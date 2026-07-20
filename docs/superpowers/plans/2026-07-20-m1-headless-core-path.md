@@ -146,7 +146,7 @@ Notes: `ARCHITECTURE.md` §2/§4 also lists `TranscriptionId`, `Status`, `Source
 - [ ] **Step 1 (TDD): write unit tests first, module by module, then implement until green.** Required test cases:
   - `Millis` arithmetic: `Millis(3000) - Millis(1000) == Millis(2000)`; ordering.
   - `TaskKind`/`OutputFormat`/`ModelSize`: `as_str` round-trips through `FromStr` for every variant (iterate an `ALL` const); unknown string → `Err`. `ModelSize::Large.ggml_name() == "large-v1"`; `ModelSize::LargeV3Turbo.ggml_name() == "large-v3-turbo"`.
-  - `Language`: port the FULL 99-entry table from `buzz/transcriber/transcriber.py:37-138` verbatim (code + English name, e.g. `("en","English") … ("yue","Cantonese")`). Tests: `Language::all().len() == 99`; `parse("en").unwrap().english_name() == "English"`; `parse("haw")` ok; `parse("xx").is_none()`; every entry's `code()` parses back to itself.
+  - `Language`: port the FULL 100-entry table from `buzz/transcriber/transcriber.py:37-138` verbatim (code + English name, e.g. `("en","English") … ("yue","Cantonese")`). Tests: `Language::all().len() == 100`; `parse("en").unwrap().english_name() == "English"`; `parse("haw")` ok; `parse("xx").is_none()`; every entry's `code()` parses back to itself.
   - `TranscriptionOptions::default()` matches Buzz defaults (`transcriber.py:141-158`): language None, task Transcribe, word_timestamps false, prompt "", temperature == DEFAULT_TEMPERATURE; model size Small (humm deviation, UX_SPEC §6 — document it in the doc comment).
   - `Pcm`: `Pcm::new(vec![0.0; 16_000]).duration() == Millis(1000)`; `duration` rounds down (`16_015` samples → `Millis(1000)`); empty → `Millis(0)`.
   - `CancelToken`: fresh token not canceled; after `cancel()` all clones report canceled.
