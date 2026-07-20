@@ -3,3 +3,10 @@
 //! dependencies; adapters implement the traits defined here.
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
+
+pub mod boundary;
+pub mod cancel;
+pub mod domain;
+pub mod error;
+pub mod language;
+pub mod paths;
