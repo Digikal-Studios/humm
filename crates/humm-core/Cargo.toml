@@ -9,6 +9,12 @@ repository.workspace = true
 thiserror.workspace = true
 directories.workspace = true
 chrono.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+zip.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true

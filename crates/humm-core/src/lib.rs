@@ -10,4 +10,5 @@ pub mod domain;
 pub mod error;
 pub mod export;
 pub mod language;
+pub mod models;
 pub mod paths;
