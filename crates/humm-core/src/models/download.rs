@@ -55,10 +55,15 @@ impl ModelDownloader {
     /// or resuming as needed), and, when `coreml_encoder` is `true`, ensures
     /// its CoreML encoder is extracted alongside it.
     ///
-    /// Returns the path to the ggml model file. CoreML failures (other than
-    /// cancellation) are logged and swallowed — a missing CoreML encoder is
-    /// a graceful degradation, not a hard error (`model_loader.py:706-738`,
-    /// Lumii ships no CoreML encoder at all).
+    /// Returns the path to the ggml model file. When `coreml_encoder` is
+    /// `true`, only "this repo doesn't publish a CoreML encoder for this
+    /// model" (HTTP 404) degrades gracefully — that case is resolved to
+    /// `Ok(())` internally by [`Self::ensure_coreml_encoder`]
+    /// (`model_loader.py:706-738`, Lumii ships no CoreML encoder at all).
+    /// Every other CoreML failure (`ChecksumMismatch` from a
+    /// corrupted/tampered zip, I/O errors, non-404 HTTP failures,
+    /// cancellation) propagates to the caller — a real failure must not be
+    /// silently downgraded to "no CoreML".
     pub fn ensure_model(
         &self,
         size: ModelSize,
@@ -74,14 +79,7 @@ impl ModelDownloader {
         self.ensure_artifact(&url, &final_path, Some(repo), progress, cancel)?;
 
         if coreml_encoder {
-            match self.ensure_coreml_encoder(size, progress, cancel) {
-                Ok(()) => {}
-                Err(ModelError::Canceled) => return Err(ModelError::Canceled),
-                Err(e) => log::warn!(
-                    "CoreML encoder unavailable for {}: {e}; continuing without it",
-                    size.as_str()
-                ),
-            }
+            propagate_coreml_result(self.ensure_coreml_encoder(size, progress, cancel))?;
         }
 
         Ok(final_path)
@@ -239,8 +237,8 @@ impl ModelDownloader {
             Ok(Some(expected)) => {
                 let actual = sha256_file(partial_path)?;
                 if actual != expected {
-                    let _ = std::fs::remove_file(partial_path);
-                    let _ = std::fs::remove_file(final_path);
+                    remove_and_warn(partial_path);
+                    remove_and_warn(final_path);
                     return Err(ModelError::ChecksumMismatch {
                         file: file_name.to_string(),
                     });
@@ -377,6 +375,42 @@ fn file_name_of(path: &Path) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or_default()
         .to_string()
+}
+
+/// Removes `path`, logging a warning if deletion fails for a reason other
+/// than the file already being absent (Buzz's
+/// `except OSError as e: logging.warning(...)`, `model_loader.py:992-995`)
+/// — used on the checksum-mismatch cleanup path, where `partial_path`
+/// always exists (it was just hashed) but `final_path` usually doesn't yet
+/// (verification happens before the `.partial` → final rename), so a
+/// `NotFound` there is the expected common case, not a failure worth
+/// surfacing.
+fn remove_and_warn(path: &Path) {
+    if let Err(e) = std::fs::remove_file(path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!(
+            "failed to delete corrupted model file {}: {e}",
+            path.display()
+        );
+    }
+}
+
+/// `ensure_model`'s CoreML-step propagation policy, factored out as a named,
+/// independently-tested unit rather than inline call-site logic: every
+/// `Err` reaching this point is a genuine failure and must pass through
+/// unchanged.
+///
+/// [`ModelDownloader::ensure_coreml_encoder`] already resolves "this repo
+/// doesn't publish a CoreML encoder for this model" (HTTP 404) to `Ok(())`
+/// internally, so by the time a `Result` reaches this function there is no
+/// "acceptable failure" left to swallow — a prior version of `ensure_model`
+/// treated every non-`Canceled` error here as "log a warning and continue,"
+/// which silently hid a corrupted/tampered CoreML zip's `ChecksumMismatch`
+/// (and any I/O or non-404 HTTP failure) from the caller. Fixed per code
+/// review.
+fn propagate_coreml_result(result: Result<(), ModelError>) -> Result<(), ModelError> {
+    result
 }
 
 /// Decides whether/how to resume a `.partial` download: `None` for a
@@ -517,6 +551,68 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use std::io::Cursor;
+
+    #[test]
+    fn propagate_coreml_result_passes_through_ok() {
+        assert!(propagate_coreml_result(Ok(())).is_ok());
+    }
+
+    #[test]
+    fn propagate_coreml_result_propagates_checksum_mismatch() {
+        let err = ModelError::ChecksumMismatch {
+            file: "ggml-small-encoder.mlmodelc.zip".to_string(),
+        };
+        assert!(matches!(
+            propagate_coreml_result(Err(err)),
+            Err(ModelError::ChecksumMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn propagate_coreml_result_propagates_io_error() {
+        let err = ModelError::Io(std::io::Error::other("disk full"));
+        assert!(matches!(
+            propagate_coreml_result(Err(err)),
+            Err(ModelError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn propagate_coreml_result_propagates_http_error() {
+        let err = ModelError::Http {
+            detail: "500".to_string(),
+        };
+        assert!(matches!(
+            propagate_coreml_result(Err(err)),
+            Err(ModelError::Http { .. })
+        ));
+    }
+
+    #[test]
+    fn propagate_coreml_result_propagates_canceled() {
+        assert!(matches!(
+            propagate_coreml_result(Err(ModelError::Canceled)),
+            Err(ModelError::Canceled)
+        ));
+    }
+
+    #[test]
+    fn remove_and_warn_removes_existing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("corrupted.bin");
+        std::fs::write(&path, b"bad checksum").expect("write");
+        remove_and_warn(&path);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn remove_and_warn_does_not_panic_on_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Must not panic even though the file was never created — this is
+        // the common case for `final_path` in `verify_or_warn`, since
+        // verification runs before the `.partial` -> final rename.
+        remove_and_warn(&dir.path().join("never-existed.bin"));
+    }
 
     #[test]
     fn resume_plan_none_when_no_partial() {
