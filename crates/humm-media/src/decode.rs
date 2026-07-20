@@ -89,7 +89,15 @@ impl AudioDecoder for FfmpegDecoder {
                 let _ = stderr_handle.join();
                 return Err(MediaError::Canceled);
             }
-            let n = stdout.read(&mut chunk).map_err(MediaError::Io)?;
+            let n = match stdout.read(&mut chunk) {
+                Ok(n) => n,
+                Err(err) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stderr_handle.join();
+                    return Err(MediaError::Io(err));
+                }
+            };
             if n == 0 {
                 break;
             }

@@ -169,9 +169,46 @@ fn missing_binary_actionable() {
     }
 }
 
+/// Genuinely exercises the mid-decode kill()/wait()/stderr-join path:
+/// `audio-long.mp3` decodes in a few seconds of wall time (ffmpeg is far
+/// faster than real-time for a 120 s mp3, but not instant), so canceling
+/// from another thread after a short delay lands while `decode()` is still
+/// blocked in the stdout read loop, not before ffmpeg is even spawned.
 #[test]
 #[ignore = "requires ffmpeg + Buzz testdata"]
-fn cancel_kills_decode() {
+fn cancel_kills_decode_mid_read() {
+    let path = testdata().join("audio-long.mp3");
+    let cancel = CancelToken::new();
+    let cancel_from_main = cancel.clone();
+
+    let start = Instant::now();
+    let handle = std::thread::spawn(move || {
+        let decoder = FfmpegDecoder::new();
+        decoder.decode(&path, &cancel)
+    });
+
+    std::thread::sleep(Duration::from_millis(200));
+    cancel_from_main.cancel();
+
+    let result = handle.join().expect("decode thread should not panic");
+    let elapsed = start.elapsed();
+
+    assert!(
+        matches!(result, Err(MediaError::Canceled)),
+        "expected Canceled, got {result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "cancellation took too long: {elapsed:?}"
+    );
+}
+
+/// The pre-canceled fast path (superset of the brief): a token already
+/// canceled before `decode()` is called short-circuits before ffmpeg is
+/// even spawned.
+#[test]
+#[ignore = "requires ffmpeg + Buzz testdata"]
+fn cancel_kills_decode_pre_canceled_fast_path() {
     let path = testdata().join("audio-long.mp3");
     let decoder = FfmpegDecoder::new();
     let cancel = CancelToken::new();
