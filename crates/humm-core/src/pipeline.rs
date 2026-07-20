@@ -1,0 +1,716 @@
+//! The file-transcription pipeline: probe → decode → transcribe → export.
+//!
+//! Ported from Buzz's `FileTranscriber.run` (`buzz/transcriber/file_transcriber.py:38-73`):
+//! transcribe, strip each segment's text, then write one output file per
+//! requested format. This module wires the boundary traits together but
+//! names no adapter — it is pure core, exercised in tests with in-module
+//! fakes only.
+
+use std::path::PathBuf;
+
+use crate::boundary::{AudioDecoder, EngineOptions, MediaProber, SegmentSink, TranscriptionEngine};
+use crate::cancel::CancelToken;
+use crate::domain::{JobSpec, Segment};
+use crate::error::{CoreError, ExportError, MediaError};
+use crate::export::{TextKey, output_file_path, write_format};
+
+/// The result of a successful [`run_file_job`]: the (trimmed) segments
+/// produced by transcription, and the paths written, in `job.output.formats`
+/// order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JobOutcome {
+    /// Transcribed segments, with `text` trimmed (`translation` untouched).
+    pub segments: Vec<Segment>,
+    /// Paths written, one per requested output format, in format order.
+    pub written: Vec<PathBuf>,
+}
+
+/// Engine-side tuning knobs that aren't part of [`crate::domain::TranscriptionOptions`]
+/// (which mirrors Buzz's persisted, restart-safe job options) — these are
+/// runtime/environment concerns supplied by the caller instead.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineTuning {
+    /// VAD model path. `Some` enables voice-activity detection (F-045);
+    /// `None` (the default) disables it.
+    pub vad_model: Option<PathBuf>,
+    /// Whether to use GPU acceleration (Metal/CoreML). Defaults to `true`.
+    pub use_gpu: bool,
+    /// Thread count override; `None` (the default) uses the adapter's
+    /// default.
+    pub threads: Option<u32>,
+}
+
+impl Default for EngineTuning {
+    fn default() -> Self {
+        EngineTuning {
+            vad_model: None,
+            use_gpu: true,
+            threads: None,
+        }
+    }
+}
+
+/// Forwards every segment/progress update to `observer` while also
+/// collecting the segments for the final [`JobOutcome`].
+///
+/// Trims `segment.text` as each segment arrives (Buzz strips text once, in
+/// `run()`, after transcription completes and before either the `completed`
+/// signal or the export loop see it — `file_transcriber.py:51-52`; trimming
+/// here, at the single point both the observer and the collected `Vec`
+/// derive from, reproduces that "every consumer sees stripped text" contract
+/// without a second pass over the collected segments).
+struct TeeSink<'a> {
+    observer: &'a mut dyn SegmentSink,
+    segments: Vec<Segment>,
+}
+
+impl SegmentSink for TeeSink<'_> {
+    fn on_segment(&mut self, mut segment: Segment) {
+        segment.text = segment.text.trim().to_string();
+        self.observer.on_segment(segment.clone());
+        self.segments.push(segment);
+    }
+
+    fn on_progress(&mut self, fraction: f32) {
+        self.observer.on_progress(fraction);
+    }
+}
+
+/// Runs one file-transcription job end to end: validates the input exists,
+/// probes it (soft-fail), decodes to PCM, transcribes, and exports every
+/// requested format.
+///
+/// Ported from Buzz's `FileTranscriber.run` (`file_transcriber.py:38-73`).
+/// One deliberate deviation: humm creates the output directory if it's
+/// missing (`create_dir_all`) instead of failing, since Buzz's `write_output`
+/// simply fails when `-d` names a nonexistent directory.
+pub fn run_file_job(
+    job: &JobSpec,
+    tuning: &EngineTuning,
+    decoder: &dyn AudioDecoder,
+    prober: &dyn MediaProber,
+    engine: &mut dyn TranscriptionEngine,
+    observer: &mut dyn SegmentSink,
+    cancel: &CancelToken,
+) -> Result<JobOutcome, CoreError> {
+    if !job.input.exists() {
+        return Err(CoreError::InputMissing {
+            path: job.input.clone(),
+        });
+    }
+
+    match prober.probe(&job.input) {
+        Ok(info) if !info.has_audio => {
+            return Err(MediaError::NoAudioStream {
+                path: job.input.clone(),
+            }
+            .into());
+        }
+        Ok(_) => {}
+        Err(err) => {
+            // A probe error is non-fatal: ffmpeg's decode is the
+            // authoritative failure source (Buzz never probes before
+            // decode). Log and continue.
+            log::warn!(
+                "probe failed for {}: {err} — continuing, decode is authoritative",
+                job.input.display()
+            );
+        }
+    }
+
+    if cancel.is_canceled() {
+        return Err(CoreError::Canceled);
+    }
+
+    let pcm = decoder.decode(&job.input, cancel)?;
+    if pcm.is_empty() {
+        return Err(CoreError::NoAudioDecoded);
+    }
+
+    let engine_options = EngineOptions {
+        language: job.options.language,
+        task: job.options.task,
+        initial_prompt: job.options.initial_prompt.clone(),
+        word_timestamps: job.options.word_timestamps,
+        temperature: job.options.temperature.clone(),
+        vad_model: tuning.vad_model.clone(),
+        threads: tuning.threads,
+        use_gpu: tuning.use_gpu,
+    };
+
+    let mut tee = TeeSink {
+        observer,
+        segments: Vec::new(),
+    };
+    engine.transcribe(&pcm, &engine_options, &mut tee, cancel)?;
+    let segments = tee.segments;
+
+    let now = chrono::Local::now().naive_local();
+    let mut written = Vec::with_capacity(job.output.formats.len());
+    for format in &job.output.formats {
+        if cancel.is_canceled() {
+            return Err(CoreError::Canceled);
+        }
+
+        let path = output_file_path(
+            &job.input,
+            job.options.task,
+            job.options.language,
+            job.options.model.size,
+            *format,
+            job.output.directory.as_deref(),
+            job.output.file_name_template.as_deref(),
+            now,
+        );
+
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|source| ExportError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        }
+
+        let mut file = std::fs::File::create(&path).map_err(|source| ExportError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        write_format(
+            *format,
+            &segments,
+            TextKey::Text,
+            job.output.paragraph_split,
+            &mut file,
+        )
+        .map_err(|source| ExportError::Io {
+            path: path.clone(),
+            source,
+        })?;
+
+        written.push(path);
+    }
+
+    Ok(JobOutcome { segments, written })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::boundary::{EngineCaps, MediaInfo, Pcm};
+    use crate::domain::{Millis, OutputFormat, OutputSpec, TranscriptionOptions};
+    use crate::error::EngineError;
+    use pretty_assertions::assert_eq;
+    use std::collections::BTreeSet;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // -- Fakes ---------------------------------------------------------
+
+    struct FakeDecoder {
+        pcm: Pcm,
+        calls: AtomicUsize,
+    }
+
+    impl FakeDecoder {
+        fn new(pcm: Pcm) -> Self {
+            FakeDecoder {
+                pcm,
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl AudioDecoder for FakeDecoder {
+        fn decode(&self, _path: &Path, _cancel: &CancelToken) -> Result<Pcm, MediaError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.pcm.clone())
+        }
+    }
+
+    enum ProbeBehavior {
+        Info(MediaInfo),
+        Error,
+    }
+
+    struct FakeProber {
+        behavior: ProbeBehavior,
+    }
+
+    impl MediaProber for FakeProber {
+        fn probe(&self, _path: &Path) -> Result<MediaInfo, MediaError> {
+            match &self.behavior {
+                ProbeBehavior::Info(info) => Ok(info.clone()),
+                ProbeBehavior::Error => Err(MediaError::ProbeFailed {
+                    detail: "boom".into(),
+                }),
+            }
+        }
+    }
+
+    fn prober_with_audio() -> FakeProber {
+        FakeProber {
+            behavior: ProbeBehavior::Info(MediaInfo {
+                duration: Some(Millis(329)),
+                has_audio: true,
+                has_video: false,
+            }),
+        }
+    }
+
+    enum EngineBehavior {
+        EmitFixtureSegments,
+        Fail,
+    }
+
+    struct FakeEngine {
+        behavior: EngineBehavior,
+    }
+
+    impl TranscriptionEngine for FakeEngine {
+        fn transcribe(
+            &mut self,
+            _audio: &Pcm,
+            _options: &EngineOptions,
+            sink: &mut dyn SegmentSink,
+            _cancel: &CancelToken,
+        ) -> Result<(), EngineError> {
+            match self.behavior {
+                EngineBehavior::EmitFixtureSegments => {
+                    sink.on_progress(0.5);
+                    sink.on_segment(Segment {
+                        start: Millis(40),
+                        end: Millis(299),
+                        text: " Bien ".into(),
+                        translation: String::new(),
+                    });
+                    sink.on_segment(Segment {
+                        start: Millis(299),
+                        end: Millis(329),
+                        text: "venue dans".into(),
+                        translation: String::new(),
+                    });
+                    sink.on_progress(1.0);
+                    Ok(())
+                }
+                EngineBehavior::Fail => Err(EngineError::Inference {
+                    detail: "boom".into(),
+                }),
+            }
+        }
+
+        fn capabilities(&self) -> EngineCaps {
+            EngineCaps {
+                word_timestamps: false,
+                translate: false,
+                vad: false,
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        segments: Vec<Segment>,
+        progress: Vec<f32>,
+    }
+
+    impl SegmentSink for RecordingSink {
+        fn on_segment(&mut self, segment: Segment) {
+            self.segments.push(segment);
+        }
+
+        fn on_progress(&mut self, fraction: f32) {
+            self.progress.push(fraction);
+        }
+    }
+
+    struct NullSink;
+
+    impl SegmentSink for NullSink {
+        fn on_segment(&mut self, _segment: Segment) {}
+        fn on_progress(&mut self, _fraction: f32) {}
+    }
+
+    fn job_with(
+        input: PathBuf,
+        formats: BTreeSet<OutputFormat>,
+        directory: Option<PathBuf>,
+        file_name_template: Option<String>,
+    ) -> JobSpec {
+        JobSpec {
+            input,
+            options: TranscriptionOptions::default(),
+            output: OutputSpec {
+                formats,
+                directory,
+                file_name_template,
+                paragraph_split: Millis(2000),
+            },
+        }
+    }
+
+    fn touch(path: &Path) {
+        std::fs::write(path, b"fake media bytes").unwrap();
+    }
+
+    // -- Tests -----------------------------------------------------------
+
+    #[test]
+    fn happy_path_writes_txt_and_srt_and_trims_outcome_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input.mp3");
+        touch(&input);
+
+        let formats: BTreeSet<OutputFormat> =
+            [OutputFormat::Txt, OutputFormat::Srt].into_iter().collect();
+        let job = job_with(
+            input.clone(),
+            formats,
+            Some(tmp.path().to_path_buf()),
+            Some("{{ input_file_name }}".to_string()),
+        );
+
+        let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let prober = prober_with_audio();
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let mut observer = NullSink;
+        let cancel = CancelToken::new();
+
+        let outcome = run_file_job(
+            &job,
+            &EngineTuning::default(),
+            &decoder,
+            &prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.segments.len(), 2);
+        assert_eq!(outcome.segments[0].text, "Bien");
+        assert_eq!(outcome.segments[1].text, "venue dans");
+
+        let txt_path = tmp.path().join("input.txt");
+        let srt_path = tmp.path().join("input.srt");
+        assert_eq!(outcome.written, vec![txt_path.clone(), srt_path.clone()]);
+
+        let txt = std::fs::read_to_string(&txt_path).unwrap();
+        assert_eq!(txt, "Bien venue dans ");
+
+        let srt = std::fs::read_to_string(&srt_path).unwrap();
+        assert_eq!(
+            srt,
+            "1\n00:00:00,040 --> 00:00:00,299\nBien\n\n2\n00:00:00,299 --> 00:00:00,329\nvenue dans\n\n"
+        );
+    }
+
+    #[test]
+    fn empty_formats_write_no_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input.mp3");
+        touch(&input);
+
+        let job = job_with(input, BTreeSet::new(), Some(tmp.path().to_path_buf()), None);
+
+        let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let prober = prober_with_audio();
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let mut observer = NullSink;
+        let cancel = CancelToken::new();
+
+        let outcome = run_file_job(
+            &job,
+            &EngineTuning::default(),
+            &decoder,
+            &prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+        )
+        .unwrap();
+
+        assert!(outcome.written.is_empty());
+        assert_eq!(outcome.segments.len(), 2);
+    }
+
+    #[test]
+    fn engine_error_propagates_and_writes_zero_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input.mp3");
+        touch(&input);
+
+        let formats: BTreeSet<OutputFormat> =
+            [OutputFormat::Txt, OutputFormat::Srt].into_iter().collect();
+        let job = job_with(
+            input,
+            formats,
+            Some(tmp.path().to_path_buf()),
+            Some("{{ input_file_name }}".to_string()),
+        );
+
+        let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let prober = prober_with_audio();
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::Fail,
+        };
+        let mut observer = NullSink;
+        let cancel = CancelToken::new();
+
+        let result = run_file_job(
+            &job,
+            &EngineTuning::default(),
+            &decoder,
+            &prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+        );
+
+        assert!(matches!(
+            result,
+            Err(CoreError::Engine(EngineError::Inference { .. }))
+        ));
+
+        let entries: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        // Only the input file we created ourselves — no exports.
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn pre_canceled_token_stops_before_decode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input.mp3");
+        touch(&input);
+
+        let job = job_with(input, BTreeSet::new(), Some(tmp.path().to_path_buf()), None);
+
+        let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let prober = prober_with_audio();
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let mut observer = NullSink;
+        let cancel = CancelToken::new();
+        cancel.cancel();
+
+        let result = run_file_job(
+            &job,
+            &EngineTuning::default(),
+            &decoder,
+            &prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+        );
+
+        assert!(matches!(result, Err(CoreError::Canceled)));
+        assert_eq!(decoder.call_count(), 0);
+    }
+
+    #[test]
+    fn missing_input_path_is_input_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("missing.mp3");
+
+        let job = job_with(
+            input.clone(),
+            BTreeSet::new(),
+            Some(tmp.path().to_path_buf()),
+            None,
+        );
+
+        let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let prober = prober_with_audio();
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let mut observer = NullSink;
+        let cancel = CancelToken::new();
+
+        let result = run_file_job(
+            &job,
+            &EngineTuning::default(),
+            &decoder,
+            &prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+        );
+
+        match result {
+            Err(CoreError::InputMissing { path }) => assert_eq!(path, input),
+            other => panic!("expected InputMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prober_reports_no_audio_stream_is_fatal_but_probe_error_is_soft() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input.mp3");
+        touch(&input);
+
+        // has_audio: false -> fatal NoAudioStream.
+        let job = job_with(
+            input.clone(),
+            BTreeSet::new(),
+            Some(tmp.path().to_path_buf()),
+            None,
+        );
+        let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let no_audio_prober = FakeProber {
+            behavior: ProbeBehavior::Info(MediaInfo {
+                duration: Some(Millis(0)),
+                has_audio: false,
+                has_video: false,
+            }),
+        };
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let mut observer = NullSink;
+        let cancel = CancelToken::new();
+
+        let result = run_file_job(
+            &job,
+            &EngineTuning::default(),
+            &decoder,
+            &no_audio_prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+        );
+        assert!(matches!(
+            result,
+            Err(CoreError::Media(MediaError::NoAudioStream { .. }))
+        ));
+        assert_eq!(decoder.call_count(), 0);
+
+        // Prober error -> soft fail, decode is authoritative, job succeeds.
+        let erroring_prober = FakeProber {
+            behavior: ProbeBehavior::Error,
+        };
+        let decoder2 = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let mut engine2 = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let mut observer2 = NullSink;
+        let cancel2 = CancelToken::new();
+
+        let result2 = run_file_job(
+            &job,
+            &EngineTuning::default(),
+            &decoder2,
+            &erroring_prober,
+            &mut engine2,
+            &mut observer2,
+            &cancel2,
+        );
+        assert!(result2.is_ok());
+        assert_eq!(decoder2.call_count(), 1);
+    }
+
+    #[test]
+    fn observer_receives_same_segments_as_outcome_plus_progress() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input.mp3");
+        touch(&input);
+
+        let job = job_with(input, BTreeSet::new(), Some(tmp.path().to_path_buf()), None);
+
+        let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let prober = prober_with_audio();
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let mut observer = RecordingSink::default();
+        let cancel = CancelToken::new();
+
+        let outcome = run_file_job(
+            &job,
+            &EngineTuning::default(),
+            &decoder,
+            &prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(observer.segments, outcome.segments);
+        assert_eq!(observer.progress, vec![0.5, 1.0]);
+    }
+
+    // -- Extra coverage beyond the brief's 7 cases ------------------------
+
+    #[test]
+    fn empty_pcm_is_no_audio_decoded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input.mp3");
+        touch(&input);
+
+        let job = job_with(input, BTreeSet::new(), Some(tmp.path().to_path_buf()), None);
+
+        let decoder = FakeDecoder::new(Pcm::new(vec![]));
+        let prober = prober_with_audio();
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let mut observer = NullSink;
+        let cancel = CancelToken::new();
+
+        let result = run_file_job(
+            &job,
+            &EngineTuning::default(),
+            &decoder,
+            &prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+        );
+
+        assert!(matches!(result, Err(CoreError::NoAudioDecoded)));
+    }
+
+    #[test]
+    fn creates_missing_output_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input.mp3");
+        touch(&input);
+        let nested = tmp.path().join("nested").join("out");
+
+        let formats: BTreeSet<OutputFormat> = [OutputFormat::Txt].into_iter().collect();
+        let job = job_with(input, formats, Some(nested.clone()), None);
+
+        let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let prober = prober_with_audio();
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let mut observer = NullSink;
+        let cancel = CancelToken::new();
+
+        let outcome = run_file_job(
+            &job,
+            &EngineTuning::default(),
+            &decoder,
+            &prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.written.len(), 1);
+        assert!(outcome.written[0].exists());
+        assert!(nested.is_dir());
+    }
+}
