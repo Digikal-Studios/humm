@@ -22,7 +22,7 @@ directories = "6"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 sha2 = "0.10"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
-log = "0.4"
+log = { version = "0.4", features = ["std"] }
 whisper-rs = "0.16"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
