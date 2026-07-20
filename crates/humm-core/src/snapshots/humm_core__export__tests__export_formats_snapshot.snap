@@ -1,0 +1,50 @@
+---
+source: crates/humm-core/src/export.rs
+assertion_line: 504
+expression: out
+---
+== TXT ==
+Hello world second segment 
+
+third
+multiline segment padded text final segment 
+== SRT ==
+1
+00:00:00,000 --> 00:00:01,000
+Hello world
+
+2
+00:00:01,200 --> 00:00:02,000
+second segment
+
+3
+00:00:05,000 --> 00:00:06,000
+third
+multiline segment
+
+4
+00:00:06,100 --> 00:00:07,000
+  padded text  
+
+5
+00:00:07,000 --> 00:00:08,000
+final segment
+
+== VTT (translation) ==
+WEBVTT
+
+00:00:00.000 --> 00:00:01.000
+Salut monde
+
+00:00:01.200 --> 00:00:02.000
+deuxième segment
+
+00:00:05.000 --> 00:00:06.000
+troisième
+multiligne
+
+00:00:06.100 --> 00:00:07.000
+  texte rembourré  
+
+00:00:07.000 --> 00:00:08.000
+segment final

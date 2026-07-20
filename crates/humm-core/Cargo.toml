@@ -8,7 +8,9 @@ repository.workspace = true
 [dependencies]
 thiserror.workspace = true
 directories.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
 tempfile.workspace = true
+insta.workspace = true
