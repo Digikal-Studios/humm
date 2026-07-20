@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/humm-core",
+    "crates/humm-media",
+    "crates/humm-whisper",
+    "crates/humm-cli",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://repo.digikal.com/jawad/humm"
+
+[workspace.dependencies]
+thiserror = "2"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "6"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+sha2 = "0.10"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+log = "0.4"
+whisper-rs = "0.16"
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
+insta = "1"
+pretty_assertions = "1"
+criterion = "0.8.2"
+assert_cmd = "2"
+predicates = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
