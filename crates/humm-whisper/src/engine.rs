@@ -1,0 +1,603 @@
+//! [`WhisperEngine`]: the whisper-rs implementation of
+//! [`humm_core::boundary::TranscriptionEngine`].
+//!
+//! Loads a ggml model into a [`WhisperContext`] (Metal + CoreML on Apple
+//! Silicon, CPU elsewhere) and runs `whisper_full` per transcription, wiring
+//! whisper.cpp's progress / new-segment / abort callbacks to the core's
+//! [`SegmentSink`] and [`CancelToken`]. FullParams mirror Buzz's whisper-cli
+//! invocation (`buzz/transcriber/whisper_cpp.py:167-196`); word-level mode
+//! reconstructs per-word/character segments from token data via
+//! [`crate::words::group_words`].
+//!
+//! ## whisper.cpp version
+//! Built against the whisper.cpp vendored by whisper-rs-sys 0.15
+//! (**whisper.cpp 1.8.3**); see [`whisper_rs::WHISPER_CPP_VERSION`].
+//!
+//! ## VAD timeline (F-045) — empirical finding
+//! whisper-rs 0.16's `WhisperState::full` calls `whisper_full_with_state`, which
+//! does **not** run VAD — whisper.cpp's VAD preprocessing lives only in the
+//! context-level `whisper_full`, which whisper-rs does not wrap. So `enable_vad`
+//! on `FullParams` is a no-op here. humm therefore runs VAD itself via the
+//! standalone [`whisper_rs::WhisperVadContext`], transcribes the speech-only
+//! audio, and remaps timestamps back to the original timeline
+//! ([`VadRemap`]) — the parity realization of Buzz's `_make_offset_mapper`. See
+//! the note on [`WhisperEngine::transcribe`].
+
+use std::ffi::{c_int, c_void};
+use std::path::Path;
+use std::sync::Once;
+
+use humm_core::boundary::{
+    EngineCaps, EngineOptions, Pcm, SAMPLE_RATE, SegmentSink, TranscriptionEngine,
+};
+use humm_core::cancel::CancelToken;
+use humm_core::domain::{Millis, Segment, TaskKind};
+use humm_core::error::EngineError;
+
+use whisper_rs::{
+    FullParams, SamplingStrategy, SegmentCallbackData, WhisperContext, WhisperContextParameters,
+    WhisperVadContext, WhisperVadContextParams, WhisperVadParams,
+};
+
+use crate::words::{TokenInfo, group_words};
+
+/// whisper.cpp reports timestamps in centiseconds; humm uses milliseconds
+/// (`ms = cs * 10`, Global Constraint 12).
+fn centiseconds_to_millis(cs: i64) -> Millis {
+    Millis(cs * 10)
+}
+
+static LOG_HOOK: Once = Once::new();
+
+/// Routes whisper.cpp/GGML logging through the `log` crate exactly once
+/// (idempotent; safe to call on every load).
+fn init_logging() {
+    LOG_HOOK.call_once(whisper_rs::install_logging_hooks);
+}
+
+/// The local whisper.cpp transcription engine.
+#[derive(Debug)]
+pub struct WhisperEngine {
+    context: WhisperContext,
+}
+
+impl WhisperEngine {
+    /// Loads a ggml model from `model_path`.
+    ///
+    /// `use_gpu` selects Metal/CoreML acceleration (`false` forces CPU; the CLI
+    /// reads `HUMM_FORCE_CPU`, not this crate). With the `coreml` feature,
+    /// whisper.cpp auto-discovers `ggml-<name>-encoder.mlmodelc` next to the
+    /// ggml file and falls back gracefully when it is absent.
+    ///
+    /// # Errors
+    /// [`EngineError::ModelLoad`] if the file is missing or whisper-rs fails to
+    /// initialize the context.
+    pub fn load(model_path: &Path, use_gpu: bool) -> Result<Self, EngineError> {
+        init_logging();
+
+        if !model_path.is_file() {
+            return Err(EngineError::ModelLoad {
+                path: model_path.to_path_buf(),
+                detail: "model file missing — download it first or set HUMM_MODEL_ROOT".to_string(),
+            });
+        }
+
+        let mut params = WhisperContextParameters::default();
+        params.use_gpu(use_gpu);
+
+        let context = WhisperContext::new_with_params(model_path, params).map_err(|e| {
+            EngineError::ModelLoad {
+                path: model_path.to_path_buf(),
+                detail: e.to_string(),
+            }
+        })?;
+
+        Ok(WhisperEngine { context })
+    }
+}
+
+impl TranscriptionEngine for WhisperEngine {
+    /// Transcribes `audio`, streaming segments and progress to `sink` and
+    /// aborting promptly when `cancel` is set.
+    ///
+    /// ## VAD timeline (F-045) — empirical finding
+    /// The vendored whisper.cpp 1.8.3 *does* remap VAD-compressed timestamps to
+    /// the original timeline — but only inside the **context-level**
+    /// `whisper_full` (which runs `whisper_vad`, transcribes the filtered
+    /// samples, then maps segment timestamps back via
+    /// `map_processed_to_original_time`; token timestamps stay raw). whisper-rs
+    /// 0.16, however, only wraps `whisper_full_with_state`, which contains no VAD
+    /// path at all, so `enable_vad` / `set_vad_model_path` on `FullParams` do
+    /// nothing here (verified empirically: with them set, no VAD ran and output
+    /// was byte-identical to VAD-off).
+    ///
+    /// humm therefore performs VAD itself: [`vad_filter`] runs whisper-rs's
+    /// standalone Silero VAD to get the speech spans, concatenates the
+    /// speech-only samples, transcribes those, and remaps every emitted segment
+    /// **and** token timestamp back onto the original timeline via [`VadRemap`]
+    /// (a sample-exact realization of Buzz's `_make_offset_mapper`,
+    /// `buzz/transcriber/whisper_cpp.py:48-74`). Verified by the
+    /// `vad_remaps_to_original_timeline` contract test.
+    fn transcribe(
+        &mut self,
+        audio: &Pcm,
+        options: &EngineOptions,
+        sink: &mut dyn SegmentSink,
+        cancel: &CancelToken,
+    ) -> Result<(), EngineError> {
+        let original = audio.samples();
+        if original.is_empty() {
+            // Nothing to decode; whisper_full errors on empty input. Report an
+            // empty transcript rather than an inference failure.
+            return Ok(());
+        }
+
+        // VAD preprocessing (F-045). See the note above: whisper-rs bypasses
+        // whisper.cpp's built-in VAD, so we filter to speech ourselves and remap
+        // timestamps back to the original timeline. `VadRemap::identity()` leaves
+        // timings untouched when VAD is off.
+        let (filtered, remap) = match &options.vad_model {
+            Some(vad_path) => {
+                let (filtered, remap) = vad_filter(vad_path, original, cancel)?;
+                if filtered.is_empty() {
+                    // No speech detected → empty transcript (mirrors whisper.cpp's
+                    // `vad_samples.empty()` early return).
+                    return Ok(());
+                }
+                (Some(filtered), remap)
+            }
+            None => (None, VadRemap::identity()),
+        };
+        let samples: &[f32] = filtered.as_deref().unwrap_or(original);
+
+        let threads = options.threads.unwrap_or_else(default_threads);
+        let mut params = build_full_params(options, threads);
+
+        let word_mode = options.word_timestamps;
+        let mut bridge = Bridge {
+            sink,
+            word_mode,
+            remap: remap.clone(),
+        };
+
+        // SAFETY: erase the borrow lifetime so whisper-rs's `'static` callback
+        // closures can hold a pointer to `bridge`. `bridge` lives on this stack
+        // frame for the whole of `transcribe`; whisper.cpp invokes the closures
+        // only synchronously on this thread from within `state.full(...)` below
+        // and never afterwards, so the pointer is always valid when
+        // dereferenced. The callbacks are non-reentrant and single-threaded, so
+        // the transient `&mut Bridge` reborrows never alias.
+        let bridge_ptr: *mut Bridge<'static> =
+            unsafe { std::mem::transmute::<*mut Bridge<'_>, *mut Bridge<'static>>(&mut bridge) };
+
+        let progress_ptr = bridge_ptr;
+        params.set_progress_callback_safe(move |pct: i32| {
+            // SAFETY: see the transmute above — valid throughout `full()`.
+            unsafe { (*progress_ptr).on_progress(pct) };
+        });
+
+        let segment_ptr = bridge_ptr;
+        params.set_segment_callback_safe_lossy(move |data: SegmentCallbackData| {
+            // SAFETY: see the transmute above — valid throughout `full()`.
+            unsafe { (*segment_ptr).on_segment(data) };
+        });
+
+        // Cooperative cancellation. whisper-rs 0.16's *safe* abort setter
+        // (`set_abort_callback_safe`) is miscompiled — it instantiates its
+        // trampoline with the raw closure type `F` while the user_data actually
+        // points to a `Box<dyn FnMut() -> bool>` (unlike the progress/segment
+        // setters, which use the boxed type), so the trampoline reinterprets a
+        // fat pointer as the closure and calls garbage, intermittently aborting
+        // the encoder (whisper error -6) even when nothing was cancelled. We use
+        // the raw C setter with a pointer to the borrowed token instead.
+        // SAFETY: `abort_trampoline` reads the `CancelToken` behind `user_data`.
+        // `cancel` is borrowed for the whole of `transcribe`, so it outlives
+        // `state.full(...)` — the only time whisper invokes the callback. The
+        // access is a shared read (`is_canceled(&self)`), so it never aliases.
+        unsafe {
+            params.set_abort_callback(Some(abort_trampoline));
+            params.set_abort_callback_user_data(cancel as *const CancelToken as *mut c_void);
+        }
+
+        let mut state = self
+            .context
+            .create_state()
+            .map_err(|e| EngineError::Inference {
+                detail: format!("failed to create whisper state: {e}"),
+            })?;
+
+        let run = state.full(params, samples);
+
+        // Cancellation makes whisper abort with a nonzero return code; surface
+        // it as `Canceled` regardless of the specific code (rather than
+        // `Inference`), whether `full` reported Ok or Err.
+        if cancel.is_canceled() {
+            return Err(EngineError::Canceled);
+        }
+        run.map_err(|e| EngineError::Inference {
+            detail: e.to_string(),
+        })?;
+
+        // Word-level mode: segment-level streaming was suppressed in the
+        // callback; reconstruct per-word/character segments from token data now
+        // that the run is complete and emit them (remapping to the original
+        // timeline under VAD).
+        if word_mode {
+            emit_word_segments(&state, options, &remap, bridge.sink)?;
+        }
+
+        Ok(())
+    }
+
+    fn capabilities(&self) -> EngineCaps {
+        EngineCaps {
+            word_timestamps: true,
+            translate: true,
+            vad: true,
+        }
+    }
+}
+
+/// Bridges whisper.cpp's callbacks to the borrowed [`SegmentSink`]. Held on
+/// `transcribe`'s stack and reached through a lifetime-erased raw pointer (the
+/// closures whisper-rs stores must be `'static`).
+struct Bridge<'a> {
+    sink: &'a mut dyn SegmentSink,
+    /// When `true`, per-segment streaming is suppressed and per-word segments
+    /// are emitted after the run instead.
+    word_mode: bool,
+    /// Maps VAD-filtered timestamps back to the original timeline (identity when
+    /// VAD is off).
+    remap: VadRemap,
+}
+
+impl Bridge<'_> {
+    fn on_progress(&mut self, pct: i32) {
+        self.sink.on_progress((pct as f32 / 100.0).clamp(0.0, 1.0));
+    }
+
+    fn on_segment(&mut self, data: SegmentCallbackData) {
+        if self.word_mode {
+            return;
+        }
+        // Translate mode yields English directly in `text`; `translation` stays
+        // empty on the segment path, matching Buzz's `_parse_segment_timings`,
+        // which never fills `translation`.
+        let text = data.text.trim().to_string();
+        self.sink.on_segment(Segment {
+            start: self
+                .remap
+                .remap(centiseconds_to_millis(data.start_timestamp)),
+            end: self.remap.remap(centiseconds_to_millis(data.end_timestamp)),
+            text,
+            translation: String::new(),
+        });
+    }
+}
+
+/// Default whisper thread count when `options.threads` is `None`:
+/// `max(1, logical_cpus / 2)`, matching Buzz's `(os.cpu_count() or 8) // 2`
+/// (`buzz/transcriber/whisper_cpp.py:178`).
+fn default_threads() -> u32 {
+    let logical = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8);
+    ((logical / 2).max(1)) as u32
+}
+
+/// C trampoline for whisper's abort callback (`ggml_abort_callback`): returns
+/// `true` (abort) once the [`CancelToken`] behind `user_data` is cancelled.
+/// Installed via the raw setter to work around a bug in whisper-rs 0.16's
+/// `set_abort_callback_safe` (see `transcribe`).
+unsafe extern "C" fn abort_trampoline(user_data: *mut c_void) -> bool {
+    if user_data.is_null() {
+        return false;
+    }
+    // SAFETY: `user_data` is the `*const CancelToken` installed by `transcribe`;
+    // the token is borrowed for the whole call and outlives every invocation
+    // (whisper only calls this during `full()`). `is_canceled` takes `&self`, so
+    // this shared read never aliases mutably.
+    let cancel = unsafe { &*(user_data as *const CancelToken) };
+    cancel.is_canceled()
+}
+
+/// Builds the `FullParams` mirroring Buzz's whisper-cli flags
+/// (`buzz/transcriber/whisper_cpp.py:167-196`). The progress, new-segment, and
+/// abort callbacks are wired separately in [`WhisperEngine::transcribe`].
+fn build_full_params(options: &EngineOptions, threads: u32) -> FullParams<'static, 'static> {
+    // whisper-cli defaults to beam search with beam_size 5 (whisper.cpp 1.8.3:
+    // `wparams.strategy = (beam_size > 1 || use_grammar) ? BEAM_SEARCH : GREEDY`
+    // with `beam_size` defaulting to 5, `patience` to -1.0). Buzz passes no
+    // sampling flags, so it inherits this default.
+    let mut params = FullParams::new(SamplingStrategy::BeamSearch {
+        beam_size: 5,
+        patience: -1.0,
+    });
+
+    params.set_n_threads(threads as c_int);
+    params.set_n_max_text_ctx(0); // Buzz: --max-context 0
+    params.set_translate(matches!(options.task, TaskKind::Translate));
+
+    // `Some(code)` or "auto" to auto-detect (Buzz: whisper_cpp.py:361-365).
+    let language: &'static str = options.language.map_or("auto", |l| l.code());
+    params.set_language(Some(language));
+
+    // Buzz passes the initial prompt straight through; guard the (malformed)
+    // interior-NUL case so `set_initial_prompt` can't panic.
+    if !options.initial_prompt.is_empty() && !options.initial_prompt.contains('\0') {
+        params.set_initial_prompt(&options.initial_prompt);
+    }
+
+    // temperature[0] = initial; increment = temperature[1] - temperature[0]
+    // when at least two are given, else leave whisper's default (0.2).
+    if let Some(&first) = options.temperature.first() {
+        params.set_temperature(first);
+    }
+    if options.temperature.len() >= 2 {
+        params.set_temperature_inc(options.temperature[1] - options.temperature[0]);
+    }
+
+    params.set_suppress_nst(true); // Buzz: --suppress-nst
+    params.set_entropy_thold(2.8); // Buzz: --entropy-thold 2.8
+
+    params.set_token_timestamps(options.word_timestamps);
+
+    // No console output; progress and segments flow through callbacks.
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    params.set_print_special(false);
+
+    // VAD is NOT configured here: `enable_vad`/`set_vad_model_path` on
+    // `FullParams` are no-ops through whisper-rs's `whisper_full_with_state`
+    // wrapper. VAD is handled by `vad_filter` + `VadRemap` in `transcribe`.
+
+    params
+}
+
+/// One contiguous speech region kept by VAD: its sample range in the ORIGINAL
+/// audio and the range it occupies in the concatenated speech-only audio. Since
+/// samples are copied 1:1 (no resampling), positions within a span map by a
+/// constant offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VadSpan {
+    orig_start: usize,
+    orig_end: usize,
+    proc_start: usize,
+    proc_end: usize,
+}
+
+/// Maps a timestamp on the VAD-filtered (speech-only) timeline back to the
+/// original audio timeline, using the kept speech spans — the parity
+/// realization of Buzz's `_make_offset_mapper`
+/// (`buzz/transcriber/whisper_cpp.py:48-74`). An empty span list is the
+/// identity map (VAD off).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct VadRemap {
+    spans: Vec<VadSpan>,
+}
+
+impl VadRemap {
+    /// The no-op map used when VAD is disabled.
+    fn identity() -> Self {
+        VadRemap { spans: Vec::new() }
+    }
+
+    /// Maps a filtered-timeline time onto the original timeline. Times inside a
+    /// span shift by that span's constant sample offset; times past the last
+    /// span clamp to the end of the final speech region.
+    fn remap(&self, t: Millis) -> Millis {
+        if self.spans.is_empty() {
+            return t;
+        }
+        let processed = millis_to_sample(t);
+        for span in &self.spans {
+            if processed < span.proc_end {
+                let within = processed.saturating_sub(span.proc_start);
+                let clamped = within.min(span.orig_end - span.orig_start);
+                return sample_to_millis(span.orig_start + clamped);
+            }
+        }
+        sample_to_millis(self.spans.last().map_or(0, |s| s.orig_end))
+    }
+}
+
+/// Converts a millisecond time to a sample index at [`SAMPLE_RATE`].
+fn millis_to_sample(t: Millis) -> usize {
+    (t.0.max(0) * i64::from(SAMPLE_RATE) / 1000) as usize
+}
+
+/// Converts a sample index at [`SAMPLE_RATE`] to a millisecond time.
+fn sample_to_millis(sample: usize) -> Millis {
+    Millis(sample as i64 * 1000 / i64::from(SAMPLE_RATE))
+}
+
+/// Runs Silero VAD over `samples`, returning the concatenated speech-only audio
+/// and the [`VadRemap`] that maps its timeline back to the original.
+///
+/// whisper-rs's `WhisperState::full` does not run whisper.cpp's built-in VAD, so
+/// humm drives the standalone VAD context directly (F-045). VAD tuning and the
+/// CPU VAD context are left at library defaults, matching both whisper.cpp's own
+/// `whisper_vad` (`whisper_vad_default_context_params`, `use_gpu = false`) and
+/// Buzz (which passes only `--vad --vad-model`).
+fn vad_filter(
+    vad_path: &Path,
+    samples: &[f32],
+    cancel: &CancelToken,
+) -> Result<(Vec<f32>, VadRemap), EngineError> {
+    if cancel.is_canceled() {
+        return Err(EngineError::Canceled);
+    }
+
+    let path_str = vad_path.to_string_lossy();
+    let mut vad = WhisperVadContext::new(path_str.as_ref(), WhisperVadContextParams::default())
+        .map_err(|e| EngineError::ModelLoad {
+            path: vad_path.to_path_buf(),
+            detail: format!("VAD model load failed: {e}"),
+        })?;
+
+    let segments = vad
+        .segments_from_samples(WhisperVadParams::default(), samples)
+        .map_err(|e| EngineError::Inference {
+            detail: format!("VAD failed: {e}"),
+        })?;
+
+    let mut filtered = Vec::new();
+    let mut spans = Vec::new();
+    for segment in segments {
+        // Segment bounds are in centiseconds on the original timeline.
+        let orig_start = centiseconds_f32_to_sample(segment.start).min(samples.len());
+        let orig_end = centiseconds_f32_to_sample(segment.end).min(samples.len());
+        if orig_start >= orig_end {
+            continue;
+        }
+        let proc_start = filtered.len();
+        filtered.extend_from_slice(&samples[orig_start..orig_end]);
+        spans.push(VadSpan {
+            orig_start,
+            orig_end,
+            proc_start,
+            proc_end: filtered.len(),
+        });
+    }
+
+    Ok((filtered, VadRemap { spans }))
+}
+
+/// Converts a centisecond time (whisper-rs VAD reports these as `f32`) to a
+/// sample index at [`SAMPLE_RATE`].
+fn centiseconds_f32_to_sample(cs: f32) -> usize {
+    (f64::from(cs) / 100.0 * f64::from(SAMPLE_RATE))
+        .round()
+        .max(0.0) as usize
+}
+
+/// Reconstructs per-word (or per-character) segments from each finished
+/// segment's token data and emits them to `sink` — the word-level-timings path
+/// (`buzz/transcriber/whisper_cpp.py:240-319`), delegating the grouping to
+/// [`group_words`]. Token times (raw, on the VAD-filtered timeline under VAD)
+/// are remapped to the original timeline via `remap` before grouping.
+fn emit_word_segments(
+    state: &whisper_rs::WhisperState,
+    options: &EngineOptions,
+    remap: &VadRemap,
+    sink: &mut dyn SegmentSink,
+) -> Result<(), EngineError> {
+    let language = options.language.map(|l| l.code());
+
+    for segment in state.as_iter() {
+        let n_tokens = segment.n_tokens();
+        let mut tokens = Vec::with_capacity(n_tokens.max(0) as usize);
+        for i in 0..n_tokens {
+            let Some(token) = segment.get_token(i) else {
+                continue;
+            };
+            // Raw token bytes (may split a multi-byte UTF-8 char across tokens);
+            // `group_words` reassembles complete characters.
+            let Ok(bytes) = token.to_bytes() else {
+                continue;
+            };
+            let data = token.token_data();
+            tokens.push(TokenInfo {
+                bytes: bytes.to_vec(),
+                start: remap.remap(centiseconds_to_millis(data.t0)),
+                end: remap.remap(centiseconds_to_millis(data.t1)),
+                p: token.token_probability(),
+            });
+        }
+
+        for word in group_words(&tokens, language) {
+            sink.on_segment(word);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use std::path::PathBuf;
+
+    #[test]
+    fn load_missing_model_is_model_load_error() {
+        let err = WhisperEngine::load(&PathBuf::from("/no/such/ggml-model.bin"), false)
+            .expect_err("missing model must error");
+        match err {
+            EngineError::ModelLoad { path, detail } => {
+                assert_eq!(path, PathBuf::from("/no/such/ggml-model.bin"));
+                assert!(detail.contains("model file missing"), "detail: {detail}");
+            }
+            other => panic!("expected ModelLoad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_threads_is_at_least_one() {
+        assert!(default_threads() >= 1);
+    }
+
+    #[test]
+    fn centiseconds_convert_to_millis() {
+        assert_eq!(centiseconds_to_millis(40), Millis(400));
+        assert_eq!(centiseconds_to_millis(0), Millis(0));
+    }
+
+    #[test]
+    fn sample_millis_round_trip() {
+        assert_eq!(millis_to_sample(Millis(1000)), 16_000);
+        assert_eq!(sample_to_millis(16_000), Millis(1000));
+        assert_eq!(millis_to_sample(Millis(-5)), 0);
+    }
+
+    #[test]
+    fn vad_remap_identity_leaves_times_unchanged() {
+        let remap = VadRemap::identity();
+        assert_eq!(remap.remap(Millis(1234)), Millis(1234));
+    }
+
+    #[test]
+    fn vad_remap_shifts_single_span_to_original_offset() {
+        // One speech span at original 5 s..10 s, filtered to 0 s..5 s.
+        let remap = VadRemap {
+            spans: vec![VadSpan {
+                orig_start: millis_to_sample(Millis(5000)),
+                orig_end: millis_to_sample(Millis(10_000)),
+                proc_start: 0,
+                proc_end: millis_to_sample(Millis(5000)),
+            }],
+        };
+        // filtered 0 ms → original 5000 ms; filtered 2500 ms → original 7500 ms.
+        assert_eq!(remap.remap(Millis(0)), Millis(5000));
+        assert_eq!(remap.remap(Millis(2500)), Millis(7500));
+        // Past the last span clamps to its original end.
+        assert_eq!(remap.remap(Millis(9999)), Millis(10_000));
+    }
+
+    #[test]
+    fn vad_remap_jumps_silence_gap_between_spans() {
+        // Speech at original 0..1 s and 5..10 s; filtered to 0..1 s and 1..6 s.
+        let remap = VadRemap {
+            spans: vec![
+                VadSpan {
+                    orig_start: 0,
+                    orig_end: millis_to_sample(Millis(1000)),
+                    proc_start: 0,
+                    proc_end: millis_to_sample(Millis(1000)),
+                },
+                VadSpan {
+                    orig_start: millis_to_sample(Millis(5000)),
+                    orig_end: millis_to_sample(Millis(10_000)),
+                    proc_start: millis_to_sample(Millis(1000)),
+                    proc_end: millis_to_sample(Millis(6000)),
+                },
+            ],
+        };
+        // Within the first span: unchanged.
+        assert_eq!(remap.remap(Millis(500)), Millis(500));
+        // Just past the gap: filtered 1000 ms → original 5000 ms (jumps 4 s).
+        assert_eq!(remap.remap(Millis(1000)), Millis(5000));
+        // Deep in the second span: filtered 3500 ms → original 7500 ms.
+        assert_eq!(remap.remap(Millis(3500)), Millis(7500));
+    }
+}

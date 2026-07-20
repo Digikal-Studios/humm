@@ -33,12 +33,12 @@ Verification method legend:
 | F-029 | Task persistence (SQLite, startup cancel-flip) | unit + cli-int | not-started |
 | F-030 | Folder watch (filters, mirroring, delete/move source) | unit + cli-int | not-started |
 | F-031 | LLM translation during transcription (batching, storage) | unit (mock server) + contract | not-started |
-| F-040 | Local inference backend(s) — whisper-rs consolidation (ADR; Q-2 for HF/MMS) | contract + diff + bench | not-started |
+| F-040 | Local inference backend(s) — whisper-rs consolidation (ADR; Q-2 for HF/MMS) | contract + diff + bench | implemented (whisper-rs adapter + 4 contract tests pass; diff/bench pending) |
 | F-041 | OpenAI-compatible API backend (chunking >25MB, base URL, key) | contract (mock + real) | not-started |
 | F-042 | Model sizes & custom models (ggml URL, HF repo id, lumii) | unit + contract | not-started |
 | F-043 | Model download & cache (resume, SHA256, sentinels, layout) | unit + contract | not-started |
 | F-044 | Model management UI (download/delete/show location) | gui-manual | not-started |
-| F-045 | Silero VAD on file transcription (offset remap) | contract + diff | not-started |
+| F-045 | Silero VAD on file transcription (offset remap) | contract + diff | implemented (manual VAD via WhisperVadContext + VadRemap; contract test passes — first segment ≥ speech onset on original timeline; diff pending) |
 | F-060 | Live recording window (device, meter, options) | gui-manual | not-started |
 | F-061 | Real-time transcription loop (chunking, silence cuts, rolling prompt) | unit (chunker) + gui-manual | not-started |
 | F-062 | Display modes incl. append-and-correct merge | unit (merge algorithm) + gui-manual | not-started |

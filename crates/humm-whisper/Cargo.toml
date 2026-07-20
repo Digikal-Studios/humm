@@ -7,3 +7,19 @@ repository.workspace = true
 
 [dependencies]
 humm-core = { path = "../humm-core", version = "0.1.0" }
+# `log_backend` routes whisper.cpp/GGML's stderr logging through the `log`
+# crate (via `install_logging_hooks`), so ggml/Metal init noise is captured
+# rather than printed. `log` is already a workspace dependency.
+whisper-rs = { workspace = true, features = ["log_backend"] }
+
+# Metal (GPU) + CoreML (ANE encoder) acceleration, Apple Silicon only. On other
+# platforms whisper-rs falls back to CPU. Features union with the base entry.
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { workspace = true, features = ["metal", "coreml"] }
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+# Contract tests decode Buzz testdata through the real ffmpeg adapter and pull
+# the Silero VAD model via humm-core's downloader.
+humm-media = { path = "../humm-media", version = "0.1.0" }
+tempfile.workspace = true
