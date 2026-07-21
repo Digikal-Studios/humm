@@ -34,6 +34,14 @@ pub struct EngineTuning {
     /// `None` (the default) disables it.
     pub vad_model: Option<PathBuf>,
     /// Whether to use GPU acceleration (Metal/CoreML). Defaults to `true`.
+    ///
+    /// Not read by [`run_file_job`]: the engine is already constructed by
+    /// the time it reaches this function, and GPU/CPU selection happens at
+    /// engine *load*, not per job. The binary (`humm-cli`'s `EngineFactory`)
+    /// resolves this value itself and passes it directly to
+    /// `WhisperEngine::load`. This field exists so callers have one place to
+    /// carry the resolved value alongside the other tuning knobs; it is
+    /// otherwise inert here.
     pub use_gpu: bool,
     /// Thread count override; `None` (the default) uses the adapter's
     /// default.
