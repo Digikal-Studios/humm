@@ -111,6 +111,42 @@ pub trait MediaProber: Send + Sync {
     fn probe(&self, path: &Path) -> Result<MediaInfo, MediaError>;
 }
 
+/// Progress of a media download, as reported by a [`MediaFetcher`].
+///
+/// Mirrors yt-dlp's `downloaded_bytes`/`total_bytes` progress hook
+/// (`buzz/transcriber/file_transcriber.py:172-174`): `total` is `None` when
+/// the server did not advertise a content length, in which case a fractional
+/// progress cannot be computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FetchProgress {
+    /// Bytes downloaded so far.
+    pub downloaded: u64,
+    /// Total bytes to download, if the source advertised a size.
+    pub total: Option<u64>,
+}
+
+/// Downloads remote media to a local file. Implemented by the yt-dlp
+/// subprocess adapter (`humm-media`, Task 6).
+///
+/// Ported from the URL-download half of Buzz's `FileTranscriber.run`
+/// (`buzz/transcriber/file_transcriber.py:38-73,75-153`), where the download
+/// happens inside the task run, immediately before transcription.
+pub trait MediaFetcher: Send + Sync {
+    /// Downloads the best audio of `url` into `dest_dir`, returning the
+    /// downloaded file's path.
+    ///
+    /// Emits progress through `progress` (called zero or more times) and polls
+    /// `cancel` cooperatively, killing the subprocess if cancellation is
+    /// requested. `dest_dir` is expected to exist; the caller creates it.
+    fn fetch(
+        &self,
+        url: &url::Url,
+        dest_dir: &Path,
+        progress: &mut dyn FnMut(FetchProgress),
+        cancel: &CancelToken,
+    ) -> Result<PathBuf, MediaError>;
+}
+
 /// Receives incremental transcription results as they're produced.
 ///
 /// Implementations must not panic: [`Self::on_segment`] and

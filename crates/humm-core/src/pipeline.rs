@@ -334,6 +334,23 @@ mod tests {
         fn on_progress(&mut self, _fraction: f32) {}
     }
 
+    /// Observer that trips a shared [`CancelToken`] once progress reaches
+    /// `trip_at`. Used to simulate a cancel that lands between transcription
+    /// finishing (the engine's final `on_progress(1.0)`) and the export loop.
+    struct CancelOnProgress {
+        token: CancelToken,
+        trip_at: f32,
+    }
+
+    impl SegmentSink for CancelOnProgress {
+        fn on_segment(&mut self, _segment: Segment) {}
+        fn on_progress(&mut self, fraction: f32) {
+            if fraction >= self.trip_at {
+                self.token.cancel();
+            }
+        }
+    }
+
     fn job_with(
         input: PathBuf,
         formats: BTreeSet<OutputFormat>,
@@ -711,5 +728,100 @@ mod tests {
         assert_eq!(outcome.written.len(), 1);
         assert!(outcome.written[0].exists());
         assert!(nested.is_dir());
+    }
+
+    // -- Mid-export cancel interleaving (M1-review carry-over ticket) ------
+    //
+    // From `humm-m2-tickets` ("Bundle with M2's Ctrl-C/cancel work"): the
+    // mid-export cancel interleaving for `run_file_job` was verified correct by
+    // inspection but left untested in M1. These two tests close that gap.
+
+    #[test]
+    fn cancel_between_transcribe_and_export_writes_zero_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input.mp3");
+        touch(&input);
+
+        // Two formats requested — the cancel must abort before writing any.
+        let formats: BTreeSet<OutputFormat> =
+            [OutputFormat::Txt, OutputFormat::Srt].into_iter().collect();
+        let job = job_with(
+            input,
+            formats,
+            Some(tmp.path().to_path_buf()),
+            Some("{{ input_file_name }}".to_string()),
+        );
+
+        let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let prober = prober_with_audio();
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let cancel = CancelToken::new();
+        // Trips on the engine's final on_progress(1.0): transcription has
+        // finished, the export loop has not started.
+        let mut observer = CancelOnProgress {
+            token: cancel.clone(),
+            trip_at: 1.0,
+        };
+
+        let result = run_file_job(
+            &job,
+            &EngineTuning::default(),
+            &decoder,
+            &prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+        );
+
+        assert!(matches!(result, Err(CoreError::Canceled)));
+        // Only the input file we created ourselves — no exports.
+        let entries: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn pre_canceled_token_with_formats_requested_writes_zero_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input.mp3");
+        touch(&input);
+
+        // Same invariant asserted directly (the M1 pre-cancel test used an
+        // empty format set): a token canceled before the loop writes nothing.
+        let formats: BTreeSet<OutputFormat> =
+            [OutputFormat::Txt, OutputFormat::Srt, OutputFormat::Vtt]
+                .into_iter()
+                .collect();
+        let job = job_with(
+            input,
+            formats,
+            Some(tmp.path().to_path_buf()),
+            Some("{{ input_file_name }}".to_string()),
+        );
+
+        let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let prober = prober_with_audio();
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let mut observer = NullSink;
+        let cancel = CancelToken::new();
+        cancel.cancel();
+
+        let result = run_file_job(
+            &job,
+            &EngineTuning::default(),
+            &decoder,
+            &prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+        );
+
+        assert!(matches!(result, Err(CoreError::Canceled)));
+        assert_eq!(decoder.call_count(), 0);
+        let entries: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        assert_eq!(entries.len(), 1);
     }
 }

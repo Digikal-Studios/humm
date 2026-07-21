@@ -32,6 +32,12 @@ pub enum MediaError {
         /// Diagnostic detail.
         detail: String,
     },
+    /// A remote media download (yt-dlp) failed.
+    #[error("download failed: {detail}")]
+    FetchFailed {
+        /// Diagnostic detail (yt-dlp stderr excerpt, exit code).
+        detail: String,
+    },
     /// The input file has no audio stream to decode.
     #[error("no audio stream in {}", path.display())]
     NoAudioStream {
