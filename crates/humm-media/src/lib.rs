@@ -4,10 +4,12 @@
 
 mod capabilities;
 mod decode;
+mod fetch;
 mod probe;
 
 pub use capabilities::{MediaCapabilities, probe_binaries};
 pub use decode::FfmpegDecoder;
+pub use fetch::YtDlpFetcher;
 pub use probe::FfprobeProber;
 
 use std::ffi::OsStr;
@@ -46,7 +48,7 @@ pub(crate) fn map_spawn_error(
         MediaError::BinaryMissing {
             binary: binary.display().to_string(),
             hint: format!(
-                "{program} not found — install it (e.g. `brew install ffmpeg`) or set {env_var}"
+                "{program} not found — install it (e.g. `brew install {program}`) or set {env_var}"
             ),
         }
     } else {

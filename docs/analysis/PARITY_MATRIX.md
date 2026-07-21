@@ -23,7 +23,7 @@ Verification method legend:
 | F-009 | File logging | cli-int | verified (cli-int `log_file_written` executed and passed, Task 8) |
 | F-020 | Import files dialog (filters, last-folder) | gui-manual | not-started |
 | F-021 | Drag-and-drop import | gui-manual | not-started |
-| F-022 | Import URL (yt-dlp) & Import Folder (recursive scan) | contract (yt-dlp) + cli-int + gui-manual | not-started |
+| F-022 | Import URL (yt-dlp) & Import Folder (recursive scan) | contract (yt-dlp) + cli-int + gui-manual | in-progress (URL-import half: `YtDlpFetcher`/`MediaFetcher` adapter implemented in `humm-media` + contract tests against real yt-dlp pass — download+progress, mid-transfer cancel, capability probe, Task 6, ADR-016 `--no-playlist` deviation noted; CLI/GUI wiring and folder-import recursive scan deferred to later M2/M3 tasks) |
 | F-023 | Options window (all options, persistence, conditional visibility) | gui-manual + unit (options model) | not-started |
 | F-024 | Task queue, background execution, statuses | unit + cli-int | not-started |
 | F-025 | Progress & ETA (task, download) | unit + gui-manual | not-started |
