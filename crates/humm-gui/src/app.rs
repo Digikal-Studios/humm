@@ -782,6 +782,15 @@ impl HummApp {
     /// clicking the window's close button takes, so `eframe`'s own
     /// persistence (`gui.ron`) still runs. A no-op whenever the hook is
     /// unset (the default, non-smoke case).
+    ///
+    /// While active and short of the target, also calls
+    /// `ctx.request_repaint()`: egui only calls `eframe::App::ui` again on
+    /// its own when there's real work to do (input, an animation, an
+    /// explicit repaint request), so an otherwise-idle app would never
+    /// advance `smoke_frame_count` and the hook would stall forever short of
+    /// its target. This deliberately defeats humm's normal zero-idle-CPU
+    /// behavior — but only for the duration this hook is itself active,
+    /// i.e. only when `HUMM_SMOKE_AUTO_CLOSE_FRAMES` is set.
     fn apply_smoke_auto_close(&mut self, ctx: &egui::Context) {
         let Some(target_frames) = self.smoke_hooks.auto_close_frames else {
             return;
@@ -789,6 +798,8 @@ impl HummApp {
         self.smoke_frame_count += 1;
         if self.smoke_frame_count >= target_frames {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else {
+            ctx.request_repaint();
         }
     }
 
