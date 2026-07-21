@@ -10,7 +10,7 @@ name = "humm"
 path = "src/main.rs"
 
 [dependencies]
-humm-core = { path = "../humm-core", version = "0.1.0" }
+humm-core.workspace = true
 humm-media = { path = "../humm-media", version = "0.1.0" }
 humm-whisper = { path = "../humm-whisper", version = "0.1.0" }
 clap = { workspace = true }

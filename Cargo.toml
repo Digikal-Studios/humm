@@ -4,6 +4,7 @@ members = [
     "crates/humm-core",
     "crates/humm-media",
     "crates/humm-whisper",
+    "crates/humm-store",
     "crates/humm-cli",
 ]
 # The ADR-002 validation benchmark lives under validation/; it is a protocol +
@@ -16,6 +17,7 @@ license = "MIT"
 repository = "https://repo.digikal.com/jawad/humm"
 
 [workspace.dependencies]
+humm-core = { path = "crates/humm-core", version = "0.1.0" }
 thiserror = "2"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
@@ -37,6 +39,7 @@ predicates = "3"
 uuid = { version = "1", features = ["v4", "serde"] }
 url = { version = "2", features = ["serde"] }
 toml = "0.9"
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [profile.release]
 lto = "thin"

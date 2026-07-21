@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::cancel::CancelToken;
-use crate::domain::{Millis, Segment, TaskKind};
-use crate::error::{EngineError, MediaError};
+use crate::domain::{Millis, Segment, Source, TaskKind, TaskSpec, TranscriptionId};
+use crate::error::{EngineError, MediaError, StoreError};
 use crate::language::Language;
 
 /// Sample rate (Hz) all decoded PCM and captured audio is normalized to.
@@ -140,6 +140,47 @@ pub trait TranscriptionEngine: Send {
 
     /// The capabilities this engine implementation supports.
     fn capabilities(&self) -> EngineCaps;
+}
+
+/// The task queue's writer surface: the *only* writer of a task's `status`
+/// (`docs/design/ARCHITECTURE.md` §5). Implemented by `humm-store`'s
+/// `SqliteStore`; the queue drives a task through these transitions in order
+/// (`create_task` → `mark_started` → zero or more `update_progress`/
+/// `update_file` → exactly one of `mark_completed`/`mark_failed`/
+/// `mark_canceled`).
+pub trait TaskStore: Send + Sync {
+    /// Inserts a new `queued` task row for `id`, persisting every field of
+    /// `spec` (including the full `options_json` round-trip) plus `source`.
+    fn create_task(
+        &self,
+        id: &TranscriptionId,
+        spec: &TaskSpec,
+        source: Source,
+    ) -> Result<(), StoreError>;
+
+    /// Marks the task as started: `status` becomes `in_progress` and
+    /// `time_started` is set to now.
+    fn mark_started(&self, id: &TranscriptionId) -> Result<(), StoreError>;
+
+    /// Records progress: `status` becomes `in_progress` and `progress` is set
+    /// to `fraction`, clamped to `[0.0, 1.0]`.
+    fn update_progress(&self, id: &TranscriptionId, fraction: f64) -> Result<(), StoreError>;
+
+    /// Updates the task's resolved local file path, e.g. once a
+    /// [`crate::domain::Input::Url`] task's download completes.
+    fn update_file(&self, id: &TranscriptionId, path: &Path) -> Result<(), StoreError>;
+
+    /// Marks the task `completed`, sets `time_ended`, and persists
+    /// `segments` (in order) as the task's transcript.
+    fn mark_completed(&self, id: &TranscriptionId, segments: &[Segment]) -> Result<(), StoreError>;
+
+    /// Marks the task `failed`, sets `time_ended`, and records `error` as the
+    /// task's `error_message`. No segments are persisted.
+    fn mark_failed(&self, id: &TranscriptionId, error: &str) -> Result<(), StoreError>;
+
+    /// Marks the task `canceled` and sets `time_ended`. No segments are
+    /// persisted.
+    fn mark_canceled(&self, id: &TranscriptionId) -> Result<(), StoreError>;
 }
 
 #[cfg(test)]

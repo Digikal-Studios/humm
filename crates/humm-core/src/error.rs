@@ -121,6 +121,45 @@ pub enum ExportError {
     },
 }
 
+/// Errors from the task-store (SQLite persistence) boundary.
+///
+/// Implemented by `humm-store`'s `SqliteStore`
+/// (`docs/design/ARCHITECTURE.md` §5, ADR-004).
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum StoreError {
+    /// The database file could not be opened or created.
+    #[error("failed to open database at {}: {detail}", path.display())]
+    Open {
+        /// Path to the database file.
+        path: PathBuf,
+        /// Diagnostic detail.
+        detail: String,
+    },
+    /// A SQL statement (query, insert, update, migration pragma, ...) failed,
+    /// or the connection mutex was poisoned by a prior panic.
+    #[error("database query failed: {detail}")]
+    Query {
+        /// Diagnostic detail.
+        detail: String,
+    },
+    /// The database's schema is at an unrecognized or unsupported version, or
+    /// otherwise contains data that cannot be interpreted (e.g. malformed
+    /// persisted JSON).
+    #[error("corrupt or unsupported database: {detail}")]
+    Corrupt {
+        /// Diagnostic detail.
+        detail: String,
+    },
+    /// Underlying I/O error (e.g. creating the database's parent directory).
+    #[error(transparent)]
+    Io(
+        /// The underlying I/O error.
+        #[from]
+        std::io::Error,
+    ),
+}
+
 /// The top-level error composing every core error type, returned by the
 /// transcription pipeline.
 #[derive(Debug, thiserror::Error)]
@@ -138,6 +177,9 @@ pub enum CoreError {
     /// An export-writing error.
     #[error(transparent)]
     Export(#[from] ExportError),
+    /// A task-store (persistence) error.
+    #[error(transparent)]
+    Store(#[from] StoreError),
     /// The job's input path does not exist.
     #[error("input not found: {}", path.display())]
     InputMissing {
@@ -203,5 +245,34 @@ mod tests {
             path: PathBuf::from("/audio/missing.mp3"),
         };
         assert!(err.to_string().contains("missing.mp3"));
+    }
+
+    #[test]
+    fn store_error_open_renders_path_and_detail() {
+        let err = StoreError::Open {
+            path: PathBuf::from("/data/humm.sqlite"),
+            detail: "permission denied".to_string(),
+        };
+        let message = err.to_string();
+        assert!(message.contains("humm.sqlite"));
+        assert!(message.contains("permission denied"));
+    }
+
+    #[test]
+    fn store_error_corrupt_renders_detail() {
+        let err = StoreError::Corrupt {
+            detail: "unsupported schema version 7".to_string(),
+        };
+        assert!(err.to_string().contains("unsupported schema version 7"));
+    }
+
+    #[test]
+    fn core_error_wraps_store_error() {
+        let err: CoreError = StoreError::Query {
+            detail: "boom".to_string(),
+        }
+        .into();
+        assert!(matches!(err, CoreError::Store(_)));
+        assert!(err.to_string().contains("boom"));
     }
 }

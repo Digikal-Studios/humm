@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-humm-core = { path = "../humm-core", version = "0.1.0" }
+humm-core.workspace = true
 # `log_backend` routes whisper.cpp/GGML's stderr logging through the `log`
 # crate (via `install_logging_hooks`), so ggml/Metal init noise is captured
 # rather than printed. `log` is already a workspace dependency.
