@@ -51,7 +51,7 @@ Empty states everywhere: fresh main table shows a drop-target hero ("Drop media 
 
 ## 3. Keyboard shortcuts
 
-Buzz's 21 defaults preserved verbatim (muscle-memory parity, `EXTERNAL_SURFACE.md` table) — including Ctrl+S = Clear History (surprising, but rebindable; a confirm dialog guards it). All rebindable in Preferences → Shortcuts with conflict detection ✚ and Reset to Defaults. macOS renders ⌘ equivalents.
+Buzz's 20 defaults preserved verbatim (recounted from `buzz/settings/shortcut.py` at M3 implementation time — an earlier analysis pass overcounted at 21; muscle-memory parity) — including Ctrl+S = Clear History (surprising, but rebindable; a confirm dialog guards it). All rebindable in Preferences → Shortcuts with conflict detection ✚ and Reset to Defaults. macOS renders ⌘ equivalents.
 
 ## 4. States, cancellation, progress (global rules)
 

@@ -157,7 +157,9 @@ failing the run.
 
 A second, independent lock file (`data_dir/gui.lock`) exists for GUI
 exclusivity — an exclusive claim on it that is never downgraded, so a second
-GUI launch's attempt fails. This commit ships the acquire function
-(`humm_core::instance::acquire_gui_lock`); the GUI wiring itself (detecting
-the failed claim and showing "humm is already running" before exiting 0)
-lands with the GUI single-instance task later in M3.
+GUI launch's attempt fails. `humm-gui`'s `main.rs` wires this end to end (M3
+GUI-shell task): a failed claim shows a native `rfd::MessageDialog` ("humm is
+already running.") and exits 0 before any window opens; a successful claim is
+held for the process lifetime alongside `instance.lock`'s own shared claim
+(the GUI participates in the `instance.lock` stale-flip protocol like any
+other humm process, via the same `acquire_instance_lock` call).

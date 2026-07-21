@@ -29,7 +29,7 @@ Icon toolbar: Record | New File Transcription, New URL Transcription, Open Trans
 - Source: `buzz/widgets/main_window_toolbar.py`, `buzz/widgets/menu_bar.py`.
 
 ### F-005 — Customizable keyboard shortcuts
-21 named shortcuts with defaults (full table in `EXTERNAL_SURFACE.md` companion; e.g. Ctrl+R record, Ctrl+O import, Ctrl+X cancel, Ctrl+S clear history, viewer keys). Editable in Preferences → Shortcuts (QKeySequenceEdit per action, Reset to Defaults); stored as dict under `shortcuts`; re-applied live to menu/toolbar.
+20 named shortcuts with defaults (recounted from `buzz/settings/shortcut.py` at M3 implementation time — an earlier analysis pass overcounted at 21; e.g. Ctrl+R record, Ctrl+O import, Ctrl+X cancel, Ctrl+S clear history, viewer keys). Editable in Preferences → Shortcuts (QKeySequenceEdit per action, Reset to Defaults); stored as dict under `shortcuts`; re-applied live to menu/toolbar.
 - Source: `buzz/settings/shortcut.py`, `buzz/settings/shortcuts.py`, `buzz/widgets/preferences_dialog/shortcuts_editor_preferences_widget.py`, `buzz/widgets/sequence_edit.py`.
 
 ### F-006 — Update check & in-app update

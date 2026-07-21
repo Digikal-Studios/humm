@@ -6,6 +6,7 @@ members = [
     "crates/humm-whisper",
     "crates/humm-store",
     "crates/humm-cli",
+    "crates/humm-gui",
 ]
 # The ADR-002 validation benchmark lives under validation/; it is a protocol +
 # scripts, not a cargo project, and must never be pulled into the workspace.
@@ -43,6 +44,15 @@ flume = "0.11"
 toml = "0.9"
 rusqlite = { version = "0.40", features = ["bundled"] }
 fd-lock = "4"
+egui = "0.35"
+eframe = { version = "0.35", features = ["persistence"] }
+egui_extras = "0.35"
+rfd = "0.17"
+fluent = "0.17"
+unic-langid = { version = "0.9", features = ["macros"] }
+open = "5"
+regex = "1"
+egui_kittest = { version = "0.35", features = ["eframe"] }
 
 [profile.release]
 lto = "thin"

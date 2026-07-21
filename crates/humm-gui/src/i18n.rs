@@ -1,0 +1,156 @@
+//! Fluent-backed string catalog (F-008 scaffold).
+//!
+//! Every user-visible string in `humm-gui` is a key resolved through
+//! [`tr`]/[`tr_args`] rather than an inline literal — Buzz's gettext catalog
+//! (`buzz/locale.py`) ported to Fluent (ADR-014). Only the `en` catalog is
+//! embedded this milestone; locale negotiation (Buzz's 15 UI locales,
+//! `buzz-notes-options-shortcuts-telemetry.md` §F-008) lands with the locale
+//! ports in a later milestone. Until then the bundle is always English.
+//!
+//! [`FluentBundle`] is not `Sync` (its default memoizer uses interior
+//! mutability that isn't thread-safe), so it cannot live in a plain `static`.
+//! egui itself is single-threaded (all `tr`/`tr_args` calls happen from the
+//! UI thread that owns the `egui::Context`), so a `thread_local!` is the
+//! right tool: no cross-thread sharing is ever needed, and each thread that
+//! happens to call `tr` (only ever one, in practice) gets its own bundle,
+//! built once and reused.
+
+use std::cell::RefCell;
+
+use fluent::{FluentArgs, FluentBundle, FluentResource, FluentValue};
+use unic_langid::langid;
+
+/// The embedded English Fluent catalog source.
+const EN_FTL: &str = include_str!("../assets/i18n/en/humm.ftl");
+
+/// Every catalog key `humm-gui` actually references from view code, asserted
+/// resolvable by this module's unit test (the F-008 "matrix method": unit
+/// catalog load). Extend this list in the same commit as any `tr("new-key")`
+/// call — an unlisted key can silently render as its own name in the UI with
+/// nothing catching it.
+pub fn all_keys_used() -> &'static [&'static str] {
+    &["hero-drop", "hero-import-button"]
+}
+
+thread_local! {
+    static BUNDLE: RefCell<FluentBundle<FluentResource>> = RefCell::new(build_bundle());
+}
+
+fn build_bundle() -> FluentBundle<FluentResource> {
+    let resource = FluentResource::try_new(EN_FTL.to_string()).unwrap_or_else(|(_, errors)| {
+        // The embedded catalog is compiled into the binary; a parse failure
+        // here means `humm.ftl` itself is malformed, which is a build-time
+        // defect, not a runtime condition callers can recover from. Panicking
+        // at first use (rather than silently serving an empty bundle, which
+        // would make every `tr()` call fall back to its own key name) makes
+        // the defect impossible to miss.
+        panic!("humm.ftl failed to parse: {errors:?}");
+    });
+    let mut bundle = FluentBundle::new(vec![langid!("en-US")]);
+    bundle
+        .add_resource(resource)
+        .expect("humm.ftl has no duplicate message ids");
+    bundle
+}
+
+/// Resolves `key` to its English text, or `key` itself if the catalog has no
+/// such message (the missing-key detection contract [`all_keys_used`]'s test
+/// relies on: an unregistered/misspelled key is visibly wrong in the UI
+/// rather than panicking).
+pub fn tr(key: &str) -> String {
+    tr_args(key, &[])
+}
+
+/// Like [`tr`], but resolves Fluent placeables (`{ $name }`) from `args`
+/// (name, value pairs).
+pub fn tr_args(key: &str, args: &[(&str, &str)]) -> String {
+    BUNDLE.with(|bundle| {
+        let bundle = bundle.borrow();
+        let Some(message) = bundle.get_message(key) else {
+            return key.to_string();
+        };
+        let Some(pattern) = message.value() else {
+            return key.to_string();
+        };
+        let fluent_args = if args.is_empty() {
+            None
+        } else {
+            let mut built = FluentArgs::new();
+            for (name, value) in args {
+                built.set(*name, FluentValue::from(*value));
+            }
+            Some(built)
+        };
+        let mut errors = Vec::new();
+        bundle
+            .format_pattern(pattern, fluent_args.as_ref(), &mut errors)
+            .into_owned()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_registered_key_resolves_to_something_other_than_itself() {
+        for key in all_keys_used() {
+            let resolved = tr(key);
+            assert_ne!(
+                &resolved, key,
+                "key {key:?} resolved to its own name — missing from humm.ftl"
+            );
+            assert!(!resolved.is_empty(), "key {key:?} resolved to empty text");
+        }
+    }
+
+    #[test]
+    fn hero_drop_matches_the_buzz_notes_wording() {
+        assert_eq!(tr("hero-drop"), "Drop media here, or ⌘O");
+    }
+
+    #[test]
+    fn hero_import_button_matches_the_buzz_notes_wording() {
+        assert_eq!(tr("hero-import-button"), "Import files…");
+    }
+
+    #[test]
+    fn unknown_key_resolves_to_itself() {
+        assert_eq!(tr("no-such-key"), "no-such-key");
+    }
+
+    #[test]
+    fn tr_args_substitutes_named_placeables() {
+        // No current catalog key uses a placeable; this exercises the
+        // substitution machinery directly against a key that does, so the
+        // mechanism is proven before the first real user of it lands.
+        thread_local! {
+            static SCRATCH: RefCell<FluentBundle<FluentResource>> = RefCell::new({
+                let resource = FluentResource::try_new(
+                    "greeting = Hello, { $name }!".to_string(),
+                )
+                .expect("valid ftl");
+                let mut bundle = FluentBundle::new(vec![langid!("en-US")]);
+                bundle.add_resource(resource).expect("no dup ids");
+                bundle
+            });
+        }
+        let rendered = SCRATCH.with(|bundle| {
+            let bundle = bundle.borrow();
+            let message = bundle.get_message("greeting").expect("message exists");
+            let pattern = message.value().expect("has value");
+            let mut args = FluentArgs::new();
+            args.set("name", FluentValue::from("humm"));
+            let mut errors = Vec::new();
+            bundle
+                .format_pattern(pattern, Some(&args), &mut errors)
+                .into_owned()
+        });
+        // Fluent wraps substituted values in bidi-isolation marks by default
+        // (`useIsolating`), so this checks substring containment rather than
+        // an exact match against those (version-sensitive) control chars.
+        assert!(rendered.starts_with("Hello, "));
+        assert!(rendered.contains("humm"));
+        assert!(rendered.ends_with('!'));
+    }
+}

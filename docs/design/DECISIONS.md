@@ -50,7 +50,7 @@ whisper-rs is **1.91×/1.96×** faster (small/turbo) and uses **2.24×/1.75×** 
 **Validation:** contract test with a synthesized loopback (and `mock` capture impl for CI); resample quality test (sine sweep RMS error); chunker unit tests port Buzz's silence-cut behavior.
 
 ## ADR-006 — GUI framework: **egui/eframe 0.35**
-**Needs from `USER_JOURNEYS.md`:** 5+ real OS windows (main/viewer/recording/preferences/presentation), virtualized editable segment table (100k rows), custom painting (audio meter, presentation view), streamed video frames as textures, synced playback UI, native file dialogs, drag-drop, 21 rebindable shortcuts, i18n, background-task progress without jank, accessibility.
+**Needs from `USER_JOURNEYS.md`:** 5+ real OS windows (main/viewer/recording/preferences/presentation), virtualized editable segment table (100k rows), custom painting (audio meter, presentation view), streamed video frames as textures, synced playback UI, native file dialogs, drag-drop, 20 rebindable shortcuts, i18n, background-task progress without jank, accessibility.
 **Options considered:**
 - **iced 0.14** — Elm model is clean for this app-shape; but multi-window is young, table virtualization and custom-widget ergonomics lag, accessibility incomplete, slower release cadence.
 - **Slint 1.17** — polished, good a11y, royalty-free desktop license; but DSL split poorly fits our churn-heavy custom surfaces (meter, table-editor, video), and the license story (GPL/royalty-free/commercial triad) is a needless liability for a personal OSS-adjacent app.
