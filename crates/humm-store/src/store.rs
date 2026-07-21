@@ -5,11 +5,18 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Mutex, MutexGuard};
 
+use std::collections::BTreeSet;
+
+use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
 use humm_core::boundary::TaskStore;
-use humm_core::domain::{Input, Millis, Segment, Source, Status, TaskSpec, TranscriptionId};
+use humm_core::domain::{
+    DEFAULT_TEMPERATURE, Input, Millis, ModelSize, ModelSpec, OutputFormat, OutputSpec, Segment,
+    Source, Status, TaskKind, TaskSpec, TranscriptionId, TranscriptionOptions,
+};
 use humm_core::error::StoreError;
+use humm_core::language::Language;
 
 use crate::schema::migrate;
 
@@ -150,6 +157,24 @@ fn now_iso() -> String {
 fn query_error(err: rusqlite::Error) -> StoreError {
     StoreError::Query {
         detail: err.to_string(),
+    }
+}
+
+/// Interprets a raw SQLite value from a `BOOLEAN`-affinity column (
+/// `word_level_timings`, `extract_speech`) as a bool, tolerating every
+/// storage class such a value might arrive in: humm's own
+/// [`SqliteStore::create_task`] binds a Rust `bool`, which rusqlite/SQLite
+/// store as `INTEGER` `0`/`1`; a real Buzz install's own restart path
+/// instead reads this column back as a Python `str` and compares it to
+/// `"1"` (`transcription_tasks_table_widget.py:758`) — so a `"1"`/`"true"`
+/// text value, however it got onto a row, is also truthy here. Anything
+/// else (`NULL`, `0`, `"0"`, a blob) is `false`.
+fn parse_loose_bool(value: &Value) -> bool {
+    match value {
+        Value::Integer(i) => *i != 0,
+        Value::Real(r) => *r != 0.0,
+        Value::Text(s) => s == "1" || s.eq_ignore_ascii_case("true"),
+        Value::Null | Value::Blob(_) => false,
     }
 }
 
@@ -518,6 +543,183 @@ impl SqliteStore {
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(query_error)
     }
+
+    /// Sets a task's user-assigned display name. Ported from Buzz's
+    /// `TranscriptionDAO.update_transcription_name`
+    /// (`transcription_dao.py:269-284`), which raises when the row doesn't
+    /// exist (`query.numRowsAffected() == 0`); this returns
+    /// `Err(StoreError::Query)` in that case.
+    pub fn set_task_name(&self, id: &TranscriptionId, name: &str) -> Result<(), StoreError> {
+        let conn = self.lock()?;
+        let affected = conn
+            .execute(
+                "UPDATE transcription SET name = ?1 WHERE id = ?2",
+                params![name, id.to_string()],
+            )
+            .map_err(query_error)?;
+        if affected == 0 {
+            return Err(StoreError::Query {
+                detail: format!("set_task_name: no task with id {id}"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Sets a task's free-text notes. Ported from Buzz's
+    /// `TranscriptionDAO.update_transcription_notes`
+    /// (`transcription_dao.py:303-318`), which raises when the row doesn't
+    /// exist (`query.numRowsAffected() == 0`); this returns
+    /// `Err(StoreError::Query)` in that case.
+    pub fn set_task_notes(&self, id: &TranscriptionId, notes: &str) -> Result<(), StoreError> {
+        let conn = self.lock()?;
+        let affected = conn
+            .execute(
+                "UPDATE transcription SET notes = ?1 WHERE id = ?2",
+                params![notes, id.to_string()],
+            )
+            .map_err(query_error)?;
+        if affected == 0 {
+            return Err(StoreError::Query {
+                detail: format!("set_task_notes: no task with id {id}"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Deletes `ids` (and, via the `ON DELETE CASCADE` foreign key —
+    /// active because `Self::configure` enables `PRAGMA foreign_keys=ON`
+    /// — their `transcription_segment` rows). Returns the number of
+    /// `transcription` rows actually removed; an id with no matching row is
+    /// silently skipped rather than an error. `ids.is_empty()` is a no-op
+    /// returning `Ok(0)` without touching the database.
+    ///
+    /// One `DELETE ... WHERE id IN (...)` statement with one bound
+    /// parameter per id, the same placeholder-building pattern
+    /// `Self::run_buzz_import` uses for its segment copy.
+    pub fn delete_tasks(&self, ids: &[TranscriptionId]) -> Result<usize, StoreError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.lock()?;
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        let sql = format!("DELETE FROM transcription WHERE id IN ({placeholders})");
+        let id_strings: Vec<String> = ids.iter().map(TranscriptionId::to_string).collect();
+        let affected = conn
+            .execute(&sql, params_from_iter(id_strings.iter()))
+            .map_err(query_error)?;
+        Ok(affected)
+    }
+
+    /// Rebuilds a Buzz-parity [`TaskSpec`] from a task's raw columns —
+    /// for rows whose `options_json` is `NULL` (an imported Buzz row, or
+    /// any row a future humm version wrote without it).
+    /// [`Self::load_task_spec`] is for the `options_json` round-trip; this
+    /// is the column-only fallback. `Ok(None)` if `id` doesn't exist.
+    ///
+    /// Ported from Buzz's `_restart_transcription_task`
+    /// (`transcription_tasks_table_widget.py:727-780`): every column is
+    /// parsed tolerantly, with the same fallbacks Buzz applies on a
+    /// restart — an unparseable/absent `language` becomes `None`, `task`
+    /// becomes [`TaskKind::Transcribe`], `export_formats` entries that
+    /// don't parse are dropped rather than failing the whole list, and
+    /// (Buzz's own restart fallback, not this crate's
+    /// `TranscriptionOptions::default()` `Small`) an unparseable/absent
+    /// `whisper_model_size` becomes [`ModelSize::Tiny`].
+    /// `initial_prompt`/`temperature` are not persisted as columns, so they
+    /// take `TranscriptionOptions::default()`'s values — matching Buzz's
+    /// restart, which hardcodes `initial_prompt=""` and never restores
+    /// temperature either.
+    pub fn spec_from_columns(&self, id: &TranscriptionId) -> Result<Option<TaskSpec>, StoreError> {
+        let conn = self.lock()?;
+        let row = conn
+            .query_row(
+                "SELECT file, url, language, task, whisper_model_size, \
+                 hugging_face_model_id, word_level_timings, export_formats, output_folder \
+                 FROM transcription WHERE id = ?1",
+                params![id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Value>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(query_error)?;
+        drop(conn);
+
+        let Some((
+            file,
+            url,
+            language,
+            task,
+            whisper_model_size,
+            hugging_face_model_id,
+            word_level_timings,
+            export_formats,
+            output_folder,
+        )) = row
+        else {
+            return Ok(None);
+        };
+
+        // "input from url else file": the `url`/`file` columns are mutually
+        // exclusive by construction (`create_task` sets exactly one), so
+        // preferring `url` when present is unambiguous.
+        let input = match url {
+            Some(url) => Input::parse(&url),
+            None => Input::Path(file.map(PathBuf::from).unwrap_or_default()),
+        };
+
+        let options = TranscriptionOptions {
+            language: language.as_deref().and_then(Language::parse),
+            task: task
+                .as_deref()
+                .and_then(|s| TaskKind::from_str(s).ok())
+                .unwrap_or(TaskKind::Transcribe),
+            model: ModelSpec {
+                size: whisper_model_size
+                    .as_deref()
+                    .and_then(|s| ModelSize::from_str(s).ok())
+                    .unwrap_or(ModelSize::Tiny),
+                hf_repo: hugging_face_model_id,
+            },
+            word_timestamps: parse_loose_bool(&word_level_timings),
+            initial_prompt: String::new(),
+            temperature: DEFAULT_TEMPERATURE.to_vec(),
+        };
+
+        // Tolerant, comma-split (Buzz's own restart splits on `','` and
+        // `.strip()`s each piece, even though `create_task` writes `", "`-
+        // joined values): unrecognized entries are dropped, not an error.
+        let formats: BTreeSet<OutputFormat> = export_formats
+            .as_deref()
+            .map(|s| {
+                s.split(',')
+                    .filter_map(|part| OutputFormat::from_str(part.trim()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let output = OutputSpec {
+            formats,
+            directory: output_folder.map(PathBuf::from),
+            ..OutputSpec::default()
+        };
+
+        Ok(Some(TaskSpec {
+            input,
+            options,
+            output,
+        }))
+    }
 }
 
 impl TaskStore for SqliteStore {
@@ -588,6 +790,23 @@ impl TaskStore for SqliteStore {
             ],
         )
         .map_err(query_error)?;
+        Ok(())
+    }
+
+    fn requeue_task(&self, id: &TranscriptionId) -> Result<(), StoreError> {
+        let conn = self.lock()?;
+        let affected = conn
+            .execute(
+                "UPDATE transcription SET status = ?1, progress = 0.0, time_started = NULL, \
+                 time_ended = NULL, error_message = NULL WHERE id = ?2",
+                params![Status::Queued.as_str(), id.to_string()],
+            )
+            .map_err(query_error)?;
+        if affected == 0 {
+            return Err(StoreError::Query {
+                detail: format!("requeue_task: no task with id {id}"),
+            });
+        }
         Ok(())
     }
 
@@ -1134,5 +1353,253 @@ mod tests {
         assert_eq!(path, PathBuf::from("/tmp/humm.sqlite"));
         assert!(detail.starts_with("disk full"));
         assert!(detail.contains("malformed database schema"));
+    }
+
+    // -- Task 3: retry/rename/notes/delete/spec_from_columns (F-026) --------
+
+    #[test]
+    fn requeue_task_resets_status_progress_and_clears_timestamps_and_error_only() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        let mut spec = sample_task_spec();
+        spec.output.directory = Some(PathBuf::from("/tmp/out"));
+        store
+            .create_task(&id, &spec, Source::FileImport)
+            .expect("create");
+        store.mark_started(&id).expect("started");
+        store.update_progress(&id, 0.75).expect("progress");
+        store.mark_failed(&id, "boom").expect("failed");
+
+        let before = fetch_full_row(&store, &id);
+        assert_eq!(before.status.as_deref(), Some("failed"));
+        assert_eq!(before.progress, 0.75);
+        assert!(before.time_started.is_some());
+        assert!(before.time_ended.is_some());
+        assert_eq!(before.error_message.as_deref(), Some("boom"));
+
+        store.requeue_task(&id).expect("requeue");
+
+        let after = fetch_full_row(&store, &id);
+        assert_eq!(after.status.as_deref(), Some("queued"));
+        assert_eq!(after.progress, 0.0);
+        assert_eq!(after.time_started, None);
+        assert_eq!(after.time_ended, None);
+        assert_eq!(after.error_message, None);
+
+        // Every other column is untouched by requeue.
+        assert_eq!(after.export_formats, before.export_formats);
+        assert_eq!(after.file, before.file);
+        assert_eq!(after.output_folder, before.output_folder);
+        assert_eq!(after.language, before.language);
+        assert_eq!(after.model_type, before.model_type);
+        assert_eq!(after.source, before.source);
+        assert_eq!(after.task, before.task);
+        assert_eq!(after.time_queued, before.time_queued);
+        assert_eq!(after.url, before.url);
+        assert_eq!(after.whisper_model_size, before.whisper_model_size);
+        assert_eq!(after.hugging_face_model_id, before.hugging_face_model_id);
+        assert_eq!(after.word_level_timings, before.word_level_timings);
+        assert_eq!(after.extract_speech, before.extract_speech);
+        assert_eq!(after.name, before.name);
+        assert_eq!(after.notes, before.notes);
+        assert_eq!(after.options_json, before.options_json);
+        assert_eq!(after.kind, before.kind);
+    }
+
+    #[test]
+    fn requeue_task_on_missing_id_errors() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        let err = store.requeue_task(&id).expect_err("missing id must error");
+        assert!(matches!(err, StoreError::Query { .. }));
+    }
+
+    #[test]
+    fn set_task_name_updates_name_and_errors_on_missing_id() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        store
+            .create_task(&id, &sample_task_spec(), Source::FileImport)
+            .expect("create");
+
+        store.set_task_name(&id, "My Recording").expect("set name");
+        let row = store.get_task(&id).expect("get").expect("present");
+        assert_eq!(row.name.as_deref(), Some("My Recording"));
+
+        let missing = TranscriptionId::new();
+        let err = store
+            .set_task_name(&missing, "x")
+            .expect_err("missing id must error");
+        assert!(matches!(err, StoreError::Query { .. }));
+    }
+
+    #[test]
+    fn set_task_notes_updates_notes_and_errors_on_missing_id() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        store
+            .create_task(&id, &sample_task_spec(), Source::FileImport)
+            .expect("create");
+
+        store
+            .set_task_notes(&id, "remember to trim the intro")
+            .expect("set notes");
+        let row = store.get_task(&id).expect("get").expect("present");
+        assert_eq!(row.notes.as_deref(), Some("remember to trim the intro"));
+
+        let missing = TranscriptionId::new();
+        let err = store
+            .set_task_notes(&missing, "x")
+            .expect_err("missing id must error");
+        assert!(matches!(err, StoreError::Query { .. }));
+    }
+
+    #[test]
+    fn delete_tasks_removes_rows_and_cascades_segments() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let a = TranscriptionId::new();
+        let b = TranscriptionId::new();
+        store
+            .create_task(&a, &sample_task_spec(), Source::FileImport)
+            .expect("create a");
+        store
+            .create_task(&b, &sample_task_spec(), Source::FileImport)
+            .expect("create b");
+        let segments = vec![Segment {
+            start: Millis(0),
+            end: Millis(1000),
+            text: "hi".to_string(),
+            translation: String::new(),
+        }];
+        store.mark_completed(&a, &segments).expect("complete a");
+        store.mark_completed(&b, &segments).expect("complete b");
+        assert_eq!(store.get_segments(&a).expect("segments a").len(), 1);
+
+        let deleted = store.delete_tasks(&[a, b]).expect("delete");
+        assert_eq!(deleted, 2);
+
+        assert_eq!(store.get_task(&a).expect("get a"), None);
+        assert_eq!(store.get_task(&b).expect("get b"), None);
+        assert!(
+            store
+                .get_segments(&a)
+                .expect("segments a after delete")
+                .is_empty()
+        );
+        assert!(
+            store
+                .get_segments(&b)
+                .expect("segments b after delete")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn delete_tasks_of_empty_slice_is_a_noop_returning_zero() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        assert_eq!(store.delete_tasks(&[]).expect("delete empty"), 0);
+    }
+
+    #[test]
+    fn delete_tasks_skips_unknown_ids_without_erroring() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let a = TranscriptionId::new();
+        store
+            .create_task(&a, &sample_task_spec(), Source::FileImport)
+            .expect("create a");
+        let unknown = TranscriptionId::new();
+
+        let deleted = store.delete_tasks(&[a, unknown]).expect("delete");
+        assert_eq!(deleted, 1);
+        assert_eq!(store.get_task(&a).expect("get a"), None);
+    }
+
+    #[test]
+    fn spec_from_columns_maps_buzz_shaped_row_with_fallbacks() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        {
+            let conn = store.conn.lock().expect("lock");
+            conn.execute(
+                "INSERT INTO transcription (
+                    id, file, url, language, task, whisper_model_size,
+                    hugging_face_model_id, word_level_timings, export_formats,
+                    output_folder, status, time_queued, kind
+                ) VALUES (
+                    ?1, ?2, NULL, ?3, ?4, ?5, NULL, ?6, ?7, ?8, 'failed', ?9, 'file'
+                )",
+                params![
+                    id.to_string(),
+                    "/buzz/audio1.mp3",
+                    "not-a-real-language",
+                    "not-a-real-task",
+                    "not-a-real-size",
+                    true,
+                    "txt, bogus, srt",
+                    "/buzz/out",
+                    "2024-01-01T00:00:00.000000",
+                ],
+            )
+            .expect("insert buzz-shaped row");
+        }
+
+        let spec = store
+            .spec_from_columns(&id)
+            .expect("spec_from_columns")
+            .expect("row present");
+
+        assert_eq!(spec.input, Input::Path(PathBuf::from("/buzz/audio1.mp3")));
+        assert_eq!(spec.options.language, None);
+        assert_eq!(spec.options.task, TaskKind::Transcribe);
+        // Buzz's own restart fallback for an unparseable model size is
+        // `Tiny`, not this crate's `TranscriptionOptions::default()` `Small`.
+        assert_eq!(spec.options.model.size, ModelSize::Tiny);
+        assert_eq!(spec.options.model.hf_repo, None);
+        assert!(spec.options.word_timestamps);
+        assert_eq!(spec.options.initial_prompt, "");
+        assert_eq!(spec.options.temperature, DEFAULT_TEMPERATURE.to_vec());
+        assert_eq!(
+            spec.output.formats,
+            [OutputFormat::Txt, OutputFormat::Srt].into_iter().collect()
+        );
+        assert_eq!(spec.output.directory, Some(PathBuf::from("/buzz/out")));
+    }
+
+    #[test]
+    fn spec_from_columns_prefers_url_over_file_and_returns_none_for_missing_row() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        let mut spec = sample_task_spec();
+        spec.input = Input::Url(url::Url::parse("https://example.com/a.mp3").expect("url"));
+        store
+            .create_task(&id, &spec, Source::UrlImport)
+            .expect("create");
+
+        let rebuilt = store
+            .spec_from_columns(&id)
+            .expect("spec_from_columns")
+            .expect("row present");
+        assert_eq!(
+            rebuilt.input,
+            Input::Url(url::Url::parse("https://example.com/a.mp3").expect("url"))
+        );
+
+        assert_eq!(
+            store
+                .spec_from_columns(&TranscriptionId::new())
+                .expect("missing"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_loose_bool_treats_buzz_text_and_ints_as_truthy() {
+        use rusqlite::types::Value;
+        assert!(parse_loose_bool(&Value::Integer(1)));
+        assert!(!parse_loose_bool(&Value::Integer(0)));
+        assert!(parse_loose_bool(&Value::Text("1".to_string())));
+        assert!(parse_loose_bool(&Value::Text("true".to_string())));
+        assert!(!parse_loose_bool(&Value::Text("0".to_string())));
+        assert!(!parse_loose_bool(&Value::Null));
     }
 }

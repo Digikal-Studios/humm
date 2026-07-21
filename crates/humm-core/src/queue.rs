@@ -76,6 +76,9 @@ const YTDLP_MISSING: &str =
 /// task is canceled before it starts, in which case it is `Queued` →
 /// `Canceled` with no `Started`. `StoreWriteFailed` is out of band: it may
 /// interleave anywhere in that sequence (ADR-018) and never changes it.
+/// [`QueueHandle::retry`] restarts this whole sequence for the same id: a
+/// terminal event is followed by a fresh `Queued`, as though the id had
+/// been enqueued again.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaskEventKind {
     /// The task was accepted and persisted; it is waiting its turn.
@@ -291,6 +294,14 @@ enum Command {
         /// Where the task came from.
         source: Source,
     },
+    /// Re-enqueue an already-terminated task's *existing* row for a retry:
+    /// same `id`, fresh `spec` (see [`QueueHandle::retry`]).
+    Retry {
+        /// The task's id, reused rather than minting a new one.
+        id: TranscriptionId,
+        /// The (possibly edited) task specification to retry with.
+        spec: Box<TaskSpec>,
+    },
     /// Add `id` to the canceled-set (and, if it is the current task, its token
     /// was already tripped by the handle).
     Cancel(TranscriptionId),
@@ -337,6 +348,37 @@ impl QueueHandle {
             id,
             spec: Box::new(spec),
             source,
+        });
+    }
+
+    /// Retries a terminated task: reuses `id`'s existing row rather than
+    /// creating a new one — the runner calls [`TaskStore::requeue_task`],
+    /// not `create_task` (Buzz DAO parity:
+    /// `TranscriptionDAO.reset_transcription_for_restart`,
+    /// `transcription_dao.py:353-370`, resets the row in place) — and
+    /// re-enqueues it with `spec`. Returns immediately; the runner requeues
+    /// and emits `Queued` on its own thread, same as [`Self::enqueue`].
+    ///
+    /// Before enqueueing, the runner purges any stale canceled-set entry for
+    /// `id`. Such an entry can outlive the task it targeted in two ways:
+    /// canceling the task *while it runs* leaves one until `run_task`'s own
+    /// tail-drain consumes it at terminal time, and canceling a task that
+    /// has *already* terminated leaves one that nothing ever consumes (no
+    /// task with that id is pending or current again) — see
+    /// `cancel_of_running_task_leaves_no_stale_canceled_id`. Left in place,
+    /// either would make `run_task` treat the retried run as pre-canceled
+    /// and skip it straight to `Canceled` without running it. Buzz's own
+    /// queue worker has the identical guard: `add_task` removes the task's
+    /// id from `canceled_tasks` "for restart functionality"
+    /// (`file_transcriber_queue_worker.py:357-361`) before enqueueing.
+    ///
+    /// A `requeue_task` store failure emits `Failed` instead of `Queued`
+    /// (mirroring [`Self::enqueue`]'s `create_task`-failure arm) and the
+    /// task never runs.
+    pub fn retry(&self, id: TranscriptionId, spec: TaskSpec) {
+        let _ = self.commands.send(Command::Retry {
+            id,
+            spec: Box::new(spec),
         });
     }
 
@@ -583,6 +625,37 @@ impl Runner {
                     Err(err) => {
                         let message = CoreError::from(err).to_string();
                         log::error!("create_task failed for task {id}: {message}");
+                        if let Err(err2) = self.store.mark_failed(&id, &message) {
+                            self.store_write_failed(id, "mark_failed", &err2);
+                        }
+                        self.emit(TaskEvent {
+                            task_id: id,
+                            kind: TaskEventKind::Failed { message },
+                        });
+                    }
+                }
+            }
+            Command::Retry { id, spec } => {
+                // Purge any stale canceled-set entry for `id` *before*
+                // requeueing — see `QueueHandle::retry`'s doc for why one
+                // can be sitting here (a task canceled mid-run, whose
+                // tail-drain hasn't run yet, or a task canceled after it
+                // already reached a terminal state, whose entry nothing
+                // ever consumes). Left in place, `run_task`'s dequeue-time
+                // canceled-set check would treat this retry as already
+                // canceled and skip it without running.
+                self.canceled.remove(&id);
+                match self.store.requeue_task(&id) {
+                    Ok(()) => {
+                        self.emit(TaskEvent {
+                            task_id: id,
+                            kind: TaskEventKind::Queued,
+                        });
+                        self.pending.push_back(PendingTask { id, spec });
+                    }
+                    Err(err) => {
+                        let message = CoreError::from(err).to_string();
+                        log::error!("requeue_task failed for task {id}: {message}");
                         if let Err(err2) = self.store.mark_failed(&id, &message) {
                             self.store_write_failed(id, "mark_failed", &err2);
                         }
@@ -1005,6 +1078,7 @@ mod tests {
     #[derive(Debug, Clone, PartialEq)]
     enum StoreCall {
         Create(TranscriptionId),
+        Requeue(TranscriptionId),
         Started(TranscriptionId),
         Progress(TranscriptionId, f64),
         UpdateFile(TranscriptionId, PathBuf),
@@ -1019,6 +1093,10 @@ mod tests {
         // When true, the *first* create_task fails and later ones succeed, so a
         // test can assert the queue survives a create failure and keeps going.
         fail_next_create: std::sync::atomic::AtomicBool,
+        // When true, every requeue_task call fails — exercises the retry
+        // failure arm (mirrors `fail_started`'s always-fail shape, since the
+        // tests that set this only ever retry once).
+        fail_requeue: bool,
         completed_gate: Option<Gate>,
         canceled_gate: Option<Gate>,
     }
@@ -1042,6 +1120,16 @@ mod tests {
                 });
             }
             self.record(StoreCall::Create(*id));
+            Ok(())
+        }
+
+        fn requeue_task(&self, id: &TranscriptionId) -> Result<(), StoreError> {
+            if self.fail_requeue {
+                return Err(StoreError::Query {
+                    detail: "requeue boom".into(),
+                });
+            }
+            self.record(StoreCall::Requeue(*id));
             Ok(())
         }
 
@@ -1384,6 +1472,7 @@ mod tests {
         no_fetcher: bool,
         fail_started: bool,
         fail_create: bool,
+        fail_requeue: bool,
         completed_gate: Option<Gate>,
         canceled_gate: Option<Gate>,
         fetch_steps: Vec<FetchProgress>,
@@ -1405,6 +1494,7 @@ mod tests {
             calls: Arc::clone(&store_calls),
             fail_started: cfg.fail_started,
             fail_next_create: std::sync::atomic::AtomicBool::new(cfg.fail_create),
+            fail_requeue: cfg.fail_requeue,
             completed_gate: cfg.completed_gate,
             canceled_gate: cfg.canceled_gate,
         };
@@ -2261,6 +2351,237 @@ mod tests {
             !calls
                 .iter()
                 .any(|c2| matches!(c2, StoreCall::Canceled(x) if *x == b || *x == c))
+        );
+    }
+
+    // -- Retry (Task 3: retry/rename/notes/delete plumbing, F-026) ----------
+
+    #[test]
+    fn retry_after_cancel_of_running_task_runs_to_completion() {
+        // A is canceled *while running* — Task 1's tail-drain in `run_task`
+        // consumes its canceled-set entry at terminal time, so this exercises
+        // the "no leftover entry" path (unlike the terminated-task case
+        // below, which exercises the *other* stale-entry source: canceling
+        // an id that never gets dequeued again). Either way, `retry` must
+        // still purge the canceled-set before enqueueing: without that purge
+        // this test would only pass by accident (the tail-drain already
+        // cleaned up), so it alone doesn't prove the purge is needed — the
+        // `_terminated_task_` test below is the one that actually requires it.
+        let (engine_ctrl, engine_gate) = gate();
+        let (q, h) = build(Cfg {
+            scripts: vec![
+                EngineScript::Block(engine_gate),
+                EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![seg("retry-ok")],
+                },
+            ],
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let spec = path_task(h.input_file("a.mp3"));
+        q.enqueue(a, spec.clone(), Source::FileImport);
+        engine_ctrl.wait_entered();
+        q.cancel(a);
+        engine_ctrl.release();
+        events_until(&rx, |e| {
+            e.task_id == a && matches!(e.kind, TaskEventKind::Canceled)
+        });
+
+        q.retry(a, spec);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        let calls = h.store_calls();
+        assert!(calls.contains(&StoreCall::Requeue(a)));
+        let started_count = calls
+            .iter()
+            .filter(|c| matches!(c, StoreCall::Started(id) if *id == a))
+            .count();
+        assert_eq!(started_count, 2, "A must start again after the retry");
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, StoreCall::Completed(id, _) if *id == a)),
+            "A must complete on retry, not stay canceled: {calls:?}"
+        );
+        // Requeue happens strictly after the first run's Canceled write.
+        let canceled_idx = calls
+            .iter()
+            .position(|c| matches!(c, StoreCall::Canceled(id) if *id == a))
+            .expect("first run canceled");
+        let requeue_idx = calls
+            .iter()
+            .position(|c| matches!(c, StoreCall::Requeue(id) if *id == a))
+            .expect("requeue recorded");
+        assert!(canceled_idx < requeue_idx);
+
+        let a_kinds = kinds(&events, a);
+        assert!(matches!(
+            a_kinds.last(),
+            Some(TaskEventKind::Completed { .. })
+        ));
+    }
+
+    #[test]
+    fn retry_after_cancel_of_terminated_task_still_runs() {
+        // A fails normally (no cancellation involved), then `cancel(a)` is
+        // called *after* A already reached a terminal state: no task is
+        // pending or current with this id, so — per
+        // `cancel_of_running_task_leaves_no_stale_canceled_id` — that insert
+        // is never consumed and would sit in the canceled-set forever. If
+        // `retry`'s runner arm didn't purge it before enqueueing, dequeuing
+        // the retried task would see `id` in the canceled-set and skip
+        // straight to `Canceled` without ever running — this is exactly the
+        // Task 1 review finding the brief calls out.
+        let (q, h) = build(Cfg {
+            scripts: vec![
+                EngineScript::Fail,
+                EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![seg("retry-ok")],
+                },
+            ],
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let spec = path_task(h.input_file("a.mp3"));
+        q.enqueue(a, spec.clone(), Source::FileImport);
+        events_until(&rx, |e| {
+            e.task_id == a && matches!(e.kind, TaskEventKind::Failed { .. })
+        });
+
+        // Stale insert: A is already terminal, so this targets nothing.
+        q.cancel(a);
+        q.retry(a, spec);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        let calls = h.store_calls();
+        assert!(calls.contains(&StoreCall::Requeue(a)));
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, StoreCall::Completed(id, _) if *id == a)),
+            "the retry must complete, not be swallowed by the stale cancel: {calls:?}"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| matches!(c, StoreCall::Canceled(id) if *id == a))
+                .count(),
+            0,
+            "A must never be written canceled in this scenario"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Canceled))
+        );
+    }
+
+    #[test]
+    fn retry_requeues_same_id_and_runs() {
+        let (q, h) = build(Cfg {
+            scripts: vec![
+                EngineScript::Fail,
+                EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![seg("retry-ok")],
+                },
+            ],
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let spec = path_task(h.input_file("a.mp3"));
+        q.enqueue(a, spec.clone(), Source::FileImport);
+        // `events_until` drains the channel through the first run's Failed
+        // event, so those events must be folded into `events` below
+        // alongside whatever `drain` collects after the retry — otherwise
+        // they'd be lost rather than just consumed for synchronization.
+        let mut events = events_until(&rx, |e| {
+            e.task_id == a && matches!(e.kind, TaskEventKind::Failed { .. })
+        });
+
+        q.retry(a, spec);
+        q.finish().expect("finish");
+        events.extend(drain(&rx));
+
+        let calls = h.store_calls();
+        assert!(calls.contains(&StoreCall::Requeue(a)));
+        let started_count = calls
+            .iter()
+            .filter(|c| matches!(c, StoreCall::Started(id) if *id == a))
+            .count();
+        assert_eq!(started_count, 2);
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, StoreCall::Completed(id, _) if *id == a))
+        );
+
+        // Full per-id event order: Queued, Started, Failed (first run), then
+        // a fresh Queued, Started, ..., Completed for the retry.
+        let a_kinds = kinds(&events, a);
+        let first_failed = a_kinds
+            .iter()
+            .position(|k| matches!(k, TaskEventKind::Failed { .. }))
+            .expect("first run failed");
+        assert!(matches!(a_kinds[first_failed + 1], TaskEventKind::Queued));
+        assert!(matches!(
+            a_kinds.last(),
+            Some(TaskEventKind::Completed { .. })
+        ));
+    }
+
+    #[test]
+    fn retry_requeue_store_failure_emits_failed() {
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Fail],
+            fail_requeue: true,
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let spec = path_task(h.input_file("a.mp3"));
+        q.enqueue(a, spec.clone(), Source::FileImport);
+        // See the identical comment in `retry_requeues_same_id_and_runs`:
+        // fold the pre-retry events back in rather than losing them.
+        let mut events = events_until(&rx, |e| {
+            e.task_id == a && matches!(e.kind, TaskEventKind::Failed { .. })
+        });
+
+        q.retry(a, spec);
+        q.finish().expect("finish");
+        events.extend(drain(&rx));
+
+        // requeue_task itself failed: no Requeue call recorded, the task
+        // never runs again (no second Started/Completed), and a Failed
+        // event fires for the retry attempt (mirrors the create_task
+        // failure arm).
+        let calls = h.store_calls();
+        assert!(!calls.iter().any(|c| matches!(c, StoreCall::Requeue(_))));
+        let started_count = calls
+            .iter()
+            .filter(|c| matches!(c, StoreCall::Started(id) if *id == a))
+            .count();
+        assert_eq!(started_count, 1);
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, StoreCall::Completed(id, _) if *id == a))
+        );
+        let a_kinds = kinds(&events, a);
+        assert_eq!(
+            a_kinds
+                .iter()
+                .filter(|k| matches!(k, TaskEventKind::Failed { .. }))
+                .count(),
+            2,
+            "first-run Failed plus the retry's requeue-failure Failed: {a_kinds:?}"
         );
     }
 

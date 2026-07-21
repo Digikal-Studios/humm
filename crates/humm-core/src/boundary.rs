@@ -194,6 +194,18 @@ pub trait TaskStore: Send + Sync {
         source: Source,
     ) -> Result<(), StoreError>;
 
+    /// Resets an already-terminated task's *existing* row back to `queued`
+    /// for a retry — no new row is inserted: `status` becomes `queued`,
+    /// `progress` resets to `0.0`, and `time_started`/`time_ended`/
+    /// `error_message` are cleared to `NULL`. Every other column (name,
+    /// notes, the persisted spec, ...) is left untouched.
+    ///
+    /// Ported from Buzz's `TranscriptionDAO.reset_transcription_for_restart`
+    /// (`transcription_dao.py:353-370`), which raises when the row doesn't
+    /// exist (`query.numRowsAffected() == 0`); this returns `Err` in that
+    /// case rather than silently no-oping.
+    fn requeue_task(&self, id: &TranscriptionId) -> Result<(), StoreError>;
+
     /// Marks the task as started: `status` becomes `in_progress` and
     /// `time_started` is set to now.
     fn mark_started(&self, id: &TranscriptionId) -> Result<(), StoreError>;

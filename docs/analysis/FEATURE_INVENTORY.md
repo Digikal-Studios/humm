@@ -78,7 +78,7 @@ Fraction-complete per task (from segment timestamps vs audio duration in child p
 
 ### F-026 — Cancel / restart / rename / notes / delete
 Cancel (toolbar/Ctrl+X): terminates demucs process if running, stops transcriber, DB → canceled. Restart (context menu, failed/canceled/skipped): rebuilds task from DB row — initial prompt, OpenAI token, LLM options are NOT persisted, so restart uses defaults for those (edge!). Rename + free-text Notes columns. Clear History (Ctrl+S) / Delete key with confirmation.
-- Source: `buzz/widgets/main_window.py:232-266,727-826`, `buzz/file_transcriber_queue_worker.py:369-381`.
+- Source: `buzz/widgets/main_window.py:232-266` (cancel/delete-confirmation triggers), `buzz/widgets/transcription_tasks_table_widget.py:606-826` (delete, rename, notes, restart — corrects the original `main_window.py:727-826` citation, which pointed at the wrong file: `main_window.py` is only 589 lines and holds none of this logic), `buzz/db/dao/transcription_dao.py:269-370` (`update_transcription_name`/`update_transcription_notes`/`reset_transcription_for_restart` DAO methods, each raising on a missing row), `buzz/file_transcriber_queue_worker.py:357-381` (`add_task`'s canceled-set purge "for restart functionality" plus `cancel_task`).
 
 ### F-027 — Speech extraction (Demucs vocal isolation)
 Optional pre-pass: Demucs htdemucs separates vocals → `<name>_speech.mp3`, which replaces the input for transcription; `_speech` stripped from export names; runs in its own process (killable); CLI `-e`.
