@@ -115,6 +115,7 @@ fn test_services(store: Arc<SqliteStore>, engines: Box<dyn EngineFactory>) -> Se
         engines,
         fetcher: None,
         capabilities: Capabilities::default(),
+        artifacts: None,
     })
 }
 

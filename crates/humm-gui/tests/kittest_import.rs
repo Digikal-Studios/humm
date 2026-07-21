@@ -74,6 +74,7 @@ fn test_services(store: Arc<SqliteStore>, capabilities: Capabilities) -> Service
         engines: Box::new(FakeSucceedingEngineFactory),
         fetcher: None,
         capabilities,
+        artifacts: None,
     })
 }
 

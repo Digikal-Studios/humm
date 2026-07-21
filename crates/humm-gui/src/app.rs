@@ -310,8 +310,15 @@ impl HummApp {
     /// shortcuts this frame's `main_window::show` call) and dispatches the
     /// corresponding import flow. Always resets it to `None` first — a
     /// canceled dialog must not re-trigger itself on the very next frame.
+    /// Guarded by `!modal_open()` (symmetry with
+    /// [`Self::drain_dropped_files`]'s own guard): a pending import queued
+    /// the same frame some other modal is already up (e.g. Clear-confirm)
+    /// must not silently clobber it with a freshly-opened dialog/sheet.
     fn drain_pending_import(&mut self) {
         let request = std::mem::take(&mut self.action_state.pending_import);
+        if self.action_state.modal_open() {
+            return;
+        }
         match request {
             PendingImportRequest::None => {}
             PendingImportRequest::File => self.handle_file_import_request(),

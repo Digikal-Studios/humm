@@ -10,25 +10,28 @@
 //! ([`Services::update_rx`]) for Task 11 to fill in.
 //!
 //! Unlike the CLI, the GUI never resolves a model before enqueueing — model
-//! acquisition is meant to happen *inside* the task run so an absent model
-//! never blocks other imports (design spec §2.1). That machinery
-//! (`ArtifactEnsurer`) lands with the real engine wiring later in M3; until
-//! then [`init`] configures a placeholder [`EngineFactory`] whose `create`
-//! always fails actionably, so an accepted-but-unwireable transcription task
-//! fails cleanly instead of silently doing nothing.
+//! acquisition happens *inside* the task run instead, via
+//! [`crate::engine_factory::DownloaderEnsurer`] (`RunnerDeps::artifacts`), so
+//! an absent model never blocks other imports (design spec §2.1); the engine
+//! itself is built by [`crate::engine_factory::GuiEngineFactory`] from
+//! whatever path that ensurer just resolved.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use humm_core::boundary::{MediaFetcher, TaskStore, TranscriptionEngine};
-use humm_core::domain::ModelSpec;
-use humm_core::error::{CoreError, EngineError, StoreError};
+use humm_core::boundary::{MediaFetcher, TaskStore};
+use humm_core::env::{threads_from_env, use_gpu_from_env};
+use humm_core::error::StoreError;
 use humm_core::paths;
 use humm_core::pipeline::EngineTuning;
-use humm_core::queue::{EngineFactory, QueueHandle, RunnerDeps, TaskEvent, spawn_task_runner};
+use humm_core::queue::{
+    ArtifactEnsurer, EngineFactory, QueueHandle, RunnerDeps, TaskEvent, spawn_task_runner,
+};
 use humm_core::settings::{Settings, SettingsError};
 use humm_media::{FfmpegDecoder, FfprobeProber, MediaCapabilities, YtDlpFetcher, probe_binaries};
 use humm_store::SqliteStore;
+
+use crate::engine_factory::{DownloaderEnsurer, GuiEngineFactory};
 
 /// ffmpeg/ffprobe/yt-dlp availability, probed once at startup.
 ///
@@ -124,19 +127,33 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
     let fetcher = build_fetcher(&settings, &media_caps);
     let model_root = paths::model_root();
 
+    let use_gpu = use_gpu_from_env(std::env::var("HUMM_FORCE_CPU").ok().as_deref());
+    let ensurer = DownloaderEnsurer {
+        root: model_root.clone(),
+        custom_url: settings.models.custom_model_url.clone(),
+        // Mirrors the CLI's `coreml_encoder()` exactly (`humm-cli/src/run.rs`).
+        coreml: cfg!(all(target_os = "macos", target_arch = "aarch64")),
+    };
+
     let deps = RunnerDeps {
         store: Arc::clone(&store) as Arc<dyn TaskStore>,
         decoder,
         prober,
         fetcher,
-        engines: Box::new(UnwiredEngineFactory),
-        tuning: EngineTuning::default(),
+        engines: Box::new(GuiEngineFactory { use_gpu }),
+        tuning: EngineTuning {
+            // No fixed VAD path up front: `DownloaderEnsurer::ensure_vad`
+            // resolves it per job, since a GUI run has no synchronous
+            // pre-enqueue resolution step to do it once (design spec §2.1).
+            vad_model: None,
+            use_gpu,
+            threads: threads_from_env(std::env::var("HUMM_WHISPER_N_THREADS").ok().as_deref()),
+        },
         media_dir: paths::media_dir(),
-        // No ArtifactEnsurer yet: the real engine/model wiring (and the
-        // non-modal download machinery it enables, design spec §2.1) lands
-        // later in M3. Until then `UnwiredEngineFactory` fails every job
-        // actionably rather than silently doing nothing.
-        artifacts: None,
+        // The GUI never resolves a model before enqueueing — this is what
+        // makes that safe: the runner ensures the model/VAD as the task's
+        // own first phase (module doc, `queue.rs`).
+        artifacts: Some(Arc::new(ensurer) as Arc<dyn ArtifactEnsurer>),
     };
     let queue = spawn_task_runner(deps);
     let events = queue.subscribe();
@@ -183,6 +200,12 @@ pub struct TestDeps {
     /// Reported capabilities (defaults to all-`false`; a test overrides this
     /// to simulate ffmpeg/yt-dlp being present).
     pub capabilities: Capabilities,
+    /// Artifact ensurer, if the test needs one (`None` — the common case —
+    /// means every enqueued task already carries a runnable engine/model, as
+    /// every kittest fixture before this task assumed; a phase test scripts
+    /// a fake here to drive `ModelDownloadProgress` events through the real
+    /// queue).
+    pub artifacts: Option<Arc<dyn ArtifactEnsurer>>,
 }
 
 /// Builds [`Services`] from caller-supplied fakes/temp state — no real
@@ -201,7 +224,7 @@ pub fn init_with(deps: TestDeps) -> Services {
         engines: deps.engines,
         tuning: EngineTuning::default(),
         media_dir: deps.media_dir,
-        artifacts: None,
+        artifacts: deps.artifacts,
     };
     let queue = spawn_task_runner(runner_deps);
     let events = queue.subscribe();
@@ -275,54 +298,15 @@ fn build_fetcher(settings: &Settings, caps: &MediaCapabilities) -> Option<Arc<dy
     Some(Arc::new(YtDlpFetcher::new(cookie_file)))
 }
 
-/// The [`EngineFactory`] `init` configures until the real whisper-rs wiring
-/// lands later in M3: every `create` call fails with an actionable
-/// [`CoreError`] rather than silently doing nothing, so an accepted
-/// transcription task still reaches a clean `Failed` terminal state instead
-/// of hanging or panicking.
-struct UnwiredEngineFactory;
-
-impl EngineFactory for UnwiredEngineFactory {
-    fn create(
-        &mut self,
-        _model: &ModelSpec,
-        _resolved: Option<&Path>,
-    ) -> Result<Box<dyn TranscriptionEngine>, CoreError> {
-        Err(CoreError::Engine(EngineError::Inference {
-            detail: "the transcription engine isn't wired up yet in this build of humm — engine \
-                     wiring lands later in this milestone; imports are accepted but will fail \
-                     until then"
-                .to_string(),
-        }))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use humm_core::domain::{ModelSize, TranscriptionId};
+    use humm_core::boundary::TranscriptionEngine;
+    use humm_core::domain::{ModelSpec, TranscriptionId};
     use humm_core::error::CoreError;
     use pretty_assertions::assert_eq;
+    use std::path::Path;
     use std::time::{Duration, Instant};
-
-    #[test]
-    fn unwired_engine_factory_fails_actionably() {
-        let mut factory = UnwiredEngineFactory;
-        let model = ModelSpec {
-            size: ModelSize::Small,
-            hf_repo: None,
-        };
-        // `Box<dyn TranscriptionEngine>` isn't `Debug`, so `Result::expect_err`
-        // (which requires the `Ok` side to be `Debug`) doesn't apply here.
-        let err = match factory.create(&model, None) {
-            Ok(_) => panic!("expected UnwiredEngineFactory::create to fail"),
-            Err(err) => err,
-        };
-        assert!(
-            err.to_string().contains("not wired up") || err.to_string().contains("isn't wired"),
-            "expected an actionable engine-not-wired message, got: {err}"
-        );
-    }
 
     fn test_deps(store: Arc<SqliteStore>) -> TestDeps {
         struct FailingFactory;
@@ -346,6 +330,7 @@ mod tests {
             engines: Box::new(FailingFactory),
             fetcher: None,
             capabilities: Capabilities::default(),
+            artifacts: None,
         }
     }
 

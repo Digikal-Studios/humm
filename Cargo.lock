@@ -2209,6 +2209,7 @@ dependencies = [
  "humm-core",
  "humm-media",
  "humm-store",
+ "humm-whisper",
  "log",
  "open",
  "pretty_assertions",

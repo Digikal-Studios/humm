@@ -101,6 +101,7 @@ fn test_services(store: Arc<SqliteStore>) -> Services {
         engines: Box::new(NeverCalledEngineFactory),
         fetcher: None,
         capabilities: Capabilities::default(),
+        artifacts: None,
     })
 }
 

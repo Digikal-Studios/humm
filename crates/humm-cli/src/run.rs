@@ -44,6 +44,7 @@ use humm_core::domain::{
     DEFAULT_TEMPERATURE, Input, Millis, ModelSize, ModelSpec, OutputFormat, OutputSpec, Source,
     TaskSpec, TranscriptionId, TranscriptionOptions,
 };
+use humm_core::env::{threads_from_env, use_gpu_from_env, vad_disabled_from_env};
 use humm_core::error::CoreError;
 use humm_core::format::format_eta;
 use humm_core::instance::{self, InstanceGuard};
@@ -898,24 +899,6 @@ fn run_fail(message: impl std::fmt::Display) -> ExitCode {
     ExitCode::from(1)
 }
 
-/// `HUMM_FORCE_CPU` semantics mirror Buzz's `BUZZ_FORCE_CPU`
-/// (`buzz/transcriber/whisper_cpp.py:191-193`): unset or `"false"` leaves GPU
-/// use enabled; any other value forces CPU.
-fn use_gpu_from_env(value: Option<&str>) -> bool {
-    !matches!(value, Some(v) if v != "false")
-}
-
-/// `HUMM_DISABLE_VAD` semantics: unset or empty leaves VAD on (the default for
-/// real users); any non-empty value disables it — a test-only kill-switch so
-/// hermetic `humm-cli` tests never reach the network for the Silero model.
-fn vad_disabled_from_env(value: Option<&str>) -> bool {
-    value.is_some_and(|v| !v.is_empty())
-}
-
-fn threads_from_env(value: Option<&str>) -> Option<u32> {
-    value.and_then(|v| v.parse().ok())
-}
-
 fn paragraph_split_from_env(value: Option<&str>) -> Millis {
     value
         .and_then(|v| v.parse::<i64>().ok())
@@ -1187,47 +1170,6 @@ mod tests {
             args.model_type = model_type;
             assert!(validate_add_args(&args).is_none());
         }
-    }
-
-    #[test]
-    fn use_gpu_from_env_unset_allows_gpu() {
-        assert!(use_gpu_from_env(None));
-    }
-
-    #[test]
-    fn use_gpu_from_env_false_allows_gpu() {
-        assert!(use_gpu_from_env(Some("false")));
-    }
-
-    #[test]
-    fn use_gpu_from_env_any_other_value_forces_cpu() {
-        assert!(!use_gpu_from_env(Some("true")));
-        assert!(!use_gpu_from_env(Some("1")));
-        assert!(!use_gpu_from_env(Some("")));
-    }
-
-    #[test]
-    fn vad_disabled_from_env_unset_or_empty_leaves_vad_on() {
-        assert!(!vad_disabled_from_env(None));
-        assert!(!vad_disabled_from_env(Some("")));
-    }
-
-    #[test]
-    fn vad_disabled_from_env_any_non_empty_value_disables_vad() {
-        assert!(vad_disabled_from_env(Some("1")));
-        assert!(vad_disabled_from_env(Some("true")));
-        assert!(vad_disabled_from_env(Some("false")));
-    }
-
-    #[test]
-    fn threads_from_env_parses_valid_value() {
-        assert_eq!(threads_from_env(Some("4")), Some(4));
-    }
-
-    #[test]
-    fn threads_from_env_none_when_unset_or_invalid() {
-        assert_eq!(threads_from_env(None), None);
-        assert_eq!(threads_from_env(Some("not-a-number")), None);
     }
 
     #[test]

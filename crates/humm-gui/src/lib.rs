@@ -9,6 +9,7 @@
 //! harness).
 
 pub mod app;
+pub mod engine_factory;
 pub mod events;
 pub mod format;
 pub mod i18n;
