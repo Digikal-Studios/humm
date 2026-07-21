@@ -174,21 +174,39 @@ fn missing_binary_actionable() {
     }
 }
 
-/// Genuinely exercises the mid-decode kill()/wait()/stderr-join path:
-/// `audio-long.mp3` decodes in a few seconds of wall time (ffmpeg is far
-/// faster than real-time for a 120 s mp3, but not instant), so canceling
-/// from another thread after a short delay lands while `decode()` is still
-/// blocked in the stdout read loop, not before ffmpeg is even spawned.
+/// Genuinely exercises the mid-decode kill()/wait()/stderr-join path.
+/// Racing a fixed sleep against ffmpeg's full-speed decode is flaky (fast
+/// hardware finishes the 120 s mp3 in ~100 ms), so a wrapper script injects
+/// `-re` to throttle ffmpeg's input reads to realtime — the same
+/// throttle-the-producer approach as `fetch_cancel_kills_download_mid_transfer`.
+/// Canceling 200 ms in is then guaranteed to land while `decode()` is still
+/// in its stdout read loop, on any hardware.
 #[test]
 #[ignore = "requires ffmpeg + Buzz testdata"]
+#[cfg(unix)]
 fn cancel_kills_decode_mid_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wrapper = dir.path().join("ffmpeg-realtime.sh");
+    // `exec` keeps ffmpeg in the wrapper's own PID so `child.kill()` reaches
+    // it directly; `${HUMM_FFMPEG:-ffmpeg}` matches `FfmpegDecoder::new()`'s
+    // binary resolution.
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\nexec \"${HUMM_FFMPEG:-ffmpeg}\" -re \"$@\"\n",
+    )
+    .expect("write wrapper script");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod wrapper script");
+
     let path = testdata().join("audio-long.mp3");
     let cancel = CancelToken::new();
     let cancel_from_main = cancel.clone();
 
     let start = Instant::now();
     let handle = std::thread::spawn(move || {
-        let decoder = FfmpegDecoder::new();
+        let decoder = FfmpegDecoder::with_binary(&wrapper);
         decoder.decode(&path, &cancel)
     });
 
