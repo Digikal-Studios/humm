@@ -108,7 +108,8 @@ As `ARCHITECTURE.md` §3. Justification per subsystem recorded there; the delibe
 **Rationale:** gettext-rs binds C gettext (an avoidable non-Rust boundary for a solved-in-Rust problem); Buzz's .po strings won't match humm's UI copy anyway (UX_SPEC redesigns flows), so .po reuse is illusory.
 
 ## ADR-015 — Update check: notify-only (approved Q-7)
-GitHub Releases `releases/latest` JSON compare + toolbar notice linking to the release page. No installer download/launch in v1. Disable env: `HUMM_DISABLE_UPDATE_CHECK`. Same ≤7-day cadence.
+`releases/latest` JSON compare + toolbar notice linking to the release page. No installer download/launch in v1. Disable env: `HUMM_DISABLE_UPDATE_CHECK`. Same ≤7-day cadence.
+**Endpoint note (Q-8, M2 F-006):** humm does not reuse Buzz's GitHub-hosted `chidiwilliams/buzz` endpoint. humm's repo is hosted on Gitea (`repo.digikal.com`), which serves the same `releases/latest/download/<asset>` URL shape GitHub does — `update::VERSION_INFO_URL` = `https://repo.digikal.com/jawad/humm/releases/latest/download/version_info.json`. No release has been published yet, so this fetch 404s harmlessly until the first one exists; `check_for_update` surfaces a non-2xx status as `UpdateError::Http`, which a notify-only feature logs and otherwise ignores rather than treating as a hard failure.
 
 ## ADR-016 — URL import via `yt-dlp` subprocess (pre-approved conditional, confirmed)
 Phase 0 confirmed Buzz uses yt-dlp (F-022). humm: `MediaFetcher` adapter invoking `yt-dlp` with `--print`-based machine-readable progress, `bestaudio/best`, cookie file passthrough (`HUMM_DOWNLOAD_COOKIEFILE`), startup probe, graceful absence (URL import disabled with actionable message when binary missing).

@@ -15,3 +15,4 @@ pub mod paths;
 pub mod pipeline;
 pub mod queue;
 pub mod settings;
+pub mod update;
