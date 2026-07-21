@@ -157,7 +157,8 @@ enum Command {
     /// Add `id` to the canceled-set (and, if it is the current task, its token
     /// was already tripped by the handle).
     Cancel(TranscriptionId),
-    /// Cancel the current task and every task dequeued afterward.
+    /// Cancel the current task and every task pending at this moment (one-shot;
+    /// tasks enqueued later are unaffected).
     CancelAll,
     /// No more enqueues; drain the remaining queue, then stop.
     Finish,
@@ -216,7 +217,8 @@ impl QueueHandle {
         }
     }
 
-    /// Requests cancellation of the running task and every queued/future task.
+    /// Requests cancellation of the running task and every task pending at the
+    /// moment of the call. Tasks enqueued afterward run normally (one-shot).
     pub fn cancel_all(&self) {
         let _ = self.commands.send(Command::CancelAll);
         if let Some((_, token)) = lock_recover(&self.current).as_ref() {
@@ -354,10 +356,10 @@ struct Runner {
     media_dir: PathBuf,
     /// Tasks accepted but not yet run (FIFO).
     pending: VecDeque<PendingTask>,
-    /// Ids canceled while pending (Buzz's canceled-set).
+    /// Ids canceled but not yet dequeued (Buzz's canceled-set). *Consumed*: an
+    /// id is removed when its task is dequeued-and-canceled, so the set cannot
+    /// grow without bound.
     canceled: HashSet<TranscriptionId>,
-    /// Once set, every subsequently dequeued task is canceled.
-    cancel_all: bool,
     /// Once set, exit after the pending queue drains.
     finishing: bool,
     /// The cached engine and the model it was built for.
@@ -432,7 +434,19 @@ impl Runner {
                 self.canceled.insert(id);
             }
             Command::CancelAll => {
-                self.cancel_all = true;
+                // One-shot (Buzz-style): cancel the current task and every task
+                // pending *now* — not tasks enqueued later. Snapshot the current
+                // backlog into the canceled-set, and trip the running task's
+                // token. Tripping here (in addition to the handle, which does it
+                // at call time for promptness) is the sole path that catches a
+                // task dequeued into `current` between pop and the handle's
+                // read, since that task is no longer in `pending`.
+                let pending_ids: Vec<TranscriptionId> =
+                    self.pending.iter().map(|task| task.id).collect();
+                self.canceled.extend(pending_ids);
+                if let Some((_, token)) = lock_recover(&self.current).as_ref() {
+                    token.cancel();
+                }
             }
             Command::Finish => {
                 self.finishing = true;
@@ -448,11 +462,15 @@ impl Runner {
 
         // Register as current *before* the cancel check, so a concurrent
         // `cancel(id)`/`cancel_all` from the handle trips this token; then
-        // re-drain commands so a just-arrived `Cancel`/`CancelAll` is honored.
+        // re-drain commands so a just-arrived `Cancel`/`CancelAll` is honored
+        // (a `CancelAll` drained here trips this now-current token).
         self.set_current(Some((id, token.clone())));
         self.drain_commands_nonblocking();
 
-        if self.cancel_all || self.canceled.contains(&id) || token.is_canceled() {
+        // Consume this id from the canceled-set (keeping it bounded) while
+        // deciding whether the task was canceled before it could start.
+        let canceled_before_start = self.canceled.remove(&id);
+        if canceled_before_start || token.is_canceled() {
             self.set_current(None);
             self.write_canceled(id);
             return;
@@ -634,7 +652,6 @@ pub fn spawn_task_runner(deps: RunnerDeps) -> QueueHandle {
         media_dir: deps.media_dir,
         pending: VecDeque::new(),
         canceled: HashSet::new(),
-        cancel_all: false,
         finishing: false,
         engine_cache: None,
     };
@@ -725,7 +742,9 @@ mod tests {
     struct FakeStore {
         calls: Arc<Mutex<Vec<StoreCall>>>,
         fail_started: bool,
-        fail_create: bool,
+        // When true, the *first* create_task fails and later ones succeed, so a
+        // test can assert the queue survives a create failure and keeps going.
+        fail_next_create: std::sync::atomic::AtomicBool,
         completed_gate: Option<Gate>,
         canceled_gate: Option<Gate>,
     }
@@ -743,7 +762,7 @@ mod tests {
             _spec: &TaskSpec,
             _source: Source,
         ) -> Result<(), StoreError> {
-            if self.fail_create {
+            if self.fail_next_create.swap(false, Ordering::SeqCst) {
                 return Err(StoreError::Query {
                     detail: "create boom".into(),
                 });
@@ -985,7 +1004,7 @@ mod tests {
         let store = FakeStore {
             calls: Arc::clone(&store_calls),
             fail_started: cfg.fail_started,
-            fail_create: cfg.fail_create,
+            fail_next_create: std::sync::atomic::AtomicBool::new(cfg.fail_create),
             completed_gate: cfg.completed_gate,
             canceled_gate: cfg.canceled_gate,
         };
@@ -1568,5 +1587,102 @@ mod tests {
                 .iter()
                 .any(|c2| matches!(c2, StoreCall::Completed(..) | StoreCall::Failed(..)))
         );
+    }
+
+    #[test]
+    fn cancel_all_is_one_shot_tasks_enqueued_afterward_still_run() {
+        let (engine_ctrl, engine_gate) = gate();
+        let (q, h) = build(Cfg {
+            // A blocks (canceled mid-run); B is canceled while pending; C, which
+            // is enqueued *after* cancel_all, must run to completion.
+            scripts: vec![
+                EngineScript::Block(engine_gate),
+                EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![seg("c")],
+                },
+            ],
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let b = TranscriptionId::new();
+        let c = TranscriptionId::new();
+        q.enqueue(a, path_task(h.input_file("a.mp3")), Source::FileImport);
+        q.enqueue(b, path_task(h.input_file("b.mp3")), Source::FileImport);
+        engine_ctrl.wait_entered();
+        q.cancel_all();
+        engine_ctrl.release();
+        // Enqueued strictly after cancel_all (which is already in the channel):
+        // the one-shot semantics must not cancel it.
+        q.enqueue(c, path_task(h.input_file("c.mp3")), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        let calls = h.store_calls();
+        assert!(calls.contains(&StoreCall::Canceled(a)));
+        assert!(calls.contains(&StoreCall::Canceled(b)));
+        // C ran to completion and was never canceled.
+        assert!(
+            calls
+                .iter()
+                .any(|x| matches!(x, StoreCall::Completed(id, _) if *id == c))
+        );
+        assert!(!calls.contains(&StoreCall::Canceled(c)));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == c && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.task_id == c && matches!(e.kind, TaskEventKind::Canceled))
+        );
+    }
+
+    #[test]
+    fn create_task_failure_fails_that_task_without_wedging_the_queue() {
+        let (q, h) = build(Cfg {
+            // The first create_task errors; the second succeeds.
+            fail_create: true,
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![],
+            }],
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let b = TranscriptionId::new();
+        q.enqueue(a, path_task(h.input_file("a.mp3")), Source::FileImport);
+        q.enqueue(b, path_task(h.input_file("b.mp3")), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        // A's create failed: a Failed event, never Queued or Started.
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Failed { .. }))
+        );
+        assert!(
+            !events.iter().any(|e| e.task_id == a
+                && matches!(e.kind, TaskEventKind::Queued | TaskEventKind::Started))
+        );
+        // B still runs to completion — the queue did not wedge.
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == b && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+        let calls = h.store_calls();
+        assert!(
+            calls
+                .iter()
+                .any(|x| matches!(x, StoreCall::Completed(id, _) if *id == b))
+        );
+        // A's create never recorded (it errored before recording).
+        assert!(!calls.contains(&StoreCall::Create(a)));
     }
 }
