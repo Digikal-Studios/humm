@@ -35,7 +35,28 @@ files or URLs.
 
 Zero formats still transcribes and persists history — it just writes no export.
 
-## 2. `--json` event schema
+## 2. Voice-activity detection (VAD)
+
+VAD is **default-on, not a flag** — there is no `--vad`/`--no-vad` switch (matching
+Buzz, which has none either). Every `humm add` run tries to use Silero VAD
+(F-045) when a model is obtainable:
+
+- **Cached:** if `ggml-silero-v6.2.0.bin` is already present and complete under
+  the model root, it's used immediately — no network, no delay.
+- **First run:** if it's missing, humm downloads it once from
+  `huggingface.co/ggml-org/whisper-vad` before the first task starts, emitting
+  the same `model_download_progress` events (`--json` mode) / progress line
+  (human mode) described in §3 below — this is the same mechanism Buzz gets
+  for free by shipping the model at build time next to `whisper-cli`; humm
+  fetches it lazily instead since there's no bundled binary to ship it beside.
+- **Graceful degradation:** any fetch failure (offline, network blip, disk
+  full) is logged (`log::warn!`) and the run continues **without VAD** —
+  transcription still completes normally, just without the voice-activity
+  offset remap. VAD is never a hard requirement for `humm add` to succeed.
+
+See `crates/humm-cli/src/run.rs`'s `ensure_vad()` for the implementation.
+
+## 3. `--json` event schema
 
 One JSON object per line on **stdout**; nothing else is written to stdout in
 `--json` mode. Field names and event names are stable.
@@ -64,7 +85,7 @@ and a URL download phase line `downloading <url>  NN%`; written export paths go
 to **stdout** (one per line); failures print `error: <input>: <cause>` to
 stderr. `--quiet` suppresses the progress lines only.
 
-## 3. Exit codes
+## 4. Exit codes
 
 | Code | Meaning |
 |------|---------|
@@ -73,7 +94,7 @@ stderr. `--quiet` suppresses the progress lines only.
 | `2` | At least one task failed (and none was canceled). Failures are persisted as history rows, so `humm add missing.mp3 good.wav` yields a `failed` row and a `completed` row. |
 | `130` | At least one task **in this invocation** was canceled via SIGINT/Ctrl-C (first signal cancels every task; a second exits immediately). Outranks `2`. Startup recovery flips a *prior* run's stale `in_progress`/`queued` rows to `canceled`, but that never drives the current invocation's exit code — a relaunch whose own inputs fail still exits `2`. |
 
-## 4. Environment variables
+## 5. Environment variables
 
 | Variable | Effect |
 |----------|--------|
@@ -89,7 +110,7 @@ stderr. `--quiet` suppresses the progress lines only.
 | `HUMM_BUZZ_SQLITE` | Override the one-time Buzz-import source database. Used only if the path exists — point it at a nonexistent path to disable the import (M2 addition; used by hermetic tests). |
 | `HUMM_BUZZ_TESTDATA`, `HUMM_WHISPER_TEST_MODEL` | Test-only: locate Buzz fixtures / a real tiny model for `#[ignore]` tests. |
 
-## 5. File locations (macOS defaults shown)
+## 6. File locations (macOS defaults shown)
 
 | What | Path | Override |
 |------|------|----------|
@@ -97,12 +118,13 @@ stderr. `--quiet` suppresses the progress lines only.
 | Database | `~/Library/Application Support/humm/humm.sqlite` | `HUMM_DATA_DIR` |
 | URL-import media | `~/Library/Application Support/humm/media/<task-id>/` | `HUMM_DATA_DIR` |
 | Model cache | `~/Library/Application Support/humm/models/` | `HUMM_MODEL_ROOT` |
+| VAD model | `~/Library/Application Support/humm/models/ggml-silero-v6.2.0.bin` (§2) | `HUMM_MODEL_ROOT` |
 | Logs | `~/Library/Logs/humm/logs.txt` | `HUMM_LOG_DIR` |
 
 Linux/Windows follow the platform config/data/state conventions
 (`directories` crate); see `crates/humm-core/src/paths.rs`.
 
-## 6. First-run migration
+## 7. First-run migration
 
 On first launch, if a Buzz database exists (macOS
 `~/Library/Application Support/Buzz/Buzz.sqlite`, or `HUMM_BUZZ_SQLITE`) and the
