@@ -7,7 +7,6 @@ and computes a word-level Levenshtein edit distance. Agreement % =
 """
 import re
 import sys
-import unicodedata
 
 
 def read_humm(path):

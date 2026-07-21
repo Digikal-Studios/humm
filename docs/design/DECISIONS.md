@@ -23,7 +23,7 @@ Format: context → options → decision → rationale → validation. Versions 
 
 | Model | Engine | Wall (s, mean of 2) | Peak RSS (MiB) | Transcript agreement |
 |---|---|---:|---:|---:|
-| small | **whisper-rs** | **6.92** (17.3× RT) | **862** | 38.3 % pairwise vs candle |
+| small | **whisper-rs** | **6.92** (17.3× RT) | **861** | 38.3 % pairwise vs candle |
 | small | candle 0.11.0 | 13.20 (9.1× RT) | 1927 | — |
 | large-v3-turbo | **whisper-rs** | **8.18** (14.7× RT) | **1820** | 36.2 % pairwise vs candle |
 | large-v3-turbo | candle 0.11.0 | 16.07 (7.5× RT) | 3186 | — |
