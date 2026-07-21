@@ -558,6 +558,7 @@ impl Runner {
             Ok(terminal) => terminal,
             Err(payload) => {
                 let msg = panic_message(&*payload);
+                log::error!("task {id} panicked: {msg}");
                 // A previously cached engine — or one `run_job` built but
                 // never got to cache (the panic happened before its
                 // unconditional cache-assignment ran) — must not be reused:
@@ -1043,6 +1044,12 @@ mod tests {
     struct FakeFetcher {
         steps: Vec<FetchProgress>,
         calls: Arc<Mutex<Vec<url::Url>>>,
+        /// When set, `fetch` panics instead of returning — exercises a panic
+        /// that unwinds *before* `run_job` ever reaches the cached-engine
+        /// check (`fetch_url` runs ahead of engine acquisition), so any
+        /// engine already sitting in `engine_cache` from a prior task is
+        /// still there when the unwind hits.
+        panics: bool,
     }
 
     impl MediaFetcher for FakeFetcher {
@@ -1053,6 +1060,9 @@ mod tests {
             progress: &mut dyn FnMut(FetchProgress),
             _cancel: &CancelToken,
         ) -> Result<PathBuf, MediaError> {
+            if self.panics {
+                panic!("fetcher exploded");
+            }
             self.calls
                 .lock()
                 .expect("fetch calls lock")
@@ -1098,6 +1108,7 @@ mod tests {
         completed_gate: Option<Gate>,
         canceled_gate: Option<Gate>,
         fetch_steps: Vec<FetchProgress>,
+        fetch_panics: bool,
     }
 
     fn build(cfg: Cfg) -> (QueueHandle, Harness) {
@@ -1131,6 +1142,7 @@ mod tests {
             Some(Arc::new(FakeFetcher {
                 steps: cfg.fetch_steps,
                 calls: Arc::clone(&fetch_calls),
+                panics: cfg.fetch_panics,
             }))
         };
 
@@ -1980,6 +1992,66 @@ mod tests {
         let created = h.created.lock().expect("created").clone();
         // Same model for both, but the factory was asked twice: the engine
         // that panicked mid-A was discarded, not reused for B.
+        assert_eq!(
+            created,
+            vec![
+                ModelSpec {
+                    size: ModelSize::Small,
+                    hf_repo: None,
+                },
+                ModelSpec {
+                    size: ModelSize::Small,
+                    hf_repo: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn engine_panic_before_acquisition_still_discards_cached_engine() {
+        // A (Small) completes normally and caches its engine. B is a URL
+        // task whose *fetch* panics — `fetch_url` runs before `run_job` ever
+        // reaches the cached-engine check, so the panic unwinds with A's
+        // engine still sitting in `engine_cache`, untouched by anything
+        // `run_job` did for B. This isolates the unconditional
+        // `engine_cache = None` on panic from the "panic happened while
+        // holding the engine" case already covered by
+        // `engine_panic_discards_cached_engine`. C (Small) must then rebuild
+        // rather than silently reuse A's stale cached engine.
+        let (q, h) = build(Cfg {
+            scripts: vec![
+                EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![],
+                },
+                EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![],
+                },
+            ],
+            fetch_panics: true,
+            ..Cfg::default()
+        });
+        let a = TranscriptionId::new();
+        let b = TranscriptionId::new();
+        let c = TranscriptionId::new();
+        let mut spec_a = path_task(h.input_file("a.mp3"));
+        spec_a.options = options_for(ModelSize::Small);
+        let mut spec_b = url_task();
+        spec_b.options = options_for(ModelSize::Small);
+        let mut spec_c = path_task(h.input_file("c.mp3"));
+        spec_c.options = options_for(ModelSize::Small);
+        q.enqueue(a, spec_a, Source::FileImport);
+        q.enqueue(b, spec_b, Source::UrlImport);
+        q.enqueue(c, spec_c, Source::FileImport);
+        q.finish().expect("finish");
+
+        let created = h.created.lock().expect("created").clone();
+        // Two creates, not one: B never reaches engine acquisition at all
+        // (it panics in the fetch), so it contributes nothing here; A and C
+        // both had to build their own engine — without the explicit clear,
+        // C would have silently reused A's cached engine and this vec would
+        // have only A's entry.
         assert_eq!(
             created,
             vec![

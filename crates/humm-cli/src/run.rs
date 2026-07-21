@@ -588,9 +588,13 @@ impl<'a> HumanRenderer<'a> {
                 self.line.finish();
             }
             TaskEventKind::StoreWriteFailed { operation, detail } => {
-                // Out of band (ADR-018): does not interrupt the progress
-                // line's task-boundary state, so no `self.line.finish()`.
                 if !self.quiet {
+                    // Finish the `\r`-rewritten progress line first, so the
+                    // warning gets its own line instead of appending to a
+                    // partially-drawn one; the progress line re-renders
+                    // cleanly on the next update (out of band — ADR-018 —
+                    // this doesn't otherwise change the task's phase).
+                    self.line.finish();
                     eprintln!("warning: history not recorded ({operation}): {detail}");
                 }
             }
