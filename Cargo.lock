@@ -2212,6 +2212,7 @@ dependencies = [
  "log",
  "open",
  "pretty_assertions",
+ "regex",
  "rfd",
  "rusqlite",
  "tempfile",

@@ -90,6 +90,34 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "retry-error-unavailable",
         // Store-health banner (F-004, Task 8)
         "banner-store-health",
+        // Drag-and-drop overlay (F-021, Task 9)
+        "drop-overlay-text",
+        // URL-import capability gating (F-022, Task 9)
+        "url-import-unavailable-tooltip",
+        // URL-import dialog (F-022, Task 9)
+        "url-dialog-title",
+        "url-dialog-label",
+        "url-dialog-placeholder",
+        "url-dialog-invalid",
+        "url-dialog-ok",
+        "url-dialog-cancel",
+        // Options sheet (F-023, Task 9)
+        "options-model-label",
+        "options-task-label",
+        "options-language-label",
+        "language-detect",
+        "options-word-timestamps",
+        "options-extract-speech",
+        "options-extract-speech-tooltip",
+        "options-export-label",
+        "options-export-txt",
+        "options-export-srt",
+        "options-export-vtt",
+        "options-summary-no-formats",
+        "options-advanced",
+        "options-initial-prompt-label",
+        "options-hf-repo-label",
+        "options-run",
     ]
 }
 
@@ -173,6 +201,11 @@ mod tests {
     #[test]
     fn hero_import_button_matches_the_buzz_notes_wording() {
         assert_eq!(tr("hero-import-button"), "Import files…");
+    }
+
+    #[test]
+    fn url_dialog_invalid_matches_the_buzz_message_byte_exact() {
+        assert_eq!(tr("url-dialog-invalid"), "The URL you entered is invalid.");
     }
 
     #[test]

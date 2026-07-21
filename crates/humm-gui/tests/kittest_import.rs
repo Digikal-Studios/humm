@@ -1,0 +1,226 @@
+//! kittest coverage for Task 9 (F-020/F-021/F-022 GUI/F-023): the options
+//! sheet's file-count summary, the Run→enqueue→sticky-prefs round trip, and
+//! the URL dialog's inline-error-stays-open contract.
+//!
+//! rfd's own (blocking, native) file/folder dialogs cannot run inside a
+//! kittest harness — every scenario here opens the options sheet directly
+//! via [`HummApp::open_options_sheet_for_test`] (the same test seam pattern
+//! as `HummApp::inject_event_for_test`), which is exactly the state every
+//! real import path (file dialog, drag-drop, folder scan, argv, confirmed
+//! URL) resolves to before the sheet ever renders.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use egui_kittest::kittest::NodeT;
+use egui_kittest::{Harness, HarnessBuilder, kittest::Queryable};
+use humm_core::boundary::{EngineCaps, EngineOptions, Pcm, SegmentSink, TranscriptionEngine};
+use humm_core::cancel::CancelToken;
+use humm_core::domain::{DEFAULT_TEMPERATURE, ModelSize, ModelSpec, OutputFormat, TaskKind};
+use humm_core::error::{CoreError, EngineError};
+use humm_gui::app::HummApp;
+use humm_gui::import::ImportRequest;
+use humm_gui::services::{self, Capabilities, Services, TestDeps};
+use humm_store::SqliteStore;
+
+/// A [`humm_core::queue::EngineFactory`] that always succeeds with zero
+/// segments — the enqueued tasks in this file point at nonexistent paths
+/// (`/no/such/a.wav`), so the real decoder/prober (`services::init_with`'s
+/// hard-coded real adapters) fail the job cleanly before this engine is
+/// ever exercised; it exists only so `create` itself never has to be the
+/// thing that fails.
+struct FakeSucceedingEngineFactory;
+
+impl humm_core::queue::EngineFactory for FakeSucceedingEngineFactory {
+    fn create(
+        &mut self,
+        _model: &ModelSpec,
+        _resolved: Option<&Path>,
+    ) -> Result<Box<dyn TranscriptionEngine>, CoreError> {
+        Ok(Box::new(FakeEngine))
+    }
+}
+
+struct FakeEngine;
+
+impl TranscriptionEngine for FakeEngine {
+    fn transcribe(
+        &mut self,
+        _audio: &Pcm,
+        _options: &EngineOptions,
+        _sink: &mut dyn SegmentSink,
+        _cancel: &CancelToken,
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn capabilities(&self) -> EngineCaps {
+        EngineCaps {
+            word_timestamps: false,
+            translate: false,
+            vad: false,
+        }
+    }
+}
+
+fn test_services(store: Arc<SqliteStore>, capabilities: Capabilities) -> Services {
+    services::init_with(TestDeps {
+        store,
+        media_dir: PathBuf::from("/unused-media-dir"),
+        model_root: PathBuf::from("/unused-model-root"),
+        settings: humm_core::settings::Settings::default(),
+        settings_path: PathBuf::from("/unused-settings-path"),
+        engines: Box::new(FakeSucceedingEngineFactory),
+        fetcher: None,
+        capabilities,
+    })
+}
+
+fn harness_with(store: Arc<SqliteStore>, capabilities: Capabilities) -> Harness<'static, HummApp> {
+    HarnessBuilder::default()
+        .with_size(egui::Vec2::new(1000.0, 700.0))
+        .build_eframe(move |_cc| HummApp::new_for_test(test_services(store, capabilities)))
+}
+
+/// Polls `store` until it has exactly `expected` rows (`list_tasks`), so a
+/// test can wait out the queue's own enqueue → `create_task` round trip
+/// (`Command::Enqueue` is processed asynchronously on the runner thread —
+/// same rationale as `kittest_actions.rs`'s own poll loop for retry).
+fn wait_for_task_count(store: &SqliteStore, expected: usize) -> Vec<humm_store::TaskRow> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let rows = store.list_tasks().expect("list_tasks");
+        if rows.len() >= expected {
+            return rows;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected {expected} task row(s), only saw {} before timeout",
+            rows.len()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+// -- Options sheet: file-count summary ---------------------------------------
+
+#[test]
+fn open_options_sheet_shows_the_file_count_and_extract_speech_is_disabled() {
+    let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
+    let mut harness = harness_with(store, Capabilities::default());
+    harness.run();
+
+    harness
+        .state_mut()
+        .open_options_sheet_for_test(ImportRequest::Files(vec![
+            PathBuf::from("/no/such/a.wav"),
+            PathBuf::from("/no/such/b.wav"),
+        ]));
+    harness.run();
+
+    harness.get_by_label_contains("2 files");
+
+    let extract_speech = harness.get_by_label("Extract speech");
+    assert!(
+        extract_speech.accesskit_node().is_disabled(),
+        "Extract speech must be disabled this milestone"
+    );
+}
+
+// -- Run -> enqueue -> sticky prefs -------------------------------------------
+
+#[test]
+fn run_with_srt_checked_enqueues_full_options_closes_the_sheet_and_stays_sticky_on_reopen() {
+    let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
+    let store_for_assert = Arc::clone(&store);
+    let mut harness = harness_with(store, Capabilities::default());
+    harness.run();
+
+    harness
+        .state_mut()
+        .open_options_sheet_for_test(ImportRequest::Files(vec![
+            PathBuf::from("/no/such/a.wav"),
+            PathBuf::from("/no/such/b.wav"),
+        ]));
+    harness.run();
+
+    harness.get_by_label("SRT").click();
+    harness.run();
+    harness.get_by_label("Run").click();
+    harness.run();
+
+    // The sheet closed: its file-count header is gone.
+    assert!(
+        harness.query_by_label_contains("2 files").is_none(),
+        "the options sheet should have closed after Run"
+    );
+
+    let rows = wait_for_task_count(&store_for_assert, 2);
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        let spec = store_for_assert
+            .load_task_spec(&row.id)
+            .expect("load_task_spec")
+            .expect("a Run-enqueued task always has a persisted options_json");
+        assert_eq!(
+            spec.output.formats,
+            [OutputFormat::Srt].into_iter().collect(),
+            "only SRT was checked"
+        );
+        assert_eq!(spec.options.task, TaskKind::Transcribe, "sticky default");
+        assert_eq!(spec.options.language, None, "Detect Language default");
+        assert_eq!(
+            spec.options.model,
+            ModelSpec {
+                size: ModelSize::Small,
+                hf_repo: None,
+            },
+            "default model (no hf_repo entered)"
+        );
+        assert!(!spec.options.word_timestamps);
+        assert_eq!(spec.options.temperature, DEFAULT_TEMPERATURE.to_vec());
+    }
+
+    // Reopen with a different request: SRT must still be checked (sticky
+    // `file_transcriber.export_formats`, written back on the previous Run).
+    harness
+        .state_mut()
+        .open_options_sheet_for_test(ImportRequest::Files(vec![PathBuf::from("/no/such/c.wav")]));
+    harness.run();
+    harness.get_by_label_contains("1 file");
+
+    let srt_checkbox = harness.get_by_label("SRT");
+    assert_eq!(
+        srt_checkbox.accesskit_node().toggled(),
+        Some(egui::accesskit::Toggled::True),
+        "SRT must still be checked on reopen (sticky prefs)"
+    );
+}
+
+// -- URL dialog: invalid input stays open with the exact Buzz message --------
+
+#[test]
+fn url_dialog_invalid_input_shows_the_exact_error_and_stays_open() {
+    let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
+    let capabilities = Capabilities {
+        yt_dlp: true,
+        ..Capabilities::default()
+    };
+    let mut harness = harness_with(store, capabilities);
+    harness.run();
+
+    harness.get_by_label("New URL Transcription").click();
+    harness.run();
+
+    // Ok is always enabled, even with the (default-empty) field untouched —
+    // an empty string is itself one of the reject vectors. Buzz relabels
+    // this dialog's button "Ok" (not "OK" — see `url-dialog-ok`'s doc
+    // comment in the `.ftl`).
+    harness.get_by_label("Ok").click();
+    harness.run();
+
+    harness.get_by_label_contains("The URL you entered is invalid.");
+    // The dialog is still open: its text field is still on screen.
+    harness.get_by_role(egui::accesskit::Role::TextInput);
+}

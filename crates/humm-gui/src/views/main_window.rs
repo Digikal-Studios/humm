@@ -18,14 +18,16 @@ use humm_core::domain::Status;
 use crate::i18n::tr;
 use crate::shortcuts::{ShortcutAction, ShortcutMap};
 use crate::viewmodel::{TableAction, TasksVm};
+use crate::views::options_sheet::{self, OptionsSheet, SheetOutcome};
 use crate::views::rename_notes::{self, Dialog, DialogOutcome};
 use crate::views::task_table::{self, TableLayout};
 use crate::views::toasts::{self, ToastAction, ToastStack};
+use crate::views::url_dialog::{self, UrlDialog};
 
 /// Which import flow (if any) the user just requested via the toolbar's
-/// "New File"/"New URL" buttons, the File menu, or their shortcuts.
-/// **This task only sets this field** — Task 9's file/URL/folder-dialog
-/// wiring is the consumer; nothing reads it yet.
+/// "New File"/"New URL" buttons, the File menu, or their shortcuts. Set
+/// here (Task 8); consumed by `HummApp::drain_pending_import` (Task 9),
+/// which dispatches the actual file/URL/folder dialog flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PendingImportRequest {
     /// Nothing pending.
@@ -41,14 +43,20 @@ pub enum PendingImportRequest {
 }
 
 /// The persistent multi-window-flow state Task 8 introduces:
-/// import/About/Preferences requests (stub fields Task 9/11 consume), the
+/// import/About/Preferences requests (the import field is fully wired as of
+/// Task 9; About/Preferences stay stub fields for Task 11), the
 /// Clear-History confirm modal, the Rename/Notes dialog, the toast stack,
 /// and the store-health banner. Owned by `HummApp`, threaded through
 /// [`show`] each frame.
+///
+/// The options sheet (F-023) and URL dialog (F-022) are Task 9 additions:
+/// `app.rs` opens/populates `options_sheet` (it needs `Services`' settings,
+/// which this module never touches); `url_dialog` is fully self-contained
+/// (no `Services` access needed) and this module drives it directly.
 #[derive(Debug, Default)]
 pub struct ActionState {
     /// Set by the toolbar/File-menu import buttons/shortcuts; consumed by
-    /// Task 9.
+    /// `app.rs` right after `show` returns (`HummApp::drain_pending_import`).
     pub pending_import: PendingImportRequest,
     /// Set by Help → "About humm"; a no-op stub this task — Task 11 builds
     /// the About window.
@@ -64,25 +72,35 @@ pub struct ActionState {
     pub toasts: ToastStack,
     /// The `StoreWriteFailed` health banner.
     pub banner: StoreHealthBanner,
+    /// The open options sheet (F-023), if any — opened by `app.rs` from a
+    /// file dialog pick, a folder scan, a dropped-files event, argv, or a
+    /// confirmed URL dialog.
+    pub options_sheet: Option<OptionsSheet>,
+    /// The URL-import dialog (F-022): closed, or open with its
+    /// in-progress text/validation error.
+    pub url_dialog: UrlDialog,
 }
 
 impl ActionState {
     /// Whether any modal currently has the user's attention: the Rename/
-    /// Notes dialog, the Clear-History confirm, or a failed-task toast's
-    /// error-detail popover. Global shortcuts (`handle_global_shortcuts`)
-    /// and the table's own Delete/⌘C/Return handling
-    /// (`task_table::handle_keyboard_shortcuts`) must both be suppressed
-    /// while this is true — a modal's text field owns keyboard input, and
-    /// forwarding e.g. Delete/⌘X to the table underneath would silently act
-    /// on the (still-selected, now-hidden-behind-the-modal) row instead of
-    /// whatever the user is actually looking at. Concrete collisions this
-    /// fixes: Delete while editing a Rename field previously opened the
-    /// Clear-confirm modal stacked on top of it; ⌘X swallowed a cut and
-    /// canceled the selected row; ⌘S stacked a second confirm modal.
+    /// Notes dialog, the Clear-History confirm, a failed-task toast's
+    /// error-detail popover, the options sheet, or the URL dialog. Global
+    /// shortcuts (`handle_global_shortcuts`) and the table's own Delete/⌘C/
+    /// Return handling (`task_table::handle_keyboard_shortcuts`) must both
+    /// be suppressed while this is true — a modal's text field owns
+    /// keyboard input, and forwarding e.g. Delete/⌘X to the table
+    /// underneath would silently act on the (still-selected, now-hidden-
+    /// behind-the-modal) row instead of whatever the user is actually
+    /// looking at. Concrete collisions this fixes: Delete while editing a
+    /// Rename field previously opened the Clear-confirm modal stacked on
+    /// top of it; ⌘X swallowed a cut and canceled the selected row; ⌘S
+    /// stacked a second confirm modal.
     pub fn modal_open(&self) -> bool {
         self.clear_confirm_open
             || !matches!(self.dialog, Dialog::None)
             || self.toasts.detail.is_some()
+            || self.options_sheet.is_some()
+            || !matches!(self.url_dialog, UrlDialog::None)
     }
 }
 
@@ -181,14 +199,26 @@ pub struct ShowResult {
     pub clear_confirmed: bool,
     /// Any actions requested from a toast/its detail popover.
     pub toast_actions: Vec<ToastAction>,
+    /// The options sheet closed this frame (Run or Cancel/Escape/backdrop) —
+    /// `app.rs` persists the sticky prefs either way and, for `Run`,
+    /// enqueues every spec.
+    pub sheet_outcome: Option<SheetOutcome>,
+    /// The URL dialog produced a validated URL this frame — `app.rs` opens
+    /// the options sheet with it (needs `Services.settings` for prefill,
+    /// which this module never touches).
+    pub url_dialog_result: Option<url::Url>,
 }
 
 /// Renders the main window: global shortcuts, menu bar, toolbar, the
 /// store-health banner (when visible), the hero/table body, and the
-/// Clear-confirm/Rename/Notes modals plus the toast stack — in that order
-/// (later elements draw on top).
+/// Clear-confirm/Rename/Notes/options-sheet/URL-dialog modals plus the
+/// toast stack and drag-drop overlay — in that order (later elements draw
+/// on top).
 ///
 /// `ui` is the root viewport's `egui::Ui` (eframe 0.35 hands this directly).
+/// `custom_model_available`/`yt_dlp_available` are precomputed by `app.rs`
+/// from `Services` (`settings.models.custom_model_url.is_some()` /
+/// `capabilities.yt_dlp`) — this module never reads `Services` directly.
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
@@ -198,14 +228,16 @@ pub fn show(
     shortcuts: &ShortcutMap,
     state: &mut ActionState,
     now: Instant,
+    custom_model_available: bool,
+    yt_dlp_available: bool,
 ) -> ShowResult {
-    handle_global_shortcuts(ui, actions, shortcuts, state);
+    handle_global_shortcuts(ui, actions, shortcuts, state, yt_dlp_available);
 
     egui::Panel::top("humm-menu-bar").show(ui, |ui| {
-        show_menu_bar(ui, shortcuts, state);
+        show_menu_bar(ui, shortcuts, state, yt_dlp_available);
     });
     egui::Panel::top("humm-toolbar").show(ui, |ui| {
-        show_toolbar(ui, vm, actions, state);
+        show_toolbar(ui, vm, actions, state, yt_dlp_available);
     });
     if state.banner.visible() {
         egui::Panel::top("humm-store-health-banner").show(ui, |ui| {
@@ -225,12 +257,44 @@ pub fn show(
     let clear_confirmed = show_clear_confirm(ui.ctx(), &mut state.clear_confirm_open);
     let dialog_outcome = rename_notes::ui(ui.ctx(), &mut state.dialog);
     let toast_actions = toasts::ui(ui.ctx(), &mut state.toasts, vm, now);
+    let sheet_outcome =
+        options_sheet::ui(ui.ctx(), &mut state.options_sheet, custom_model_available);
+    let url_dialog_result = url_dialog::ui(ui.ctx(), &mut state.url_dialog);
+    show_drop_overlay(ui);
 
     ShowResult {
         dialog_outcome,
         clear_confirmed,
         toast_actions,
+        sheet_outcome,
+        url_dialog_result,
     }
+}
+
+/// The full-viewport "Drop to import" veil (F-021), shown only while
+/// `egui::RawInput::hovered_files` is non-empty — i.e. while the OS reports
+/// files hovering over the window mid-drag, before they're actually
+/// dropped. Purely visual: the actual drop (`dropped_files`) is handled by
+/// `app.rs` (it needs `Services.settings` to open the options sheet), not
+/// here.
+fn show_drop_overlay(ui: &mut egui::Ui) {
+    let hovering_files = ui.ctx().input(|input| !input.raw.hovered_files.is_empty());
+    if !hovering_files {
+        return;
+    }
+    let screen = ui.ctx().input(|input| input.viewport_rect());
+    egui::Area::new(egui::Id::new("humm-drop-overlay"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::Pos2::ZERO)
+        .show(ui.ctx(), |ui| {
+            ui.painter()
+                .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(180));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(screen), |ui| {
+                ui.centered_and_justified(|ui| {
+                    ui.heading(tr("drop-overlay-text"));
+                });
+            });
+        });
 }
 
 /// Consumes the five Task-8 global shortcuts (⌘X/⌘S/⌘O/⌘U/⌘,), routing each
@@ -245,11 +309,17 @@ pub fn show(
 /// so a modal's own text field still receives the raw key event normally
 /// (e.g. ⌘X actually cuts text instead of being swallowed as "Cancel
 /// Transcription").
+///
+/// ⌘U (Import URL) is itself a no-op while `yt_dlp_available` is `false`
+/// (Policy rule 6) — consistent with the toolbar button/menu item it
+/// otherwise mirrors, both of which are disabled in that case
+/// (`show_toolbar`/`show_menu_bar`).
 fn handle_global_shortcuts(
     ui: &mut egui::Ui,
     actions: &mut Vec<TableAction>,
     shortcuts: &ShortcutMap,
     state: &mut ActionState,
+    yt_dlp_available: bool,
 ) {
     if state.modal_open() {
         return;
@@ -264,7 +334,9 @@ fn handle_global_shortcuts(
         if input.consume_shortcut(&shortcuts.get(ShortcutAction::OpenImportWindow)) {
             state.pending_import = PendingImportRequest::File;
         }
-        if input.consume_shortcut(&shortcuts.get(ShortcutAction::OpenImportUrlWindow)) {
+        if input.consume_shortcut(&shortcuts.get(ShortcutAction::OpenImportUrlWindow))
+            && yt_dlp_available
+        {
             state.pending_import = PendingImportRequest::Url;
         }
         if input.consume_shortcut(&shortcuts.get(ShortcutAction::OpenPreferencesWindow)) {
@@ -278,7 +350,16 @@ fn handle_global_shortcuts(
 /// (⌘O) / Import URL… (⌘U) / Import Folder… (no shortcut); Help → About
 /// humm / Help (disabled, no docs site yet) / Preferences… (⌘,). Buzz's
 /// "Plugins…" entry is not ported (ADR-010).
-fn show_menu_bar(ui: &mut egui::Ui, shortcuts: &ShortcutMap, state: &mut ActionState) {
+///
+/// "Import URL…" is disabled with a tooltip when `yt_dlp_available` is
+/// `false` (Policy rule 6: a missing binary degrades the feature
+/// gracefully, never crashes).
+fn show_menu_bar(
+    ui: &mut egui::Ui,
+    shortcuts: &ShortcutMap,
+    state: &mut ActionState,
+    yt_dlp_available: bool,
+) {
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button(tr("menu-file"), |ui| {
             let import_file_shortcut = shortcuts.get(ShortcutAction::OpenImportWindow);
@@ -292,10 +373,13 @@ fn show_menu_bar(ui: &mut egui::Ui, shortcuts: &ShortcutMap, state: &mut ActionS
             }
             let import_url_shortcut = shortcuts.get(ShortcutAction::OpenImportUrlWindow);
             let hint = ui.ctx().format_shortcut(&import_url_shortcut);
-            if ui
-                .add(egui::Button::new(tr("menu-file-import-url")).shortcut_text(hint))
-                .clicked()
-            {
+            let import_url_response = ui.add_enabled(
+                yt_dlp_available,
+                egui::Button::new(tr("menu-file-import-url")).shortcut_text(hint),
+            );
+            if !yt_dlp_available {
+                import_url_response.on_disabled_hover_text(tr("url-import-unavailable-tooltip"));
+            } else if import_url_response.clicked() {
                 state.pending_import = PendingImportRequest::Url;
                 ui.close();
             }
@@ -327,11 +411,15 @@ fn show_menu_bar(ui: &mut egui::Ui, shortcuts: &ShortcutMap, state: &mut ActionS
 /// The toolbar (design spec §3.3): Record (disabled) · New File
 /// Transcription · New URL Transcription · Open Transcript (disabled) ·
 /// Cancel Transcription · Clear History · [Update chip — hidden, Task 11].
+///
+/// "New URL Transcription" is disabled with a tooltip when
+/// `yt_dlp_available` is `false` (Policy rule 6).
 fn show_toolbar(
     ui: &mut egui::Ui,
     vm: &TasksVm,
     actions: &mut Vec<TableAction>,
     state: &mut ActionState,
+    yt_dlp_available: bool,
 ) {
     let enablement = toolbar_enablement(&vm.selected_statuses());
     ui.horizontal(|ui| {
@@ -341,7 +429,11 @@ fn show_toolbar(
         if ui.button(tr("toolbar-new-file")).clicked() {
             state.pending_import = PendingImportRequest::File;
         }
-        if ui.button(tr("toolbar-new-url")).clicked() {
+        let new_url_response =
+            ui.add_enabled(yt_dlp_available, egui::Button::new(tr("toolbar-new-url")));
+        if !yt_dlp_available {
+            new_url_response.on_disabled_hover_text(tr("url-import-unavailable-tooltip"));
+        } else if new_url_response.clicked() {
             state.pending_import = PendingImportRequest::Url;
         }
         ui.add_enabled(false, egui::Button::new(tr("toolbar-open-transcript")))

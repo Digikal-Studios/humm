@@ -96,3 +96,50 @@ retry-error-unavailable = Could not restart: saved options are unavailable
 ## Store-health banner (views/main_window.rs, app.rs, F-004)
 
 banner-store-health = humm couldn't record history updates — exports still complete; see the log file
+
+## Drag-and-drop overlay (views/main_window.rs, F-021)
+
+drop-overlay-text = Drop to import
+
+## URL-import unavailable tooltip (views/main_window.rs, F-022)
+##
+## Byte-identical to the queue's own `YTDLP_MISSING` message
+## (`humm_core::queue`) — that constant isn't `pub`, so this key duplicates
+## it verbatim rather than importing it; keep both in sync if either changes.
+
+url-import-unavailable-tooltip = yt-dlp missing — install it (e.g. `brew install yt-dlp`) or set HUMM_YTDLP
+
+## URL-import dialog (views/url_dialog.rs, F-022)
+##
+## url-dialog-invalid is byte-exact with Buzz's `import_url_dialog.py`
+## `QMessageBox.critical` text — pinned by a unit test. url-dialog-ok/
+## url-dialog-cancel are deliberately "Ok"/"Cancel" (not "OK", see
+## dialog-ok's own comment above) — Buzz relabels this dialog's
+## QDialogButtonBox to exactly that casing (`import_url_dialog.py:25-29`),
+## the same convention as clear-confirm-ok/clear-confirm-cancel.
+
+url-dialog-title = Import URL
+url-dialog-label = URL:
+url-dialog-placeholder = https://example.com/audio.mp3
+url-dialog-invalid = The URL you entered is invalid.
+url-dialog-ok = Ok
+url-dialog-cancel = Cancel
+
+## Options sheet (views/options_sheet.rs, F-023)
+
+options-model-label = Model:
+options-task-label = Task:
+options-language-label = Language:
+language-detect = Detect Language
+options-word-timestamps = Word-level timings
+options-extract-speech = Extract speech
+options-extract-speech-tooltip = Speech extraction arrives in a later release
+options-export-label = Export:
+options-export-txt = TXT
+options-export-srt = SRT
+options-export-vtt = VTT
+options-summary-no-formats = no export selected
+options-advanced = Advanced
+options-initial-prompt-label = Initial Prompt:
+options-hf-repo-label = Hugging Face model
+options-run = Run

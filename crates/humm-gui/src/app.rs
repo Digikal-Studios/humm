@@ -5,23 +5,27 @@
 //! §1/§4).
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use humm_core::domain::{Status, TranscriptionId};
 use humm_core::queue::{TaskEvent, TaskEventKind};
-use humm_core::settings::GuiSettings;
+use humm_core::settings::{FileTranscriberSettings, GuiSettings};
 
 use crate::events::{self, SharedEventQueue};
 use crate::i18n::tr;
+use crate::import::{FileDialogs, ImportRequest, RfdFileDialogs, scan_folder};
 use crate::services::Services;
 use crate::shortcuts::ShortcutMap;
 use crate::viewmodel::{TableAction, TasksVm};
 use crate::views;
-use crate::views::main_window::{ActionState, toolbar_enablement};
+use crate::views::main_window::{ActionState, PendingImportRequest, toolbar_enablement};
+use crate::views::options_sheet::{OptionsSheet, SheetOutcome, SheetState};
 use crate::views::rename_notes::{self, DialogOutcome};
 use crate::views::task_table::TableLayout;
 use crate::views::toasts::{ToastAction, ToastKind};
+use crate::views::url_dialog::UrlDialog;
 
 /// The eframe application.
 ///
@@ -65,15 +69,34 @@ pub struct HummApp {
     /// Toolbar/menu/dialog/toast/banner state (F-004/F-026): see
     /// [`ActionState`]'s own field docs.
     action_state: ActionState,
+    /// Seam over the (blocking, native) file/folder pickers (F-020/F-022) —
+    /// always [`RfdFileDialogs`] in both real and kittest construction;
+    /// nothing in this milestone's kittest coverage drives it (the sheet
+    /// itself is opened directly via [`HummApp::open_options_sheet_for_test`]
+    /// instead), but the seam exists so a future test can inject a fake
+    /// without touching call sites.
+    dialogs: Box<dyn FileDialogs>,
+    /// Files passed as argv (Finder "open with" parity, design spec
+    /// deviation #12) — opened as the options sheet's request on the first
+    /// `eframe::App::ui` call, then cleared so it never re-triggers. Empty
+    /// (the common case) is a permanent no-op.
+    pending_argv_import: Vec<PathBuf>,
 }
 
 impl HummApp {
     /// Builds the app for real use (`main.rs`), spawning the event pump
     /// immediately from the window's own [`egui::Context`]
-    /// (`cc.egui_ctx`).
-    pub fn new(cc: &eframe::CreationContext<'_>, services: Services) -> Self {
+    /// (`cc.egui_ctx`). `argv_import` is `main.rs`'s parsed command-line
+    /// file paths (Finder "open with" parity) — opened as the options
+    /// sheet's request on the first frame; an empty `Vec` (the common case)
+    /// is a no-op.
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        services: Services,
+        argv_import: Vec<PathBuf>,
+    ) -> Self {
         let event_queue = events::spawn_event_pump(services.events.clone(), cc.egui_ctx.clone());
-        Self::build(services, Some(event_queue))
+        Self::build(services, Some(event_queue), argv_import)
     }
 
     /// Builds the app directly from injected [`Services`], for kittest
@@ -86,14 +109,24 @@ impl HummApp {
     /// receives — for an `egui_kittest` harness, that is the *same*
     /// `Context` its own `CreationContext` carries, so the net effect is
     /// identical; it just can't be captured before the first frame runs.
+    ///
+    /// Never carries a pending argv import (kittest harnesses have no real
+    /// argv to speak of) — a test that wants to exercise the argv-import
+    /// path opens the sheet directly via
+    /// [`HummApp::open_options_sheet_for_test`], which is exactly what the
+    /// real argv path itself resolves to on its first frame.
     pub fn new_for_test(services: Services) -> Self {
-        Self::build(services, None)
+        Self::build(services, None, Vec::new())
     }
 
     /// Shared constructor body: loads the task table's view-model from
     /// `services.store` and restores its persisted layout/sort from
     /// `services.settings.gui` before the first frame ever renders.
-    fn build(services: Services, event_queue: Option<SharedEventQueue>) -> Self {
+    fn build(
+        services: Services,
+        event_queue: Option<SharedEventQueue>,
+        pending_argv_import: Vec<PathBuf>,
+    ) -> Self {
         let gui_settings = {
             let settings = services
                 .settings
@@ -123,6 +156,8 @@ impl HummApp {
             pending_table_actions: Vec::new(),
             shortcuts,
             action_state: ActionState::default(),
+            dialogs: Box::new(RfdFileDialogs),
+            pending_argv_import,
         }
     }
 
@@ -168,6 +203,198 @@ impl HummApp {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push_back(event);
         }
+    }
+
+    /// Test-only seam: opens the options sheet directly with `request`, as
+    /// if the corresponding dialog/drag-drop/argv flow had already produced
+    /// it. Lets a kittest harness exercise the sheet (and Run→enqueue→
+    /// sticky-prefs flow) without ever driving a real, blocking rfd dialog —
+    /// same "plain `pub fn`, not `#[cfg(test)]`" pattern as
+    /// [`Self::inject_event_for_test`].
+    pub fn open_options_sheet_for_test(&mut self, request: ImportRequest) {
+        self.open_options_sheet(request);
+    }
+
+    /// Whether `settings.models.custom_model_url` is set — gates the
+    /// options sheet's model-size combo's "Custom" entry (F-023).
+    fn custom_model_available(&self) -> bool {
+        let settings = self
+            .services
+            .settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        settings.models.custom_model_url.is_some()
+    }
+
+    /// Opens the options sheet for `request`, prefilled from the current
+    /// `settings.file_transcriber`/`settings.models` snapshot.
+    fn open_options_sheet(&mut self, request: ImportRequest) {
+        let prefill: FileTranscriberSettings = {
+            let settings = self
+                .services
+                .settings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            settings.file_transcriber.clone()
+        };
+        let custom_model_available = self.custom_model_available();
+        self.action_state.options_sheet =
+            Some(OptionsSheet::new(request, &prefill, custom_model_available));
+    }
+
+    /// Applies the options sheet's close outcome (`views::main_window::show`
+    /// already rendered it this frame): persists the sticky prefs
+    /// unconditionally (Buzz's `closeEvent` parity — Run *and* Cancel/
+    /// Escape/backdrop-click all save), then, for `Run`, enqueues every
+    /// spec with a fresh id.
+    fn apply_sheet_outcome(&mut self, outcome: SheetOutcome) {
+        match outcome {
+            SheetOutcome::Run { specs, sticky } => {
+                self.persist_sticky_prefs(&sticky);
+                for (id, spec, source) in specs {
+                    self.services.queue.enqueue(id, spec, source);
+                }
+            }
+            SheetOutcome::Cancelled { sticky } => self.persist_sticky_prefs(&sticky),
+        }
+    }
+
+    /// Writes `sticky` into `settings.file_transcriber` and persists it. A
+    /// save failure is logged, not fatal (same non-fatal-settings-write
+    /// contract as [`Self::persist_layout_if_changed`]/
+    /// [`Self::persist_last_import_folder`]).
+    fn persist_sticky_prefs(&mut self, sticky: &SheetState) {
+        let mut settings = self
+            .services
+            .settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        sticky.write_to(&mut settings.file_transcriber);
+        if let Err(err) = settings.save(&self.services.settings_path) {
+            log::warn!("could not persist file-transcriber options: {err}");
+        }
+    }
+
+    /// Persists `folder` as `settings.file_transcriber.last_import_folder`
+    /// (Buzz parity: persisted at dialog time, independent of the sheet's
+    /// own sticky write-back). A no-op if `folder` is `None` (the file
+    /// dialog's pick had no parent directory — practically unreachable, but
+    /// harmless either way).
+    fn persist_last_import_folder(&mut self, folder: Option<&Path>) {
+        let Some(folder) = folder else {
+            return;
+        };
+        let mut settings = self
+            .services
+            .settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        settings.file_transcriber.last_import_folder = Some(folder.to_path_buf());
+        if let Err(err) = settings.save(&self.services.settings_path) {
+            log::warn!("could not persist the last import folder: {err}");
+        }
+    }
+
+    /// The last-used import folder, if any, to seed the file/folder dialog's
+    /// starting directory.
+    fn last_import_folder(&self) -> Option<PathBuf> {
+        let settings = self
+            .services
+            .settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        settings.file_transcriber.last_import_folder.clone()
+    }
+
+    /// Drains `action_state.pending_import` (set by the toolbar/File-menu/
+    /// shortcuts this frame's `main_window::show` call) and dispatches the
+    /// corresponding import flow. Always resets it to `None` first — a
+    /// canceled dialog must not re-trigger itself on the very next frame.
+    fn drain_pending_import(&mut self) {
+        let request = std::mem::take(&mut self.action_state.pending_import);
+        match request {
+            PendingImportRequest::None => {}
+            PendingImportRequest::File => self.handle_file_import_request(),
+            PendingImportRequest::Url => {
+                self.action_state.url_dialog = UrlDialog::open();
+            }
+            PendingImportRequest::Folder => self.handle_folder_import_request(),
+        }
+    }
+
+    /// "New File Transcription" / File → "Import File…" / ⌘O
+    /// (`main_window.py:268-281`): opens the (blocking) file dialog seeded
+    /// with the last import folder, persists the parent of the first pick,
+    /// and opens the options sheet with every picked file. A cancel (`None`)
+    /// or an empty pick is a silent no-op.
+    fn handle_file_import_request(&mut self) {
+        let start_dir = self.last_import_folder();
+        let Some(paths) = self.dialogs.pick_files(start_dir.as_deref()) else {
+            return;
+        };
+        if paths.is_empty() {
+            return;
+        }
+        self.persist_last_import_folder(paths[0].parent());
+        self.open_options_sheet(ImportRequest::Files(paths));
+    }
+
+    /// File → "Import Folder…" (`main_window.py:288-304`): opens the
+    /// (blocking) folder dialog seeded with the last import folder,
+    /// persists the chosen folder itself, recursively scans it
+    /// (`import::scan_folder`), and opens the options sheet with whatever
+    /// matched. Zero matches is a silent no-op (Buzz parity) — same for a
+    /// cancel (`None`).
+    fn handle_folder_import_request(&mut self) {
+        let start_dir = self.last_import_folder();
+        let Some(folder) = self.dialogs.pick_folder(start_dir.as_deref()) else {
+            return;
+        };
+        self.persist_last_import_folder(Some(&folder));
+        let files = scan_folder(&folder);
+        if files.is_empty() {
+            return;
+        }
+        self.open_options_sheet(ImportRequest::Files(files));
+    }
+
+    /// Drag-and-drop (F-021, `main_window.py:196-205`): reads
+    /// `egui::RawInput::dropped_files` (no extension filtering — Buzz
+    /// parity) and, if any files were dropped this frame, opens the options
+    /// sheet with them. Guarded by `!modal_open()` so a drop landing while
+    /// some other modal (e.g. Clear-confirm) is already up doesn't silently
+    /// clobber it with a freshly-opened sheet — a humm-only defensive
+    /// addition (Buzz's own top-level-window drop target has no equivalent
+    /// modal to protect).
+    fn drain_dropped_files(&mut self, ctx: &egui::Context) {
+        if self.action_state.modal_open() {
+            return;
+        }
+        let dropped: Vec<PathBuf> = ctx.input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .collect()
+        });
+        if dropped.is_empty() {
+            return;
+        }
+        self.open_options_sheet(ImportRequest::Files(dropped));
+    }
+
+    /// Consumes `pending_argv_import` (Finder "open with" parity) on
+    /// whichever frame first calls this — always the very first
+    /// `eframe::App::ui` call, since it's cleared unconditionally the first
+    /// time regardless of whether it was empty. An empty `Vec` (the common
+    /// case: no argv files) never opens a sheet.
+    fn drain_pending_argv_import(&mut self) {
+        let paths = std::mem::take(&mut self.pending_argv_import);
+        if paths.is_empty() {
+            return;
+        }
+        self.open_options_sheet(ImportRequest::Files(paths));
     }
 
     /// Reacts to one drained event with a toast/banner side effect, keyed on
@@ -443,6 +670,8 @@ impl eframe::App for HummApp {
             ));
         }
 
+        self.drain_pending_argv_import();
+
         let now = Instant::now();
         if let Some(event_queue) = &self.event_queue {
             for event in events::drain(event_queue) {
@@ -450,6 +679,9 @@ impl eframe::App for HummApp {
                 self.react_to_event(&event, now);
             }
         }
+
+        let custom_model_available = self.custom_model_available();
+        let yt_dlp_available = self.services.capabilities.yt_dlp;
 
         let result = views::main_window::show(
             ui,
@@ -459,6 +691,8 @@ impl eframe::App for HummApp {
             &self.shortcuts,
             &mut self.action_state,
             now,
+            custom_model_available,
+            yt_dlp_available,
         );
 
         if let Some(outcome) = result.dialog_outcome {
@@ -470,8 +704,16 @@ impl eframe::App for HummApp {
         for action in result.toast_actions {
             self.apply_toast_action(action, now);
         }
+        if let Some(outcome) = result.sheet_outcome {
+            self.apply_sheet_outcome(outcome);
+        }
+        if let Some(url) = result.url_dialog_result {
+            self.open_options_sheet(ImportRequest::Url(url));
+        }
 
         self.drain_table_actions(now);
+        self.drain_pending_import();
+        self.drain_dropped_files(ui.ctx());
 
         self.persist_layout_if_changed();
     }

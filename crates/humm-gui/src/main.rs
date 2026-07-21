@@ -22,12 +22,12 @@ fn main() -> eframe::Result {
     log::debug!("humm-gui starting (log_dir={})", log_dir.display());
 
     // Files passed as argv (Finder "open with" parity — deviation #12 in the
-    // design spec): held as a pending import for the import-flow task to
-    // consume; nothing acts on them yet.
+    // design spec): opened as the options sheet's request on the app's
+    // first frame (`HummApp::drain_pending_argv_import`).
     let pending_import: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
     if !pending_import.is_empty() {
         log::info!(
-            "{} file(s) passed on the command line; import wiring lands in a later task",
+            "{} file(s) passed on the command line; opening the import options sheet",
             pending_import.len()
         );
     }
@@ -72,7 +72,7 @@ fn main() -> eframe::Result {
         };
 
     match services::init(sole_instance) {
-        Ok(services) => run_app(services),
+        Ok(services) => run_app(services, pending_import),
         Err(err) => run_error_app(err),
     }
 }
@@ -89,8 +89,9 @@ fn show_already_running_dialog() {
 }
 
 /// The real window: 1240×600, titled "humm", geometry/egui-memory persisted
-/// to `config_dir()/gui.ron` (design spec §3.1, F-001).
-fn run_app(services: Services) -> eframe::Result {
+/// to `config_dir()/gui.ron` (design spec §3.1, F-001). `argv_import` is
+/// threaded straight through to [`HummApp::new`].
+fn run_app(services: Services, argv_import: Vec<PathBuf>) -> eframe::Result {
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1240.0, 600.0])
         .with_title("humm");
@@ -102,7 +103,7 @@ fn run_app(services: Services) -> eframe::Result {
     eframe::run_native(
         "humm",
         options,
-        Box::new(move |cc| Ok(Box::new(HummApp::new(cc, services)))),
+        Box::new(move |cc| Ok(Box::new(HummApp::new(cc, services, argv_import)))),
     )
 }
 
