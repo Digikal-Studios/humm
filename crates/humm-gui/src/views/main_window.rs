@@ -1,21 +1,34 @@
 //! The main window's central content.
 //!
-//! This task ships only the empty-state hero: the task table (F-003), menu
-//! bar/toolbar (F-004), and drop-overlay/toast/banner chrome all arrive in
-//! later M3 tasks (`docs/superpowers/specs/2026-07-21-m3-gui-shell-design.md`
-//! §1's module layout). Until the table exists, the hero is always shown —
-//! there is no "populated" state yet to switch away from it.
+//! This task adds the task table (F-003) alongside the empty-state hero
+//! (Task 6): the hero shows when there are no rows to display, the table
+//! otherwise. The menu bar/toolbar (F-004) and drop-overlay/toast/banner
+//! chrome still arrive in later M3 tasks
+//! (`docs/superpowers/specs/2026-07-21-m3-gui-shell-design.md` §1's module
+//! layout).
 
 use crate::i18n::tr;
+use crate::viewmodel::{TableAction, TasksVm};
+use crate::views::task_table::{self, TableLayout};
 
-/// Renders the main window's central panel.
+/// Renders the main window's central panel: the empty-state hero when
+/// `vm` has no rows, the virtualized task table otherwise.
 ///
 /// `ui` is the root viewport's `egui::Ui` (eframe 0.35's `App::ui` hands this
 /// directly rather than a bare `Context`); wrapping it in `CentralPanel`
 /// gives the usual margin/background egui apps expect.
-pub fn show(ui: &mut egui::Ui) {
+pub fn show(
+    ui: &mut egui::Ui,
+    vm: &mut TasksVm,
+    layout: &mut TableLayout,
+    actions: &mut Vec<TableAction>,
+) {
     egui::CentralPanel::default().show(ui, |ui| {
-        show_hero(ui);
+        if vm.sorted_rows().is_empty() {
+            show_hero(ui);
+        } else {
+            task_table::ui(ui, vm, layout, actions);
+        }
     });
 }
 

@@ -3,3 +3,4 @@
 //! services hold state, views are pure render functions of it).
 
 pub mod main_window;
+pub mod task_table;

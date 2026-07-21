@@ -13,4 +13,4 @@
 mod schema;
 mod store;
 
-pub use store::{BuzzImportOutcome, SqliteStore, TaskRow};
+pub use store::{BuzzImportOutcome, ModelDisplayColumns, SqliteStore, TaskRow};

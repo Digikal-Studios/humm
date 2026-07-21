@@ -52,7 +52,13 @@ pub struct ParseEnumError(String);
 /// Wraps a random (v4) UUID — Buzz's `FileTranscriptionTask.uid`
 /// (`transcriber.py:195`); Buzz also keeps a deprecated `id: int`, which humm
 /// does not port. Serializes as its hyphenated lowercase string form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// `PartialOrd`/`Ord` (byte order of the underlying UUID — not creation
+/// order) are derived so ids can key a `BTreeSet`/`BTreeMap`, e.g. the GUI
+/// task table's multi-row selection (`humm-gui`'s `TasksVm::selection`); no
+/// code relies on the ordering being anything other than an arbitrary total
+/// order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TranscriptionId(uuid::Uuid);
 
 impl TranscriptionId {

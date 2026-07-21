@@ -45,6 +45,11 @@ pub struct BuzzImportOutcome {
     pub segments: usize,
 }
 
+/// The raw `(model_type, whisper_model_size)` column pair
+/// [`SqliteStore::model_display_columns`] returns — display-only, see that
+/// method's doc comment.
+pub type ModelDisplayColumns = (Option<String>, Option<String>);
+
 /// A row from the `transcription` table: a task's metadata, not its
 /// segments (see [`SqliteStore::get_segments`]).
 #[derive(Debug, Clone, PartialEq)]
@@ -719,6 +724,31 @@ impl SqliteStore {
             options,
             output,
         }))
+    }
+
+    /// Reads the raw `model_type`/`whisper_model_size` columns for `id`,
+    /// **display-only** (the GUI task table's Model column, for rows whose
+    /// `options_json` is `NULL` — an imported/foreign row with no
+    /// [`TaskSpec`] to derive a proper model description from). `Ok(None)` if
+    /// `id` doesn't exist.
+    ///
+    /// This is *not* a substitute for [`Self::spec_from_columns`]: it hands
+    /// back the two raw strings verbatim (no `ModelSize`/`ModelSpec`
+    /// parsing, no Buzz-restart fallbacks) for a caller that only wants to
+    /// *show* something reasonable, never to reconstruct a runnable model
+    /// selection.
+    pub fn model_display_columns(
+        &self,
+        id: &TranscriptionId,
+    ) -> Result<Option<ModelDisplayColumns>, StoreError> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT model_type, whisper_model_size FROM transcription WHERE id = ?1",
+            params![id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(query_error)
     }
 }
 
@@ -1590,6 +1620,52 @@ mod tests {
                 .expect("missing"),
             None
         );
+    }
+
+    #[test]
+    fn model_display_columns_reads_raw_model_type_and_size_and_none_for_missing_row() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        let mut spec = sample_task_spec();
+        spec.options.model.size = ModelSize::Small;
+        store
+            .create_task(&id, &spec, Source::FileImport)
+            .expect("create");
+
+        let (model_type, size) = store
+            .model_display_columns(&id)
+            .expect("model_display_columns")
+            .expect("row present");
+        assert_eq!(model_type.as_deref(), Some("Whisper.cpp"));
+        assert_eq!(size.as_deref(), Some("small"));
+
+        assert_eq!(
+            store
+                .model_display_columns(&TranscriptionId::new())
+                .expect("missing"),
+            None
+        );
+    }
+
+    #[test]
+    fn model_display_columns_is_none_for_null_columns_on_a_foreign_row() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        {
+            let conn = store.conn.lock().expect("lock");
+            conn.execute(
+                "INSERT INTO transcription (id, status, time_queued, kind) \
+                 VALUES (?1, 'completed', ?2, 'file')",
+                params![id.to_string(), "2020-01-01T00:00:00"],
+            )
+            .expect("insert foreign row");
+        }
+        let (model_type, size) = store
+            .model_display_columns(&id)
+            .expect("model_display_columns")
+            .expect("row present");
+        assert_eq!(model_type, None);
+        assert_eq!(size, None);
     }
 
     #[test]

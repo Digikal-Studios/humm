@@ -9,3 +9,25 @@
 
 hero-drop = Drop media here, or ⌘O
 hero-import-button = Import files…
+
+## Task table (views/task_table.rs, F-003) — column headers
+
+table-col-file-name = File Name / URL
+table-col-model = Model
+table-col-task = Task
+table-col-status = Status
+table-col-date-completed = Date Completed
+table-col-date-added = Date Added
+table-col-notes = Notes
+
+## Task table — header/row context menus
+
+table-menu-reset-column-order = Reset Column Order
+table-menu-restart = Restart Transcription
+table-menu-rename = Rename
+table-menu-notes = Add/Edit Notes
+
+## Task table — Task column labels (viewmodel.rs)
+
+task-transcribe = Transcribe
+task-translate = Translate to English

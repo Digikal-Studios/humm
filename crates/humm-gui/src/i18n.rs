@@ -29,7 +29,23 @@ const EN_FTL: &str = include_str!("../assets/i18n/en/humm.ftl");
 /// call — an unlisted key can silently render as its own name in the UI with
 /// nothing catching it.
 pub fn all_keys_used() -> &'static [&'static str] {
-    &["hero-drop", "hero-import-button"]
+    &[
+        "hero-drop",
+        "hero-import-button",
+        "table-col-file-name",
+        "table-col-model",
+        "table-col-task",
+        "table-col-status",
+        "table-col-date-completed",
+        "table-col-date-added",
+        "table-col-notes",
+        "table-menu-reset-column-order",
+        "table-menu-restart",
+        "table-menu-rename",
+        "table-menu-notes",
+        "task-transcribe",
+        "task-translate",
+    ]
 }
 
 thread_local! {

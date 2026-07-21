@@ -10,6 +10,7 @@
 
 pub mod app;
 pub mod events;
+pub mod format;
 pub mod i18n;
 pub mod logging;
 pub mod services;

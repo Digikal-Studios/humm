@@ -1,0 +1,584 @@
+//! The virtualized task table (F-003):
+//! `transcription_tasks_table_widget.py` ported to an
+//! `egui_extras::TableBuilder`. This module owns only *rendering* and
+//! *layout* — the data lives in [`crate::viewmodel::TasksVm`]; anything the
+//! view can't decide for itself (retry/rename/notes/clear/open) is pushed
+//! onto the caller-supplied `actions: &mut Vec<TableAction>` rather than
+//! acted on here (`app.rs` is the intended consumer, starting Task 8 — see
+//! its call site's doc comment for this task's interim handling).
+
+use std::time::Duration;
+
+use egui::{Key, Modifiers, Sense};
+use egui_extras::{Column, TableBuilder};
+
+use humm_core::domain::{Status, TranscriptionId};
+use humm_core::settings::GuiSettings;
+
+use crate::format;
+use crate::i18n::tr;
+use crate::viewmodel::{ColumnId, RowVm, TableAction, TasksVm};
+
+/// Persisted column chrome for the task table: visible columns and their
+/// display order (`settings.gui.task_table_visible`/`task_table_order`).
+/// Sort state lives on [`TasksVm`] itself (`TasksVm::sort`), not here — see
+/// [`Self::to_gui_settings`] for how the two recombine into one `[gui]`
+/// settings snapshot.
+///
+/// [`Self::anchor`] is the shift-click range-selection anchor: transient UI
+/// state that must survive across frames (so a later shift-click can extend
+/// from it) but must never be persisted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableLayout {
+    order: Vec<ColumnId>,
+    visible: Vec<ColumnId>,
+    /// Row index (in current sort order) of the last plain click, if any —
+    /// the shift-click range-selection anchor.
+    anchor: Option<usize>,
+}
+
+impl Default for TableLayout {
+    fn default() -> Self {
+        TableLayout {
+            order: ColumnId::all().to_vec(),
+            visible: ColumnId::all().to_vec(),
+            anchor: None,
+        }
+    }
+}
+
+impl TableLayout {
+    /// Restores a [`TableLayout`] from persisted settings, falling back to
+    /// the built-in default for any field that's absent, empty, or contains
+    /// only unrecognized column ids (a stale/foreign settings file must
+    /// never leave the table with zero columns). `FileName` is always kept
+    /// visible regardless of what was persisted (it is never hideable).
+    pub fn from_gui_settings(gui: &GuiSettings) -> Self {
+        let mut layout = TableLayout::default();
+
+        if let Some(persisted) = &gui.task_table_order {
+            let mut order: Vec<ColumnId> = persisted
+                .iter()
+                .filter_map(|id| ColumnId::from_id(id))
+                .collect();
+            if !order.is_empty() {
+                // A column added to `ColumnId::all()` after this settings
+                // file was written wouldn't appear in `persisted` — append
+                // it at the end rather than silently dropping it.
+                for col in ColumnId::all() {
+                    if !order.contains(&col) {
+                        order.push(col);
+                    }
+                }
+                layout.order = order;
+            }
+        }
+
+        if let Some(persisted) = &gui.task_table_visible {
+            let mut visible: Vec<ColumnId> = persisted
+                .iter()
+                .filter_map(|id| ColumnId::from_id(id))
+                .collect();
+            // Every entry unrecognized (a foreign/corrupt settings file) —
+            // fall back to the built-in default rather than an all-hidden
+            // table.
+            if !visible.is_empty() {
+                if !visible.contains(&ColumnId::FileName) {
+                    visible.push(ColumnId::FileName);
+                }
+                layout.visible = visible;
+            }
+        }
+
+        layout
+    }
+
+    /// Builds the `[gui]` settings snapshot for this layout plus the given
+    /// (externally-owned, on `TasksVm`) sort state — the shape
+    /// [`Self::from_gui_settings`] reads back.
+    pub fn to_gui_settings(&self, sort: (ColumnId, bool)) -> GuiSettings {
+        GuiSettings {
+            task_table_visible: Some(
+                self.visible
+                    .iter()
+                    .map(|col| col.id().to_string())
+                    .collect(),
+            ),
+            task_table_order: Some(self.order.iter().map(|col| col.id().to_string()).collect()),
+            task_table_sort_column: Some(sort.0.id().to_string()),
+            task_table_sort_descending: Some(sort.1),
+        }
+    }
+
+    /// The persisted sort restored from `gui`, or the built-in default
+    /// `(DateAdded, descending)` if absent/unrecognized.
+    pub fn sort_from_gui_settings(gui: &GuiSettings) -> (ColumnId, bool) {
+        let col = gui
+            .task_table_sort_column
+            .as_deref()
+            .and_then(ColumnId::from_id)
+            .unwrap_or(ColumnId::DateAdded);
+        let descending = gui.task_table_sort_descending.unwrap_or(true);
+        (col, descending)
+    }
+
+    /// Whether `col` is currently visible. `FileName` is always visible.
+    pub fn is_visible(&self, col: ColumnId) -> bool {
+        col == ColumnId::FileName || self.visible.contains(&col)
+    }
+
+    /// Toggles `col`'s visibility. A no-op for `FileName` (never hideable).
+    pub fn toggle_visible(&mut self, col: ColumnId) {
+        if !col.hideable() {
+            return;
+        }
+        match self.visible.iter().position(|c| *c == col) {
+            Some(pos) => {
+                self.visible.remove(pos);
+            }
+            None => self.visible.push(col),
+        }
+    }
+
+    /// "Reset Column Order": restores the default order and un-hides every
+    /// column (Buzz's `reset_column_order`; the accompanying sort reset is
+    /// the caller's job — see [`TasksVm::set_sort_exact`]).
+    pub fn reset(&mut self) {
+        self.order = ColumnId::all().to_vec();
+        self.visible = ColumnId::all().to_vec();
+    }
+
+    /// Visible columns, in display order — the single list both the header
+    /// and every row must iterate identically (an `egui_extras::TableRow`
+    /// panics if more cells are added than columns were pre-allocated).
+    fn visible_in_order(&self) -> Vec<ColumnId> {
+        self.order
+            .iter()
+            .copied()
+            .filter(|col| self.is_visible(*col))
+            .collect()
+    }
+}
+
+/// Renders the virtualized task table: sortable header with a persisted
+/// column layout, multi-select rows with Buzz-parity status/ETA text,
+/// header/row context menus, and the Delete/⌘C/Return shortcuts.
+pub fn ui(
+    ui: &mut egui::Ui,
+    vm: &mut TasksVm,
+    layout: &mut TableLayout,
+    actions: &mut Vec<TableAction>,
+) {
+    let modifiers = ui.input(|i| i.modifiers);
+    handle_keyboard_shortcuts(ui, vm, actions);
+
+    let visible_columns = layout.visible_in_order();
+
+    // Only an in-progress row's status text (elapsed-time ETA) goes stale
+    // between real events, so only schedule the tick when one exists — an
+    // idle table (nothing in-progress) requests nothing extra.
+    if vm
+        .sorted_rows()
+        .iter()
+        .any(|row| row.status == Status::InProgress)
+    {
+        ui.ctx().request_repaint_after(Duration::from_secs(1));
+    }
+
+    let mut builder = TableBuilder::new(ui)
+        .striped(true)
+        .sense(Sense::click())
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+    for col in &visible_columns {
+        builder = builder.column(
+            Column::initial(col.default_width())
+                .clip(true)
+                .at_least(40.0),
+        );
+    }
+
+    let now = chrono::Local::now().naive_local();
+    let sort = vm.sort();
+
+    let mut header_union: Option<egui::Response> = None;
+    let table = builder.header(22.0, |mut header| {
+        for col in &visible_columns {
+            let label = header_label(*col, sort);
+            let mut cell_response = None;
+            header.col(|ui| {
+                cell_response = Some(interactive_cell(ui, "sort-click", label));
+            });
+            if let Some(response) = &cell_response
+                && response.clicked()
+            {
+                vm.set_sort(*col);
+            }
+            header_union = union_opt(header_union, cell_response);
+        }
+
+        if let Some(union) = header_union {
+            union.context_menu(|ui| {
+                if ui.button(tr("table-menu-reset-column-order")).clicked() {
+                    layout.reset();
+                    vm.set_sort_exact(ColumnId::DateAdded, true);
+                    ui.close();
+                }
+                ui.separator();
+                for col in ColumnId::all() {
+                    if !col.hideable() {
+                        continue;
+                    }
+                    let mut visible = layout.is_visible(col);
+                    if ui.checkbox(&mut visible, col.label()).changed() {
+                        layout.toggle_visible(col);
+                    }
+                }
+            });
+        }
+    });
+
+    table.body(|body| {
+        let total_rows = vm.sorted_rows().len();
+        body.rows(20.0, total_rows, |mut row| {
+            let idx = row.index();
+            let row_id = vm.sorted_rows()[idx].id;
+            let row_status = vm.sorted_rows()[idx].status;
+            let selected = vm.selection().contains(&row_id);
+            row.set_selected(selected);
+
+            let mut row_union: Option<egui::Response> = None;
+            for col in &visible_columns {
+                let text = cell_text(vm.sorted_rows(), idx, *col, now);
+                let mut cell_response = None;
+                row.col(|ui| {
+                    cell_response = Some(interactive_cell(ui, "row-click", text));
+                });
+                row_union = union_opt(row_union, cell_response);
+            }
+
+            let Some(response) = row_union else {
+                return;
+            };
+            if response.clicked() {
+                apply_row_click(vm, layout, idx, row_id, modifiers);
+            }
+            response.context_menu(|ui| {
+                if matches!(
+                    row_status,
+                    Status::Failed | Status::Canceled | Status::Skipped
+                ) {
+                    if ui.button(tr("table-menu-restart")).clicked() {
+                        actions.push(TableAction::Retry(row_id));
+                        ui.close();
+                    }
+                    ui.separator();
+                }
+                if ui.button(tr("table-menu-rename")).clicked() {
+                    actions.push(TableAction::Rename(row_id));
+                    ui.close();
+                }
+                if ui.button(tr("table-menu-notes")).clicked() {
+                    actions.push(TableAction::Notes(row_id));
+                    ui.close();
+                }
+            });
+        });
+    });
+}
+
+/// Delete/⌘C/Return, gated on a non-empty selection (mirroring Buzz's own
+/// enablement — none of these three do anything with nothing selected).
+fn handle_keyboard_shortcuts(ui: &egui::Ui, vm: &TasksVm, actions: &mut Vec<TableAction>) {
+    if vm.selection().is_empty() {
+        return;
+    }
+    let (delete, copy, open) = ui.input(|i| {
+        (
+            i.key_pressed(Key::Delete),
+            i.modifiers.command && i.key_pressed(Key::C),
+            i.key_pressed(Key::Enter),
+        )
+    });
+    if delete {
+        actions.push(TableAction::ClearSelected);
+    }
+    if copy {
+        ui.ctx().copy_text(vm.copy_text());
+    }
+    if open {
+        actions.push(TableAction::OpenSelected);
+    }
+}
+
+/// Applies Buzz/Qt-style click selection semantics: plain click selects only
+/// this row (and sets it as the shift-click anchor); Cmd/Ctrl-click toggles
+/// it; Shift-click extends the selection from the last anchor to this row.
+fn apply_row_click(
+    vm: &mut TasksVm,
+    layout: &mut TableLayout,
+    idx: usize,
+    row_id: TranscriptionId,
+    modifiers: Modifiers,
+) {
+    if modifiers.shift
+        && let Some(anchor) = layout.anchor
+    {
+        vm.select_range(anchor, idx);
+        return;
+    }
+    if modifiers.command {
+        vm.toggle_selection(row_id);
+    } else {
+        vm.select_only(row_id);
+    }
+    layout.anchor = Some(idx);
+}
+
+/// Renders `text` and returns a *directly-captured* full-cell click response.
+///
+/// `egui_extras` 0.35's `TableRow::col`/`TableRow::response` return a
+/// `Response` built from `Ui::response()`, which is documented to reflect
+/// "last frame's widget rect" — in practice this cell-wrapper response never
+/// observes a click at all (proven via a standalone repro against this
+/// exact `egui`/`egui_extras`/`egui_kittest` version combination: the
+/// wrapper's `clicked()` stayed `false` across 20+ settled frames after a
+/// real click, while a response obtained by calling `Ui::interact` directly
+/// inside the cell closure correctly reported it). This helper is the
+/// workaround: it renders the label, then calls `ui.interact` over the
+/// cell's own `max_rect` with a stable, salt-based id, and returns *that*
+/// response — the only one this table's click/sort/context-menu handling can
+/// trust. `id_salt` only needs to be unique *within one cell* (row/column
+/// identity already comes from the table's own per-cell id salting), so a
+/// short fixed string per call site (`"sort-click"`, `"row-click"`) is
+/// enough.
+fn interactive_cell(ui: &mut egui::Ui, id_salt: &str, text: String) -> egui::Response {
+    ui.label(text);
+    let rect = ui.max_rect();
+    let id = ui.id().with(id_salt);
+    ui.interact(rect, id, Sense::click())
+}
+
+/// Folds `next` into `acc` via [`egui::Response::union`], the same
+/// "accumulate a row's clickable area across its cells" pattern
+/// `egui_extras::TableRow` itself uses internally.
+fn union_opt(acc: Option<egui::Response>, next: Option<egui::Response>) -> Option<egui::Response> {
+    match (acc, next) {
+        (Some(acc), Some(next)) => Some(acc.union(next)),
+        (Some(acc), None) => Some(acc),
+        (None, next) => next,
+    }
+}
+
+/// The header label for `col`, with a sort-direction arrow appended when
+/// `col` is the current sort key.
+fn header_label(col: ColumnId, sort: (ColumnId, bool)) -> String {
+    let label = col.label();
+    if sort.0 == col {
+        let arrow = if sort.1 { "\u{25bc}" } else { "\u{25b2}" };
+        format!("{label} {arrow}")
+    } else {
+        label
+    }
+}
+
+/// The display text for one cell.
+fn cell_text(rows: &[RowVm], idx: usize, col: ColumnId, now: chrono::NaiveDateTime) -> String {
+    let row = &rows[idx];
+    match col {
+        ColumnId::FileName => row.display_name.clone(),
+        ColumnId::Model => row.model_text.clone(),
+        ColumnId::Task => row.task_text.clone(),
+        ColumnId::Status => format::status_text(row, now),
+        ColumnId::DateCompleted => row
+            .time_ended
+            .as_deref()
+            .map(format::date_text)
+            .unwrap_or_default(),
+        ColumnId::DateAdded => format::date_text(&row.time_queued),
+        ColumnId::Notes => row.notes.clone().unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gui_settings(
+        visible: Option<Vec<&str>>,
+        order: Option<Vec<&str>>,
+        sort_col: Option<&str>,
+        sort_desc: Option<bool>,
+    ) -> GuiSettings {
+        GuiSettings {
+            task_table_visible: visible.map(|v| v.into_iter().map(str::to_string).collect()),
+            task_table_order: order.map(|v| v.into_iter().map(str::to_string).collect()),
+            task_table_sort_column: sort_col.map(str::to_string),
+            task_table_sort_descending: sort_desc,
+        }
+    }
+
+    #[test]
+    fn default_layout_shows_every_column_in_buzz_order() {
+        let layout = TableLayout::default();
+        for col in ColumnId::all() {
+            assert!(layout.is_visible(col));
+        }
+        assert_eq!(layout.visible_in_order(), ColumnId::all().to_vec());
+    }
+
+    #[test]
+    fn toggle_visible_hides_and_reshows_a_hideable_column() {
+        let mut layout = TableLayout::default();
+        assert!(layout.is_visible(ColumnId::Notes));
+        layout.toggle_visible(ColumnId::Notes);
+        assert!(!layout.is_visible(ColumnId::Notes));
+        layout.toggle_visible(ColumnId::Notes);
+        assert!(layout.is_visible(ColumnId::Notes));
+    }
+
+    #[test]
+    fn toggle_visible_is_a_noop_for_file_name() {
+        let mut layout = TableLayout::default();
+        layout.toggle_visible(ColumnId::FileName);
+        assert!(layout.is_visible(ColumnId::FileName));
+    }
+
+    #[test]
+    fn hidden_column_is_excluded_from_visible_in_order_but_others_remain() {
+        let mut layout = TableLayout::default();
+        layout.toggle_visible(ColumnId::Notes);
+        let visible = layout.visible_in_order();
+        assert!(!visible.contains(&ColumnId::Notes));
+        assert_eq!(visible.len(), ColumnId::all().len() - 1);
+    }
+
+    #[test]
+    fn reset_restores_default_order_and_visibility() {
+        let mut layout = TableLayout::default();
+        layout.toggle_visible(ColumnId::Notes);
+        layout.order.swap(0, 1);
+        layout.reset();
+        assert_eq!(layout.order, ColumnId::all().to_vec());
+        assert!(layout.is_visible(ColumnId::Notes));
+    }
+
+    #[test]
+    fn from_gui_settings_round_trips_through_to_gui_settings() {
+        let mut layout = TableLayout::default();
+        layout.toggle_visible(ColumnId::Notes);
+        layout.order.swap(0, 2);
+        let sort = (ColumnId::Status, false);
+
+        let settings = layout.to_gui_settings(sort);
+        let restored = TableLayout::from_gui_settings(&settings);
+        let restored_sort = TableLayout::sort_from_gui_settings(&settings);
+
+        assert_eq!(restored.order, layout.order);
+        assert_eq!(restored.visible, layout.visible);
+        assert_eq!(restored_sort, sort);
+    }
+
+    #[test]
+    fn from_gui_settings_falls_back_to_defaults_when_absent() {
+        let settings = gui_settings(None, None, None, None);
+        let layout = TableLayout::from_gui_settings(&settings);
+        assert_eq!(layout.order, ColumnId::all().to_vec());
+        assert_eq!(layout.visible, ColumnId::all().to_vec());
+        assert_eq!(
+            TableLayout::sort_from_gui_settings(&settings),
+            (ColumnId::DateAdded, true)
+        );
+    }
+
+    #[test]
+    fn from_gui_settings_ignores_unrecognized_column_ids_and_falls_back() {
+        let settings = gui_settings(
+            Some(vec!["not-a-real-column"]),
+            Some(vec!["also-not-real"]),
+            Some("nope"),
+            Some(false),
+        );
+        let layout = TableLayout::from_gui_settings(&settings);
+        // Every entry was unrecognized, so both lists fall back to the
+        // built-in default rather than ending up empty.
+        assert_eq!(layout.order, ColumnId::all().to_vec());
+        assert_eq!(layout.visible, ColumnId::all().to_vec());
+        // An unrecognized sort column falls back to the default column, but
+        // the (independently valid) descending flag is still honored.
+        assert_eq!(
+            TableLayout::sort_from_gui_settings(&settings),
+            (ColumnId::DateAdded, false)
+        );
+    }
+
+    #[test]
+    fn from_gui_settings_always_keeps_file_name_visible() {
+        let settings = gui_settings(
+            Some(vec!["model", "status"]), // file_name deliberately omitted
+            None,
+            None,
+            None,
+        );
+        let layout = TableLayout::from_gui_settings(&settings);
+        assert!(layout.is_visible(ColumnId::FileName));
+    }
+
+    #[test]
+    fn from_gui_settings_appends_a_column_missing_from_a_stale_persisted_order() {
+        // Simulates a settings file written before `Notes` existed.
+        let ids_without_notes: Vec<&str> = ColumnId::all()
+            .into_iter()
+            .filter(|c| *c != ColumnId::Notes)
+            .map(ColumnId::id)
+            .collect();
+        let settings = gui_settings(None, Some(ids_without_notes), None, None);
+        let layout = TableLayout::from_gui_settings(&settings);
+        assert!(layout.order.contains(&ColumnId::Notes));
+        assert_eq!(layout.order.last(), Some(&ColumnId::Notes));
+    }
+
+    #[test]
+    fn header_label_appends_no_arrow_for_a_non_sorted_column() {
+        let label = header_label(ColumnId::Model, (ColumnId::DateAdded, true));
+        assert_eq!(label, ColumnId::Model.label());
+    }
+
+    #[test]
+    fn header_label_appends_descending_arrow() {
+        let label = header_label(ColumnId::DateAdded, (ColumnId::DateAdded, true));
+        assert!(label.ends_with('\u{25bc}'));
+    }
+
+    #[test]
+    fn header_label_appends_ascending_arrow() {
+        let label = header_label(ColumnId::DateAdded, (ColumnId::DateAdded, false));
+        assert!(label.ends_with('\u{25b2}'));
+    }
+
+    #[test]
+    fn plain_click_selects_only_that_row_and_sets_anchor() {
+        let mut vm = TasksVm::default();
+        let mut layout = TableLayout::default();
+        let id = TranscriptionId::new();
+
+        apply_row_click(&mut vm, &mut layout, 3, id, Modifiers::NONE);
+
+        assert_eq!(vm.selection().len(), 1);
+        assert!(vm.selection().contains(&id));
+        assert_eq!(layout.anchor, Some(3));
+    }
+
+    #[test]
+    fn command_click_toggles_without_clearing_other_selection() {
+        let mut vm = TasksVm::default();
+        let mut layout = TableLayout::default();
+        let first = TranscriptionId::new();
+        let second = TranscriptionId::new();
+        vm.select_only(first);
+
+        apply_row_click(&mut vm, &mut layout, 1, second, Modifiers::COMMAND);
+
+        assert!(vm.selection().contains(&first));
+        assert!(vm.selection().contains(&second));
+    }
+}
