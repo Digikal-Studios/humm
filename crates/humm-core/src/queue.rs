@@ -1910,12 +1910,12 @@ mod tests {
         engine_ctrl.wait_entered();
         q.cancel(a);
         engine_ctrl.release();
-        assert!(
-            events_until(&rx, |e| e.task_id == a
-                && matches!(e.kind, TaskEventKind::Canceled))
-            .iter()
-            .any(|e| matches!(e.kind, TaskEventKind::Canceled))
-        );
+        // Wait for A's own Canceled event before proceeding — `events_until`
+        // blocks (or times out) until it sees one, so reaching past this line
+        // is itself the assertion that A actually terminated.
+        events_until(&rx, |e| {
+            e.task_id == a && matches!(e.kind, TaskEventKind::Canceled)
+        });
 
         // Re-canceling an id whose task has already terminated targets
         // nothing (no task is pending or current with this id) — a no-op.
