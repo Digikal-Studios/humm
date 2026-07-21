@@ -13,14 +13,14 @@ Verification method legend:
 | Feature ID | Description | Verification method | Status |
 |---|---|---|---|
 | F-001 | GUI application launch (window, theme, geometry persistence) | gui-manual | not-started |
-| F-002 | CLI `add` (full grammar parity; headless is an approved-pending deviation) | cli-int | not-started |
+| F-002 | CLI `add` (full grammar parity; headless is an approved-pending deviation) | cli-int | in-progress (M1 grammar subset — `-t/-s/-l/-p/-w/--srt/--vtt/--txt/-d` + positionals — implemented and cli-int tested, Task 8; URL import, `-m`, `--hfid`, `-e`, `--openai-token`, `--json` deferred to M2+) |
 | F-003 | Task table (columns, status text, %/ETA, context actions, persistence of layout) | gui-manual | not-started |
 | F-004 | Toolbar & menus with selection-based enablement | gui-manual | not-started |
 | F-005 | Customizable shortcuts (21 actions, defaults, live re-apply) | gui-manual + unit (parser) | not-started |
 | F-006 | Update check & notify (install flow = deviation candidate) | unit (version compare) + gui-manual | not-started |
 | F-007 | Telemetry (parity decision open — Q-1) | n/a until decided | not-started |
 | F-008 | UI localization (15 locales) | unit (catalog load) + gui-manual | not-started |
-| F-009 | File logging | cli-int | not-started |
+| F-009 | File logging | cli-int | verified (cli-int `log_file_written` executed and passed, Task 8) |
 | F-020 | Import files dialog (filters, last-folder) | gui-manual | not-started |
 | F-021 | Drag-and-drop import | gui-manual | not-started |
 | F-022 | Import URL (yt-dlp) & Import Folder (recursive scan) | contract (yt-dlp) + cli-int + gui-manual | not-started |
@@ -29,16 +29,16 @@ Verification method legend:
 | F-025 | Progress & ETA (task, download) | unit + gui-manual | not-started |
 | F-026 | Cancel / restart / rename / notes / delete | unit + gui-manual | not-started |
 | F-027 | Speech extraction (Demucs) — strategy Q-5 | contract + diff | not-started |
-| F-028 | Export on completion (TXT/SRT/VTT, naming template) | snapshot + diff | not-started |
+| F-028 | Export on completion (TXT/SRT/VTT, naming template) | snapshot + diff | implemented (snapshot ✅ — Buzz golden fixtures ported + insta snapshot, Task 3; `diff` half runs with M2's differential harness) |
 | F-029 | Task persistence (SQLite, startup cancel-flip) | unit + cli-int | not-started |
 | F-030 | Folder watch (filters, mirroring, delete/move source) | unit + cli-int | not-started |
 | F-031 | LLM translation during transcription (batching, storage) | unit (mock server) + contract | not-started |
-| F-040 | Local inference backend(s) — whisper-rs consolidation (ADR; Q-2 for HF/MMS) | contract + diff + bench | implemented (whisper-rs adapter + 4 contract tests pass; bench baseline recorded in docs/benchmarks/M1.md; ADR-002 whisper-rs-vs-candle validation recorded in validation/adr-002/ + DECISIONS.md — whisper-rs 1.9× faster, 1.75–2.2× less RSS, more complete; diff pending) |
+| F-040 | Local inference backend(s) — whisper-rs consolidation (ADR; Q-2 for HF/MMS) | contract + diff + bench | implemented (whisper-rs engine, ADR-002 validated M1, ADR-008 consolidation — whisper-rs adapter + 4 contract tests pass; bench baseline recorded in docs/benchmarks/M1.md; ADR-002 whisper-rs-vs-candle validation recorded in validation/adr-002/ + DECISIONS.md — whisper-rs 1.9× faster, 1.75–2.2× less RSS, more complete; diff pending) |
 | F-041 | OpenAI-compatible API backend (chunking >25MB, base URL, key) | contract (mock + real) | not-started |
-| F-042 | Model sizes & custom models (ggml URL, HF repo id, lumii) | unit + contract | not-started |
-| F-043 | Model download & cache (resume, SHA256, sentinels, layout) | unit + contract | not-started |
+| F-042 | Model sizes & custom models (ggml URL, HF repo id, lumii) | unit + contract | in-progress (ggml sizes incl. lumii implemented + unit tested, Task 5; custom-URL/HF-repo id support deferred to M2) |
+| F-043 | Model download & cache (resume, SHA256, sentinels, layout) | unit + contract | in-progress (download/resume/SHA256/sentinel/CoreML zip implemented + unit tested (Task 5) and verified against real huggingface.co network in a contract test (Task 5); `.pt`/HF-hub layouts are N/A per ADR-008 backend consolidation; custom-URL download deferred to M2) |
 | F-044 | Model management UI (download/delete/show location) | gui-manual | not-started |
-| F-045 | Silero VAD on file transcription (offset remap) | contract + diff | implemented (manual VAD via WhisperVadContext + VadRemap; contract test passes — first segment ≥ speech onset on original timeline; diff pending) |
+| F-045 | Silero VAD on file transcription (offset remap) | contract + diff | implemented (manual VAD via WhisperVadContext + VadRemap, incl. VAD remap empirics, Task 6; contract test passes — first segment ≥ speech onset on original timeline; diff vs Buzz pending) |
 | F-060 | Live recording window (device, meter, options) | gui-manual | not-started |
 | F-061 | Real-time transcription loop (chunking, silence cuts, rolling prompt) | unit (chunker) + gui-manual | not-started |
 | F-062 | Display modes incl. append-and-correct merge | unit (merge algorithm) + gui-manual | not-started |

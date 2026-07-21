@@ -1,7 +1,7 @@
 //! End-to-end decode + transcribe benchmark (Task 9: criterion suite + M1
 //! baselines). **This is THE regression-tracked transcription path** —
-//! `docs/design/DECISIONS.md` / `CLAUDE.md` treat a regression here as a
-//! blocking failure, not a note to log.
+//! `CLAUDE.md` treats a regression here as a blocking failure, not a note
+//! to log.
 //!
 //! Decodes Buzz's `whisper-french.mp3` fixture via the real `ffmpeg`
 //! subprocess and transcribes it with a REAL whisper `tiny` model (GPU on)
