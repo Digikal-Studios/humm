@@ -6,6 +6,9 @@ members = [
     "crates/humm-whisper",
     "crates/humm-cli",
 ]
+# The ADR-002 validation benchmark lives under validation/; it is a protocol +
+# scripts, not a cargo project, and must never be pulled into the workspace.
+exclude = ["validation/*"]
 
 [workspace.package]
 edition = "2024"
