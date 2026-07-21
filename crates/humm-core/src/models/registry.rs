@@ -8,6 +8,7 @@
 //! SHA256 semantics (F-043), not the directory shape.
 
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use crate::domain::ModelSize;
 use crate::error::ModelError;
@@ -68,8 +69,12 @@ pub fn ggml_file_name(size: ModelSize) -> String {
 /// The HuggingFace repo id hosting `size`'s whisper.cpp files
 /// (`model_loader.py:499-502`).
 ///
-/// `Custom` has no fixed repo — humm doesn't yet support custom model URLs
-/// (they arrive with M2), so this returns [`ModelError::Unsupported`].
+/// `Custom` has no fixed repo — a custom model is a user-supplied ggml URL,
+/// fetched directly by
+/// [`crate::models::download::ModelDownloader::ensure_custom_model`], never
+/// by repo-and-file-name lookup — so this returns [`ModelError::Unsupported`]
+/// for any caller (`ggml_url`, `coreml_zip_url`, `ensure_ggml`) that tries to
+/// resolve `Custom` through the repo-hosted path instead.
 pub(crate) fn repo_for(size: ModelSize) -> Result<&'static str, ModelError> {
     match size {
         ModelSize::Custom => Err(ModelError::Unsupported {
@@ -78,6 +83,51 @@ pub(crate) fn repo_for(size: ModelSize) -> Result<&'static str, ModelError> {
         ModelSize::Lumii => Ok(LUMII_REPO),
         _ => Ok(WHISPER_CPP_REPO),
     }
+}
+
+/// The cache file name for a user-supplied custom ggml model (`-s custom`,
+/// `model_loader.py:495-497`'s `ggml-model-whisper-custom.bin` equivalent in
+/// humm's flat layout): `"ggml-custom.bin"`.
+///
+/// Deliberately equal to `ggml_file_name(ModelSize::Custom)` — a custom model
+/// occupies the same "custom slot" in the cache whichever name a caller
+/// reaches for, so the two must never drift apart (see the
+/// `custom_model_file_name_matches_ggml_file_name_for_custom_size` test).
+/// [`crate::models::download::ModelDownloader::ensure_custom_model`] uses
+/// this name; there is no fixed upstream repo for a custom model; see
+/// [`repo_for`].
+pub fn custom_model_file_name() -> &'static str {
+    "ggml-custom.bin"
+}
+
+/// The cache file name for a resolved third-party Hugging Face Whisper-family
+/// repo's ggml model (`-m huggingface --hfid <repo>`, approved Q-2 scope):
+/// `"ggml-hf-" + repo, with '/' replaced by '--', + ".bin"`.
+///
+/// Repo ids are namespaced (`owner/name`); replacing the separator keeps the
+/// result a single flat file name in humm's cache (`docs/design/ARCHITECTURE.md`
+/// §5) while staying legible and, in practice, collision-free across distinct
+/// repos (HF repo ids are restricted to `[A-Za-z0-9._-]` segments, so no
+/// other character needs sanitizing).
+pub fn hf_repo_model_file_name(repo: &str) -> String {
+    format!("ggml-hf-{}.bin", repo.replace('/', "--"))
+}
+
+/// Recognizes an `openai/whisper-<name>` repo id whose `<name>` maps to a
+/// known [`ModelSize`] (e.g. `openai/whisper-tiny`, `openai/whisper-large`,
+/// `openai/whisper-large-v3-turbo`) — the canonical OpenAI Whisper repos,
+/// whose ggml equivalents are the ordinary whisper.cpp/lumii sizes this
+/// registry already resolves (approved Q-2 "fetch ggml equivalents"
+/// mechanics).
+///
+/// Only the exact `openai/` prefix is recognized: a third-party mirror or
+/// fork (e.g. `someone-else/whisper-tiny`) is a different repo with no
+/// guaranteed ggml equivalent, and falls through to
+/// [`crate::models::download::ModelDownloader::resolve_hf_repo`]'s generic
+/// repo-file-listing path instead.
+pub fn openai_whisper_model_size(repo: &str) -> Option<ModelSize> {
+    repo.strip_prefix("openai/whisper-")
+        .and_then(|name| ModelSize::from_str(name).ok())
 }
 
 /// The download URL for `size`'s ggml model file at a given `base`
@@ -253,6 +303,72 @@ mod tests {
         let err = ggml_url(ModelSize::Custom).unwrap_err();
         assert!(matches!(err, ModelError::Unsupported { .. }));
         assert!(err.to_string().contains("custom model URLs arrive with M2"));
+    }
+
+    #[test]
+    fn custom_model_file_name_is_ggml_custom_bin() {
+        assert_eq!(custom_model_file_name(), "ggml-custom.bin");
+    }
+
+    #[test]
+    fn custom_model_file_name_matches_ggml_file_name_for_custom_size() {
+        // The two naming paths (the fixed "custom slot" name, and the
+        // generic `ggml_file_name` used by every other `ModelSize`) must
+        // never drift apart, or a caller mixing the two would silently
+        // address two different files.
+        assert_eq!(custom_model_file_name(), ggml_file_name(ModelSize::Custom));
+    }
+
+    #[test]
+    fn hf_repo_model_file_name_replaces_slash_with_double_dash() {
+        assert_eq!(
+            hf_repo_model_file_name("acme/whisper-x"),
+            "ggml-hf-acme--whisper-x.bin"
+        );
+    }
+
+    #[test]
+    fn hf_repo_model_file_name_leaves_non_slash_characters_alone() {
+        assert_eq!(
+            hf_repo_model_file_name("ggerganov/whisper.cpp"),
+            "ggml-hf-ggerganov--whisper.cpp.bin"
+        );
+    }
+
+    #[test]
+    fn openai_whisper_model_size_maps_known_sizes() {
+        assert_eq!(
+            openai_whisper_model_size("openai/whisper-tiny"),
+            Some(ModelSize::Tiny)
+        );
+        assert_eq!(
+            openai_whisper_model_size("openai/whisper-large-v3-turbo"),
+            Some(ModelSize::LargeV3Turbo)
+        );
+    }
+
+    #[test]
+    fn openai_whisper_model_size_maps_bare_large_to_v1() {
+        // Buzz's `WhisperModelSize.LARGE` ("large") is whisper.cpp's
+        // `large-v1` (`ggml_name`); the openai repo id for it is
+        // `openai/whisper-large` (no version suffix).
+        assert_eq!(
+            openai_whisper_model_size("openai/whisper-large"),
+            Some(ModelSize::Large)
+        );
+    }
+
+    #[test]
+    fn openai_whisper_model_size_none_for_unknown_name() {
+        assert_eq!(openai_whisper_model_size("openai/whisper-bogus"), None);
+    }
+
+    #[test]
+    fn openai_whisper_model_size_none_for_non_openai_prefix() {
+        // Only the exact `openai/` prefix triggers the mapping — a
+        // third-party mirror or fork falls through to the generic
+        // repo-file-listing path instead.
+        assert_eq!(openai_whisper_model_size("someone-else/whisper-tiny"), None);
     }
 
     #[test]

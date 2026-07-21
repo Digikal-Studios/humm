@@ -170,6 +170,104 @@ impl ModelDownloader {
         })
     }
 
+    /// Ensures a user-supplied custom ggml model (`-s custom`) is present in
+    /// the cache at [`registry::custom_model_file_name`], downloading or
+    /// resuming from `url` as needed (`model_loader.py:656-675`).
+    ///
+    /// No SHA256 verification: a custom URL is user-supplied, so there is no
+    /// upstream digest to check it against — Buzz doesn't verify custom
+    /// downloads either (`model_loader.py:670-675` calls
+    /// `download_model_to_path` with `expected_sha256=None`). The
+    /// completeness sentinel is still written, so a second call is a
+    /// network-free fast path exactly like every other artifact.
+    pub fn ensure_custom_model(
+        &self,
+        url: &str,
+        progress: &mut dyn FnMut(DownloadProgress),
+        cancel: &CancelToken,
+    ) -> Result<PathBuf, ModelError> {
+        let final_path = self.root.join(registry::custom_model_file_name());
+        self.ensure_artifact(url, &final_path, None, progress, cancel)?;
+        Ok(final_path)
+    }
+
+    /// Resolves a Hugging Face Whisper-family repo id to a local ggml model
+    /// (`-m huggingface --hfid <repo>`, approved Q-2 "fetch ggml
+    /// equivalents" scope — MMS/non-Whisper repos are out of scope).
+    ///
+    /// Two arms:
+    /// 1. `repo` is `openai/whisper-<name>` and `<name>` maps to a known
+    ///    [`ModelSize`] ([`registry::openai_whisper_model_size`]) — these are
+    ///    the canonical OpenAI Whisper repos, whose ggml equivalent is just
+    ///    the ordinary whisper.cpp/lumii size; delegate to
+    ///    [`Self::resolve_model`] verbatim (same CoreML behavior, same cache
+    ///    path, same everything).
+    /// 2. Otherwise, list `repo`'s files via the Hugging Face Hub API
+    ///    (`GET {hf_base}/api/models/{repo}`) and pick the ggml candidate:
+    ///    files matching `ggml-*.bin` are preferred; if none, every `.bin`
+    ///    file is a candidate. Exactly one candidate downloads from
+    ///    `{hf_base}/{repo}/resolve/main/{file}` to
+    ///    [`registry::hf_repo_model_file_name`] via [`Self::ensure_artifact`]
+    ///    with no SHA verification (third-party repos don't expose a
+    ///    per-file digest through this API) and, deliberately, no CoreML
+    ///    encoder (third-party repos don't publish the encoder zip
+    ///    whisper.cpp's own repos do — `coreml_degraded` is always `false`
+    ///    here, not a transport degradation, just "never attempted").
+    ///    Multiple candidates or zero candidates are both `Unsupported`,
+    ///    with an actionable message (constraint 4): multiple lists the
+    ///    candidate names and points at the custom-URL setting
+    ///    (`models.custom_model_url`) to pick one explicitly; zero explains
+    ///    that only ggml-format Whisper repos are supported here (MMS/other
+    ///    non-Whisper repos are the scope cut) and points at both
+    ///    whisper.cpp's conversion docs and the custom-URL setting. A
+    ///    non-2xx or malformed API response is a transport-class failure —
+    ///    [`ModelError::Http`].
+    pub fn resolve_hf_repo(
+        &self,
+        repo: &str,
+        coreml_encoder: bool,
+        progress: &mut dyn FnMut(DownloadProgress),
+        cancel: &CancelToken,
+    ) -> Result<ResolvedModel, ModelError> {
+        if let Some(size) = registry::openai_whisper_model_size(repo) {
+            return self.resolve_model(size, coreml_encoder, progress, cancel);
+        }
+
+        let siblings = self.list_hf_repo_files(repo)?;
+        let candidates = select_ggml_candidates(&siblings);
+
+        match candidates.as_slice() {
+            [] => Err(ModelError::Unsupported {
+                detail: format!(
+                    "Hugging Face repo '{repo}' has no ggml-format model file (no `ggml-*.bin` \
+                     or `*.bin` entries); humm's Hugging Face support only covers ggml-format \
+                     Whisper-family repos — non-Whisper repos (e.g. MMS/wav2vec2) are out of \
+                     scope. Convert the repo to ggml with whisper.cpp's conversion docs \
+                     (https://github.com/ggerganov/whisper.cpp/tree/master/models#conversion) \
+                     and point humm at the result via the custom-model-url setting \
+                     (`models.custom_model_url`)."
+                ),
+            }),
+            [file] => {
+                let final_path = self.root.join(registry::hf_repo_model_file_name(repo));
+                let url = format!("{}/{repo}/resolve/main/{file}", self.hf_base);
+                self.ensure_artifact(&url, &final_path, None, progress, cancel)?;
+                Ok(ResolvedModel {
+                    path: final_path,
+                    coreml_degraded: false,
+                })
+            }
+            multiple => Err(ModelError::Unsupported {
+                detail: format!(
+                    "Hugging Face repo '{repo}' has multiple candidate ggml files ({}); humm \
+                     can't pick one for you — download the one you want yourself and set it via \
+                     the custom-model-url setting (`models.custom_model_url`) instead of `--hfid`.",
+                    multiple.join(", ")
+                ),
+            }),
+        }
+    }
+
     /// Ensures the Silero VAD model is present in the cache (downloading or
     /// resuming as needed). Returns its path.
     pub fn ensure_vad_model(
@@ -520,6 +618,36 @@ impl ModelDownloader {
         Ok(find_sha256(&text, file_name))
     }
 
+    /// `GET {hf_base}/api/models/{repo}` (the Hugging Face Hub repo-info API,
+    /// distinct from the `tree/main` endpoint [`Self::expected_sha256`]
+    /// uses), parsed for every `siblings[].rfilename` — the repo's full file
+    /// listing, used by [`Self::resolve_hf_repo`] to find a ggml candidate.
+    /// A non-2xx status or a response body that doesn't parse as the
+    /// expected JSON shape are both transport-class failures: the caller
+    /// cannot tell "repo doesn't exist" from "API changed shape" from here,
+    /// and either way there is nothing useful to fall back to.
+    fn list_hf_repo_files(&self, repo: &str) -> Result<Vec<String>, ModelError> {
+        let url = hf_repo_api_url(&self.hf_base, repo);
+        let response = self.send_get(&url, None)?;
+        if !response.status().is_success() {
+            return Err(ModelError::Http {
+                detail: format!(
+                    "listing Hugging Face repo '{repo}' files: {url}: HTTP {}",
+                    response.status()
+                ),
+            });
+        }
+        let text = response.text().map_err(|e| ModelError::Http {
+            detail: format!("listing Hugging Face repo '{repo}' files: {url}: {e}"),
+        })?;
+        let info: HfModelInfo = serde_json::from_str(&text).map_err(|e| ModelError::Http {
+            detail: format!(
+                "Hugging Face repo '{repo}' returned a malformed API response ({url}): {e}"
+            ),
+        })?;
+        Ok(info.siblings.into_iter().map(|s| s.rfilename).collect())
+    }
+
     /// Sends a `GET` request, optionally with a `Range` header. Only
     /// transport-level failures become `Err`; the caller inspects
     /// `response.status()` itself (some callers treat 404 specially).
@@ -620,6 +748,35 @@ impl ModelDownloader {
 /// can never drift apart.
 fn tree_api_url(base: &str, repo: &str) -> String {
     format!("{base}/api/models/{repo}/tree/main")
+}
+
+/// The HuggingFace repo-info API URL for `repo` at a given `base` — shared
+/// by [`ModelDownloader::list_hf_repo_files`] and its tests. Distinct from
+/// [`tree_api_url`]: this endpoint returns the whole repo record (including
+/// `siblings[].rfilename`, the full file listing), not per-file digests.
+fn hf_repo_api_url(base: &str, repo: &str) -> String {
+    format!("{base}/api/models/{repo}")
+}
+
+/// Picks the ggml model candidates out of a Hugging Face repo's file listing
+/// (`resolve_hf_repo`'s selection rule, approved Q-2 scope): files matching
+/// `ggml-*.bin` are preferred; if none match, every `.bin` file is a
+/// candidate instead (kept deliberately simple — no further filtering of
+/// non-model `.bin` names). Order is preserved from `files`.
+fn select_ggml_candidates(files: &[String]) -> Vec<String> {
+    let ggml_bin: Vec<String> = files
+        .iter()
+        .filter(|f| f.starts_with("ggml-") && f.ends_with(".bin"))
+        .cloned()
+        .collect();
+    if !ggml_bin.is_empty() {
+        return ggml_bin;
+    }
+    files
+        .iter()
+        .filter(|f| f.ends_with(".bin"))
+        .cloned()
+        .collect()
 }
 
 fn file_name_of(path: &Path) -> String {
@@ -769,6 +926,19 @@ struct HfTreeEntry {
 #[derive(Debug, serde::Deserialize)]
 struct HfLfs {
     oid: String,
+}
+
+/// The shape of a Hugging Face Hub `GET /api/models/{repo}` response that
+/// [`ModelDownloader::list_hf_repo_files`] cares about — just the file
+/// listing, ignoring every other repo-metadata field the real API returns.
+#[derive(Debug, serde::Deserialize)]
+struct HfModelInfo {
+    siblings: Vec<HfSibling>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct HfSibling {
+    rfilename: String,
 }
 
 /// Parses a HuggingFace `tree/main` API JSON array, returning the `lfs.oid`
@@ -1355,5 +1525,292 @@ mod tests {
         let requests = server.requests();
         assert!(requests.iter().any(|r| r.path == ggml_url_path));
         assert!(requests.iter().any(|r| r.path == zip_url_path));
+    }
+
+    // --- Custom models: ggml URL + HF Whisper-family repo id resolution
+    // (M2 Task 8, F-042 full, Q-2). ---
+
+    #[test]
+    fn select_ggml_candidates_prefers_ggml_prefixed_bin_files() {
+        let files = vec![
+            "ggml-model.bin".to_string(),
+            "pytorch_model.bin".to_string(),
+            "README.md".to_string(),
+        ];
+        assert_eq!(select_ggml_candidates(&files), vec!["ggml-model.bin"]);
+    }
+
+    #[test]
+    fn select_ggml_candidates_falls_back_to_any_bin_file() {
+        let files = vec!["pytorch_model.bin".to_string(), "config.json".to_string()];
+        assert_eq!(select_ggml_candidates(&files), vec!["pytorch_model.bin"]);
+    }
+
+    #[test]
+    fn select_ggml_candidates_empty_when_no_bin_files() {
+        let files = vec!["config.json".to_string(), "README.md".to_string()];
+        assert!(select_ggml_candidates(&files).is_empty());
+    }
+
+    #[test]
+    fn select_ggml_candidates_lists_every_ggml_match() {
+        let files = vec![
+            "ggml-a.bin".to_string(),
+            "ggml-b.bin".to_string(),
+            "README.md".to_string(),
+        ];
+        assert_eq!(
+            select_ggml_candidates(&files),
+            vec!["ggml-a.bin".to_string(), "ggml-b.bin".to_string()]
+        );
+    }
+
+    /// `ensure_custom_model` resumes an interrupted download (a `.partial`
+    /// left over from a prior attempt) via `Range`, verifies no SHA is
+    /// requested (no `sha_repo`), writes the sentinel, and a second call is a
+    /// network-free fast path.
+    #[test]
+    fn ensure_custom_model_downloads_resumes_and_fast_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let full_bytes = b"totally-fake-custom-ggml-bytes-for-testing".to_vec();
+
+        let server = TestServer::start();
+        let custom_path = "/someuser/somerepo/resolve/main/custom-model.bin";
+        server.set_route(custom_path, Canned::ok(full_bytes.clone()));
+        let url = format!("{}{custom_path}", server.base_url());
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), server.base_url());
+        let cancel = CancelToken::new();
+
+        // Simulate an interrupted prior attempt: half the bytes already sit
+        // in `.partial`.
+        let final_path = dir.path().join(registry::custom_model_file_name());
+        let partial_path = partial_path_for(&final_path);
+        let half_len = full_bytes.len() / 2;
+        std::fs::write(&partial_path, &full_bytes[..half_len]).expect("seed partial");
+
+        let mut updates = Vec::new();
+        let resumed_path = downloader
+            .ensure_custom_model(&url, &mut |p| updates.push(p), &cancel)
+            .expect("ensure_custom_model should resume and complete");
+
+        assert_eq!(resumed_path, final_path);
+        assert_eq!(std::fs::read(&resumed_path).unwrap(), full_bytes);
+        assert!(sentinel_path_for(&final_path).is_file());
+        assert!(!updates.is_empty());
+
+        let requests = server.requests();
+        assert_eq!(
+            requests.len(),
+            1,
+            "exactly one GET for the resume: {requests:?}"
+        );
+        assert_eq!(
+            requests[0].range.as_deref(),
+            Some(format!("bytes={half_len}-")).as_deref()
+        );
+
+        // Fast path: sentinel + file present -> zero further requests.
+        let second = downloader
+            .ensure_custom_model(&url, &mut |_| {}, &cancel)
+            .expect("second call should hit the fast path");
+        assert_eq!(second, final_path);
+        assert_eq!(
+            server.requests().len(),
+            1,
+            "fast path must not touch the network"
+        );
+    }
+
+    /// `openai/whisper-tiny` maps to `ModelSize::Tiny` and delegates to
+    /// `resolve_model`, fetching the standard whisper.cpp ggml (proving the
+    /// Q-2 "ggml equivalents" mapping works, not a third-party repo fetch).
+    #[test]
+    fn resolve_hf_repo_openai_prefix_delegates_to_resolve_model() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let size = ModelSize::Tiny;
+        let ggml_bytes = b"fake tiny ggml bytes".to_vec();
+
+        let server = TestServer::start();
+        let base = server.base_url();
+        let ggml_url_path = path_of(&registry::ggml_url_with_base(&base, size).unwrap());
+        server.set_route(ggml_url_path.clone(), Canned::ok(ggml_bytes.clone()));
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), base);
+        let cancel = CancelToken::new();
+        let resolved = downloader
+            .resolve_hf_repo("openai/whisper-tiny", false, &mut |_| {}, &cancel)
+            .expect("openai/whisper-tiny should resolve via the ggml equivalent");
+
+        assert_eq!(resolved.path, dir.path().join(ggml_file_name(size)));
+        assert!(!resolved.coreml_degraded);
+        assert!(
+            server.requests().iter().any(|r| r.path == ggml_url_path),
+            "expected a GET for ggml-tiny.bin at the whisper.cpp repo path: {:?}",
+            server.requests()
+        );
+    }
+
+    /// A third-party repo whose file listing has exactly one ggml candidate
+    /// downloads it to `ggml-hf-<repo>.bin`, with no SHA verification and no
+    /// CoreML attempt (even though `coreml_encoder` is requested).
+    #[test]
+    fn resolve_hf_repo_single_candidate_downloads_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = "acme/whisper-x";
+        let server = TestServer::start();
+        let base = server.base_url();
+
+        let api_path = format!("/api/models/{repo}");
+        server.set_route(
+            api_path.clone(),
+            Canned::ok(
+                br#"{"siblings":[{"rfilename":"ggml-model.bin"},{"rfilename":"README.md"}]}"#
+                    .to_vec(),
+            ),
+        );
+
+        let model_bytes = b"fake third-party ggml bytes".to_vec();
+        let resolve_path = format!("/{repo}/resolve/main/ggml-model.bin");
+        server.set_route(resolve_path.clone(), Canned::ok(model_bytes.clone()));
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), base);
+        let cancel = CancelToken::new();
+        let resolved = downloader
+            .resolve_hf_repo(repo, true, &mut |_| {}, &cancel)
+            .expect("single candidate should download");
+
+        let expected_path = dir.path().join(registry::hf_repo_model_file_name(repo));
+        assert_eq!(resolved.path, expected_path);
+        assert!(
+            !resolved.coreml_degraded,
+            "third-party repos never get CoreML, even when requested"
+        );
+        assert_eq!(std::fs::read(&resolved.path).unwrap(), model_bytes);
+        assert!(sentinel_path_for(&resolved.path).is_file());
+
+        let requests = server.requests();
+        assert!(requests.iter().any(|r| r.path == api_path));
+        assert!(requests.iter().any(|r| r.path == resolve_path));
+        assert_eq!(
+            requests.len(),
+            2,
+            "no CoreML zip request should ever be attempted for a third-party repo: {requests:?}"
+        );
+    }
+
+    /// Two `.bin` candidates: `Unsupported`, naming both files and pointing
+    /// at the custom-URL mechanism to pick one explicitly.
+    #[test]
+    fn resolve_hf_repo_multiple_candidates_lists_them_in_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = "acme/multi";
+        let server = TestServer::start();
+        let base = server.base_url();
+        server.set_route(
+            format!("/api/models/{repo}"),
+            Canned::ok(
+                br#"{"siblings":[{"rfilename":"ggml-a.bin"},{"rfilename":"ggml-b.bin"}]}"#.to_vec(),
+            ),
+        );
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), base);
+        let cancel = CancelToken::new();
+        let err = downloader
+            .resolve_hf_repo(repo, false, &mut |_| {}, &cancel)
+            .expect_err("multiple candidates must not auto-pick one");
+
+        let ModelError::Unsupported { detail } = err else {
+            panic!("expected Unsupported, got {err:?}");
+        };
+        assert!(detail.contains("ggml-a.bin"), "{detail}");
+        assert!(detail.contains("ggml-b.bin"), "{detail}");
+        assert!(
+            detail.contains("custom_model_url") || detail.contains("custom-model-url"),
+            "should point at the custom-URL mechanism: {detail}"
+        );
+    }
+
+    /// Zero `.bin` candidates: `Unsupported`, explaining the ggml-only /
+    /// MMS-out-of-scope cut and pointing at conversion docs + the custom-URL
+    /// mechanism.
+    #[test]
+    fn resolve_hf_repo_zero_candidates_explains_scope_cut() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = "facebook/mms-1b-all";
+        let server = TestServer::start();
+        let base = server.base_url();
+        server.set_route(
+            format!("/api/models/{repo}"),
+            Canned::ok(
+                br#"{"siblings":[{"rfilename":"config.json"},{"rfilename":"model.safetensors"}]}"#
+                    .to_vec(),
+            ),
+        );
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), base);
+        let cancel = CancelToken::new();
+        let err = downloader
+            .resolve_hf_repo(repo, false, &mut |_| {}, &cancel)
+            .expect_err("no ggml/.bin files means no whisper.cpp-compatible model");
+
+        let ModelError::Unsupported { detail } = err else {
+            panic!("expected Unsupported, got {err:?}");
+        };
+        assert!(detail.contains("ggml"), "{detail}");
+        assert!(
+            detail.contains("MMS") || detail.contains("non-Whisper"),
+            "should say MMS/non-Whisper repos are out of scope: {detail}"
+        );
+        assert!(
+            detail.contains("whisper.cpp") && detail.contains("conversion"),
+            "should point at whisper.cpp's conversion docs: {detail}"
+        );
+        assert!(
+            detail.contains("custom_model_url") || detail.contains("custom-model-url"),
+            "should point at the custom-URL mechanism: {detail}"
+        );
+    }
+
+    /// A non-2xx response from the repo-listing API is a transport-class
+    /// failure.
+    #[test]
+    fn resolve_hf_repo_api_404_is_http_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = "does/not-exist";
+        let server = TestServer::start();
+        let base = server.base_url();
+        server.set_route(format!("/api/models/{repo}"), Canned::status(404));
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), base);
+        let cancel = CancelToken::new();
+        let err = downloader
+            .resolve_hf_repo(repo, false, &mut |_| {}, &cancel)
+            .expect_err("404 should be a transport-class failure");
+        assert!(matches!(err, ModelError::Http { .. }));
+    }
+
+    /// A malformed API response body (not the expected JSON shape) is also a
+    /// transport-class failure, naming the repo.
+    #[test]
+    fn resolve_hf_repo_malformed_api_json_is_http_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = "acme/broken";
+        let server = TestServer::start();
+        let base = server.base_url();
+        server.set_route(
+            format!("/api/models/{repo}"),
+            Canned::ok(b"not json".to_vec()),
+        );
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), base);
+        let cancel = CancelToken::new();
+        let err = downloader
+            .resolve_hf_repo(repo, false, &mut |_| {}, &cancel)
+            .expect_err("malformed API response should be a transport-class failure");
+        let ModelError::Http { detail } = err else {
+            panic!("expected Http, got {err:?}");
+        };
+        assert!(detail.contains(repo), "{detail}");
     }
 }
