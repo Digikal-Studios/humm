@@ -143,8 +143,21 @@ own store once (idempotent; failures are non-fatal). Stale `in_progress`/
 `queued` rows (Buzz's or humm's) are then flipped to `canceled` at every
 startup so a crashed run leaves no phantom "running" task.
 
-Running two `humm add` invocations concurrently is unsupported: the second
-process's startup stale-recovery scan can transiently flip the first
-process's still-genuinely-running `in_progress` row to `canceled` before it
-finishes; single-instance handling (so a second launch can't race the first
-this way) arrives with the GUI.
+Running two `humm add` invocations concurrently is now supported (ADR-017): at
+startup, every humm process takes a non-blocking exclusive claim on
+`data_dir/instance.lock`. Whichever process wins that claim is provably the
+sole live humm process, so only *it* runs the stale-flip; it then downgrades
+to a shared claim (held for the rest of its run) so later `humm add`
+invocations can start and proceed concurrently. A process that loses the
+exclusive claim (another humm process is already alive) skips the flip
+entirely and takes a shared claim instead — it never treats another process's
+genuinely-running `in_progress` row as stale. A lock-file I/O failure (e.g. an
+unwritable `data_dir`) falls back to the old unconditional flip rather than
+failing the run.
+
+A second, independent lock file (`data_dir/gui.lock`) exists for GUI
+exclusivity — an exclusive claim on it that is never downgraded, so a second
+GUI launch's attempt fails. This commit ships the acquire function
+(`humm_core::instance::acquire_gui_lock`); the GUI wiring itself (detecting
+the failed claim and showing "humm is already running" before exiting 0)
+lands with the GUI single-instance task later in M3.

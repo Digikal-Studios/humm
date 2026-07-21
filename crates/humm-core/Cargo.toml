@@ -19,6 +19,7 @@ uuid.workspace = true
 url.workspace = true
 toml.workspace = true
 flume.workspace = true
+fd-lock.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true

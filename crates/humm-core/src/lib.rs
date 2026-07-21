@@ -9,6 +9,7 @@ pub mod cancel;
 pub mod domain;
 pub mod error;
 pub mod export;
+pub mod instance;
 pub mod language;
 pub mod models;
 pub mod paths;

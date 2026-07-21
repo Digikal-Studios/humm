@@ -6,9 +6,12 @@
 //! *before* any task is queued — `cli.py:219-221`):
 //! 1. Grammar/usage validation (Task 10) + language parse.
 //! 2. Load [`Settings`] (`paths::settings_path()`).
-//! 3. Open [`SqliteStore`]; first-run Buzz import (non-fatal), then
-//!    `cancel_stale_tasks()` (a crashed/killed prior run leaves stale
-//!    `queued`/`in_progress` rows — F-029).
+//! 3. Open [`SqliteStore`]; first-run Buzz import (non-fatal), then acquire
+//!    the single-instance lock (ADR-017) and run `cancel_stale_tasks()` only
+//!    if it reports this process as the sole live instance (a crashed/killed
+//!    prior run leaves stale `queued`/`in_progress` rows — F-029; but a
+//!    *second, still-running* humm process must never have its live row
+//!    flipped by this one — `docs/HUMM_SURFACE.md` §7).
 //! 4. Resolve the model synchronously, streaming download progress.
 //! 5. Ensure the VAD model (F-045): use the cached copy if present, else fetch
 //!    it once. Buzz ships `ggml-silero-v6.2.0.bin` next to whisper-cli at build
@@ -42,6 +45,7 @@ use humm_core::domain::{
     TaskSpec, TranscriptionId, TranscriptionOptions,
 };
 use humm_core::error::CoreError;
+use humm_core::instance::{self, InstanceGuard};
 use humm_core::language::Language;
 use humm_core::models::download::{DownloadProgress, ModelDownloader};
 use humm_core::models::registry::local_vad_model_path;
@@ -131,10 +135,23 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
     };
 
     import_buzz_history(&store);
-    match store.cancel_stale_tasks() {
-        Ok(0) => {}
-        Ok(n) => log::info!("recovered {n} stale task(s) from a prior run as canceled"),
-        Err(err) => log::warn!("cancel_stale_tasks failed (continuing): {err}"),
+
+    // Single-instance stale-flip gate (ADR-017, `docs/HUMM_SURFACE.md` §7):
+    // only a process that wins the exclusive claim is provably the sole live
+    // humm process, so only it may treat every `in_progress`/`queued` row as
+    // stale — otherwise this run could cancel a second, still-running
+    // process's genuine work. `_instance` is bound (deliberately not
+    // `let _ = ..`, which would drop the guard immediately) and lives until
+    // `execute` returns, holding the claim for this run's whole lifetime.
+    let (_instance, should_flip_stale_tasks) = acquire_instance_lock_or_fallback();
+    if should_flip_stale_tasks {
+        match store.cancel_stale_tasks() {
+            Ok(0) => {}
+            Ok(n) => log::info!("recovered {n} stale task(s) from a prior run as canceled"),
+            Err(err) => log::warn!("cancel_stale_tasks failed (continuing): {err}"),
+        }
+    } else {
+        log::info!("another humm process is running — skipping stale-task recovery");
     }
 
     let model_root = paths::model_root();
@@ -245,6 +262,32 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
     }
 
     exit
+}
+
+/// Acquires the single-instance lock (ADR-017) at `paths::data_dir()` and
+/// reports whether the stale-task flip should run this time. Returns the held
+/// [`InstanceGuard`] (`None` only on the I/O-error fallback below, where no
+/// claim was taken) alongside that decision.
+///
+/// Callers must bind the guard with `let _instance = ..` — never `let _ =
+/// ..`, which drops a temporary immediately rather than holding it — and keep
+/// that binding alive for the rest of the run, so the claim is held until
+/// this process exits (`execute`'s local scope does this naturally).
+///
+/// A lock-file I/O error (unwritable `data_dir`, permissions) is logged and
+/// treated as "flip anyway": a lock failure must never brick the CLI, so this
+/// falls back to exactly today's pre-ADR-017 unconditional behavior.
+fn acquire_instance_lock_or_fallback() -> (Option<InstanceGuard>, bool) {
+    match instance::acquire_instance_lock(&paths::data_dir()) {
+        Ok(lock) => (Some(lock.guard), lock.sole_instance),
+        Err(err) => {
+            log::warn!(
+                "could not acquire the single-instance lock ({err}); falling back to \
+                 unconditional stale-task recovery"
+            );
+            (None, true)
+        }
+    }
 }
 
 /// Runs the one-time Buzz import when a Buzz database is present and the import
