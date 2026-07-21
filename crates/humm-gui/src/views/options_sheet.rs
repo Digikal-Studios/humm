@@ -247,7 +247,12 @@ pub fn build_specs(
 /// `settings.models.custom_model_url.is_some()`). `Lumii` is never listed
 /// (en-locale-only per the binding decision — Buzz itself gates it to the
 /// `lv_LV` UI locale, which this milestone never is).
-fn selectable_model_sizes(custom_available: bool) -> Vec<ModelSize> {
+///
+/// `pub(crate)`: also used by [`crate::models_ui::refresh`] (Preferences →
+/// Models, F-044) — the same fixed size set applies there, since it's the
+/// same Buzz gate (Custom row only when configured, Lumii never), just
+/// listing on-disk state rather than a picker.
+pub(crate) fn selectable_model_sizes(custom_available: bool) -> Vec<ModelSize> {
     let mut sizes = vec![
         ModelSize::Tiny,
         ModelSize::TinyEn,
@@ -273,7 +278,11 @@ fn selectable_model_sizes(custom_available: bool) -> Vec<ModelSize> {
 /// alphanumeric run starts with an uppercase letter, continuing lowercase;
 /// any other character (`.`, `-`) is left as-is and starts a new run, e.g.
 /// `"large-v3-turbo"` → `"Large-V3-Turbo"`.
-fn title_case(s: &str) -> String {
+///
+/// `pub(crate)`: also used by [`crate::models_ui`] for the Preferences
+/// window's Models tab, which wants the identical Buzz-parity display
+/// convention for the same [`ModelSize`] values.
+pub(crate) fn title_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut capitalize_next = true;
     for ch in s.chars() {

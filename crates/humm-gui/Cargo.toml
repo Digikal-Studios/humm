@@ -28,6 +28,7 @@ thiserror = { workspace = true }
 open = { workspace = true }
 regex = { workspace = true }
 url = { workspace = true }
+uuid.workspace = true
 
 [dev-dependencies]
 egui_kittest = { workspace = true }

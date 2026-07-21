@@ -6,9 +6,14 @@
 //! Launch order (design spec §3.1): parse argv as a pending import → acquire
 //! the GUI single-instance lock (second launch → native dialog + exit) →
 //! acquire the instance lock (decides the stale-task-flip, applied inside
-//! `services::init`) → build [`Services`] → `eframe::run_native`. Any
-//! failure up to and including `services::init` renders a minimal error app
-//! with the actionable cause and a Quit button — never a panic.
+//! `services::init`) → build [`Services`] (which also spawns the background
+//! update check, F-006, when one is due — `services::init`'s own doc
+//! comment) → `eframe::run_native`. The one-per-launch telemetry event
+//! (F-007, ADR-009) deliberately isn't fired here either — `HummApp` fires
+//! it from its first `eframe::App::ui` frame instead, off this function's
+//! own critical path (see `services::fire_launch_telemetry`'s doc comment).
+//! Any failure up to and including `services::init` renders a minimal error
+//! app with the actionable cause and a Quit button — never a panic.
 
 use std::path::PathBuf;
 

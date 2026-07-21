@@ -16,23 +16,27 @@ use humm_core::settings::{FileTranscriberSettings, GuiSettings};
 use crate::events::{self, SharedEventQueue};
 use crate::i18n::tr;
 use crate::import::{FileDialogs, ImportRequest, RfdFileDialogs, scan_folder};
-use crate::services::Services;
+use crate::services::{self, Services, UpdateNotice};
 use crate::shortcuts::ShortcutMap;
 use crate::viewmodel::{TableAction, TasksVm};
 use crate::views;
+use crate::views::about::{self, AboutCheckResult, AboutState};
 use crate::views::main_window::{ActionState, PendingImportRequest, toolbar_enablement};
 use crate::views::options_sheet::{OptionsSheet, SheetOutcome, SheetState};
+use crate::views::preferences::{self, PreferencesState};
 use crate::views::rename_notes::{self, DialogOutcome};
 use crate::views::task_table::TableLayout;
 use crate::views::toasts::{ToastAction, ToastKind};
+use crate::views::update_notice::UpdateNoticeState;
 use crate::views::url_dialog::UrlDialog;
 
+/// The version string every version-facing view (the update dialog's
+/// "Current version: …", the About window's "Version …") shows — the crate's
+/// own `Cargo.toml` version at build time, the same value `services.rs`
+/// feeds [`humm_core::update::check_for_update`] as `current_version`.
+const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// The eframe application.
-///
-/// `capabilities`/`model_root`/`update_rx` aren't read yet: URL-import
-/// gating, model resolution, and the update-check banner are later M3 tasks.
-/// They're already threaded through `services` because every later M3 task
-/// builds on this same `HummApp`.
 pub struct HummApp {
     services: Services,
     /// Shared buffer the event-pump thread feeds. `None` until the pump is
@@ -81,6 +85,24 @@ pub struct HummApp {
     /// `eframe::App::ui` call, then cleared so it never re-triggers. Empty
     /// (the common case) is a permanent no-op.
     pending_argv_import: Vec<PathBuf>,
+    /// Whether [`services::fire_launch_telemetry`] has already run this
+    /// launch — set on the very first `eframe::App::ui` call so the one
+    /// `app_launched` event fires exactly once (F-007, ADR-009), never
+    /// again after.
+    telemetry_fired: bool,
+    /// Whether the About window (a real OS viewport,
+    /// [`Self::show_about_viewport`]) is currently open.
+    about_open: bool,
+    /// The About window's own state (manual-check in-flight flag + last
+    /// result) — persists across the window closing/reopening within one
+    /// launch, same as Buzz's dialog would if kept alive.
+    about_state: AboutState,
+    /// Whether the Preferences window (a real OS viewport,
+    /// [`Self::show_preferences_viewport`]) is currently open.
+    preferences_open: bool,
+    /// The Preferences window's state, rebuilt fresh (Models tab re-scanned
+    /// from disk) each time it's opened; `None` while closed.
+    preferences_state: Option<PreferencesState>,
 }
 
 impl HummApp {
@@ -127,12 +149,15 @@ impl HummApp {
         event_queue: Option<SharedEventQueue>,
         pending_argv_import: Vec<PathBuf>,
     ) -> Self {
-        let gui_settings = {
+        let (gui_settings, stored_available_version) = {
             let settings = services
                 .settings
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            settings.gui.clone()
+            (
+                settings.gui.clone(),
+                settings.updates.available_version.clone(),
+            )
         };
 
         let mut tasks = TasksVm::load(&services.store);
@@ -147,6 +172,29 @@ impl HummApp {
         // Buzz default (`ShortcutMap::from_settings`'s own contract).
         let shortcuts = ShortcutMap::from_settings(&HashMap::new());
 
+        // Chip persistence across sessions (binding decision, Buzz-equivalent):
+        // a stale-but-still-newer `available_version` from a previous
+        // session's check shows the chip immediately, before this session's
+        // own check (if any) has even run. Only the version string survives
+        // a restart — release notes/download URLs aren't persisted, so the
+        // dialog shows an empty notes section until a fresh check backfills
+        // them.
+        let update_notice = if services::chip_visible_on_startup(
+            CURRENT_VERSION,
+            stored_available_version.as_deref(),
+        ) {
+            UpdateNoticeState {
+                info: Some(humm_core::update::UpdateInfo {
+                    version: stored_available_version.unwrap_or_default(),
+                    release_notes: String::new(),
+                    download_urls: Vec::new(),
+                }),
+                dialog_open: false,
+            }
+        } else {
+            UpdateNoticeState::default()
+        };
+
         HummApp {
             services,
             event_queue,
@@ -155,9 +203,17 @@ impl HummApp {
             last_saved_gui_settings,
             pending_table_actions: Vec::new(),
             shortcuts,
-            action_state: ActionState::default(),
+            action_state: ActionState {
+                update_notice,
+                ..ActionState::default()
+            },
             dialogs: Box::new(RfdFileDialogs),
             pending_argv_import,
+            telemetry_fired: false,
+            about_open: false,
+            about_state: AboutState::default(),
+            preferences_open: false,
+            preferences_state: None,
         }
     }
 
@@ -218,12 +274,19 @@ impl HummApp {
     /// Whether `settings.models.custom_model_url` is set — gates the
     /// options sheet's model-size combo's "Custom" entry (F-023).
     fn custom_model_available(&self) -> bool {
+        self.custom_model_url().is_some()
+    }
+
+    /// The current `settings.models.custom_model_url` value — the Models
+    /// tab's own custom-URL row gate (F-044) needs the value itself, not
+    /// just [`Self::custom_model_available`]'s boolean.
+    fn custom_model_url(&self) -> Option<String> {
         let settings = self
             .services
             .settings
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        settings.models.custom_model_url.is_some()
+        settings.models.custom_model_url.clone()
     }
 
     /// Opens the options sheet for `request`, prefilled from the current
@@ -653,6 +716,166 @@ impl HummApp {
             .toasts
             .push(ToastKind::Error, message, now);
     }
+
+    /// Fires the one-per-launch telemetry event (F-007, ADR-009) on the
+    /// first call only — every later call is a no-op. See
+    /// [`services::fire_launch_telemetry`]'s doc comment for why this lives
+    /// on the first UI frame rather than in `services::init`.
+    fn fire_telemetry_once(&mut self) {
+        if self.telemetry_fired {
+            return;
+        }
+        self.telemetry_fired = true;
+        services::fire_launch_telemetry(&self.services);
+    }
+
+    /// Drains `services.update_rx` and applies every [`UpdateNotice`] this
+    /// frame: `Available` always updates the toolbar chip (whichever check
+    /// — startup or the About window's manual one — found it); `UpToDate`
+    /// always clears the chip (binding decision: "clear when a check says
+    /// up-to-date"), regardless of source. Which UI surfaces which notice
+    /// beyond that is decided by `self.about_state.checking`: while a manual
+    /// check is in flight, this frame's notice *is* that check's result
+    /// (`about_state.checking` is cleared here and the About window's inline
+    /// label/the update dialog reflects it); otherwise it's the startup
+    /// check's own (silent, log-only) result.
+    ///
+    /// Simplification (documented): if a startup check and a manual check
+    /// somehow overlap in the same frame window, this can't tell their
+    /// notices apart and may attribute one to the other. Both come from
+    /// `run_update_check`'s exact same shape either way, and the startup
+    /// check only ever fires once, very early in the process's life, so in
+    /// practice the two paths don't actually race within a session.
+    fn drain_update_notices(&mut self) {
+        for notice in self.services.update_rx.try_iter().collect::<Vec<_>>() {
+            let awaiting_manual = self.about_state.checking;
+            match notice {
+                UpdateNotice::Available(info) => {
+                    self.action_state.update_notice.info = Some(info);
+                    if awaiting_manual {
+                        self.about_state.checking = false;
+                        self.about_state.result = None;
+                        self.action_state.update_notice.dialog_open = true;
+                    }
+                }
+                UpdateNotice::UpToDate => {
+                    self.action_state.update_notice.info = None;
+                    if awaiting_manual {
+                        self.about_state.checking = false;
+                        self.about_state.result = Some(AboutCheckResult::UpToDate);
+                    } else {
+                        log::debug!("startup update check: already up to date");
+                    }
+                }
+                UpdateNotice::CheckFailed(detail) => {
+                    if awaiting_manual {
+                        self.about_state.checking = false;
+                        self.about_state.result = Some(AboutCheckResult::Failed(detail));
+                    } else {
+                        log::debug!("startup update check failed: {detail}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Spawns the About window's manual "Check for updates" — bypasses
+    /// every startup gate (the ≤7-day cadence, the Privacy toggle, and the
+    /// `HUMM_DISABLE_UPDATE_CHECK` env var: binding decision, an explicit
+    /// user click), but funnels through the exact same
+    /// [`services::run_update_check`] the startup path uses, onto the same
+    /// [`Services::update_tx`] channel.
+    fn spawn_manual_update_check(&self) {
+        let settings = Arc::clone(&self.services.settings);
+        let settings_path = self.services.settings_path.clone();
+        let tx = self.services.update_tx.clone();
+        std::thread::spawn(move || {
+            services::run_update_check(
+                &settings,
+                &settings_path,
+                &tx,
+                humm_core::update::VERSION_INFO_URL,
+                CURRENT_VERSION,
+            );
+        });
+    }
+
+    /// Opens/keeps open the About window (Help → "About humm") as a real OS
+    /// viewport — an *immediate* viewport (see `views::about`'s module doc
+    /// for the immediate-vs-deferred tradeoff). [`about::ui`] itself is the
+    /// plain, kittest-drivable function; this wrapper is the (manually
+    /// verified — no display in this sandboxed environment)
+    /// viewport-plumbing part.
+    fn show_about_viewport(&mut self, ctx: &egui::Context) {
+        let about_state = &self.about_state;
+        let mut action = about::AboutAction::default();
+        let mut close_requested = false;
+
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("humm-about-viewport"),
+            egui::ViewportBuilder::default()
+                .with_title(tr("about-app-name"))
+                .with_inner_size([380.0, 240.0])
+                .with_resizable(false),
+            |ui, _class| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    action = about::ui(ui, CURRENT_VERSION, about_state);
+                });
+                if ui.ctx().input(|input| input.viewport().close_requested()) {
+                    close_requested = true;
+                }
+            },
+        );
+
+        if action.check_clicked && !self.about_state.checking {
+            self.about_state.checking = true;
+            self.about_state.result = None;
+            self.spawn_manual_update_check();
+        }
+        if action.show_logs_clicked
+            && let Err(err) = open::that(humm_core::paths::log_dir())
+        {
+            log::warn!("could not open the log folder: {err}");
+        }
+        if action.close_clicked || close_requested {
+            self.about_open = false;
+        }
+    }
+
+    /// Opens/keeps open the Preferences window (⌘,/Help → "Preferences…")
+    /// as a real OS viewport, min 650×500 (binding decision). Same
+    /// immediate-viewport shape as [`Self::show_about_viewport`]; see
+    /// `views::preferences`'s module doc for the tradeoff this implies.
+    fn show_preferences_viewport(&mut self, ctx: &egui::Context) {
+        let Some(state) = &mut self.preferences_state else {
+            return;
+        };
+        let settings = &self.services.settings;
+        let settings_path = &self.services.settings_path;
+        let model_root = &self.services.model_root;
+        let mut close_requested = false;
+
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("humm-preferences-viewport"),
+            egui::ViewportBuilder::default()
+                .with_title(tr("prefs-title"))
+                .with_inner_size([650.0, 500.0])
+                .with_min_inner_size([650.0, 500.0]),
+            |ui, _class| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    preferences::ui(ui, state, model_root, settings, settings_path);
+                });
+                if ui.ctx().input(|input| input.viewport().close_requested()) {
+                    close_requested = true;
+                }
+            },
+        );
+
+        if close_requested {
+            self.preferences_open = false;
+            self.preferences_state = None;
+        }
+    }
 }
 
 /// Buzz's Restart gate (`transcription_tasks_table_widget.py:696-725`):
@@ -677,7 +900,9 @@ impl eframe::App for HummApp {
             ));
         }
 
+        self.fire_telemetry_once();
         self.drain_pending_argv_import();
+        self.drain_update_notices();
 
         let now = Instant::now();
         if let Some(event_queue) = &self.event_queue {
@@ -700,6 +925,7 @@ impl eframe::App for HummApp {
             now,
             custom_model_available,
             yt_dlp_available,
+            CURRENT_VERSION,
         );
 
         if let Some(outcome) = result.dialog_outcome {
@@ -721,6 +947,35 @@ impl eframe::App for HummApp {
         self.drain_table_actions(now);
         self.drain_pending_import();
         self.drain_dropped_files(ui.ctx());
+
+        // Multi-window flows (Task 8's `about_requested`/`preferences_requested`
+        // stubs, wired here): a click this frame opens the corresponding real
+        // OS viewport; the flag itself is one-shot (reset immediately) so it
+        // never re-triggers on a later frame while the window stays open.
+        if self.action_state.about_requested {
+            self.action_state.about_requested = false;
+            self.about_open = true;
+        }
+        if self.action_state.preferences_requested {
+            self.action_state.preferences_requested = false;
+            // Only (re)builds state on an actual open — re-triggering ⌘,/the
+            // menu item while the window is already open must not clobber
+            // live state (an in-flight download's `Downloading` row, a
+            // half-typed custom URL, an open delete-confirm modal).
+            if !self.preferences_open {
+                self.preferences_state = Some(PreferencesState::new(
+                    &self.services.model_root,
+                    self.custom_model_url().as_deref(),
+                ));
+            }
+            self.preferences_open = true;
+        }
+        if self.about_open {
+            self.show_about_viewport(ui.ctx());
+        }
+        if self.preferences_open {
+            self.show_preferences_viewport(ui.ctx());
+        }
 
         self.persist_layout_if_changed();
     }

@@ -3,11 +3,13 @@
 //!
 //! [`init`] mirrors `humm-cli`'s startup order
 //! (`crates/humm-cli/src/run.rs::execute`): settings → store → one-time Buzz
-//! import → instance-lock-gated stale-task flip → queue spawn. The GUI
-//! additionally probes `ffmpeg`/`ffprobe`/`yt-dlp` availability
+//! import → instance-lock-gated stale-task flip → queue spawn → (if due) the
+//! background update check (F-006, ADR-015, [`maybe_spawn_startup_update_check`]).
+//! The GUI additionally probes `ffmpeg`/`ffprobe`/`yt-dlp` availability
 //! ([`Capabilities`]) so later tasks can gate URL-import UI with a tooltip
-//! (Policy rule 6), and stubs the update-check notice channel
-//! ([`Services::update_rx`]) for Task 11 to fill in.
+//! (Policy rule 6). The one-per-launch telemetry event (F-007, ADR-009) is
+//! deliberately *not* fired from here — see [`fire_launch_telemetry`]'s doc
+//! comment for why.
 //!
 //! Unlike the CLI, the GUI never resolves a model before enqueueing — model
 //! acquisition happens *inside* the task run instead, via
@@ -16,8 +18,10 @@
 //! itself is built by [`crate::engine_factory::GuiEngineFactory`] from
 //! whatever path that ensurer just resolved.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+use chrono::NaiveDateTime;
 
 use humm_core::boundary::{MediaFetcher, TaskStore};
 use humm_core::env::{threads_from_env, use_gpu_from_env};
@@ -28,6 +32,8 @@ use humm_core::queue::{
     ArtifactEnsurer, EngineFactory, QueueHandle, RunnerDeps, TaskEvent, spawn_task_runner,
 };
 use humm_core::settings::{Settings, SettingsError};
+use humm_core::telemetry::{Event, NoopTelemetry, PostHogTelemetry, Telemetry, telemetry_enabled};
+use humm_core::update::{self, UpdateInfo};
 use humm_media::{FfmpegDecoder, FfprobeProber, MediaCapabilities, YtDlpFetcher, probe_binaries};
 use humm_store::SqliteStore;
 
@@ -59,13 +65,26 @@ impl From<&MediaCapabilities> for Capabilities {
     }
 }
 
-/// A pending update notice from the background update-check thread (Task
-/// 11 wires the sender; this channel exists now so [`Services`] and
-/// `HummApp` already have somewhere to receive it from).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UpdateNotice {
-    /// The newer version string the update check reported.
-    pub version: String,
+/// The outcome of one update check (startup or manual — both funnel through
+/// [`run_update_check`]), sent to `HummApp` over [`Services::update_rx`].
+///
+/// A startup check that finds nothing new (`UpToDate`) or fails
+/// (`CheckFailed`) is silently logged by `HummApp` (Buzz's own startup path
+/// has no UI for either case); the About window's manual check — which
+/// reuses this exact same code path (binding decision: "one code path") —
+/// surfaces both instead ("You're up to date!" / "Update check failed — see
+/// the log file"). `HummApp` tells the two apart via its own
+/// `about_state.checking` flag (set right before spawning a manual check),
+/// not anything carried on this enum itself.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateNotice {
+    /// A newer version is available.
+    Available(UpdateInfo),
+    /// The current version is already the latest.
+    UpToDate,
+    /// The check itself failed (network/parse error) — the detail is
+    /// [`update::UpdateError`]'s `Display` text.
+    CheckFailed(String),
 }
 
 /// Everything `HummApp` needs to run. Constructed once at startup, by
@@ -86,9 +105,14 @@ pub struct Services {
     pub capabilities: Capabilities,
     /// Root directory for downloaded whisper models.
     pub model_root: PathBuf,
-    /// Update-check notices. Empty (no sender) until Task 11 wires the
-    /// background check; receiving from it simply never resolves until then.
+    /// Update-check notices: [`init`]/[`init_with`] spawn the startup check
+    /// (when due) against this channel's sender; `HummApp` drains
+    /// `update_rx` every frame.
     pub update_rx: flume::Receiver<UpdateNotice>,
+    /// The other end of `update_rx` — kept so `HummApp` can also spawn the
+    /// About window's manual check (which reuses [`run_update_check`]) onto
+    /// the same channel the startup check reports over.
+    pub update_tx: flume::Sender<UpdateNotice>,
 }
 
 /// Errors that can prevent the GUI from starting, rendered by `main.rs`'s
@@ -105,15 +129,25 @@ pub enum InitError {
 
 /// Builds [`Services`] with real adapters, mirroring the CLI's startup order
 /// (`crates/humm-cli/src/run.rs::execute`): settings → store → one-time Buzz
-/// import → instance-lock-gated stale-task flip → queue spawn.
+/// import → instance-lock-gated stale-task flip → queue spawn → (if due)
+/// background update check (F-006/ADR-015). The user-facing telemetry launch
+/// event (F-007/ADR-009) is deliberately *not* fired here — [`HummApp`]
+/// fires it once from its first `eframe::App::ui` frame instead (see
+/// [`fire_launch_telemetry`]'s doc comment for why).
 ///
 /// `sole_instance` is threaded in from `main.rs`'s
 /// `humm_core::instance::acquire_instance_lock` call — the lock guard itself
 /// is held by `main` for the process lifetime; this function only needs the
 /// *decision* that call already made (ADR-017).
+///
+/// [`HummApp`]: crate::app::HummApp
 pub fn init(sole_instance: bool) -> Result<Services, InitError> {
     let settings_path = paths::settings_path();
-    let settings = Settings::load(&settings_path)?;
+    // Wrapped in `Arc<Mutex<_>>` immediately (rather than at the end, as
+    // before Task 11): the background update-check thread spawned below
+    // needs to share this exact settings handle with the rest of `Services`,
+    // not a separate copy that would silently diverge.
+    let settings = Arc::new(Mutex::new(Settings::load(&settings_path)?));
 
     let store = Arc::new(SqliteStore::open(&paths::db_path())?);
     import_buzz_history(&store);
@@ -124,13 +158,21 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
 
     let decoder = Arc::new(FfmpegDecoder::new());
     let prober = Arc::new(FfprobeProber::new());
-    let fetcher = build_fetcher(&settings, &media_caps);
+    let (fetcher, custom_model_url) = {
+        let guard = settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (
+            build_fetcher(&guard, &media_caps),
+            guard.models.custom_model_url.clone(),
+        )
+    };
     let model_root = paths::model_root();
 
     let use_gpu = use_gpu_from_env(std::env::var("HUMM_FORCE_CPU").ok().as_deref());
     let ensurer = DownloaderEnsurer {
         root: model_root.clone(),
-        custom_url: settings.models.custom_model_url.clone(),
+        custom_url: custom_model_url,
         // Mirrors the CLI's `coreml_encoder()` exactly (`humm-cli/src/run.rs`).
         coreml: cfg!(all(target_os = "macos", target_arch = "aarch64")),
     };
@@ -158,14 +200,11 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
     let queue = spawn_task_runner(deps);
     let events = queue.subscribe();
 
-    // No sender is ever constructed for `update_rx` this task — Task 11
-    // wires the real background check and its sender. Receiving from an
-    // orphaned channel just never resolves, which is exactly "no update
-    // notices yet".
-    let (_update_tx, update_rx) = flume::unbounded();
+    let (update_tx, update_rx) = flume::unbounded();
+    maybe_spawn_startup_update_check(&settings, &settings_path, update_tx.clone());
 
     Ok(Services {
-        settings: Arc::new(Mutex::new(settings)),
+        settings,
         settings_path,
         store,
         queue,
@@ -173,7 +212,153 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
         capabilities,
         model_root,
         update_rx,
+        update_tx,
     })
+}
+
+/// Spawns the background update check (F-006, `update_checker.py:69-91`
+/// parity) iff [`update_check_due`] says one is due right now — reading
+/// `HUMM_DISABLE_UPDATE_CHECK` and `settings.updates.{check_enabled,
+/// last_check}` exactly once. The env var is read *here*, not inside
+/// [`run_update_check`] itself: Buzz constructs its checker and connects its
+/// signal unconditionally, gating only the network call
+/// (`main_window.py:569`) — mirrored here by always building `Services`'
+/// update channel (`init`, above) and only conditionally spawning the thread
+/// that would actually touch the network.
+fn maybe_spawn_startup_update_check(
+    settings: &Arc<Mutex<Settings>>,
+    settings_path: &Path,
+    tx: flume::Sender<UpdateNotice>,
+) {
+    let env = std::env::var("HUMM_DISABLE_UPDATE_CHECK").ok();
+    let (check_enabled, last_check) = {
+        let guard = settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (
+            guard.updates.check_enabled,
+            guard.updates.last_check.clone(),
+        )
+    };
+    let now = chrono::Local::now().naive_local();
+    if !update_check_due(env.as_deref(), check_enabled, last_check.as_deref(), now) {
+        return;
+    }
+
+    let settings = Arc::clone(settings);
+    let settings_path = settings_path.to_path_buf();
+    std::thread::spawn(move || {
+        run_update_check(
+            &settings,
+            &settings_path,
+            &tx,
+            update::VERSION_INFO_URL,
+            env!("CARGO_PKG_VERSION"),
+        );
+    });
+}
+
+/// Whether an update check should run right now (F-006, ADR-015): the
+/// `HUMM_DISABLE_UPDATE_CHECK` env var (any non-empty value disables — Buzz's
+/// `BUZZ_DISABLE_UPDATE_CHECK` parity), the user's Preferences → Privacy
+/// "Check for updates automatically" toggle, and the ≤7-day cadence
+/// ([`update::should_check`]), all AND'd together. Pure and independently
+/// testable — the actual network call/thread spawn is
+/// [`maybe_spawn_startup_update_check`]'s job, not this function's.
+///
+/// This is the *startup* gate only. The About window's manual "Check for
+/// updates" bypasses every input here — including the env var, since a
+/// manual click is an explicit user action, not the automatic background
+/// check Buzz's/humm's disable knobs exist to silence (see
+/// [`run_update_check`]'s doc comment for the shared code path both funnel
+/// through).
+pub fn update_check_due(
+    env: Option<&str>,
+    check_enabled: bool,
+    last_check: Option<&str>,
+    now: NaiveDateTime,
+) -> bool {
+    let env_disables = env.is_some_and(|value| !value.is_empty());
+    !env_disables && check_enabled && update::should_check(last_check, now, false)
+}
+
+/// Runs one update check against `url`/`current_version` and reports the
+/// outcome both ways: persisted into `settings` (`updates.last_check`
+/// unconditionally — written *before* anything else, `%Y-%m-%dT%H:%M:%S%.f`,
+/// even on a failed fetch, matching Buzz's `_on_reply_finished`
+/// (`update_checker.py:82-85`); `updates.available_version` only on success:
+/// the newer version string, or `""` on "already up to date" — again Buzz
+/// parity, `update_checker.py:120-125`) and sent as an [`UpdateNotice`] over
+/// `tx`.
+///
+/// The single code path both the startup check
+/// ([`maybe_spawn_startup_update_check`]) and the About window's manual
+/// check share (binding decision: humm unifies Buzz's two separate update
+/// endpoints/logics into this one). Callers that don't want to block their
+/// own thread (both of the above) spawn this into its own
+/// `std::thread::spawn`; this function itself performs the (blocking)
+/// network call directly on whatever thread calls it.
+pub(crate) fn run_update_check(
+    settings: &Arc<Mutex<Settings>>,
+    settings_path: &Path,
+    tx: &flume::Sender<UpdateNotice>,
+    url: &str,
+    current_version: &str,
+) {
+    let outcome = update::check_for_update(url, current_version);
+    let now_iso = chrono::Local::now()
+        .naive_local()
+        .format("%Y-%m-%dT%H:%M:%S%.f")
+        .to_string();
+
+    let notice = match &outcome {
+        Ok(Some(info)) => UpdateNotice::Available(info.clone()),
+        Ok(None) => UpdateNotice::UpToDate,
+        Err(err) => UpdateNotice::CheckFailed(err.to_string()),
+    };
+
+    {
+        let mut guard = settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.updates.last_check = Some(now_iso);
+        match &outcome {
+            Ok(Some(info)) => guard.updates.available_version = Some(info.version.clone()),
+            Ok(None) => guard.updates.available_version = Some(String::new()),
+            // Buzz leaves `available-version` untouched on a failed fetch
+            // (`update_checker.py:87-91`: log + return, no further writes).
+            Err(_) => {}
+        }
+        if let Err(err) = guard.save(settings_path) {
+            log::warn!("could not persist the update-check result: {err}");
+        }
+    }
+
+    if tx.send(notice).is_err() {
+        log::debug!("update-check receiver already dropped; discarding the result");
+    }
+}
+
+/// Whether the toolbar chip should show *at startup*, before any fresh check
+/// this session has completed — Buzz-equivalent persistence across launches
+/// (binding decision): `settings.updates.available_version` from a *previous*
+/// session's successful check is still newer than `current_version`.
+///
+/// `stored_available_version` is `None` (never checked) or `Some("")`
+/// (last check found nothing newer) both resolve to `false`, same as any
+/// stored value [`update::is_newer_version`] can't parse as numeric (a
+/// corrupted/hand-edited settings file) — "no evidence of an update" is the
+/// only safe default. A caller that finds this `true` has only a version
+/// string to show, not release notes/download URLs (those aren't persisted);
+/// a fresh check backfills them once it completes.
+pub fn chip_visible_on_startup(
+    current_version: &str,
+    stored_available_version: Option<&str>,
+) -> bool {
+    match stored_available_version {
+        Some(version) if !version.is_empty() => update::is_newer_version(current_version, version),
+        _ => false,
+    }
 }
 
 /// Test-only inputs for [`init_with`]: a caller-supplied store/engine
@@ -212,6 +397,12 @@ pub struct TestDeps {
 /// settings file, database, or subprocess is ever touched. Used by kittest
 /// harnesses (this task's smoke test, and every later kittest task that
 /// constructs `HummApp` via [`crate::app::HummApp::new_for_test`]).
+///
+/// Deliberately never spawns the real startup update-check thread real
+/// [`init`] does (Global Constraint 3: no network in tests) — a test that
+/// wants to exercise the update-chip/dialog path drives it hermetically
+/// instead, by sending straight into [`Services::update_tx`] (exposed for
+/// exactly this).
 pub fn init_with(deps: TestDeps) -> Services {
     let decoder = Arc::new(FfmpegDecoder::new());
     let prober = Arc::new(FfprobeProber::new());
@@ -228,7 +419,7 @@ pub fn init_with(deps: TestDeps) -> Services {
     };
     let queue = spawn_task_runner(runner_deps);
     let events = queue.subscribe();
-    let (_update_tx, update_rx) = flume::unbounded();
+    let (update_tx, update_rx) = flume::unbounded();
 
     Services {
         settings: Arc::new(Mutex::new(deps.settings)),
@@ -239,6 +430,7 @@ pub fn init_with(deps: TestDeps) -> Services {
         capabilities: deps.capabilities,
         model_root: deps.model_root,
         update_rx,
+        update_tx,
     }
 }
 
@@ -298,6 +490,105 @@ fn build_fetcher(settings: &Settings, caps: &MediaCapabilities) -> Option<Arc<dy
     Some(Arc::new(YtDlpFetcher::new(cookie_file)))
 }
 
+/// Fires humm's one `app_launched` telemetry event (F-007, ADR-009),
+/// exactly once per launch. Called from `crate::app::HummApp`'s
+/// `eframe::App::ui` on its first frame rather than from [`init`]:
+/// `services::init` runs before any
+/// window exists, and firing telemetry is explicitly *not* on that critical
+/// path (design spec §3.1 wants < 300 ms cold-launch-to-interactive) — a
+/// first-frame call keeps it off startup's own latency budget even though
+/// [`Telemetry::capture`] is itself already fire-and-forget (spawns its own
+/// thread), because this function also does the (cheap, but still
+/// synchronous-on-the-caller's-thread) settings lock/save for
+/// `user_identifier`.
+///
+/// `settings.privacy.user_identifier` is ensured (minted + persisted via a
+/// fresh uuid4, Buzz's `Settings.get_user_identifier()` parity) *unconditionally*
+/// — even when telemetry itself ends up disabled below — matching Buzz's own
+/// identifier lifecycle (it's a general persisted identifier, not something
+/// that only exists while telemetry is on).
+pub fn fire_launch_telemetry(services: &Services) {
+    let user_identifier = ensure_user_identifier(&services.settings, &services.settings_path);
+
+    let settings_enabled = {
+        let guard = services
+            .settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.privacy.telemetry_enabled
+    };
+    let build_key = option_env!("HUMM_POSTHOG_KEY");
+    let enabled = telemetry_enabled(
+        build_key,
+        cfg!(debug_assertions),
+        std::env::var("HUMM_DISABLE_TELEMETRY").ok().as_deref(),
+        settings_enabled,
+    );
+
+    let telemetry: Box<dyn Telemetry> = if enabled {
+        Box::new(PostHogTelemetry::new(
+            build_key.unwrap_or_default().to_string(),
+            user_identifier,
+        ))
+    } else {
+        Box::new(NoopTelemetry)
+    };
+
+    let locale = locale_from_env_vars(
+        std::env::var("LC_ALL").ok().as_deref(),
+        std::env::var("LANG").ok().as_deref(),
+    );
+    let event = Event::app_launched(
+        env!("CARGO_PKG_VERSION"),
+        locale.as_deref(),
+        humm_core::telemetry::kernel_release().as_deref(),
+        humm_core::telemetry::macos_version().as_deref(),
+    );
+    telemetry.capture(event);
+}
+
+/// Returns `settings.privacy.user_identifier`, minting and persisting a
+/// fresh uuid4 if it was `None` (first run). The save failure path is
+/// logged, not fatal (same non-fatal-settings-write contract as every other
+/// persist in this crate) — the freshly-minted id is still returned and used
+/// for this launch's event either way, it just won't survive to the next
+/// one if the write failed.
+fn ensure_user_identifier(settings: &Arc<Mutex<Settings>>, settings_path: &Path) -> String {
+    let mut guard = settings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(id) = &guard.privacy.user_identifier {
+        return id.clone();
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    guard.privacy.user_identifier = Some(id.clone());
+    if let Err(err) = guard.save(settings_path) {
+        log::warn!("could not persist the telemetry user identifier: {err}");
+    }
+    id
+}
+
+/// Resolves the `locale` property [`Event::app_launched`] sends, from the
+/// `LC_ALL`/`LANG` environment variables in that precedence order (glibc/
+/// POSIX locale-resolution order; `LC_ALL` always wins when set). Pure — the
+/// real env reads happen only at [`fire_launch_telemetry`]'s call site, so
+/// this is independently testable against synthetic values.
+pub fn locale_from_env_vars(lc_all: Option<&str>, lang: Option<&str>) -> Option<String> {
+    parse_locale(lc_all).or_else(|| parse_locale(lang))
+}
+
+/// Parses one raw locale env value (e.g. `"en_US.UTF-8"`) down to its locale
+/// id alone (`"en_US"`) by dropping everything from the first `.` onward
+/// (the codeset suffix POSIX locale strings carry) — `None` for an absent or
+/// blank value.
+fn parse_locale(raw: Option<&str>) -> Option<String> {
+    let trimmed = raw?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.split('.').next().unwrap_or(trimmed).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,7 +596,6 @@ mod tests {
     use humm_core::domain::{ModelSpec, TranscriptionId};
     use humm_core::error::CoreError;
     use pretty_assertions::assert_eq;
-    use std::path::Path;
     use std::time::{Duration, Instant};
 
     fn test_deps(store: Arc<SqliteStore>) -> TestDeps {
@@ -388,6 +678,167 @@ mod tests {
                 ffprobe: false,
                 yt_dlp: true,
             }
+        );
+    }
+
+    // -- update_check_due ----------------------------------------------------
+
+    fn fixed_now() -> NaiveDateTime {
+        chrono::NaiveDate::from_ymd_opt(2026, 7, 21)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+    }
+
+    fn days_ago(days: i64) -> String {
+        (fixed_now() - chrono::Duration::days(days))
+            .format("%Y-%m-%dT%H:%M:%S%.f")
+            .to_string()
+    }
+
+    #[test]
+    fn update_check_due_env_set_disables_even_when_otherwise_due() {
+        assert!(!update_check_due(Some("1"), true, None, fixed_now()));
+        assert!(!update_check_due(
+            Some("anything"),
+            true,
+            Some(days_ago(30).as_str()),
+            fixed_now()
+        ));
+    }
+
+    #[test]
+    fn update_check_due_env_unset_or_empty_does_not_disable() {
+        assert!(update_check_due(None, true, None, fixed_now()));
+        assert!(update_check_due(Some(""), true, None, fixed_now()));
+    }
+
+    #[test]
+    fn update_check_due_toggle_off_disables_even_when_otherwise_due() {
+        assert!(!update_check_due(None, false, None, fixed_now()));
+    }
+
+    #[test]
+    fn update_check_due_true_when_never_checked() {
+        assert!(update_check_due(None, true, None, fixed_now()));
+    }
+
+    #[test]
+    fn update_check_due_false_within_the_seven_day_window() {
+        let last_check = days_ago(6);
+        assert!(!update_check_due(
+            None,
+            true,
+            Some(last_check.as_str()),
+            fixed_now()
+        ));
+    }
+
+    #[test]
+    fn update_check_due_true_past_the_seven_day_window() {
+        let last_check = days_ago(8);
+        assert!(update_check_due(
+            None,
+            true,
+            Some(last_check.as_str()),
+            fixed_now()
+        ));
+    }
+
+    // -- chip_visible_on_startup ----------------------------------------------
+
+    #[test]
+    fn chip_visible_when_stored_version_is_newer() {
+        assert!(chip_visible_on_startup("1.4.5", Some("1.5.0")));
+    }
+
+    #[test]
+    fn chip_hidden_when_stored_version_is_older_or_equal() {
+        assert!(!chip_visible_on_startup("1.5.0", Some("1.4.5")));
+        assert!(!chip_visible_on_startup("1.5.0", Some("1.5.0")));
+    }
+
+    #[test]
+    fn chip_hidden_when_stored_version_is_empty() {
+        assert!(!chip_visible_on_startup("1.5.0", Some("")));
+    }
+
+    #[test]
+    fn chip_hidden_when_never_checked() {
+        assert!(!chip_visible_on_startup("1.5.0", None));
+    }
+
+    #[test]
+    fn chip_hidden_when_stored_version_is_garbage() {
+        assert!(!chip_visible_on_startup("1.5.0", Some("not-a-version")));
+    }
+
+    // -- locale_from_env_vars --------------------------------------------------
+
+    #[test]
+    fn locale_strips_the_codeset_suffix() {
+        assert_eq!(
+            locale_from_env_vars(Some("en_US.UTF-8"), None),
+            Some("en_US".to_string())
+        );
+    }
+
+    #[test]
+    fn locale_lc_all_wins_over_lang() {
+        assert_eq!(
+            locale_from_env_vars(Some("fr_FR.UTF-8"), Some("en_US.UTF-8")),
+            Some("fr_FR".to_string())
+        );
+    }
+
+    #[test]
+    fn locale_falls_back_to_lang_when_lc_all_unset() {
+        assert_eq!(
+            locale_from_env_vars(None, Some("de_DE.UTF-8")),
+            Some("de_DE".to_string())
+        );
+    }
+
+    #[test]
+    fn locale_none_when_both_unset() {
+        assert_eq!(locale_from_env_vars(None, None), None);
+    }
+
+    #[test]
+    fn locale_none_when_both_blank() {
+        assert_eq!(locale_from_env_vars(Some(""), Some("   ")), None);
+    }
+
+    #[test]
+    fn locale_without_a_codeset_suffix_passes_through() {
+        assert_eq!(locale_from_env_vars(Some("C"), None), Some("C".to_string()));
+    }
+
+    // -- run_update_check -------------------------------------------------------
+
+    #[test]
+    fn run_update_check_persists_last_check_and_sends_check_failed_on_a_bad_url() {
+        // No network call ever succeeds against this URL (invalid scheme,
+        // never resolves) — this proves the "persist last_check even on
+        // error" contract without depending on network availability in CI.
+        let settings = Arc::new(Mutex::new(Settings::default()));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings_path = dir.path().join("settings.toml");
+        let (tx, rx) = flume::unbounded();
+
+        run_update_check(&settings, &settings_path, &tx, "not-a-valid-url", "1.0.0");
+
+        let notice = rx.try_recv().expect("a notice was sent");
+        assert!(matches!(notice, UpdateNotice::CheckFailed(_)));
+
+        let guard = settings.lock().unwrap();
+        assert!(
+            guard.updates.last_check.is_some(),
+            "last_check must be persisted even when the fetch fails"
+        );
+        assert_eq!(
+            guard.updates.available_version, None,
+            "available_version must be left untouched on a failed fetch"
         );
     }
 }

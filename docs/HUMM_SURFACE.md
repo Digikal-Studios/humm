@@ -120,6 +120,19 @@ warning lines only.
 | `HUMM_BUZZ_SQLITE` | Override the one-time Buzz-import source database. Used only if the path exists — point it at a nonexistent path to disable the import (M2 addition; used by hermetic tests). |
 | `HUMM_BUZZ_TESTDATA`, `HUMM_WHISPER_TEST_MODEL` | Test-only: locate Buzz fixtures / a real tiny model for `#[ignore]` tests. |
 
+### 5.1 `humm-gui`-only environment variables
+
+The CLI-shared variables above apply to `humm-gui` too (it calls the same
+`humm-core::paths`/`humm-core::env` functions). These four are GUI-specific
+(M3 Task 11):
+
+| Variable | Effect |
+|----------|--------|
+| `HUMM_DISABLE_TELEMETRY` | Any non-empty value disables the one `app_launched` telemetry event (F-007, ADR-009) — Buzz's `BUZZ_DISABLE_TELEMETRY` parity. An unset or set-but-empty value leaves telemetry on (subject to the other gates below). |
+| `HUMM_DISABLE_UPDATE_CHECK` | Any non-empty value disables the *startup* background update check (F-006, ADR-015) — read exactly where Buzz's own `BUZZ_DISABLE_UPDATE_CHECK` gate sits (`main_window.py:569`): the checker/channel is still constructed unconditionally, only the network call is skipped. Does **not** gate the About window's manual "Check for updates" (an explicit user click bypasses every startup gate, including this one). |
+| `HUMM_POSTHOG_KEY` | Build-time only (`option_env!`, not read at runtime): humm's own PostHog project key. Absent at build time compiles telemetry down to a permanent no-op — there is no way to enable it at runtime without rebuilding. |
+| `HUMM_FAVORITE_LANGUAGES` | Comma-separated language codes (Buzz: `BUZZ_FAVORITE_LANGUAGES`) shown as a separator-wrapped "favorites" block at the top of the options sheet's language combo (F-023); invalid codes are silently dropped. Unset or empty renders no favorites block at all. |
+
 ## 6. File locations (macOS defaults shown)
 
 | What | Path | Override |
@@ -130,6 +143,9 @@ warning lines only.
 | Model cache | `~/Library/Application Support/humm/models/` | `HUMM_MODEL_ROOT` |
 | VAD model | `~/Library/Application Support/humm/models/ggml-silero-v6.2.0.bin` (§2) | `HUMM_MODEL_ROOT` |
 | Logs | `~/Library/Logs/humm/logs.txt` | `HUMM_LOG_DIR` |
+| GUI window/table state (`humm-gui` only) | `~/Library/Application Support/humm/gui.ron` | `HUMM_CONFIG_DIR` (`eframe`'s `persistence_path`, §7) |
+| Single-instance stale-flip lock | `~/Library/Application Support/humm/instance.lock` | `HUMM_DATA_DIR` (§7) |
+| GUI exclusivity lock (`humm-gui` only) | `~/Library/Application Support/humm/gui.lock` | `HUMM_DATA_DIR` (§7) |
 
 Linux/Windows follow the platform config/data/state conventions
 (`directories` crate); see `crates/humm-core/src/paths.rs`.

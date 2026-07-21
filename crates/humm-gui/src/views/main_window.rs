@@ -22,6 +22,7 @@ use crate::views::options_sheet::{self, OptionsSheet, SheetOutcome};
 use crate::views::rename_notes::{self, Dialog, DialogOutcome};
 use crate::views::task_table::{self, TableLayout};
 use crate::views::toasts::{self, ToastAction, ToastStack};
+use crate::views::update_notice::{self, UpdateNoticeState};
 use crate::views::url_dialog::{self, UrlDialog};
 
 /// Which import flow (if any) the user just requested via the toolbar's
@@ -79,6 +80,11 @@ pub struct ActionState {
     /// The URL-import dialog (F-022): closed, or open with its
     /// in-progress text/validation error.
     pub url_dialog: UrlDialog,
+    /// The toolbar's "Update Available" chip + its dialog (F-006, ADR-015):
+    /// `app.rs` seeds `info` at startup (persisted-stale chip,
+    /// `services::chip_visible_on_startup`) and updates it as
+    /// `Services::update_rx` notices arrive; this module only renders it.
+    pub update_notice: UpdateNoticeState,
 }
 
 impl ActionState {
@@ -101,6 +107,7 @@ impl ActionState {
             || self.toasts.detail.is_some()
             || self.options_sheet.is_some()
             || !matches!(self.url_dialog, UrlDialog::None)
+            || self.update_notice.dialog_open
     }
 }
 
@@ -219,6 +226,8 @@ pub struct ShowResult {
 /// `custom_model_available`/`yt_dlp_available` are precomputed by `app.rs`
 /// from `Services` (`settings.models.custom_model_url.is_some()` /
 /// `capabilities.yt_dlp`) — this module never reads `Services` directly.
+/// `current_version` is `env!("CARGO_PKG_VERSION")`, threaded in for the
+/// update dialog's "Current version: …" line.
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
@@ -230,6 +239,7 @@ pub fn show(
     now: Instant,
     custom_model_available: bool,
     yt_dlp_available: bool,
+    current_version: &str,
 ) -> ShowResult {
     handle_global_shortcuts(ui, actions, shortcuts, state, yt_dlp_available);
 
@@ -260,6 +270,7 @@ pub fn show(
     let sheet_outcome =
         options_sheet::ui(ui.ctx(), &mut state.options_sheet, custom_model_available);
     let url_dialog_result = url_dialog::ui(ui.ctx(), &mut state.url_dialog);
+    update_notice::dialog_ui(ui.ctx(), &mut state.update_notice, current_version);
     show_drop_overlay(ui);
 
     ShowResult {
@@ -410,7 +421,8 @@ fn show_menu_bar(
 
 /// The toolbar (design spec §3.3): Record (disabled) · New File
 /// Transcription · New URL Transcription · Open Transcript (disabled) ·
-/// Cancel Transcription · Clear History · [Update chip — hidden, Task 11].
+/// Cancel Transcription · Clear History · Update Available chip (F-006,
+/// hidden while `state.update_notice.info` is `None`).
 ///
 /// "New URL Transcription" is disabled with a tooltip when
 /// `yt_dlp_available` is `false` (Policy rule 6).
@@ -451,7 +463,7 @@ fn show_toolbar(
             actions.push(TableAction::ClearSelected);
         }
         ui.separator();
-        // Update-available chip: hidden this task — Task 11 fills it in.
+        update_notice::chip_ui(ui, &mut state.update_notice);
     });
 }
 

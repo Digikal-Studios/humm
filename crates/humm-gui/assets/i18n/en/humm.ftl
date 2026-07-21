@@ -143,3 +143,58 @@ options-advanced = Advanced
 options-initial-prompt-label = Initial Prompt:
 options-hf-repo-label = Hugging Face model
 options-run = Run
+
+## Update chip + dialog (views/update_notice.rs, F-006, ADR-015)
+
+update-chip-label = Update Available
+update-dialog-title = Update Available
+update-dialog-header = A new version of humm is available!
+update-dialog-current-version = Current version:
+update-dialog-new-version = New version:
+update-dialog-release-notes = Release Notes:
+update-dialog-open-release-page = Open release page
+update-dialog-close = Close
+
+## About window (views/about.rs, F-006 gui-manual half)
+
+about-app-name = humm
+about-version-prefix = Version
+about-check-button = Check for updates
+about-show-logs-button = Show logs
+about-close-button = Close
+about-up-to-date = You're up to date!
+about-check-failed = Update check failed — see the log file
+
+## Preferences window shell (views/preferences.rs, F-044/ADR-009)
+
+prefs-title = Preferences
+prefs-tab-models = Models
+prefs-tab-privacy = Privacy
+
+## Privacy tab (views/preferences.rs, ADR-009, UX §J-11)
+
+privacy-telemetry-checkbox = Send anonymous launch telemetry
+privacy-telemetry-disabled-caption = This build has telemetry disabled at compile time.
+privacy-telemetry-items-intro = Each launch event includes:
+privacy-telemetry-item-app-version = App version
+privacy-telemetry-item-system-name = System name
+privacy-telemetry-item-os-version = OS version
+privacy-telemetry-item-kernel-release = Kernel release
+privacy-telemetry-item-cpu-architecture = CPU architecture
+privacy-telemetry-item-system-locale = System locale
+privacy-telemetry-item-identifier = A random anonymous identifier
+privacy-update-checkbox = Check for updates automatically
+
+## Models tab (models_ui.rs, F-044 basic)
+
+models-section-downloaded = Downloaded
+models-section-available = Available for Download
+models-download-button = Download
+models-delete-button = Delete
+models-show-location-button = Show file location
+models-cancel-button = Cancel
+models-custom-url-label = Custom ggml model URL:
+models-delete-confirm-title = Delete Model
+models-delete-confirm-body = Are you sure you want to delete the selected model?
+models-download-error-title = Error
+models-download-failed = Download failed
