@@ -33,7 +33,7 @@ Verification method legend:
 | F-029 | Task persistence (SQLite, startup cancel-flip) | unit + cli-int | not-started |
 | F-030 | Folder watch (filters, mirroring, delete/move source) | unit + cli-int | not-started |
 | F-031 | LLM translation during transcription (batching, storage) | unit (mock server) + contract | not-started |
-| F-040 | Local inference backend(s) — whisper-rs consolidation (ADR; Q-2 for HF/MMS) | contract + diff + bench | implemented (whisper-rs adapter + 4 contract tests pass; diff/bench pending) |
+| F-040 | Local inference backend(s) — whisper-rs consolidation (ADR; Q-2 for HF/MMS) | contract + diff + bench | implemented (whisper-rs adapter + 4 contract tests pass; bench baseline recorded in docs/benchmarks/M1.md; diff pending) |
 | F-041 | OpenAI-compatible API backend (chunking >25MB, base URL, key) | contract (mock + real) | not-started |
 | F-042 | Model sizes & custom models (ggml URL, HF repo id, lumii) | unit + contract | not-started |
 | F-043 | Model download & cache (resume, SHA256, sentinels, layout) | unit + contract | not-started |

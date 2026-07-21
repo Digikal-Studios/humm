@@ -20,3 +20,8 @@ log.workspace = true
 pretty_assertions.workspace = true
 tempfile.workspace = true
 insta.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "export"
+harness = false

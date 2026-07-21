@@ -23,3 +23,8 @@ pretty_assertions.workspace = true
 # the Silero VAD model via humm-core's downloader.
 humm-media = { path = "../humm-media", version = "0.1.0" }
 tempfile.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "e2e"
+harness = false
