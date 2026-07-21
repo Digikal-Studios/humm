@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -202,6 +202,9 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         }),
         tuning,
         media_dir: paths::media_dir(),
+        // The CLI resolves the model synchronously before enqueueing (Buzz
+        // parity, `cli.py:219-221`) — no ArtifactEnsurer is ever configured.
+        artifacts: None,
     };
 
     let handle = spawn_task_runner(deps);
@@ -424,7 +427,16 @@ struct CliEngineFactory {
 }
 
 impl EngineFactory for CliEngineFactory {
-    fn create(&mut self, _model: &ModelSpec) -> Result<Box<dyn TranscriptionEngine>, CoreError> {
+    fn create(
+        &mut self,
+        _model: &ModelSpec,
+        _resolved: Option<&Path>,
+    ) -> Result<Box<dyn TranscriptionEngine>, CoreError> {
+        // `_resolved` is ignored: the CLI already resolved the model
+        // synchronously before enqueueing (`resolve_model`, above) and
+        // carries the path itself in `self.model_path` — no ArtifactEnsurer
+        // is ever configured for the CLI (`RunnerDeps.artifacts: None`), so
+        // this is always `None` in practice anyway.
         WhisperEngine::load(&self.model_path, self.use_gpu)
             .map(|engine| Box::new(engine) as Box<dyn TranscriptionEngine>)
             .map_err(CoreError::from)
@@ -571,6 +583,12 @@ impl<'a> HumanRenderer<'a> {
                     None => format!("{label}  {pct}%"),
                 };
                 self.line.update(pct, &text);
+            }
+            TaskEventKind::ModelDownloadProgress { .. } => {
+                // Unreachable by construction: the CLI resolves its model
+                // synchronously before enqueueing and never configures an
+                // ArtifactEnsurer (`RunnerDeps.artifacts` stays `None`), so
+                // the runner never emits this variant here. Render nothing.
             }
             TaskEventKind::SegmentAdded(_) => {}
             TaskEventKind::Completed { written } => {
@@ -786,6 +804,14 @@ fn emit_json(event: &TaskEvent, labels: &HashMap<TranscriptionId, String>) {
             operation,
             detail,
         },
+        TaskEventKind::ModelDownloadProgress { .. } => {
+            // Unreachable by construction (see `HumanRenderer::on_event`'s
+            // matching arm): the CLI never configures an ArtifactEnsurer, so
+            // the runner never emits this variant here. Print nothing —
+            // this is *not* the pre-queue `model_download_progress` JSON
+            // event (`report_download`, above), which is unaffected.
+            return;
+        }
     };
     if let Some(text) = to_json_line(&value) {
         println!("{text}");
@@ -951,6 +977,12 @@ mod tests {
                 operation,
                 detail,
             },
+            TaskEventKind::ModelDownloadProgress { .. } => {
+                // `emit_json` never reaches its own matching arm for this
+                // variant either (see its comment) — no test exercises this
+                // arm of `json_for` with it.
+                unreachable!("ModelDownloadProgress is never routed through emit_json/json_for")
+            }
         };
         to_json_line(&value).expect("serializes")
     }

@@ -35,9 +35,20 @@
 //!   subscriber list and a "current task" slot, each behind its own `Mutex`.
 //!   Every critical section locks exactly one of them and releases it before
 //!   locking the other, so no lock-ordering deadlock is possible.
+//! - **Model downloads are non-modal for the GUI (`docs/design/UX_SPEC.md`
+//!   §J-1).** The CLI resolves a task's model synchronously *before*
+//!   enqueueing (Buzz parity, `cli.py:219-221`) and never configures
+//!   [`RunnerDeps::artifacts`], so this never applies to it. A GUI caller
+//!   instead supplies `Some(Arc<dyn ArtifactEnsurer>)`: the runner ensures
+//!   the model (and re-resolves the VAD model) as the task's *own* first
+//!   phase, so an absent model downloads without blocking the rest of the
+//!   queue, with progress visible per-task. The per-task event order becomes
+//!   `Started` → [`DownloadProgress`* for a URL task's media fetch] →
+//!   [`ModelDownloadProgress`* while an artifact download is in flight] →
+//!   `Progress`/`SegmentAdded`* → terminal.
 
 use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -48,6 +59,7 @@ use crate::boundary::{
 use crate::cancel::CancelToken;
 use crate::domain::{Input, ModelSpec, Segment, Source, TaskSpec, TranscriptionId};
 use crate::error::{CoreError, EngineError, MediaError, StoreError};
+use crate::models::download::DownloadProgress;
 use crate::pipeline::{EngineTuning, JobOutcome, run_file_job};
 
 /// The message emitted to yt-dlp-less URL tasks: exactly this string is
@@ -57,11 +69,13 @@ const YTDLP_MISSING: &str =
 
 /// One observable moment in a task's lifecycle, broadcast to every subscriber.
 ///
-/// The per-task order is `Queued` → (`Started` → `DownloadProgress`* →
-/// `Progress`/`SegmentAdded`* → one of `Completed`/`Failed`) — unless the task
-/// is canceled before it starts, in which case it is `Queued` → `Canceled`
-/// with no `Started`. `StoreWriteFailed` is out of band: it may interleave
-/// anywhere in that sequence (ADR-018) and never changes it.
+/// The per-task order is `Queued` → (`Started` → [`DownloadProgress`* for a
+/// URL task's media fetch] → [`ModelDownloadProgress`* when
+/// [`RunnerDeps::artifacts`] is configured and an artifact needs fetching] →
+/// `Progress`/`SegmentAdded`* → one of `Completed`/`Failed`) — unless the
+/// task is canceled before it starts, in which case it is `Queued` →
+/// `Canceled` with no `Started`. `StoreWriteFailed` is out of band: it may
+/// interleave anywhere in that sequence (ADR-018) and never changes it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaskEventKind {
     /// The task was accepted and persisted; it is waiting its turn.
@@ -72,6 +86,26 @@ pub enum TaskEventKind {
     /// tasks and only while the total size is known (Buzz parity —
     /// `file_transcriber.py:172-174`).
     DownloadProgress(f32),
+    /// Model/VAD artifact download progress for a task run with an
+    /// [`ArtifactEnsurer`] configured (GUI only —
+    /// [`RunnerDeps::artifacts`]). Emitted between `Started` and
+    /// `Progress`/`SegmentAdded`, once per
+    /// [`crate::models::download::DownloadProgress`] callback from
+    /// [`ArtifactEnsurer::ensure_model`]/[`ArtifactEnsurer::ensure_vad`].
+    ///
+    /// The CLI never constructs an `ArtifactEnsurer` — it resolves the model
+    /// synchronously before enqueueing (Buzz parity) and always leaves
+    /// `RunnerDeps.artifacts` as `None` — so this variant never fires there;
+    /// its exhaustive event matches handle it as unreachable-by-construction
+    /// (render nothing, in both human and `--json` modes).
+    ModelDownloadProgress {
+        /// File name of the artifact this update describes.
+        file: String,
+        /// Bytes downloaded so far, including any resumed offset.
+        downloaded: u64,
+        /// Total artifact size in bytes, if known.
+        total: Option<u64>,
+    },
     /// Transcription progress as a fraction in `0.0..=1.0`.
     Progress(f32),
     /// A newly recognized (and text-trimmed) segment.
@@ -108,6 +142,45 @@ pub struct TaskEvent {
     pub kind: TaskEventKind,
 }
 
+/// Ensures on-disk model/VAD artifacts are present, downloading them if
+/// necessary, so a GUI caller can enqueue a task without a model already
+/// resolved (`docs/design/UX_SPEC.md` §J-1: model downloads must never block
+/// other imports). Configured via [`RunnerDeps::artifacts`]; the CLI never
+/// constructs one (it resolves the model synchronously before enqueueing —
+/// Buzz parity, `cli.py:219-221`).
+pub trait ArtifactEnsurer: Send + Sync {
+    /// Ensures `model` is present locally, downloading it if needed, and
+    /// returns its local path.
+    ///
+    /// `progress` is called with incremental updates, mirroring
+    /// [`crate::models::download::ModelDownloader::ensure_model`]'s
+    /// contract; `cancel` is checked cooperatively during the download. A
+    /// canceled ensure must return [`CoreError::Canceled`] (not a
+    /// download-specific error variant) so [`classify`] maps it to
+    /// [`Terminal::Canceled`] rather than [`Terminal::Failed`] — the same
+    /// cancellation contract every other phase of [`Runner::run_job`]
+    /// honors.
+    fn ensure_model(
+        &self,
+        model: &ModelSpec,
+        progress: &mut dyn FnMut(DownloadProgress),
+        cancel: &CancelToken,
+    ) -> Result<PathBuf, CoreError>;
+
+    /// Ensures the VAD model is present, returning its path — or `None` if
+    /// it could not be obtained (offline, network blip, canceled).
+    ///
+    /// Unlike [`Self::ensure_model`], failure here never fails the task: VAD
+    /// is a nice-to-have (Buzz's own absent-model behavior,
+    /// `whisper_cpp.py:380`), so a failed ensure simply degrades to no VAD
+    /// for this job, exactly like the CLI's `ensure_vad` helper.
+    fn ensure_vad(
+        &self,
+        progress: &mut dyn FnMut(DownloadProgress),
+        cancel: &CancelToken,
+    ) -> Option<PathBuf>;
+}
+
 /// Builds a [`TranscriptionEngine`] for a given [`ModelSpec`].
 ///
 /// The runner caches the most recently built engine and reuses it while
@@ -116,7 +189,18 @@ pub struct TaskEvent {
 /// model changes.
 pub trait EngineFactory: Send {
     /// Creates an engine for `model`, or returns why it could not.
-    fn create(&mut self, model: &ModelSpec) -> Result<Box<dyn TranscriptionEngine>, CoreError>;
+    ///
+    /// `resolved` is the model's on-disk path, already ensured for this job
+    /// by an [`ArtifactEnsurer`] — `Some` when [`RunnerDeps::artifacts`] is
+    /// configured (GUI) and this call follows a fresh `ensure_model`; `None`
+    /// when no `ArtifactEnsurer` is configured (CLI, which resolves the
+    /// model itself before enqueueing and whose factory ignores this
+    /// parameter).
+    fn create(
+        &mut self,
+        model: &ModelSpec,
+        resolved: Option<&Path>,
+    ) -> Result<Box<dyn TranscriptionEngine>, CoreError>;
 }
 
 /// Everything the runner thread needs to process tasks.
@@ -136,6 +220,12 @@ pub struct RunnerDeps {
     pub tuning: EngineTuning,
     /// Directory under which URL downloads land (`media_dir/<task-id>/`).
     pub media_dir: PathBuf,
+    /// Ensures model/VAD artifacts before a task's engine runs, enabling
+    /// non-modal downloads for GUI callers (`docs/design/UX_SPEC.md` §J-1).
+    /// `None` (the CLI) means models are already resolved before
+    /// enqueueing — `run_job` then skips artifact-ensure entirely and
+    /// behaves byte-for-byte as it did before this field existed.
+    pub artifacts: Option<Arc<dyn ArtifactEnsurer>>,
 }
 
 /// Shared registry of live subscriber senders.
@@ -411,6 +501,9 @@ struct Runner {
     tuning: EngineTuning,
     /// Root directory for URL downloads.
     media_dir: PathBuf,
+    /// Ensures model/VAD artifacts per job when configured (GUI). `None`
+    /// (CLI) skips artifact-ensure entirely — see [`RunnerDeps::artifacts`].
+    artifacts: Option<Arc<dyn ArtifactEnsurer>>,
     /// Tasks accepted but not yet run (FIFO).
     pending: VecDeque<PendingTask>,
     /// Ids canceled but not yet dequeued (Buzz's canceled-set). *Consumed*: a
@@ -624,8 +717,10 @@ impl Runner {
         emit_store_write_failed(&self.subscribers, id, operation, err);
     }
 
-    /// Resolves the input (downloading a URL if needed), acquires the engine,
-    /// and runs the file-transcription pipeline.
+    /// Resolves the input (downloading a URL if needed), ensures artifacts
+    /// when configured (module doc: `Started` → [`DownloadProgress`*] →
+    /// [`ModelDownloadProgress`*] → `Progress`/`SegmentAdded`*), acquires the
+    /// engine, and runs the file-transcription pipeline.
     fn run_job(&mut self, id: TranscriptionId, spec: &TaskSpec, token: &CancelToken) -> Terminal {
         let input_path = match &spec.input {
             Input::Path(path) => path.clone(),
@@ -642,11 +737,32 @@ impl Runner {
             output: spec.output.clone(),
         };
 
-        // Reuse the cached engine when the model matches, else build a new one.
+        // When an ArtifactEnsurer is configured (GUI), ensure the model/VAD
+        // artifacts as this job's own phase and use a job-local tuning with
+        // the freshly-resolved VAD path; otherwise (CLI) behavior is
+        // byte-for-byte unchanged — `self.tuning` is borrowed directly, no
+        // clone, `resolved_path` stays `None`.
+        let mut ensured_tuning: Option<EngineTuning> = None;
+        let mut resolved_path: Option<PathBuf> = None;
+        if let Some(ensurer) = self.artifacts.clone() {
+            match self.ensure_artifacts(id, ensurer.as_ref(), &model, token) {
+                Ok((path, tuning)) => {
+                    resolved_path = Some(path);
+                    ensured_tuning = Some(tuning);
+                }
+                Err(terminal) => return terminal,
+            }
+        }
+        let tuning: &EngineTuning = ensured_tuning.as_ref().unwrap_or(&self.tuning);
+
+        // Reuse the cached engine when the model matches, else build a new
+        // one. A cache hit skips `create` (the just-ensured artifact is not
+        // needed to build an engine that already exists) but the ensure
+        // above still ran, keeping it fresh on disk regardless.
         let cached = self.engine_cache.take();
         let mut engine = match cached {
             Some((cached_model, engine)) if cached_model == model => engine,
-            _ => match self.engines.create(&model) {
+            _ => match self.engines.create(&model, resolved_path.as_deref()) {
                 Ok(engine) => engine,
                 Err(err) => return classify(err),
             },
@@ -661,7 +777,7 @@ impl Runner {
 
         let result = run_file_job(
             &job,
-            &self.tuning,
+            tuning,
             &*self.decoder,
             &*self.prober,
             engine.as_mut(),
@@ -675,6 +791,48 @@ impl Runner {
             Ok(outcome) => Terminal::Completed(outcome),
             Err(err) => classify(err),
         }
+    }
+
+    /// Ensures `model` (and the VAD model) via `ensurer`, emitting
+    /// [`TaskEventKind::ModelDownloadProgress`] for every progress callback
+    /// from either. Only called when `self.artifacts` is `Some`.
+    ///
+    /// A failed/canceled `ensure_model` becomes this job's [`Terminal`]
+    /// directly, via the same [`classify`] every other pipeline error goes
+    /// through — an ensurer that reports cancellation as
+    /// [`CoreError::Canceled`] therefore ends the task `Canceled`, not
+    /// `Failed`. `ensure_vad` never fails the job: its result (`Some`/`None`)
+    /// simply becomes this job's `tuning.vad_model`.
+    fn ensure_artifacts(
+        &self,
+        id: TranscriptionId,
+        ensurer: &dyn ArtifactEnsurer,
+        model: &ModelSpec,
+        token: &CancelToken,
+    ) -> Result<(PathBuf, EngineTuning), Terminal> {
+        let subscribers = Arc::clone(&self.subscribers);
+        let mut on_progress = move |update: DownloadProgress| {
+            emit(
+                &subscribers,
+                TaskEvent {
+                    task_id: id,
+                    kind: TaskEventKind::ModelDownloadProgress {
+                        file: update.file,
+                        downloaded: update.downloaded,
+                        total: update.total,
+                    },
+                },
+            );
+        };
+
+        let resolved = ensurer
+            .ensure_model(model, &mut on_progress, token)
+            .map_err(classify)?;
+
+        let mut tuning = self.tuning.clone();
+        tuning.vad_model = ensurer.ensure_vad(&mut on_progress, token);
+
+        Ok((resolved, tuning))
     }
 
     /// Downloads a URL input into `media_dir/<id>/`, emitting `DownloadProgress`
@@ -754,6 +912,7 @@ pub fn spawn_task_runner(deps: RunnerDeps) -> QueueHandle {
         engines: deps.engines,
         tuning: deps.tuning,
         media_dir: deps.media_dir,
+        artifacts: deps.artifacts,
         pending: VecDeque::new(),
         canceled: HashSet::new(),
         finishing: false,
@@ -775,7 +934,7 @@ mod tests {
     use super::*;
     use crate::boundary::{EngineCaps, EngineOptions, MediaInfo, Pcm};
     use crate::domain::{Millis, ModelSize, OutputSpec, TranscriptionOptions};
-    use crate::error::StoreError;
+    use crate::error::{ModelError, StoreError};
     use pretty_assertions::assert_eq;
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -968,18 +1127,26 @@ mod tests {
         scripts: Arc<Mutex<VecDeque<EngineScript>>>,
         in_flight: Arc<AtomicUsize>,
         max_in_flight: Arc<AtomicUsize>,
+        /// `options.vad_model` as seen by this call, in call order — lets a
+        /// test prove a per-job `EngineTuning` override (from
+        /// `ArtifactEnsurer::ensure_vad`) actually reached the pipeline.
+        vad_seen: Arc<Mutex<Vec<Option<PathBuf>>>>,
     }
 
     impl TranscriptionEngine for FakeEngine {
         fn transcribe(
             &mut self,
             _audio: &Pcm,
-            _options: &EngineOptions,
+            options: &EngineOptions,
             sink: &mut dyn SegmentSink,
             cancel: &CancelToken,
         ) -> Result<(), EngineError> {
             let n = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_in_flight.fetch_max(n, Ordering::SeqCst);
+            self.vad_seen
+                .lock()
+                .expect("vad seen lock")
+                .push(options.vad_model.clone());
             let script = self.scripts.lock().expect("scripts lock").pop_front();
             let result = match script {
                 Some(EngineScript::Emit { progress, segments }) => {
@@ -1023,18 +1190,33 @@ mod tests {
         in_flight: Arc<AtomicUsize>,
         max_in_flight: Arc<AtomicUsize>,
         created: Arc<Mutex<Vec<ModelSpec>>>,
+        /// The `resolved` path `create` was called with, in call order —
+        /// lets a test prove the just-ensured model path reaches the
+        /// factory (`None` on every call when no `ArtifactEnsurer` is
+        /// configured — CLI parity).
+        resolved_calls: Arc<Mutex<Vec<Option<PathBuf>>>>,
+        vad_seen: Arc<Mutex<Vec<Option<PathBuf>>>>,
     }
 
     impl EngineFactory for FakeFactory {
-        fn create(&mut self, model: &ModelSpec) -> Result<Box<dyn TranscriptionEngine>, CoreError> {
+        fn create(
+            &mut self,
+            model: &ModelSpec,
+            resolved: Option<&Path>,
+        ) -> Result<Box<dyn TranscriptionEngine>, CoreError> {
             self.created
                 .lock()
                 .expect("created lock")
                 .push(model.clone());
+            self.resolved_calls
+                .lock()
+                .expect("resolved calls lock")
+                .push(resolved.map(Path::to_path_buf));
             Ok(Box::new(FakeEngine {
                 scripts: Arc::clone(&self.scripts),
                 in_flight: Arc::clone(&self.in_flight),
                 max_in_flight: Arc::clone(&self.max_in_flight),
+                vad_seen: Arc::clone(&self.vad_seen),
             }))
         }
     }
@@ -1076,6 +1258,82 @@ mod tests {
         }
     }
 
+    // -- Fake ArtifactEnsurer: records calls, scripts progress + results -----
+
+    /// One scripted outcome for a single `ensure_model` call, consumed in
+    /// call order — mirrors `EngineScript`/`FakeFetcher`'s "one script entry
+    /// per call" pattern.
+    enum EnsureModelScript {
+        /// Emit `progress` steps, then resolve to `path`.
+        Ok {
+            progress: Vec<DownloadProgress>,
+            path: PathBuf,
+        },
+        /// Fail with `err` (no progress emitted).
+        Err(CoreError),
+    }
+
+    /// Fake [`ArtifactEnsurer`]: records every `ensure_model`/`ensure_vad`
+    /// call and plays back one scripted result per call, in call order.
+    /// `model_gate`, when set, blocks `ensure_model` after recording the
+    /// call (before consuming its script) — used to land a `cancel()`
+    /// mid-ensure.
+    struct FakeEnsurer {
+        model_scripts: Arc<Mutex<VecDeque<EnsureModelScript>>>,
+        vad_scripts: Arc<Mutex<VecDeque<Option<PathBuf>>>>,
+        model_calls: Arc<Mutex<Vec<ModelSpec>>>,
+        vad_calls: Arc<Mutex<usize>>,
+        model_gate: Option<Gate>,
+    }
+
+    impl ArtifactEnsurer for FakeEnsurer {
+        fn ensure_model(
+            &self,
+            model: &ModelSpec,
+            progress: &mut dyn FnMut(DownloadProgress),
+            _cancel: &CancelToken,
+        ) -> Result<PathBuf, CoreError> {
+            self.model_calls
+                .lock()
+                .expect("model calls lock")
+                .push(model.clone());
+            if let Some(gate) = &self.model_gate {
+                gate.wait();
+            }
+            match self
+                .model_scripts
+                .lock()
+                .expect("model scripts lock")
+                .pop_front()
+            {
+                Some(EnsureModelScript::Ok {
+                    progress: steps,
+                    path,
+                }) => {
+                    for step in steps {
+                        progress(step);
+                    }
+                    Ok(path)
+                }
+                Some(EnsureModelScript::Err(err)) => Err(err),
+                None => Ok(PathBuf::from("/fake/default-model.bin")),
+            }
+        }
+
+        fn ensure_vad(
+            &self,
+            _progress: &mut dyn FnMut(DownloadProgress),
+            _cancel: &CancelToken,
+        ) -> Option<PathBuf> {
+            *self.vad_calls.lock().expect("vad calls lock") += 1;
+            self.vad_scripts
+                .lock()
+                .expect("vad scripts lock")
+                .pop_front()
+                .flatten()
+        }
+    }
+
     // -- Harness -------------------------------------------------------------
 
     struct Harness {
@@ -1084,12 +1342,22 @@ mod tests {
         decoded: Arc<Mutex<Vec<PathBuf>>>,
         fetch_calls: Arc<Mutex<Vec<url::Url>>>,
         max_in_flight: Arc<AtomicUsize>,
+        resolved_calls: Arc<Mutex<Vec<Option<PathBuf>>>>,
+        vad_seen: Arc<Mutex<Vec<Option<PathBuf>>>>,
         tmp: TempDir,
     }
 
     impl Harness {
         fn store_calls(&self) -> Vec<StoreCall> {
             self.store_calls.lock().expect("store calls").clone()
+        }
+
+        fn resolved_calls(&self) -> Vec<Option<PathBuf>> {
+            self.resolved_calls.lock().expect("resolved calls").clone()
+        }
+
+        fn vad_seen(&self) -> Vec<Option<PathBuf>> {
+            self.vad_seen.lock().expect("vad seen").clone()
         }
 
         fn input_file(&self, name: &str) -> PathBuf {
@@ -1109,6 +1377,7 @@ mod tests {
         canceled_gate: Option<Gate>,
         fetch_steps: Vec<FetchProgress>,
         fetch_panics: bool,
+        ensurer: Option<Arc<dyn ArtifactEnsurer>>,
     }
 
     fn build(cfg: Cfg) -> (QueueHandle, Harness) {
@@ -1118,6 +1387,8 @@ mod tests {
         let decoded = Arc::new(Mutex::new(Vec::new()));
         let fetch_calls = Arc::new(Mutex::new(Vec::new()));
         let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let resolved_calls = Arc::new(Mutex::new(Vec::new()));
+        let vad_seen = Arc::new(Mutex::new(Vec::new()));
 
         let store = FakeStore {
             calls: Arc::clone(&store_calls),
@@ -1135,6 +1406,8 @@ mod tests {
             in_flight: Arc::new(AtomicUsize::new(0)),
             max_in_flight: Arc::clone(&max_in_flight),
             created: Arc::clone(&created),
+            resolved_calls: Arc::clone(&resolved_calls),
+            vad_seen: Arc::clone(&vad_seen),
         };
         let fetcher: Option<Arc<dyn MediaFetcher>> = if cfg.no_fetcher {
             None
@@ -1154,6 +1427,7 @@ mod tests {
             engines: Box::new(factory),
             tuning: EngineTuning::default(),
             media_dir: tmp.path().join("media"),
+            artifacts: cfg.ensurer,
         };
 
         let handle = spawn_task_runner(deps);
@@ -1165,9 +1439,21 @@ mod tests {
                 decoded,
                 fetch_calls,
                 max_in_flight,
+                resolved_calls,
+                vad_seen,
                 tmp,
             },
         )
+    }
+
+    /// Like [`build`], but with `cfg.ensurer` set to `ensurer` — the shared
+    /// harness for every `ensurer_*` test below.
+    fn build_with_ensurer(
+        mut cfg: Cfg,
+        ensurer: Arc<dyn ArtifactEnsurer>,
+    ) -> (QueueHandle, Harness) {
+        cfg.ensurer = Some(ensurer);
+        build(cfg)
     }
 
     fn path_task(input: PathBuf) -> TaskSpec {
@@ -2088,6 +2374,294 @@ mod tests {
                 if operation == "mark_started")));
         // Policy: a store-write failure never aborts the run — the task still
         // completes.
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+    }
+
+    // -- ArtifactEnsurer (Task 2: in-task model ensure) -----------------------
+
+    #[test]
+    fn ensurer_model_progress_is_emitted_per_task_between_started_and_progress() {
+        let ensurer = FakeEnsurer {
+            model_scripts: Arc::new(Mutex::new(VecDeque::from(vec![EnsureModelScript::Ok {
+                progress: vec![
+                    DownloadProgress {
+                        file: "ggml-small.bin".to_string(),
+                        downloaded: 10,
+                        total: Some(100),
+                    },
+                    DownloadProgress {
+                        file: "ggml-small.bin".to_string(),
+                        downloaded: 100,
+                        total: Some(100),
+                    },
+                ],
+                path: PathBuf::from("/models/ggml-small.bin"),
+            }]))),
+            vad_scripts: Arc::new(Mutex::new(VecDeque::new())),
+            model_calls: Arc::new(Mutex::new(Vec::new())),
+            vad_calls: Arc::new(Mutex::new(0)),
+            model_gate: None,
+        };
+        let (q, h) = build_with_ensurer(
+            Cfg {
+                scripts: vec![EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![seg("hi")],
+                }],
+                ..Cfg::default()
+            },
+            Arc::new(ensurer),
+        );
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        q.enqueue(a, path_task(h.input_file("a.mp3")), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        let a_kinds = kinds(&events, a);
+        assert!(
+            matches!(
+                a_kinds.as_slice(),
+                [
+                    TaskEventKind::Queued,
+                    TaskEventKind::Started,
+                    TaskEventKind::ModelDownloadProgress {
+                        downloaded: 10,
+                        total: Some(100),
+                        ..
+                    },
+                    TaskEventKind::ModelDownloadProgress {
+                        downloaded: 100,
+                        total: Some(100),
+                        ..
+                    },
+                    TaskEventKind::SegmentAdded(_),
+                    TaskEventKind::Completed { .. },
+                ]
+            ),
+            "unexpected event sequence: {a_kinds:?}"
+        );
+    }
+
+    #[test]
+    fn ensurer_model_failure_fails_task_with_ensurer_message() {
+        let ensurer = FakeEnsurer {
+            model_scripts: Arc::new(Mutex::new(VecDeque::from(vec![EnsureModelScript::Err(
+                CoreError::Model(ModelError::Http {
+                    detail: "connection refused".to_string(),
+                }),
+            )]))),
+            vad_scripts: Arc::new(Mutex::new(VecDeque::new())),
+            model_calls: Arc::new(Mutex::new(Vec::new())),
+            vad_calls: Arc::new(Mutex::new(0)),
+            model_gate: None,
+        };
+        let (q, h) = build_with_ensurer(Cfg::default(), Arc::new(ensurer));
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        q.enqueue(a, path_task(h.input_file("a.mp3")), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        assert!(events.iter().any(|e| e.task_id == a
+            && matches!(&e.kind, TaskEventKind::Failed { message } if message.contains("connection refused"))));
+        let calls = h.store_calls();
+        assert!(calls.iter().any(|c| matches!(
+            c,
+            StoreCall::Failed(x, m) if *x == a && m.contains("connection refused")
+        )));
+        // No engine was ever built — the ensure failed before engine
+        // acquisition.
+        assert!(h.created.lock().expect("created").is_empty());
+    }
+
+    #[test]
+    fn ensurer_vad_result_overrides_tuning_per_job_and_none_degrades() {
+        let vad_path = PathBuf::from("/models/vad/silero.bin");
+        let model_path_a = PathBuf::from("/models/ggml-small.bin");
+        let model_path_b = PathBuf::from("/models/ggml-base.bin");
+        let model_calls = Arc::new(Mutex::new(Vec::new()));
+        let vad_calls = Arc::new(Mutex::new(0));
+        let ensurer = FakeEnsurer {
+            model_scripts: Arc::new(Mutex::new(VecDeque::from(vec![
+                EnsureModelScript::Ok {
+                    progress: vec![],
+                    path: model_path_a.clone(),
+                },
+                EnsureModelScript::Ok {
+                    progress: vec![],
+                    path: model_path_b.clone(),
+                },
+            ]))),
+            vad_scripts: Arc::new(Mutex::new(VecDeque::from(vec![
+                Some(vad_path.clone()),
+                None,
+            ]))),
+            model_calls: Arc::clone(&model_calls),
+            vad_calls: Arc::clone(&vad_calls),
+            model_gate: None,
+        };
+        let (q, h) = build_with_ensurer(
+            Cfg {
+                scripts: vec![
+                    EngineScript::Emit {
+                        progress: vec![],
+                        segments: vec![],
+                    },
+                    EngineScript::Emit {
+                        progress: vec![],
+                        segments: vec![],
+                    },
+                ],
+                ..Cfg::default()
+            },
+            Arc::new(ensurer),
+        );
+        let a = TranscriptionId::new();
+        let b = TranscriptionId::new();
+        // Different model sizes so the engine cache misses for both — each
+        // task drives its own `create` call (and thus its own `resolved`).
+        let mut spec_a = path_task(h.input_file("a.mp3"));
+        let mut spec_b = path_task(h.input_file("b.mp3"));
+        spec_a.options = options_for(ModelSize::Small);
+        spec_b.options = options_for(ModelSize::Base);
+        q.enqueue(a, spec_a, Source::FileImport);
+        q.enqueue(b, spec_b, Source::FileImport);
+        q.finish().expect("finish");
+
+        // ensure_model/ensure_vad each ran once per task.
+        assert_eq!(model_calls.lock().expect("model calls").len(), 2);
+        assert_eq!(*vad_calls.lock().expect("vad calls"), 2);
+
+        // engines.create received the model just ensured for each task.
+        assert_eq!(
+            h.resolved_calls(),
+            vec![Some(model_path_a), Some(model_path_b)]
+        );
+
+        // The per-job VAD override reached the pipeline: `Some` for A,
+        // `None` (degraded) for B — despite both tasks sharing the same
+        // base `EngineTuning` (default: no VAD).
+        assert_eq!(h.vad_seen(), vec![Some(vad_path), None]);
+    }
+
+    #[test]
+    fn ensurer_cache_hit_still_ensures_model_but_skips_create() {
+        let model_calls = Arc::new(Mutex::new(Vec::new()));
+        let ensurer = FakeEnsurer {
+            model_scripts: Arc::new(Mutex::new(VecDeque::from(vec![
+                EnsureModelScript::Ok {
+                    progress: vec![],
+                    path: PathBuf::from("/models/ggml-small.bin"),
+                },
+                EnsureModelScript::Ok {
+                    progress: vec![],
+                    path: PathBuf::from("/models/ggml-small.bin"),
+                },
+            ]))),
+            vad_scripts: Arc::new(Mutex::new(VecDeque::new())),
+            model_calls: Arc::clone(&model_calls),
+            vad_calls: Arc::new(Mutex::new(0)),
+            model_gate: None,
+        };
+        let (q, h) = build_with_ensurer(
+            Cfg {
+                scripts: vec![
+                    EngineScript::Emit {
+                        progress: vec![],
+                        segments: vec![],
+                    },
+                    EngineScript::Emit {
+                        progress: vec![],
+                        segments: vec![],
+                    },
+                ],
+                ..Cfg::default()
+            },
+            Arc::new(ensurer),
+        );
+        let a = TranscriptionId::new();
+        let b = TranscriptionId::new();
+        // Same (default) model for both — the engine cache hits for B.
+        q.enqueue(a, path_task(h.input_file("a.mp3")), Source::FileImport);
+        q.enqueue(b, path_task(h.input_file("b.mp3")), Source::FileImport);
+        q.finish().expect("finish");
+
+        // ensure_model ran for both tasks — the artifact stays fresh even on
+        // a cache hit.
+        assert_eq!(model_calls.lock().expect("model calls").len(), 2);
+        // ...but engines.create ran only once: the cache hit skipped it.
+        assert_eq!(h.created.lock().expect("created").len(), 1);
+    }
+
+    #[test]
+    fn ensurer_cancel_during_ensure_yields_canceled_not_failed() {
+        let (ensure_ctrl, ensure_gate) = gate();
+        let ensurer = FakeEnsurer {
+            model_scripts: Arc::new(Mutex::new(VecDeque::from(vec![EnsureModelScript::Err(
+                CoreError::Canceled,
+            )]))),
+            vad_scripts: Arc::new(Mutex::new(VecDeque::new())),
+            model_calls: Arc::new(Mutex::new(Vec::new())),
+            vad_calls: Arc::new(Mutex::new(0)),
+            model_gate: Some(ensure_gate),
+        };
+        let (q, h) = build_with_ensurer(Cfg::default(), Arc::new(ensurer));
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        q.enqueue(a, path_task(h.input_file("a.mp3")), Source::FileImport);
+        // The runner is inside `ensure_model`, blocked on the gate.
+        ensure_ctrl.wait_entered();
+        // A is the current task, so this trips its token directly.
+        q.cancel(a);
+        ensure_ctrl.release();
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Canceled))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Failed { .. }))
+        );
+        let calls = h.store_calls();
+        assert!(calls.contains(&StoreCall::Canceled(a)));
+        assert!(!calls.iter().any(|c| matches!(c, StoreCall::Failed(..))));
+    }
+
+    #[test]
+    fn no_ensurer_behaves_exactly_as_before() {
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        q.enqueue(a, path_task(h.input_file("a.mp3")), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        // No ModelDownloadProgress events fire without an ArtifactEnsurer.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.kind, TaskEventKind::ModelDownloadProgress { .. }))
+        );
+        // The factory always sees `resolved = None` — the CLI pre-resolves
+        // the model itself and its factory ignores this parameter, but the
+        // runner must still pass `None` when no ArtifactEnsurer configured.
+        assert_eq!(h.resolved_calls(), vec![None]);
         assert!(
             events
                 .iter()
