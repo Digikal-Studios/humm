@@ -57,6 +57,13 @@ pub struct TranscriptionId(uuid::Uuid);
 
 impl TranscriptionId {
     /// Generates a new, random (v4) id. Two calls never produce the same id.
+    ///
+    /// No `Default` impl is provided: `new()` mints a fresh, random identity
+    /// on every call, so there is no meaningful "default" value to return
+    /// (unlike `uuid::Uuid::default()`, which is the fixed nil UUID) — a
+    /// `Default` impl here would either be non-deterministic (violating
+    /// `T::default() == T::default()`) or silently wrong (a nil id).
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         TranscriptionId(uuid::Uuid::new_v4())
     }
@@ -65,12 +72,6 @@ impl TranscriptionId {
     /// type's `Display`); `None` if `s` is not a valid UUID.
     pub fn parse(s: &str) -> Option<Self> {
         uuid::Uuid::parse_str(s).ok().map(TranscriptionId)
-    }
-}
-
-impl Default for TranscriptionId {
-    fn default() -> Self {
-        TranscriptionId::new()
     }
 }
 
@@ -830,6 +831,17 @@ mod tests {
     }
 
     // -- Serde wire format --------------------------------------------------
+
+    #[test]
+    fn input_path_serializes_as_tagged_lowercase_json_and_round_trips() {
+        let input = Input::Path(PathBuf::from("/x.mp3"));
+
+        let json = serde_json::to_string(&input).unwrap();
+        assert_eq!(json, r#"{"path":"/x.mp3"}"#);
+
+        let round_tripped: Input = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, input);
+    }
 
     #[test]
     fn model_size_serializes_to_buzz_wire_values() {
