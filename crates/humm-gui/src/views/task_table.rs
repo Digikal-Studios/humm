@@ -220,14 +220,25 @@ impl TableLayout {
 /// on the next launch (`main.rs`'s `persistence_path: config_dir()/gui.ron`)
 /// — so resized widths survive a restart with no code in this crate reading
 /// or writing them directly.
+///
+/// `modal_open` (F-004 review fix): `true` while any modal (Rename/Notes,
+/// Clear-confirm, a toast's error detail) has the user's attention —
+/// suppresses the Delete/⌘C/Return handling below so a modal's own text
+/// field owns keyboard input instead of the table underneath it silently
+/// acting on the still-selected row (see
+/// `main_window::ActionState::modal_open`'s doc comment for the concrete
+/// collisions this fixes).
 pub fn ui(
     ui: &mut egui::Ui,
     vm: &mut TasksVm,
     layout: &mut TableLayout,
     actions: &mut Vec<TableAction>,
+    modal_open: bool,
 ) {
     let modifiers = ui.input(|i| i.modifiers);
-    handle_keyboard_shortcuts(ui, vm, actions);
+    if !modal_open {
+        handle_keyboard_shortcuts(ui, vm, actions);
+    }
 
     let visible_columns = layout.visible_in_order();
 

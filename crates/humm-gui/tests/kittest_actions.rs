@@ -556,3 +556,72 @@ fn store_write_failed_event_shows_the_banner_and_dismiss_clears_it() {
         "a fresh reappearance must not carry over the old counter"
     );
 }
+
+// -- Modal suppresses global shortcuts (review fix) --------------------------
+
+/// Review-round fix: `handle_global_shortcuts`/`task_table::handle_keyboard_shortcuts`
+/// must both be suppressed while any modal (here, the Rename dialog) is
+/// open — Delete previously reached the table's Clear-selected handling and
+/// ⌘S previously reached the toolbar's Clear shortcut, either of which
+/// would stack the Clear-confirm modal on top of the still-open Rename
+/// dialog. Confirms the fix in both directions: neither key does anything
+/// while Rename is open, and Delete works normally again once it's closed.
+#[test]
+fn modal_open_suppresses_delete_and_command_s_while_rename_is_open() {
+    let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
+    let id = TranscriptionId::new();
+    store
+        .create_task(
+            &id,
+            &sample_spec(Input::Path(PathBuf::from("/tmp/clip.wav"))),
+            Source::FileImport,
+        )
+        .expect("create");
+    // A terminal (Clear-eligible) row, so if the gate failed to suppress
+    // the shortcuts, Clear's own gate wouldn't be what stops it either.
+    store.mark_completed(&id, &[]).expect("mark completed");
+
+    let mut harness = wide_harness(store, Box::new(NeverCalledEngineFactory));
+    harness.run();
+
+    // A plain click first: selection is separate from a context-menu
+    // right-click (`Response::clicked()` only considers the primary
+    // button), and the Clear gate this test exercises reads
+    // `vm.selected_statuses()`, which is empty — and so unconditionally
+    // gate-fails regardless of `modal_open` — unless the row is actually
+    // selected.
+    harness.get_by_label("Completed").click();
+    harness.run();
+    harness.get_by_label("Completed").click_secondary();
+    harness.run();
+    harness.get_by_label("Rename").click();
+    harness.run();
+
+    // Rename is open (its text field is on screen).
+    harness.get_by_role(egui::accesskit::Role::TextInput);
+
+    harness.key_press(egui::Key::Delete);
+    harness.run();
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::S);
+    harness.run();
+
+    // The Clear-confirm modal must not have appeared (its body text is
+    // unique to it — unlike "Clear History", which is also the toolbar
+    // button's own label and thus always on screen).
+    assert!(
+        harness
+            .query_by_label_contains("Are you sure you want to delete")
+            .is_none(),
+        "Delete/⌘S must not open Clear-confirm while Rename is open"
+    );
+    // Rename must still be the only open dialog.
+    harness.get_by_role(egui::accesskit::Role::TextInput);
+
+    // Close Rename; the same shortcut now works normally again.
+    harness.get_by_label("Cancel").click();
+    harness.run();
+
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::S);
+    harness.run();
+    harness.get_by_label_contains("Are you sure you want to delete");
+}

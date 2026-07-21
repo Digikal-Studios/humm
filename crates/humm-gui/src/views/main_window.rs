@@ -66,6 +66,26 @@ pub struct ActionState {
     pub banner: StoreHealthBanner,
 }
 
+impl ActionState {
+    /// Whether any modal currently has the user's attention: the Rename/
+    /// Notes dialog, the Clear-History confirm, or a failed-task toast's
+    /// error-detail popover. Global shortcuts (`handle_global_shortcuts`)
+    /// and the table's own Delete/⌘C/Return handling
+    /// (`task_table::handle_keyboard_shortcuts`) must both be suppressed
+    /// while this is true — a modal's text field owns keyboard input, and
+    /// forwarding e.g. Delete/⌘X to the table underneath would silently act
+    /// on the (still-selected, now-hidden-behind-the-modal) row instead of
+    /// whatever the user is actually looking at. Concrete collisions this
+    /// fixes: Delete while editing a Rename field previously opened the
+    /// Clear-confirm modal stacked on top of it; ⌘X swallowed a cut and
+    /// canceled the selected row; ⌘S stacked a second confirm modal.
+    pub fn modal_open(&self) -> bool {
+        self.clear_confirm_open
+            || !matches!(self.dialog, Dialog::None)
+            || self.toasts.detail.is_some()
+    }
+}
+
 /// The store-health banner's state machine (F-004): hidden until the first
 /// `StoreWriteFailed` event, then a persistent (non-auto-dismissing)
 /// message with a counter suffix for every subsequent event while it's
@@ -193,11 +213,12 @@ pub fn show(
         });
     }
 
+    let modal_open = state.modal_open();
     egui::CentralPanel::default().show(ui, |ui| {
         if vm.sorted_rows().is_empty() {
             show_hero(ui, state);
         } else {
-            task_table::ui(ui, vm, layout, actions);
+            task_table::ui(ui, vm, layout, actions, modal_open);
         }
     });
 
@@ -218,12 +239,21 @@ pub fn show(
 /// acting directly — `app.rs`'s single drain loop re-gates both (defense in
 /// depth), so a shortcut can never bypass the enablement rule a click
 /// would've been subject to.
+///
+/// A no-op while [`ActionState::modal_open`] is true: none of these five
+/// shortcuts are consumed at all in that case (not even to discard them),
+/// so a modal's own text field still receives the raw key event normally
+/// (e.g. ⌘X actually cuts text instead of being swallowed as "Cancel
+/// Transcription").
 fn handle_global_shortcuts(
     ui: &mut egui::Ui,
     actions: &mut Vec<TableAction>,
     shortcuts: &ShortcutMap,
     state: &mut ActionState,
 ) {
+    if state.modal_open() {
+        return;
+    }
     ui.input_mut(|input| {
         if input.consume_shortcut(&shortcuts.get(ShortcutAction::StopTranscription)) {
             actions.push(TableAction::CancelSelected);
@@ -393,6 +423,7 @@ fn show_hero(ui: &mut egui::Ui, state: &mut ActionState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use humm_core::domain::TranscriptionId;
 
     // -- toolbar_enablement -----------------------------------------------
 
@@ -489,5 +520,55 @@ mod tests {
         assert!(banner.visible());
         // Fresh reappearance: exactly the base message, no "(N)" suffix.
         assert_eq!(banner.message(), Some(tr("banner-store-health")));
+    }
+
+    // -- ActionState::modal_open --------------------------------------------
+
+    #[test]
+    fn modal_open_is_false_with_nothing_open() {
+        assert!(!ActionState::default().modal_open());
+    }
+
+    #[test]
+    fn modal_open_is_true_while_clear_confirm_is_open() {
+        let state = ActionState {
+            clear_confirm_open: true,
+            ..ActionState::default()
+        };
+        assert!(state.modal_open());
+    }
+
+    #[test]
+    fn modal_open_is_true_while_the_rename_dialog_is_open() {
+        let state = ActionState {
+            dialog: Dialog::Rename {
+                id: TranscriptionId::new(),
+                text: "clip.wav".to_string(),
+            },
+            ..ActionState::default()
+        };
+        assert!(state.modal_open());
+    }
+
+    #[test]
+    fn modal_open_is_true_while_the_notes_dialog_is_open() {
+        let state = ActionState {
+            dialog: Dialog::Notes {
+                id: TranscriptionId::new(),
+                text: String::new(),
+            },
+            ..ActionState::default()
+        };
+        assert!(state.modal_open());
+    }
+
+    #[test]
+    fn modal_open_is_true_while_a_toast_error_detail_is_open() {
+        let mut state = ActionState::default();
+        state.toasts.detail = Some(crate::views::toasts::ErrorDetail {
+            task_id: TranscriptionId::new(),
+            full_message: "boom".to_string(),
+        });
+        assert!(state.modal_open());
     }
 }

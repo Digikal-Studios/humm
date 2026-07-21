@@ -253,7 +253,21 @@ impl HummApp {
     /// logged and surfaced as an error toast; the view-model is left
     /// unchanged in that case (the rows are still there — because they're
     /// still in the store).
+    ///
+    /// Re-checks the terminal-status gate here too (the same
+    /// `toolbar_enablement(..).clear` rule `handle_clear_selected` already
+    /// checked before ever opening the confirm modal) — defense in depth:
+    /// the modal is open for as long as the user takes to click Ok/Cancel,
+    /// and task events keep flowing into `TasksVm` regardless of whether a
+    /// modal is up, so a selected row could in principle transition to a
+    /// non-terminal status in that window. Failing the gate silently
+    /// aborts the delete (nothing selected is safe to delete anymore) —
+    /// no toast, matching `handle_clear_selected`'s own silent-ignore
+    /// contract for a gate that fails.
     fn apply_clear_confirmed(&mut self, now: Instant) {
+        if !toolbar_enablement(&self.tasks.selected_statuses()).clear {
+            return;
+        }
         let ids: Vec<TranscriptionId> = self.tasks.selection().iter().copied().collect();
         if ids.is_empty() {
             return;

@@ -56,6 +56,14 @@ menu-help-docs-tooltip = Documentation arrives with the first release
 menu-help-preferences = Preferences…
 
 ## Clear-History confirm modal (views/main_window.rs, F-026)
+##
+## clear-confirm-ok is deliberately "Ok" (lowercase k), not "OK" — Buzz's
+## QMessageBox.button(...).setText(_("Ok")) literally relabels its Yes/No
+## buttons to that exact casing (main_window.py:249-250). dialog-ok below,
+## for the Rename/Notes modals, is a *different* dialog kind (Qt's
+## QInputDialog, whose own default OK button is genuinely spelled "OK") —
+## the casing difference between the two is intentional Buzz lineage, not
+## a typo to "fix" into consistency.
 
 clear-confirm-title = Clear History
 clear-confirm-body = Are you sure you want to delete the selected transcription(s)? This action cannot be undone.
