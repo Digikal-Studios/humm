@@ -8,7 +8,7 @@
 //! `unsafe` in edition 2024).
 
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Directory holding downloaded whisper models.
 ///
@@ -29,6 +29,53 @@ pub fn log_dir() -> PathBuf {
     log_dir_from(std::env::var_os("HUMM_LOG_DIR").as_deref())
 }
 
+/// Directory holding humm's configuration file (`settings.toml`).
+///
+/// Honors `HUMM_CONFIG_DIR` if set; otherwise `<platform config dir>/humm`
+/// (macOS: `~/Library/Application Support/humm`; Linux: `$XDG_CONFIG_HOME`
+/// or `~/.config/humm`; Windows: `%APPDATA%\humm`).
+pub fn config_dir() -> PathBuf {
+    config_dir_from(std::env::var_os("HUMM_CONFIG_DIR").as_deref())
+}
+
+/// Directory holding humm's persistent data: the sqlite database and
+/// downloaded media (`docs/design/ARCHITECTURE.md` §5).
+///
+/// Honors `HUMM_DATA_DIR` if set; otherwise `<platform data dir>/humm`
+/// (macOS: `~/Library/Application Support/humm`; Linux: `$XDG_DATA_HOME` or
+/// `~/.local/share/humm`; Windows: `%APPDATA%\humm`).
+pub fn data_dir() -> PathBuf {
+    data_dir_from(std::env::var_os("HUMM_DATA_DIR").as_deref())
+}
+
+/// Path to the settings TOML file: `config_dir()/settings.toml`.
+pub fn settings_path() -> PathBuf {
+    config_dir().join("settings.toml")
+}
+
+/// Path to humm's sqlite database: `data_dir()/humm.sqlite`.
+pub fn db_path() -> PathBuf {
+    data_dir().join("humm.sqlite")
+}
+
+/// Directory for URL-import downloads: `data_dir()/media`.
+pub fn media_dir() -> PathBuf {
+    data_dir().join("media")
+}
+
+/// Path to Buzz's own sqlite database on this machine, if present.
+///
+/// Buzz (the app humm ports from) keeps its database at the platform
+/// user-data root for app "Buzz" plus `Buzz.sqlite` (macOS:
+/// `~/Library/Application Support/Buzz/Buzz.sqlite`). humm never writes to
+/// this file; it only reads it, and only when a caller asks to import (a
+/// later milestone). Returns `None` when the platform data directory can't
+/// be determined or the file doesn't exist.
+pub fn buzz_sqlite_path() -> Option<PathBuf> {
+    let base = directories::BaseDirs::new()?;
+    buzz_sqlite_path_from(base.data_dir())
+}
+
 fn model_root_from(env: Option<&OsStr>) -> PathBuf {
     if let Some(value) = env {
         return PathBuf::from(value);
@@ -43,6 +90,32 @@ fn log_dir_from(env: Option<&OsStr>) -> PathBuf {
         return PathBuf::from(value);
     }
     platform_log_dir()
+}
+
+fn config_dir_from(env: Option<&OsStr>) -> PathBuf {
+    if let Some(value) = env {
+        return PathBuf::from(value);
+    }
+    directories::BaseDirs::new()
+        .map(|dirs| dirs.config_dir().join("humm"))
+        .unwrap_or_else(|| PathBuf::from("humm"))
+}
+
+fn data_dir_from(env: Option<&OsStr>) -> PathBuf {
+    if let Some(value) = env {
+        return PathBuf::from(value);
+    }
+    directories::BaseDirs::new()
+        .map(|dirs| dirs.data_dir().join("humm"))
+        .unwrap_or_else(|| PathBuf::from("humm"))
+}
+
+/// Given the platform's base data directory, returns Buzz's sqlite path if
+/// it exists there. Takes the base dir as a parameter so tests never touch
+/// real user directories.
+fn buzz_sqlite_path_from(base_data_dir: &Path) -> Option<PathBuf> {
+    let candidate = base_data_dir.join("Buzz").join("Buzz.sqlite");
+    candidate.exists().then_some(candidate)
 }
 
 #[cfg(target_os = "macos")]
@@ -122,5 +195,84 @@ mod tests {
             resolved.ends_with(Path::new("humm/logs")),
             "expected {resolved:?} to end with humm/logs"
         );
+    }
+
+    #[test]
+    fn config_dir_override_is_respected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let override_path = dir.path().join("custom-config");
+        let resolved = config_dir_from(Some(override_path.as_os_str()));
+        assert_eq!(resolved, override_path);
+    }
+
+    #[test]
+    fn config_dir_default_ends_with_humm() {
+        let resolved = config_dir_from(None);
+        assert!(
+            resolved.ends_with(Path::new("humm")),
+            "expected {resolved:?} to end with humm"
+        );
+    }
+
+    #[test]
+    fn data_dir_override_is_respected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let override_path = dir.path().join("custom-data");
+        let resolved = data_dir_from(Some(override_path.as_os_str()));
+        assert_eq!(resolved, override_path);
+    }
+
+    #[test]
+    fn data_dir_default_ends_with_humm() {
+        let resolved = data_dir_from(None);
+        assert!(
+            resolved.ends_with(Path::new("humm")),
+            "expected {resolved:?} to end with humm"
+        );
+    }
+
+    #[test]
+    fn settings_path_default_ends_with_humm_settings_toml() {
+        let resolved = settings_path();
+        assert!(
+            resolved.ends_with(Path::new("humm/settings.toml")),
+            "expected {resolved:?} to end with humm/settings.toml"
+        );
+    }
+
+    #[test]
+    fn db_path_default_ends_with_humm_sqlite() {
+        let resolved = db_path();
+        assert!(
+            resolved.ends_with(Path::new("humm/humm.sqlite")),
+            "expected {resolved:?} to end with humm/humm.sqlite"
+        );
+    }
+
+    #[test]
+    fn media_dir_default_ends_with_humm_media() {
+        let resolved = media_dir();
+        assert!(
+            resolved.ends_with(Path::new("humm/media")),
+            "expected {resolved:?} to end with humm/media"
+        );
+    }
+
+    #[test]
+    fn buzz_sqlite_path_returns_none_when_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let resolved = buzz_sqlite_path_from(dir.path());
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn buzz_sqlite_path_returns_some_when_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let buzz_dir = dir.path().join("Buzz");
+        std::fs::create_dir_all(&buzz_dir).expect("create Buzz dir");
+        let db_path = buzz_dir.join("Buzz.sqlite");
+        std::fs::write(&db_path, b"").expect("write stub db");
+        let resolved = buzz_sqlite_path_from(dir.path());
+        assert_eq!(resolved, Some(db_path));
     }
 }

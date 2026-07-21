@@ -1,0 +1,254 @@
+//! The humm settings file: a typed, serde-driven TOML document at
+//! `paths::settings_path()` (ADR-012).
+//!
+//! Buzz stored settings in `QSettings` (a Qt-ism: registry on Windows,
+//! `.plist` on macOS, `.conf` on Linux — see `buzz/settings/settings.py` and
+//! `docs/analysis/EXTERNAL_SURFACE.md` §3.6 for the full key catalog). humm
+//! ports the *semantics* of the settings this milestone actually consumes,
+//! not the QSettings mechanism itself: a plain TOML file that's diffable and
+//! hand-editable. Every field is optional and defaulted so a partial or
+//! hand-edited file still loads, and unknown keys are ignored (no
+//! `deny_unknown_fields`) so older files stay forward-compatible as fields
+//! are added.
+//!
+//! `Settings::load`/`Settings::save` are the only I/O in this module.
+//! Loading a missing file is not an error (first run); loading a file that
+//! exists but can't be read or parsed is — humm never silently discards a
+//! user's settings. Saving is atomic: write a sibling temp file, then
+//! `rename` it over the target, so a crash mid-write never corrupts the
+//! previous file.
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+/// The settings file schema, rooted at `paths::settings_path()`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// Model-selection settings.
+    pub models: ModelSettings,
+    /// URL-import download settings.
+    pub downloads: DownloadSettings,
+    /// Update-check settings.
+    pub updates: UpdateSettings,
+}
+
+/// Settings governing model selection (`buzz/model_loader.py` custom-model
+/// path; `docs/analysis/FEATURE_INVENTORY.md` F-042/F-043).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelSettings {
+    /// URL to download a user-supplied custom ggml model from. Consumed by
+    /// `-s custom` when no model is already cached.
+    pub custom_model_url: Option<String>,
+}
+
+/// Settings governing URL-import downloads (F-022).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DownloadSettings {
+    /// Cookie file passed through to `yt-dlp` for authenticated downloads
+    /// (`HUMM_DOWNLOAD_COOKIEFILE` env var takes precedence over this).
+    pub cookie_file: Option<PathBuf>,
+}
+
+/// Settings governing the update-check feature (F-006, ADR-015).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateSettings {
+    /// Timestamp of the last update check.
+    pub last_check: Option<String>,
+    /// Latest version reported by the last successful update check.
+    pub available_version: Option<String>,
+}
+
+impl Settings {
+    /// Loads settings from `path`.
+    ///
+    /// A missing file is not an error: it returns `Settings::default()` (the
+    /// expected state on first run, before any settings have been saved). A
+    /// file that exists but can't be read (permissions, I/O error) or can't
+    /// be parsed as TOML returns `Err` — humm never silently falls back to
+    /// defaults over a user's existing settings.
+    pub fn load(path: &Path) -> Result<Settings, SettingsError> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Settings::default());
+            }
+            Err(source) => {
+                return Err(SettingsError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        toml::from_str(&content).map_err(|error| SettingsError::Parse {
+            path: path.to_path_buf(),
+            detail: error.to_string(),
+        })
+    }
+
+    /// Saves settings to `path`, creating parent directories if needed.
+    ///
+    /// The write is atomic: the serialized TOML goes to a temp file in the
+    /// same directory (`<file_name>.tmp-<pid>`), which is then renamed over
+    /// `path`. On any platform where rename is atomic within a directory,
+    /// concurrent readers see either the old file or the new one, never a
+    /// partial write, and no temp file is left behind on success.
+    pub fn save(&self, path: &Path) -> Result<(), SettingsError> {
+        let body = toml::to_string_pretty(self).map_err(|error| SettingsError::Parse {
+            path: path.to_path_buf(),
+            detail: error.to_string(),
+        })?;
+
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|source| SettingsError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "settings.toml".to_string());
+        let tmp_path = parent.join(format!("{file_name}.tmp-{}", std::process::id()));
+
+        std::fs::write(&tmp_path, body).map_err(|source| SettingsError::Io {
+            path: tmp_path.clone(),
+            source,
+        })?;
+        std::fs::rename(&tmp_path, path).map_err(|source| SettingsError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(())
+    }
+}
+
+/// Errors from loading or saving the settings file.
+///
+/// Deliberately standalone rather than a `CoreError` variant: settings I/O
+/// is a leaf concern of binaries (CLI/GUI startup), not something that
+/// crosses the transcription pipeline.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum SettingsError {
+    /// An I/O error occurred at `path` (permissions, disk full, etc.) — not
+    /// including a missing file on load, which is not an error.
+    #[error("settings I/O error at {}: {source}", path.display())]
+    Io {
+        /// The path being read or written.
+        path: PathBuf,
+        /// The underlying I/O error.
+        source: std::io::Error,
+    },
+    /// The settings file's contents could not be interpreted as TOML,
+    /// either decoding an existing file or encoding one to save.
+    #[error("failed to parse settings at {}: {detail}", path.display())]
+    Parse {
+        /// The file that failed to (de)serialize.
+        path: PathBuf,
+        /// Diagnostic detail from the TOML (de)serializer.
+        detail: String,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Settings, SettingsError};
+    use std::path::Path;
+
+    #[test]
+    fn load_missing_path_returns_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        let loaded = Settings::load(&path).expect("load missing file");
+        assert_eq!(loaded, Settings::default());
+    }
+
+    #[test]
+    fn save_then_load_round_trips_all_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+
+        let mut settings = Settings::default();
+        settings.models.custom_model_url = Some("https://example.com/model.bin".to_string());
+        settings.downloads.cookie_file = Some(Path::new("/tmp/cookies.txt").to_path_buf());
+        settings.updates.last_check = Some("2026-07-21T00:00:00Z".to_string());
+        settings.updates.available_version = Some("1.2.3".to_string());
+
+        settings.save(&path).expect("save");
+        let loaded = Settings::load(&path).expect("load");
+        assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn corrupt_file_returns_err_mentioning_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "not = [valid toml").expect("write corrupt file");
+
+        let err = Settings::load(&path).expect_err("corrupt file must error");
+        let message = err.to_string();
+        assert!(
+            message.contains(path.to_str().unwrap()),
+            "expected error to mention path, got: {message}"
+        );
+    }
+
+    #[test]
+    fn save_creates_parent_dirs_and_leaves_no_tmp_sibling() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested").join("dir").join("settings.toml");
+
+        Settings::default().save(&path).expect("save");
+
+        assert!(path.exists(), "settings file should exist");
+        let parent = path.parent().unwrap();
+        let leftover_tmp: Vec<_> = std::fs::read_dir(parent)
+            .expect("read parent dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(
+            leftover_tmp.is_empty(),
+            "expected no tmp siblings, found {leftover_tmp:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_toml_keys_are_ignored_on_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        std::fs::write(
+            &path,
+            r#"
+            [models]
+            custom_model_url = "https://example.com/model.bin"
+            some_future_field = "ignored"
+
+            [some_unknown_section]
+            key = "value"
+            "#,
+        )
+        .expect("write file with unknown keys");
+
+        let loaded = Settings::load(&path).expect("load file with unknown keys");
+        assert_eq!(
+            loaded.models.custom_model_url,
+            Some("https://example.com/model.bin".to_string())
+        );
+    }
+
+    #[test]
+    fn settings_error_parse_mentions_path() {
+        let path = Path::new("/tmp/whatever/settings.toml");
+        let err = SettingsError::Parse {
+            path: path.to_path_buf(),
+            detail: "bad token".to_string(),
+        };
+        assert!(err.to_string().contains("bad token"));
+    }
+}
