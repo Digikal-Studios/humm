@@ -19,9 +19,9 @@ use crate::domain::ModelSize;
 use crate::error::ModelError;
 
 use super::registry::{
-    self, CoremlState, VAD_MODEL_FILE, VAD_MODEL_REPO, VAD_MODEL_URL, coreml_encoder_dir,
-    coreml_no_encoder_marker, coreml_state, coreml_zip_url, ggml_file_name, ggml_url,
-    partial_path_for, repo_for, sentinel_path_for,
+    self, CoremlState, VAD_MODEL_FILE, VAD_MODEL_REPO, coreml_encoder_dir,
+    coreml_no_encoder_marker, coreml_state, ggml_file_name, partial_path_for, repo_for,
+    sentinel_path_for,
 };
 
 /// One incremental progress update for a single artifact download.
@@ -40,15 +40,25 @@ pub struct DownloadProgress {
 pub struct ModelDownloader {
     client: reqwest::blocking::Client,
     root: PathBuf,
+    hf_base: String,
 }
 
 impl ModelDownloader {
     /// Creates a downloader rooted at `root` (typically
-    /// [`crate::paths::model_root`]).
+    /// [`crate::paths::model_root`]), resolving all URLs against the
+    /// default [`registry::HF_BASE`].
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self::with_hf_base(root, registry::HF_BASE)
+    }
+
+    /// Creates a downloader rooted at `root` that resolves all URLs
+    /// (ggml, CoreML zip, VAD model, SHA-digest lookups) against `hf_base`
+    /// instead of the real HuggingFace host — for tests and mirrors.
+    pub fn with_hf_base(root: impl Into<PathBuf>, hf_base: impl Into<String>) -> Self {
         ModelDownloader {
             client: reqwest::blocking::Client::new(),
             root: root.into(),
+            hf_base: hf_base.into(),
         }
     }
 
@@ -101,7 +111,7 @@ impl ModelDownloader {
     ) -> Result<PathBuf, ModelError> {
         let repo = repo_for(size)?;
         let final_path = self.root.join(ggml_file_name(size));
-        let url = ggml_url(size)?;
+        let url = registry::ggml_url_with_base(&self.hf_base, size)?;
         self.ensure_artifact(&url, &final_path, Some(repo), progress, cancel)?;
         Ok(final_path)
     }
@@ -168,13 +178,8 @@ impl ModelDownloader {
         cancel: &CancelToken,
     ) -> Result<PathBuf, ModelError> {
         let final_path = self.root.join(VAD_MODEL_FILE);
-        self.ensure_artifact(
-            VAD_MODEL_URL,
-            &final_path,
-            Some(VAD_MODEL_REPO),
-            progress,
-            cancel,
-        )?;
+        let url = registry::vad_model_url_with_base(&self.hf_base);
+        self.ensure_artifact(&url, &final_path, Some(VAD_MODEL_REPO), progress, cancel)?;
         Ok(final_path)
     }
 
@@ -190,6 +195,12 @@ impl ModelDownloader {
     /// rename. Recovering (verify-and-promote, or discard-and-restart-once)
     /// keeps a completed-but-unrenamed `.partial` from wedging the download in
     /// a permanent 416 loop.
+    ///
+    /// This is a thin sentinel-writing wrapper around
+    /// [`Self::download_and_verify`] — the CoreML zip path (which has its own
+    /// completion marker, the extracted directory's in-directory sentinel,
+    /// and so never wants *this* sentinel written) calls
+    /// [`Self::download_and_verify`] directly instead (`F-043` ticket b).
     fn ensure_artifact(
         &self,
         url: &str,
@@ -203,6 +214,26 @@ impl ModelDownloader {
             return Ok(());
         }
 
+        self.download_and_verify(url, final_path, sha_repo, progress, cancel)?;
+        std::fs::write(sentinel, b"")?;
+        Ok(())
+    }
+
+    /// Ensures `url`'s content ends up verified at `final_path` (resuming a
+    /// `.partial` if present, recovering from a 416 if the resume offset is
+    /// past EOF), without writing any completeness sentinel — callers that
+    /// use a sibling-sentinel scheme write it themselves once this returns
+    /// `Ok`. Shared by [`Self::ensure_artifact`] (ggml, VAD) and the CoreML
+    /// zip fetch in [`Self::ensure_coreml_encoder`], so both go through the
+    /// same 416-recovery logic (`F-043` ticket b).
+    fn download_and_verify(
+        &self,
+        url: &str,
+        final_path: &Path,
+        sha_repo: Option<&str>,
+        progress: &mut dyn FnMut(DownloadProgress),
+        cancel: &CancelToken,
+    ) -> Result<(), ModelError> {
         if let Some(parent) = final_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -222,7 +253,7 @@ impl ModelDownloader {
             });
         }
 
-        self.finalize_download(
+        self.download_body(
             response,
             final_path,
             sha_repo,
@@ -234,11 +265,11 @@ impl ModelDownloader {
 
     /// Common download tail shared by the resume, fresh, and 416-restart
     /// paths: stream `response` into the `.partial`, verify its SHA256 when
-    /// `sha_repo` is given, then rename to `final_path` and write the sentinel
-    /// last. `resumed_range` records whether the request that produced
-    /// `response` carried a `Range` header (so a `206` appends rather than
-    /// truncates).
-    fn finalize_download(
+    /// `sha_repo` is given, then rename to `final_path`. Writes no sentinel —
+    /// see [`Self::download_and_verify`]. `resumed_range` records whether the
+    /// request that produced `response` carried a `Range` header (so a `206`
+    /// appends rather than truncates).
+    fn download_body(
         &self,
         response: reqwest::blocking::Response,
         final_path: &Path,
@@ -264,7 +295,6 @@ impl ModelDownloader {
         }
 
         std::fs::rename(&partial_path, final_path)?;
-        std::fs::write(sentinel_path_for(final_path), b"")?;
         Ok(())
     }
 
@@ -284,16 +314,19 @@ impl ModelDownloader {
                 detail: format!("{url}: HTTP {}", response.status()),
             });
         }
-        self.finalize_download(response, final_path, sha_repo, false, progress, cancel)
+        self.download_body(response, final_path, sha_repo, false, progress, cancel)
     }
 
-    /// Recovers from an HTTP 416 on a resume request (see [`Self::ensure_artifact`]).
+    /// Recovers from an HTTP 416 on a resume request (see
+    /// [`Self::download_and_verify`]).
     ///
     /// If a digest is obtainable and the `.partial` matches it, promote the
-    /// `.partial` in place (rename + sentinel) — no re-download. Otherwise (no
-    /// digest obtainable, or a mismatch) discard the `.partial` and download
-    /// fresh exactly once, so a stale or corrupt `.partial` can never wedge
-    /// the download in a permanent 416 loop.
+    /// `.partial` in place (rename only — no sentinel; see
+    /// [`Self::download_and_verify`]) — no re-download. Otherwise (no digest
+    /// obtainable, or a mismatch) discard the `.partial` and download fresh
+    /// exactly once, so a stale or corrupt `.partial` can never wedge the
+    /// download in a permanent 416 loop. Shared verbatim by the ggml/VAD path
+    /// and the CoreML zip path (`F-043` ticket b).
     fn recover_from_range_not_satisfiable(
         &self,
         url: &str,
@@ -311,7 +344,6 @@ impl ModelDownloader {
         match on_range_not_satisfiable(verified_complete) {
             RangeRecovery::Promote => {
                 std::fs::rename(&partial_path, final_path)?;
-                std::fs::write(sentinel_path_for(final_path), b"")?;
                 Ok(())
             }
             RangeRecovery::RestartFresh => {
@@ -367,7 +399,7 @@ impl ModelDownloader {
         let target_dir = coreml_encoder_dir(&self.root, size);
 
         let repo = repo_for(size)?;
-        let url = coreml_zip_url(size)?;
+        let url = registry::coreml_zip_url_with_base(&self.hf_base, size)?;
         let zip_file_name = format!("ggml-{ggml_name}-encoder.mlmodelc.zip");
         let zip_path = self.root.join(&zip_file_name);
         let partial_zip_path = partial_path_for(&zip_path);
@@ -395,23 +427,27 @@ impl ModelDownloader {
             }
             return Ok(());
         }
-        if !response.status().is_success() {
+        if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            // Same recovery the ggml/VAD path uses (`F-043` ticket b): a
+            // resume request past EOF most likely means an earlier run's
+            // zip `.partial` already completed but died before the rename —
+            // verify-and-promote it, or discard and restart once, instead of
+            // hard-failing on a spurious 416.
+            self.recover_from_range_not_satisfiable(&url, &zip_path, Some(repo), progress, cancel)?;
+        } else if !response.status().is_success() {
             return Err(ModelError::Http {
                 detail: format!("{url}: HTTP {}", response.status()),
             });
+        } else {
+            self.download_body(
+                response,
+                &zip_path,
+                Some(repo),
+                range.is_some(),
+                progress,
+                cancel,
+            )?;
         }
-        self.write_response_stream(
-            response,
-            &partial_zip_path,
-            &zip_file_name,
-            range.is_some(),
-            progress,
-            cancel,
-        )?;
-
-        self.verify_or_warn(repo, &zip_file_name, &partial_zip_path, &zip_path)?;
-
-        std::fs::rename(&partial_zip_path, &zip_path)?;
 
         // No `tempfile` dependency in production code (Global Constraint
         // 10) — use a fixed, root-scoped scratch directory instead, wiped
@@ -466,11 +502,12 @@ impl ModelDownloader {
         }
     }
 
-    /// `GET https://huggingface.co/api/models/{repo}/tree/main`, parsed for
-    /// `file_name`'s `lfs.oid` (`docs/superpowers/.../task-5-brief.md`
-    /// step 4).
+    /// `GET {hf_base}/api/models/{repo}/tree/main`, parsed for `file_name`'s
+    /// `lfs.oid` (`docs/superpowers/.../task-5-brief.md` step 4). Resolves
+    /// against the same `hf_base` as every other URL this downloader builds
+    /// (`F-043` ticket a), so tests can serve the digest lookup locally too.
     fn expected_sha256(&self, repo: &str, file_name: &str) -> Result<Option<String>, ModelError> {
-        let url = format!("https://huggingface.co/api/models/{repo}/tree/main");
+        let url = tree_api_url(&self.hf_base, repo);
         let response = self.send_get(&url, None)?;
         if !response.status().is_success() {
             return Err(ModelError::Http {
@@ -576,6 +613,13 @@ impl ModelDownloader {
         }
         Ok(())
     }
+}
+
+/// The HuggingFace tree-listing API URL for `repo` at a given `base` —
+/// shared by [`ModelDownloader::expected_sha256`] and its tests, so the two
+/// can never drift apart.
+fn tree_api_url(base: &str, repo: &str) -> String {
+    format!("{base}/api/models/{repo}/tree/main")
 }
 
 fn file_name_of(path: &Path) -> String {
@@ -1044,5 +1088,272 @@ mod tests {
         assert!(target_dir.join("a.bin").is_file());
         assert!(target_dir.join("b.bin").is_file());
         assert!(target_dir.join(registry::SENTINEL_SUFFIX).is_file());
+    }
+
+    // --- HTTP seam tests (M2 F-043 tickets a/b/c) — all network-free, via
+    // `crate::models::test_server::TestServer`. ---
+
+    use crate::models::test_server::{Canned, TestServer};
+
+    fn sha256_bytes(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        format!("{:x}", hasher.finalize())
+    }
+
+    /// The request-target path (no scheme/host) of a `_with_base`-built URL,
+    /// for matching against `TestServer`'s per-path routes.
+    fn path_of(url: &str) -> String {
+        url::Url::parse(url).expect("parse url").path().to_string()
+    }
+
+    /// Ticket a (the M1 final reviewer's explicit acceptance criterion):
+    /// a valid, complete ggml + sentinel is already cached and CoreML state
+    /// is `Missing` — `resolve_model` with `coreml_encoder = true` must still
+    /// *attempt* the encoder zip fetch rather than silently skipping it.
+    #[test]
+    fn resolve_model_attempts_coreml_zip_fetch_when_missing_and_wanted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let size = ModelSize::Small;
+
+        let ggml_path = dir.path().join(ggml_file_name(size));
+        std::fs::write(&ggml_path, b"already-downloaded ggml bytes").expect("write ggml");
+        std::fs::write(sentinel_path_for(&ggml_path), b"").expect("write ggml sentinel");
+        assert_eq!(coreml_state(dir.path(), size), CoremlState::Missing);
+
+        let server = TestServer::start();
+        let zip_url = registry::coreml_zip_url_with_base(&server.base_url(), size).unwrap();
+        let zip_path = path_of(&zip_url);
+        // A 404 here still counts as "attempted": the point being pinned is
+        // that the request happens at all, not what it returns.
+        server.set_route(zip_path.clone(), Canned::status(404));
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), server.base_url());
+        let cancel = CancelToken::new();
+        let resolved = downloader
+            .resolve_model(size, true, &mut |_| {}, &cancel)
+            .expect("resolve_model should succeed when upstream has no CoreML encoder");
+
+        assert_eq!(resolved.path, ggml_path);
+        assert!(!resolved.coreml_degraded);
+        assert!(
+            server
+                .requests()
+                .iter()
+                .any(|r| r.method == "GET" && r.path == zip_path),
+            "expected a GET for the CoreML encoder zip in the request log: {:?}",
+            server.requests()
+        );
+    }
+
+    /// Ticket b: a resume request whose `.partial` is a COMPLETE, valid zip
+    /// gets a 416 from the server — recovery must verify it against the
+    /// published digest (served from the same local server) and promote it
+    /// in place, ending with the encoder directory `Complete`, without a
+    /// second network round-trip for the zip body itself.
+    #[test]
+    fn ensure_coreml_encoder_416_recovery_promotes_verified_partial() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let size = ModelSize::Small;
+        let repo = repo_for(size).unwrap();
+
+        let zip_bytes = build_test_zip();
+        let zip_file_name = format!("ggml-{}-encoder.mlmodelc.zip", size.ggml_name());
+        let zip_path = dir.path().join(&zip_file_name);
+        let partial_zip_path = partial_path_for(&zip_path);
+        std::fs::write(&partial_zip_path, &zip_bytes).expect("write complete partial");
+
+        let server = TestServer::start();
+        let base = server.base_url();
+
+        let zip_url = registry::coreml_zip_url_with_base(&base, size).unwrap();
+        let zip_url_path = path_of(&zip_url);
+        server.set_route(zip_url_path.clone(), Canned::forced_416());
+
+        let tree_url_path = path_of(&tree_api_url(&base, repo));
+        let tree_json = format!(
+            r#"[{{"path":"{zip_file_name}","lfs":{{"oid":"{}"}}}}]"#,
+            sha256_bytes(&zip_bytes)
+        );
+        server.set_route(tree_url_path, Canned::ok(tree_json.into_bytes()));
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), base);
+        let cancel = CancelToken::new();
+        downloader
+            .ensure_coreml_encoder(size, &mut |_| {}, &cancel)
+            .expect("ensure_coreml_encoder should recover from 416 by verifying and promoting");
+
+        assert_eq!(coreml_state(dir.path(), size), CoremlState::Complete);
+        assert!(!partial_zip_path.exists());
+        assert!(
+            !zip_path.exists(),
+            "zip should be cleaned up after extraction"
+        );
+
+        let zip_requests: Vec<_> = server
+            .requests()
+            .into_iter()
+            .filter(|r| r.path == zip_url_path)
+            .collect();
+        assert_eq!(
+            zip_requests.len(),
+            1,
+            "the verified partial should be promoted without a re-download: {zip_requests:?}"
+        );
+    }
+
+    /// Ticket b (continued): if the restart-fresh attempt *also* gets a 416,
+    /// the result must be a hard error — never a second recovery attempt
+    /// (no infinite 416 loop).
+    #[test]
+    fn ensure_coreml_encoder_416_after_restart_errors_without_looping() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let size = ModelSize::Small;
+
+        let zip_bytes = build_test_zip();
+        let zip_path = dir
+            .path()
+            .join(format!("ggml-{}-encoder.mlmodelc.zip", size.ggml_name()));
+        let partial_zip_path = partial_path_for(&zip_path);
+        std::fs::write(&partial_zip_path, &zip_bytes).expect("write partial");
+
+        let server = TestServer::start();
+        let base = server.base_url();
+        let zip_url = registry::coreml_zip_url_with_base(&base, size).unwrap();
+        let zip_url_path = path_of(&zip_url);
+        // No tree-api route registered, so the digest lookup 404s and the
+        // partial is treated as unverifiable — recovery discards it and
+        // restarts fresh exactly once. Every request to this path (ranged or
+        // not) gets 416, so that restart also fails.
+        server.set_route(zip_url_path.clone(), Canned::forced_416());
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), base);
+        let cancel = CancelToken::new();
+        let err = downloader
+            .ensure_coreml_encoder(size, &mut |_| {}, &cancel)
+            .expect_err("a second 416 after restart should error, not loop forever");
+        assert!(matches!(err, ModelError::Http { .. }));
+        assert_eq!(coreml_state(dir.path(), size), CoremlState::Missing);
+
+        let zip_requests: Vec<_> = server
+            .requests()
+            .into_iter()
+            .filter(|r| r.path == zip_url_path)
+            .collect();
+        assert_eq!(
+            zip_requests.len(),
+            2,
+            "expected exactly one ranged retry then one non-ranged restart, no more: {zip_requests:?}"
+        );
+        assert!(
+            zip_requests[0].range.is_some(),
+            "first request should carry Range"
+        );
+        assert!(
+            zip_requests[1].range.is_none(),
+            "restart-fresh request should carry no Range"
+        );
+    }
+
+    /// Ticket c: a corrupt zip downloads fine (HTTP 200) but fails
+    /// extraction — the failure must propagate without leaving a `Complete`
+    /// state, and a second run against a good zip must issue a fresh GET
+    /// (proving the failed placement didn't wedge the cache) and complete.
+    #[test]
+    fn ensure_coreml_encoder_placement_failure_redownloads_on_next_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let size = ModelSize::Small;
+
+        let server = TestServer::start();
+        let base = server.base_url();
+        let zip_url = registry::coreml_zip_url_with_base(&base, size).unwrap();
+        let zip_url_path = path_of(&zip_url);
+
+        server.set_route(
+            zip_url_path.clone(),
+            Canned::ok(b"not a real zip archive".to_vec()),
+        );
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), base);
+        let cancel = CancelToken::new();
+        downloader
+            .ensure_coreml_encoder(size, &mut |_| {}, &cancel)
+            .expect_err("a corrupt zip should fail extraction");
+        assert_eq!(
+            coreml_state(dir.path(), size),
+            CoremlState::Missing,
+            "a failed placement must not leave a Complete state"
+        );
+
+        server.set_route(zip_url_path.clone(), Canned::ok(build_test_zip()));
+        downloader
+            .ensure_coreml_encoder(size, &mut |_| {}, &cancel)
+            .expect("a fresh download of a good zip should complete");
+        assert_eq!(coreml_state(dir.path(), size), CoremlState::Complete);
+
+        let zip_requests: Vec<_> = server
+            .requests()
+            .into_iter()
+            .filter(|r| r.path == zip_url_path)
+            .collect();
+        assert_eq!(
+            zip_requests.len(),
+            2,
+            "a failed placement must not wedge the cache — the second run must re-fetch: {zip_requests:?}"
+        );
+        assert!(
+            zip_requests[1].range.is_none(),
+            "no partial survives a failed placement, so the second fetch should be fresh"
+        );
+    }
+
+    /// Happy-path seam test: a full `resolve_model` (ggml + CoreML zip, both
+    /// with real SHA verification) served entirely by the local server —
+    /// proving the whole flow is testable, and future-upgrade-testable,
+    /// offline.
+    #[test]
+    fn resolve_model_happy_path_full_seam_from_local_server() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let size = ModelSize::Small;
+        let repo = repo_for(size).unwrap();
+
+        let ggml_bytes = b"fake ggml model bytes for the happy path".to_vec();
+        let zip_bytes = build_test_zip();
+        let ggml_file = ggml_file_name(size);
+        let zip_file = format!("ggml-{}-encoder.mlmodelc.zip", size.ggml_name());
+
+        let server = TestServer::start();
+        let base = server.base_url();
+
+        let ggml_url_path = path_of(&registry::ggml_url_with_base(&base, size).unwrap());
+        server.set_route(ggml_url_path.clone(), Canned::ok(ggml_bytes.clone()));
+
+        let zip_url_path = path_of(&registry::coreml_zip_url_with_base(&base, size).unwrap());
+        server.set_route(zip_url_path.clone(), Canned::ok(zip_bytes.clone()));
+
+        let tree_url_path = path_of(&tree_api_url(&base, repo));
+        let tree_json = format!(
+            r#"[{{"path":"{ggml_file}","lfs":{{"oid":"{}"}}}},{{"path":"{zip_file}","lfs":{{"oid":"{}"}}}}]"#,
+            sha256_bytes(&ggml_bytes),
+            sha256_bytes(&zip_bytes),
+        );
+        server.set_route(tree_url_path, Canned::ok(tree_json.into_bytes()));
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), base);
+        let cancel = CancelToken::new();
+        let resolved = downloader
+            .resolve_model(size, true, &mut |_| {}, &cancel)
+            .expect("resolve_model should succeed fully offline via the local server");
+
+        assert_eq!(resolved.path, dir.path().join(&ggml_file));
+        assert!(!resolved.coreml_degraded);
+        assert!(resolved.path.is_file());
+        assert!(sentinel_path_for(&resolved.path).is_file());
+        assert_eq!(coreml_state(dir.path(), size), CoremlState::Complete);
+
+        let requests = server.requests();
+        assert!(requests.iter().any(|r| r.path == ggml_url_path));
+        assert!(requests.iter().any(|r| r.path == zip_url_path));
     }
 }

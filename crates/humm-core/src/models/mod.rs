@@ -7,3 +7,6 @@
 
 pub mod download;
 pub mod registry;
+
+#[cfg(test)]
+mod test_server;

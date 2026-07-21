@@ -12,6 +12,12 @@ use std::path::{Path, PathBuf};
 use crate::domain::ModelSize;
 use crate::error::ModelError;
 
+/// The default HuggingFace base URL every `*_url` fn resolves against.
+/// [`crate::models::download::ModelDownloader::new`] uses this; tests and
+/// mirrors point [`crate::models::download::ModelDownloader::with_hf_base`]
+/// at a different base instead (M2 F-043 downloader HTTP seam).
+pub const HF_BASE: &str = "https://huggingface.co";
+
 /// HuggingFace repo id for the mainline whisper.cpp ggml models
 /// (`model_loader.py:491`).
 pub const WHISPER_CPP_REPO: &str = "ggerganov/whisper.cpp";
@@ -28,7 +34,10 @@ pub const VAD_MODEL_FILE: &str = "ggml-silero-v6.2.0.bin";
 /// download URL and the SHA256-digest lookup.
 pub const VAD_MODEL_REPO: &str = "ggml-org/whisper-vad";
 
-/// Download URL for the Silero VAD model.
+/// Download URL for the Silero VAD model, at the default [`HF_BASE`]
+/// (equal to `vad_model_url_with_base(HF_BASE)`; kept as a const for
+/// callers that just want the default URL without an `impl Into<String>`
+/// round-trip).
 pub const VAD_MODEL_URL: &str =
     "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin";
 
@@ -71,24 +80,44 @@ pub(crate) fn repo_for(size: ModelSize) -> Result<&'static str, ModelError> {
     }
 }
 
+/// The download URL for `size`'s ggml model file at a given `base`
+/// (`model_loader.py:495-517`). [`ggml_url`] is this at the default
+/// [`HF_BASE`].
+pub fn ggml_url_with_base(base: &str, size: ModelSize) -> Result<String, ModelError> {
+    let repo = repo_for(size)?;
+    Ok(format!(
+        "{base}/{repo}/resolve/main/{}",
+        ggml_file_name(size)
+    ))
+}
+
 /// The download URL for `size`'s ggml model file
 /// (`model_loader.py:495-517`).
 pub fn ggml_url(size: ModelSize) -> Result<String, ModelError> {
+    ggml_url_with_base(HF_BASE, size)
+}
+
+/// The download URL for `size`'s CoreML encoder zip at a given `base`
+/// (`model_loader.py:692`). [`coreml_zip_url`] is this at the default
+/// [`HF_BASE`].
+pub fn coreml_zip_url_with_base(base: &str, size: ModelSize) -> Result<String, ModelError> {
     let repo = repo_for(size)?;
     Ok(format!(
-        "https://huggingface.co/{repo}/resolve/main/{}",
-        ggml_file_name(size)
+        "{base}/{repo}/resolve/main/ggml-{}-encoder.mlmodelc.zip",
+        size.ggml_name()
     ))
 }
 
 /// The download URL for `size`'s CoreML encoder zip
 /// (`model_loader.py:692`).
 pub fn coreml_zip_url(size: ModelSize) -> Result<String, ModelError> {
-    let repo = repo_for(size)?;
-    Ok(format!(
-        "https://huggingface.co/{repo}/resolve/main/ggml-{}-encoder.mlmodelc.zip",
-        size.ggml_name()
-    ))
+    coreml_zip_url_with_base(HF_BASE, size)
+}
+
+/// The download URL for the Silero VAD model at a given `base`.
+/// [`VAD_MODEL_URL`] is this at the default [`HF_BASE`].
+pub fn vad_model_url_with_base(base: &str) -> String {
+    format!("{base}/{VAD_MODEL_REPO}/resolve/main/{VAD_MODEL_FILE}")
 }
 
 /// The path to `size`'s locally cached ggml file, if fully downloaded.
@@ -235,11 +264,48 @@ mod tests {
     }
 
     #[test]
+    fn ggml_url_with_base_swaps_the_host() {
+        assert_eq!(
+            ggml_url_with_base("http://127.0.0.1:9", ModelSize::Small).unwrap(),
+            "http://127.0.0.1:9/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+        );
+    }
+
+    #[test]
+    fn ggml_url_delegates_to_with_base_at_hf_base() {
+        assert_eq!(
+            ggml_url(ModelSize::Small).unwrap(),
+            ggml_url_with_base(HF_BASE, ModelSize::Small).unwrap()
+        );
+    }
+
+    #[test]
+    fn coreml_zip_url_with_base_swaps_the_host() {
+        assert_eq!(
+            coreml_zip_url_with_base("http://127.0.0.1:9", ModelSize::Small).unwrap(),
+            "http://127.0.0.1:9/ggerganov/whisper.cpp/resolve/main/ggml-small-encoder.mlmodelc.zip"
+        );
+    }
+
+    #[test]
     fn coreml_zip_url_custom_is_unsupported() {
         assert!(matches!(
             coreml_zip_url(ModelSize::Custom).unwrap_err(),
             ModelError::Unsupported { .. }
         ));
+    }
+
+    #[test]
+    fn vad_model_url_with_base_matches_default_const_at_hf_base() {
+        assert_eq!(vad_model_url_with_base(HF_BASE), VAD_MODEL_URL);
+    }
+
+    #[test]
+    fn vad_model_url_with_base_swaps_the_host() {
+        assert_eq!(
+            vad_model_url_with_base("http://127.0.0.1:9"),
+            "http://127.0.0.1:9/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin"
+        );
     }
 
     #[test]
