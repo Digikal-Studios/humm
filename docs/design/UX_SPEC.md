@@ -21,7 +21,7 @@ Empty states everywhere: fresh main table shows a drop-target hero ("Drop media 
 ### J-1 File transcription
 - Cold launch < 300 ms to interactive (perf value #2). Import via dialog, drag-drop, URL, or folder — all converge on the **options sheet**, prefilled from last use (parity) with a one-line summary header ("Whisper · small · auto language · SRT+TXT") so repeat runs are Enter-Enter ✚.
 - **Model downloads are non-modal** ✚: choosing an absent model, the task queues normally; the model downloads as the running task's first phase, with progress in its own row; imports never block (fixes J-1 ⚠ modal downloads). All downloads (incl. HF-hub ones) show determinate progress + ETA ✚ (we control the HTTP client).
-- Task rows: status chip with %, ETA, and *phase* (`downloading model / downloading media / isolating speech / transcribing / exporting`) ✚ — Buzz collapsed these into one opaque %.
+- Task rows: status chip with %, ETA, and *phase* (`downloading media / downloading model / isolating speech / transcribing / exporting`) ✚ — Buzz collapsed these into one opaque %.
 - Errors: status chip `Failed` + one-line human cause; click → detail popover with full error, log-file link, and a **Retry** button. Retry reuses the *fully persisted* options (fixes Buzz's restart-loses-options trap, F-026/ARCH §4) ✚.
 
 ### J-2 CLI

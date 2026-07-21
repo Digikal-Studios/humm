@@ -58,7 +58,7 @@ use crate::boundary::{
 };
 use crate::cancel::CancelToken;
 use crate::domain::{Input, ModelSpec, Segment, Source, TaskSpec, TranscriptionId};
-use crate::error::{CoreError, EngineError, MediaError, StoreError};
+use crate::error::{CoreError, EngineError, MediaError, ModelError, StoreError};
 use crate::models::download::DownloadProgress;
 use crate::pipeline::{EngineTuning, JobOutcome, run_file_job};
 
@@ -154,12 +154,14 @@ pub trait ArtifactEnsurer: Send + Sync {
     ///
     /// `progress` is called with incremental updates, mirroring
     /// [`crate::models::download::ModelDownloader::ensure_model`]'s
-    /// contract; `cancel` is checked cooperatively during the download. A
-    /// canceled ensure must return [`CoreError::Canceled`] (not a
-    /// download-specific error variant) so [`classify`] maps it to
-    /// [`Terminal::Canceled`] rather than [`Terminal::Failed`] — the same
-    /// cancellation contract every other phase of [`Runner::run_job`]
-    /// honors.
+    /// contract; `cancel` is checked cooperatively during the download.
+    /// Errors are classified exactly like every other pipeline error:
+    /// cancellation — reported as either [`CoreError::Canceled`] or
+    /// `CoreError::Model(ModelError::Canceled)` (what a
+    /// [`crate::models::download::ModelDownloader`]-backed implementation
+    /// naturally produces when a download is canceled) — ends the task in
+    /// a canceled terminal state, never a failed one; any other error
+    /// fails the task with that error's message.
     fn ensure_model(
         &self,
         model: &ModelSpec,
@@ -400,12 +402,21 @@ enum Terminal {
 }
 
 /// `true` if `error` represents cancellation rather than a genuine failure.
+///
+/// `CoreError::Model(ModelError::Canceled)` is included alongside the bare
+/// `CoreError::Canceled`: a real (downloader-backed) [`ArtifactEnsurer`]
+/// wraps [`crate::models::download::ModelDownloader`], whose own
+/// `Result<_, ModelError>` surfaces cancellation as `ModelError::Canceled`
+/// (`download.rs`) — `?`/`.into()` on that then produces
+/// `CoreError::Model(ModelError::Canceled)`, which must classify as
+/// cancellation exactly like every other cancellation path here.
 fn is_canceled(error: &CoreError) -> bool {
     matches!(
         error,
         CoreError::Canceled
             | CoreError::Engine(EngineError::Canceled)
             | CoreError::Media(MediaError::Canceled)
+            | CoreError::Model(ModelError::Canceled)
     )
 }
 
@@ -2617,6 +2628,49 @@ mod tests {
         // The runner is inside `ensure_model`, blocked on the gate.
         ensure_ctrl.wait_entered();
         // A is the current task, so this trips its token directly.
+        q.cancel(a);
+        ensure_ctrl.release();
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Canceled))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Failed { .. }))
+        );
+        let calls = h.store_calls();
+        assert!(calls.contains(&StoreCall::Canceled(a)));
+        assert!(!calls.iter().any(|c| matches!(c, StoreCall::Failed(..))));
+    }
+
+    #[test]
+    fn ensurer_model_error_wrapping_canceled_yields_canceled_not_failed() {
+        // A real (downloader-backed) ArtifactEnsurer wraps `ModelDownloader`,
+        // whose own `Result<_, ModelError>` surfaces cancellation as
+        // `ModelError::Canceled` — `?`/`.into()` on that produces
+        // `CoreError::Model(ModelError::Canceled)`, distinct from the bare
+        // `CoreError::Canceled` the other cancel test uses. `is_canceled`
+        // must treat this the same way: Canceled, never Failed.
+        let (ensure_ctrl, ensure_gate) = gate();
+        let ensurer = FakeEnsurer {
+            model_scripts: Arc::new(Mutex::new(VecDeque::from(vec![EnsureModelScript::Err(
+                CoreError::from(ModelError::Canceled),
+            )]))),
+            vad_scripts: Arc::new(Mutex::new(VecDeque::new())),
+            model_calls: Arc::new(Mutex::new(Vec::new())),
+            vad_calls: Arc::new(Mutex::new(0)),
+            model_gate: Some(ensure_gate),
+        };
+        let (q, h) = build_with_ensurer(Cfg::default(), Arc::new(ensurer));
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        q.enqueue(a, path_task(h.input_file("a.mp3")), Source::FileImport);
+        ensure_ctrl.wait_entered();
         q.cancel(a);
         ensure_ctrl.release();
         q.finish().expect("finish");
