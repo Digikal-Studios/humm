@@ -453,9 +453,17 @@ fn add_json_emits_a_valid_event_stream() {
         event_names.push(name);
     }
 
-    assert_eq!(event_names.first().map(String::as_str), Some("queued"));
-    assert!(event_names.iter().any(|e| e == "started"));
-    assert_eq!(event_names.last().map(String::as_str), Some("completed"));
+    // Any `model_download_progress` events (a first-run VAD fetch) legitimately
+    // precede the task stream (both are JSON — the "nothing non-JSON on stdout"
+    // check above already covered them). Assert the per-task subsequence.
+    let task_events: Vec<&str> = event_names
+        .iter()
+        .map(String::as_str)
+        .filter(|e| *e != "model_download_progress")
+        .collect();
+    assert_eq!(task_events.first().copied(), Some("queued"));
+    assert!(task_events.contains(&"started"));
+    assert_eq!(task_events.last().copied(), Some("completed"));
     assert!(!completed_written.is_empty());
     for path in &completed_written {
         assert!(
@@ -519,8 +527,10 @@ fn custom_size_without_settings_url_fails_with_actionable_message() {
         );
 }
 
-// A single missing input -> exit 2, a persisted `failed` row, and stderr names
-// the path without ever printing a model download line (the stub is cached).
+// A single missing input -> exit 2 with a persisted `failed` row whose human
+// error line on stderr names the path. (The ggml model resolves from the cached
+// stub; a first-run VAD fetch may still occur, so this does not assert the
+// absence of any download line.)
 #[test]
 fn missing_input_persists_failed_row_and_exits_2() {
     let env = Env::new();
@@ -534,9 +544,7 @@ fn missing_input_persists_failed_row_and_exits_2() {
         .arg("tiny")
         .assert()
         .code(2)
-        .stderr(
-            predicate::str::contains("nope.mp3").and(predicate::str::contains("Downloading").not()),
-        );
+        .stderr(predicate::str::contains("nope.mp3"));
 
     let store = env.store();
     let tasks = store.list_tasks().unwrap();

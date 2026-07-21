@@ -10,9 +10,12 @@
 //!    `cancel_stale_tasks()` (a crashed/killed prior run leaves stale
 //!    `queued`/`in_progress` rows — F-029).
 //! 4. Resolve the model synchronously, streaming download progress.
-//! 5. VAD is cache-only: enabled iff a complete VAD model is already present
-//!    (Buzz parity — `whisper_cpp.py:380` `vad_enabled = os.path.exists(...)`;
-//!    Buzz never downloads it during transcription).
+//! 5. Ensure the VAD model (F-045): use the cached copy if present, else fetch
+//!    it once. Buzz ships `ggml-silero-v6.2.0.bin` next to whisper-cli at build
+//!    time (FEATURE_INVENTORY F-045), so every Buzz user has VAD by default;
+//!    humm ships no file and downloads it on first run to match that outcome.
+//!    A fetch failure degrades to no-VAD (`whisper_cpp.py:380`'s absent-model
+//!    case) — the *failure* mode, never the default — and never fails the run.
 //! 6. Spawn the task runner; enqueue one [`TaskSpec`] per input.
 //! 7. Install a Ctrl-C handler: first signal cancels every task, second exits.
 //! 8. Drain [`TaskEvent`]s, rendering progress/ETA (human) or one JSON object
@@ -150,10 +153,9 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
     }
 
     let use_gpu = use_gpu_from_env(std::env::var("HUMM_FORCE_CPU").ok().as_deref());
+    let vad_model = ensure_vad(&model_root, args.json, args.quiet, &download_cancel);
     let tuning = EngineTuning {
-        // Cache-only VAD (Buzz `whisper_cpp.py:380`): enabled iff already
-        // downloaded, never fetched as a side effect of `humm add`.
-        vad_model: local_vad_model_path(&model_root),
+        vad_model,
         use_gpu,
         threads: threads_from_env(std::env::var("HUMM_WHISPER_N_THREADS").ok().as_deref()),
     };
@@ -301,19 +303,7 @@ fn resolve_model(
     let quiet = args.quiet;
 
     let mut line = ProgressLine::new();
-    let mut render = |update: DownloadProgress| {
-        if json {
-            if let Some(text) = to_json_line(&JsonEvent::ModelDownloadProgress {
-                file: &update.file,
-                downloaded: update.downloaded,
-                total: update.total,
-            }) {
-                println!("{text}");
-            }
-        } else if !quiet {
-            render_download_progress(&mut line, &update);
-        }
-    };
+    let mut render = |update: DownloadProgress| report_download(json, quiet, &mut line, &update);
 
     let result = if args.model_type == ModelTypeArg::HuggingFace {
         // Validation guarantees `hfid` is `Some` for the huggingface type.
@@ -353,6 +343,52 @@ fn resolve_model(
             },
         }),
         Err(err) => Err(run_fail(err)),
+    }
+}
+
+/// Renders one download progress update — a `model_download_progress` JSON line
+/// (`--json`) or a human stderr line (unless `--quiet`). Shared by the model and
+/// VAD fetches (both are just artifacts to the user).
+fn report_download(json: bool, quiet: bool, line: &mut ProgressLine, update: &DownloadProgress) {
+    if json {
+        if let Some(text) = to_json_line(&JsonEvent::ModelDownloadProgress {
+            file: &update.file,
+            downloaded: update.downloaded,
+            total: update.total,
+        }) {
+            println!("{text}");
+        }
+    } else if !quiet {
+        render_download_progress(line, update);
+    }
+}
+
+/// Ensures the VAD model (F-045): the cached copy if present, else a one-time
+/// fetch. Buzz ships `ggml-silero-v6.2.0.bin` next to whisper-cli at build time,
+/// so every Buzz user has VAD by default; humm downloads it on first run to
+/// match that outcome. Any fetch failure (offline, network blip) degrades to
+/// `None` — VAD silently off, the run continues — which is `whisper_cpp.py:380`'s
+/// absent-model behavior as the *failure* mode, not the default.
+fn ensure_vad(
+    model_root: &std::path::Path,
+    json: bool,
+    quiet: bool,
+    cancel: &CancelToken,
+) -> Option<PathBuf> {
+    if let Some(path) = local_vad_model_path(model_root) {
+        return Some(path);
+    }
+    let downloader = ModelDownloader::new(model_root.to_path_buf());
+    let mut line = ProgressLine::new();
+    let mut render = |update: DownloadProgress| report_download(json, quiet, &mut line, &update);
+    let result = downloader.ensure_vad_model(&mut render, cancel);
+    line.finish();
+    match result {
+        Ok(path) => Some(path),
+        Err(err) => {
+            log::warn!("VAD model unavailable ({err}); continuing without VAD");
+            None
+        }
     }
 }
 

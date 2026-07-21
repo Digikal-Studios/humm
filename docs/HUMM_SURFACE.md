@@ -71,7 +71,7 @@ stderr. `--quiet` suppresses the progress lines only.
 | `0` | Every input succeeded. |
 | `1` | Usage/validation error (bad flag, unknown language, missing `--hfid`, unavailable backend) **or** a config/runtime error before any task could run (corrupt settings, model download/resolution failure). Usage errors also print `Run \`humm add --help\` for usage.`; config/runtime errors print the actionable cause alone. |
 | `2` | At least one task failed (and none was canceled). Failures are persisted as history rows, so `humm add missing.mp3 good.wav` yields a `failed` row and a `completed` row. |
-| `130` | At least one task was canceled — SIGINT/Ctrl-C (first signal cancels every task; a second exits immediately) or startup recovery of a stale `in_progress`/`queued` row from a crashed/killed prior run. Outranks `2`. |
+| `130` | At least one task **in this invocation** was canceled via SIGINT/Ctrl-C (first signal cancels every task; a second exits immediately). Outranks `2`. Startup recovery flips a *prior* run's stale `in_progress`/`queued` rows to `canceled`, but that never drives the current invocation's exit code — a relaunch whose own inputs fail still exits `2`. |
 
 ## 4. Environment variables
 
