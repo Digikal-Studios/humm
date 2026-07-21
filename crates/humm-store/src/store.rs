@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Mutex, MutexGuard};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
 use humm_core::boundary::TaskStore;
 use humm_core::domain::{Input, Millis, Segment, Source, Status, TaskSpec, TranscriptionId};
@@ -15,6 +15,28 @@ use crate::schema::migrate;
 
 const SELECT_TASK_COLUMNS: &str = "id, status, source, file, url, progress, error_message, \
      time_queued, time_started, time_ended, name, notes";
+
+/// The `humm_meta` key marking a completed [`SqliteStore::import_buzz_db`]
+/// run.
+const BUZZ_IMPORT_DONE_KEY: &str = "buzz_import_done";
+
+/// Outcome of [`SqliteStore::import_buzz_db`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuzzImportOutcome {
+    /// `true` if the import was a no-op because a previous run already
+    /// completed it (`humm_meta['buzz_import_done']` was already set) — the
+    /// Buzz file was not opened, and `tasks`/`segments` are `0`.
+    pub skipped: bool,
+    /// Number of `transcription` rows newly copied from the Buzz database
+    /// this run. Rows whose `id` already existed in this store are not
+    /// counted (and are not re-copied).
+    pub tasks: usize,
+    /// Number of `transcription_segment` rows newly copied this run,
+    /// restricted to the transcriptions actually imported: a pre-existing
+    /// transcription id's Buzz segments are never copied, even though that
+    /// id itself was simply skipped as a duplicate rather than an error.
+    pub segments: usize,
+}
 
 /// A row from the `transcription` table: a task's metadata, not its
 /// segments (see [`SqliteStore::get_segments`]).
@@ -131,6 +153,25 @@ fn query_error(err: rusqlite::Error) -> StoreError {
     }
 }
 
+/// Builds the read-only, immutable `file:` URI used to `ATTACH` a Buzz
+/// database, guaranteeing humm can never write to it. Percent-encodes `%`,
+/// `?`, and `#` only when present — those are the characters that would
+/// otherwise be parsed as `file:` URI query-string syntax; real Buzz paths
+/// (`user_data_dir("Buzz")/Buzz.sqlite`) never contain them in practice, so a
+/// full RFC 3986 encoder would be overkill here.
+fn buzz_attach_uri(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    if raw.contains('%') || raw.contains('?') || raw.contains('#') {
+        let encoded = raw
+            .replace('%', "%25")
+            .replace('?', "%3F")
+            .replace('#', "%23");
+        format!("file:{encoded}?mode=ro&immutable=1")
+    } else {
+        format!("file:{raw}?mode=ro&immutable=1")
+    }
+}
+
 /// SQLite-backed [`TaskStore`] implementation (ADR-004). Schema v1 is a
 /// Buzz-superset of `transcription`/`transcription_segment` plus humm's
 /// `options_json`/`kind` additions (see `crate::schema`).
@@ -204,6 +245,152 @@ impl SqliteStore {
             )
             .map_err(query_error)?;
         Ok(affected)
+    }
+
+    /// `true` once [`Self::import_buzz_db`] has completed successfully at
+    /// least once (`humm_meta['buzz_import_done']` is set).
+    pub fn buzz_import_done(&self) -> Result<bool, StoreError> {
+        let conn = self.lock()?;
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT value FROM humm_meta WHERE key = ?1",
+                params![BUZZ_IMPORT_DONE_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(query_error)?;
+        Ok(value.is_some())
+    }
+
+    /// One-time import of a Buzz `Buzz.sqlite` database (Q-6, F-029): copies
+    /// every `transcription` row not already present by `id`, plus each
+    /// newly-copied row's `transcription_segment` rows, then records
+    /// `humm_meta['buzz_import_done']` so later calls are a no-op
+    /// (`skipped: true` — `buzz_db` is not even opened).
+    ///
+    /// `buzz_db` is `ATTACH`ed read-only/immutable (humm can never write to
+    /// a file Buzz might still own) and the copy runs in one transaction
+    /// with the completion marker: a failure partway through leaves neither
+    /// partial rows nor the marker, so the next launch retries from
+    /// scratch. The `ATTACH` is always balanced with a `DETACH` before this
+    /// returns, whether or not the import itself succeeded.
+    ///
+    /// Imported rows keep their Buzz `status` verbatim — a Buzz
+    /// `in_progress` (or `queued`) row imports as-is, not `canceled`.
+    /// Callers must run [`Self::cancel_stale_tasks`] *after* this (as
+    /// already happens at every startup) so an imported stale row gets
+    /// flipped like any other; this method does not do that itself.
+    /// `options_json` is left `NULL` (imported rows restart from column
+    /// data, exactly as Buzz's own queued/in-progress rows did) and `kind`
+    /// takes its schema default (`'file'`).
+    ///
+    /// Failures are the caller's to log — non-fatal by contract
+    /// (`docs/design/ARCHITECTURE.md` §5).
+    pub fn import_buzz_db(&self, buzz_db: &Path) -> Result<BuzzImportOutcome, StoreError> {
+        if self.buzz_import_done()? {
+            return Ok(BuzzImportOutcome {
+                skipped: true,
+                tasks: 0,
+                segments: 0,
+            });
+        }
+
+        let mut conn = self.lock()?;
+        let uri = buzz_attach_uri(buzz_db);
+        conn.execute("ATTACH DATABASE ?1 AS buzz", params![uri])
+            .map_err(query_error)?;
+
+        let outcome = Self::run_buzz_import(&mut conn);
+
+        // Balance the ATTACH above regardless of how the import went: a
+        // failed import must not leave `buzz` attached to this long-lived
+        // connection (the next retry would then fail to re-attach it).
+        let detach = conn
+            .execute_batch("DETACH DATABASE buzz;")
+            .map_err(query_error);
+
+        match outcome {
+            Ok(ok) => {
+                detach?;
+                Ok(ok)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// The `ATTACH`ed-and-locked half of [`Self::import_buzz_db`]: runs the
+    /// copy in one transaction (marker write included) and commits, or (via
+    /// the transaction's drop-triggered rollback on an `Err` return) leaves
+    /// no trace.
+    fn run_buzz_import(conn: &mut Connection) -> Result<BuzzImportOutcome, StoreError> {
+        let tx = conn.transaction().map_err(query_error)?;
+
+        // Snapshot which ids are new *before* inserting: once the insert
+        // below runs, `NOT IN (SELECT id FROM transcription)` would no
+        // longer identify them (they'd already be present), and segments
+        // must be restricted to exactly this set — a pre-existing
+        // transcription id's segments are never copied, even though the id
+        // itself is just skipped as a duplicate.
+        let new_ids: Vec<String> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id FROM buzz.transcription \
+                     WHERE id NOT IN (SELECT id FROM transcription)",
+                )
+                .map_err(query_error)?;
+            stmt.query_map([], |row| row.get(0))
+                .map_err(query_error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(query_error)?
+        };
+
+        let tasks = tx
+            .execute(
+                "INSERT INTO transcription (
+                    id, error_message, export_formats, file, output_folder, progress,
+                    language, model_type, source, status, task, time_ended, time_queued,
+                    time_started, url, whisper_model_size, hugging_face_model_id,
+                    word_level_timings, extract_speech, name, notes
+                )
+                SELECT
+                    id, error_message, export_formats, file, output_folder, progress,
+                    language, model_type, source, status, task, time_ended, time_queued,
+                    time_started, url, whisper_model_size, hugging_face_model_id,
+                    word_level_timings, extract_speech, name, notes
+                FROM buzz.transcription
+                WHERE id NOT IN (SELECT id FROM transcription)",
+                [],
+            )
+            .map_err(query_error)?;
+
+        let segments = if new_ids.is_empty() {
+            0
+        } else {
+            let placeholders = vec!["?"; new_ids.len()].join(", ");
+            let sql = format!(
+                "INSERT INTO transcription_segment \
+                 (end_time, start_time, text, translation, transcription_id) \
+                 SELECT end_time, start_time, text, translation, transcription_id \
+                 FROM buzz.transcription_segment \
+                 WHERE transcription_id IN ({placeholders})"
+            );
+            tx.execute(&sql, params_from_iter(new_ids.iter()))
+                .map_err(query_error)?
+        };
+
+        tx.execute(
+            "INSERT INTO humm_meta (key, value) VALUES (?1, ?2)",
+            params![BUZZ_IMPORT_DONE_KEY, now_iso()],
+        )
+        .map_err(query_error)?;
+
+        tx.commit().map_err(query_error)?;
+
+        Ok(BuzzImportOutcome {
+            skipped: false,
+            tasks,
+            segments,
+        })
     }
 
     /// Fetches one task's row by id; `Ok(None)` if it doesn't exist.
