@@ -139,6 +139,10 @@ fn wide_harness(
     HarnessBuilder::default()
         .with_size(egui::Vec2::new(1700.0, 500.0))
         .with_step_dt(0.01)
+        // See `kittest_import.rs`'s `harness_with` for why this is raised
+        // above the default of 4 (final-review fix 5): a real queue/
+        // event-pump thread backs this harness too.
+        .with_max_steps(32)
         .build_eframe(move |_cc| HummApp::new_for_test(test_services(store, engines)))
 }
 

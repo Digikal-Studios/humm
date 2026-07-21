@@ -81,6 +81,12 @@ fn test_services(store: Arc<SqliteStore>, capabilities: Capabilities) -> Service
 fn harness_with(store: Arc<SqliteStore>, capabilities: Capabilities) -> Harness<'static, HummApp> {
     HarnessBuilder::default()
         .with_size(egui::Vec2::new(1000.0, 700.0))
+        // The default `max_steps` (4) is tuned for a static UI; a real
+        // `HummApp` backed by `init_with`'s live queue/event-pump thread can
+        // occasionally need a couple of extra `Harness::run` steps to settle
+        // under event-pump churn, which otherwise flakes with a spurious
+        // "exceeded max_steps" panic (final-review fix 5).
+        .with_max_steps(32)
         .build_eframe(move |_cc| HummApp::new_for_test(test_services(store, capabilities)))
 }
 

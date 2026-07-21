@@ -15,6 +15,7 @@
 //! messages, same "VAD failure never fails the task" contract.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use humm_core::boundary::TranscriptionEngine;
 use humm_core::cancel::CancelToken;
@@ -25,6 +26,7 @@ use humm_core::models::download::{DownloadProgress, ModelDownloader, ResolvedMod
 use humm_core::models::registry::local_vad_model_path;
 use humm_core::paths;
 use humm_core::queue::{ArtifactEnsurer, EngineFactory};
+use humm_core::settings::Settings;
 
 /// Seam over [`ModelDownloader`]'s network-touching methods, so
 /// [`DownloaderEnsurer`]'s routing logic (which arm to call, the exact
@@ -124,10 +126,15 @@ pub struct DownloaderEnsurer {
     /// Root directory downloaded artifacts are cached under
     /// (`paths::model_root()`).
     pub root: PathBuf,
-    /// The user's configured custom-model URL
-    /// (`settings.models.custom_model_url`), consulted only when a task's
-    /// [`ModelSpec::size`] is [`ModelSize::Custom`].
-    pub custom_url: Option<String>,
+    /// Shared handle to the live settings. `models.custom_model_url` is read
+    /// fresh from this handle on every [`ArtifactEnsurer::ensure_model`]
+    /// call — never snapshotted at construction — so a URL the user sets in
+    /// the Models tab *after* `services::init` already built this ensurer is
+    /// still honored by the very next enqueued Custom-size task. The lock is
+    /// held only long enough to clone the `Option<String>`, then dropped
+    /// before any network I/O starts (Standing Policy: never hold a lock
+    /// across blocking work).
+    pub settings: Arc<Mutex<Settings>>,
     /// Whether to fetch the CoreML encoder alongside a ggml model (Apple
     /// Silicon only — mirrors the CLI's `coreml_encoder()`,
     /// `humm-cli/src/run.rs`).
@@ -139,6 +146,35 @@ impl DownloaderEnsurer {
     fn backend(&self) -> RealBackend {
         RealBackend(ModelDownloader::new(self.root.clone()))
     }
+
+    /// [`ArtifactEnsurer::ensure_model`]'s real body, taking `backend` as an
+    /// explicit parameter so tests can exercise the live-settings-read
+    /// wiring against a [`ModelBackend`] fake — [`Self::ensure_model`]
+    /// itself always calls this with [`Self::backend`]'s real,
+    /// network-touching [`RealBackend`].
+    fn ensure_model_against(
+        &self,
+        backend: &dyn ModelBackend,
+        model: &ModelSpec,
+        progress: &mut dyn FnMut(DownloadProgress),
+        cancel: &CancelToken,
+    ) -> Result<PathBuf, CoreError> {
+        let custom_url = {
+            let guard = self
+                .settings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.models.custom_model_url.clone()
+        };
+        route_ensure_model(
+            backend,
+            model,
+            custom_url.as_deref(),
+            self.coreml,
+            progress,
+            cancel,
+        )
+    }
 }
 
 impl ArtifactEnsurer for DownloaderEnsurer {
@@ -148,14 +184,7 @@ impl ArtifactEnsurer for DownloaderEnsurer {
         progress: &mut dyn FnMut(DownloadProgress),
         cancel: &CancelToken,
     ) -> Result<PathBuf, CoreError> {
-        route_ensure_model(
-            &self.backend(),
-            model,
-            self.custom_url.as_deref(),
-            self.coreml,
-            progress,
-            cancel,
-        )
+        self.ensure_model_against(&self.backend(), model, progress, cancel)
     }
 
     fn ensure_vad(
@@ -511,6 +540,69 @@ mod tests {
         )
         .expect_err("must propagate the backend's error");
         assert!(matches!(err, CoreError::Model(ModelError::Http { .. })));
+    }
+
+    // -- DownloaderEnsurer::ensure_model: live settings read (Task: final-
+    //    review fix 1) ------------------------------------------------------
+
+    #[test]
+    fn ensure_model_honors_a_custom_url_set_after_construction() {
+        let backend = FakeBackend::default();
+        *backend.ensure_custom_result.borrow_mut() =
+            Some(Ok(PathBuf::from("/cache/ggml-late.bin")));
+        let settings = Arc::new(Mutex::new(Settings::default()));
+        let ensurer = DownloaderEnsurer {
+            root: PathBuf::from("/unused-root"),
+            settings: Arc::clone(&settings),
+            coreml: false,
+        };
+        // The ensurer was already constructed above with no URL configured
+        // — this mutates the *shared* settings handle afterward, exactly as
+        // a Preferences-tab edit would between `services::init` and a later
+        // `ensure_model` call.
+        settings
+            .lock()
+            .expect("settings lock")
+            .models
+            .custom_model_url = Some("https://example.com/late.bin".to_string());
+
+        let mut seen = Vec::new();
+        let mut progress = |update: DownloadProgress| seen.push(update);
+        let spec = model(ModelSize::Custom, None);
+        let result =
+            ensurer.ensure_model_against(&backend, &spec, &mut progress, &CancelToken::new());
+
+        assert_eq!(result.expect("ok"), PathBuf::from("/cache/ggml-late.bin"));
+        assert_eq!(
+            *backend.calls.borrow(),
+            vec!["ensure_custom_model:https://example.com/late.bin".to_string()]
+        );
+    }
+
+    #[test]
+    fn ensure_model_still_fails_actionably_when_the_live_url_is_unset() {
+        let backend = FakeBackend::default();
+        let settings = Arc::new(Mutex::new(Settings::default()));
+        let ensurer = DownloaderEnsurer {
+            root: PathBuf::from("/unused-root"),
+            settings,
+            coreml: false,
+        };
+        let mut progress = |_: DownloadProgress| panic!("must not be called");
+        let spec = model(ModelSize::Custom, None);
+        let err = ensurer
+            .ensure_model_against(&backend, &spec, &mut progress, &CancelToken::new())
+            .expect_err("must fail without a configured custom URL");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("models.custom_model_url"),
+            "message should name the setting: {message}"
+        );
+        assert!(
+            backend.calls.borrow().is_empty(),
+            "the backend must never be touched when no custom URL is configured"
+        );
     }
 
     // -- ensure_vad routing ----------------------------------------------------

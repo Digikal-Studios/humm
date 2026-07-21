@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use humm_core::domain::{Status, TranscriptionId};
-use humm_core::queue::{TaskEvent, TaskEventKind};
+use humm_core::queue::{QueueHandle, TaskEvent, TaskEventKind};
 use humm_core::settings::{FileTranscriberSettings, GuiSettings};
 
 use crate::events::{self, SharedEventQueue};
@@ -104,8 +104,11 @@ pub struct HummApp {
     /// from disk) each time it's opened; `None` while closed.
     preferences_state: Option<PreferencesState>,
     /// Environment-gated smoke-test hooks (`HUMM_SMOKE_OPEN_WINDOWS`/
-    /// `HUMM_SMOKE_AUTO_CLOSE_FRAMES`, see [`SmokeHooks`]) — read once here
-    /// in [`Self::build`], never re-read per frame. Exist solely so the M3
+    /// `HUMM_SMOKE_AUTO_CLOSE_FRAMES`, see [`SmokeHooks`]) — read once from
+    /// real process env in [`Self::new`] (never in [`Self::new_for_test`],
+    /// which always passes [`SmokeHooks::default`] — final-review fix 8, so
+    /// a kittest harness can never pick one up by accident) and threaded
+    /// into [`Self::build`], never re-read per frame. Exist solely so the M3
     /// `gui-manual` multi-window smoke (`docs/gui-manual/M3.md` item 35) can
     /// run under a controller that cannot inject OS-level input
     /// (Accessibility permissions unavailable in the automation
@@ -135,7 +138,18 @@ impl HummApp {
         argv_import: Vec<PathBuf>,
     ) -> Self {
         let event_queue = events::spawn_event_pump(services.events.clone(), cc.egui_ctx.clone());
-        Self::build(services, Some(event_queue), argv_import)
+        // Smoke-test hooks (see `SmokeHooks`'s doc comment): read from real
+        // process env only on this, the real construction path — never in
+        // `new_for_test`, so a kittest harness can never accidentally pick
+        // up a `HUMM_SMOKE_*` var some other test (or the developer's own
+        // shell) happened to leave set (final-review fix 8).
+        let smoke_hooks = smoke_hooks_from_env(
+            std::env::var("HUMM_SMOKE_OPEN_WINDOWS").ok().as_deref(),
+            std::env::var("HUMM_SMOKE_AUTO_CLOSE_FRAMES")
+                .ok()
+                .as_deref(),
+        );
+        Self::build(services, Some(event_queue), argv_import, smoke_hooks)
     }
 
     /// Builds the app directly from injected [`Services`], for kittest
@@ -155,7 +169,10 @@ impl HummApp {
     /// [`HummApp::open_options_sheet_for_test`], which is exactly what the
     /// real argv path itself resolves to on its first frame.
     pub fn new_for_test(services: Services) -> Self {
-        Self::build(services, None, Vec::new())
+        // Never reads `HUMM_SMOKE_*` (final-review fix 8): a test harness
+        // always gets the hooks' inert default, regardless of what happens
+        // to be set in the process environment this test runs under.
+        Self::build(services, None, Vec::new(), SmokeHooks::default())
     }
 
     /// Shared constructor body: loads the task table's view-model from
@@ -165,6 +182,7 @@ impl HummApp {
         services: Services,
         event_queue: Option<SharedEventQueue>,
         pending_argv_import: Vec<PathBuf>,
+        smoke_hooks: SmokeHooks,
     ) -> Self {
         let (gui_settings, stored_available_version) = {
             let settings = services
@@ -188,13 +206,6 @@ impl HummApp {
         // UI is M7); an empty overrides map resolves every action to its
         // Buzz default (`ShortcutMap::from_settings`'s own contract).
         let shortcuts = ShortcutMap::from_settings(&HashMap::new());
-
-        // Smoke-test hooks (see `SmokeHooks`'s doc comment): read once here,
-        // never re-read per frame.
-        let smoke_open_env = std::env::var("HUMM_SMOKE_OPEN_WINDOWS").ok();
-        let smoke_close_env = std::env::var("HUMM_SMOKE_AUTO_CLOSE_FRAMES").ok();
-        let smoke_hooks =
-            smoke_hooks_from_env(smoke_open_env.as_deref(), smoke_close_env.as_deref());
 
         // Chip persistence across sessions (binding decision, Buzz-equivalent):
         // a stale-but-still-newer `available_version` from a previous
@@ -342,7 +353,7 @@ impl HummApp {
             SheetOutcome::Run { specs, sticky } => {
                 self.persist_sticky_prefs(&sticky);
                 for (id, spec, source) in specs {
-                    self.services.queue.enqueue(id, spec, source);
+                    self.services.queue().enqueue(id, spec, source);
                 }
             }
             SheetOutcome::Cancelled { sticky } => self.persist_sticky_prefs(&sticky),
@@ -656,7 +667,7 @@ impl HummApp {
             .map(|row| row.id)
             .collect();
         for id in ids {
-            self.services.queue.cancel(id);
+            self.services.queue().cancel(id);
         }
     }
 
@@ -702,7 +713,7 @@ impl HummApp {
             Err(err) => Err(err),
         };
         match spec {
-            Ok(Some(spec)) => self.services.queue.retry(id, spec),
+            Ok(Some(spec)) => self.services.queue().retry(id, spec),
             Ok(None) | Err(_) => {
                 self.push_error_toast(tr("retry-error-unavailable"), now);
             }
@@ -1085,6 +1096,38 @@ impl eframe::App for HummApp {
 
         self.persist_layout_if_changed();
     }
+
+    /// Called once on shutdown (`eframe::App::on_exit`, non-`glow` build —
+    /// `humm-gui` doesn't enable the `glow` feature, so this is the
+    /// zero-argument signature). Performs the graceful, bounded shutdown
+    /// `services.rs`'s `Services` struct doc documents: cancel every in-
+    /// flight/pending task, then wait for the runner to actually drain and
+    /// stop, so each canceled task's terminal store write lands before the
+    /// process exits rather than being cut off mid-write by a bare process
+    /// kill. A no-op if the queue was somehow already taken (defensive only
+    /// — `on_exit` fires at most once per process).
+    fn on_exit(&mut self) {
+        if let Some(queue) = self.services.queue.take() {
+            shutdown_queue(queue);
+        }
+    }
+}
+
+/// The shutdown sequence itself, factored out of [`HummApp::on_exit`] so it
+/// has its own directly callable, directly testable seam: `cancel_all()`
+/// trips every in-flight/pending task's cancel token and marks every pending
+/// task canceled without ever starting it; `finish()` then signals "no more
+/// enqueues" and blocks until the runner thread has drained (including
+/// writing the now-canceled in-flight task's terminal store row) and
+/// stopped. `QueueHandle::finish`'s own contract already turns a runner-
+/// thread panic into a logged defect rather than a propagated error — this
+/// only adds a log line for the (believed unreachable) case its `Result`
+/// comes back `Err` some other way.
+fn shutdown_queue(queue: QueueHandle) {
+    queue.cancel_all();
+    if let Err(err) = queue.finish() {
+        log::error!("queue shutdown sequence failed: {err}");
+    }
 }
 
 #[cfg(test)]
@@ -1145,5 +1188,135 @@ mod tests {
     fn smoke_hooks_from_env_close_absent_or_empty_is_none() {
         assert_eq!(smoke_hooks_from_env(None, None).auto_close_frames, None);
         assert_eq!(smoke_hooks_from_env(None, Some("")).auto_close_frames, None);
+    }
+}
+
+/// Covers [`shutdown_queue`] (final-review fix 4) end to end against a real
+/// [`crate::services::Services`] built by [`services::init_with`]: `Services`
+/// hard-codes the real ffmpeg/ffprobe decoder/prober (only `engines` is
+/// fakeable via `TestDeps`, same constraint `kittest_phases.rs`'s own module
+/// doc explains), so the enqueued task's input must be genuinely decodable —
+/// this reuses the same real Buzz-sourced test WAV (`HUMM_BUZZ_TESTDATA`
+/// override) every other GUI test in this workspace that reaches the decode
+/// step already depends on — rather than exercising a fake pipeline that
+/// would never actually reach the engine.
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use crate::services::{self, Capabilities, TestDeps};
+    use humm_core::boundary::{EngineCaps, EngineOptions, Pcm, SegmentSink, TranscriptionEngine};
+    use humm_core::cancel::CancelToken;
+    use humm_core::domain::{Input, ModelSpec, OutputSpec, Source, TaskSpec, TranscriptionOptions};
+    use humm_core::error::{CoreError, EngineError};
+    use humm_core::queue::EngineFactory;
+    use humm_store::SqliteStore;
+    use std::time::Duration;
+
+    fn testdata_wav() -> PathBuf {
+        std::env::var_os("HUMM_BUZZ_TESTDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/Users/jawad/RustroverProjects/buzz/testdata"))
+            .join("whisper-latvian.wav")
+    }
+
+    /// An engine that signals it has started, then busy-polls `cancel` until
+    /// tripped, returning `Canceled` — proving `shutdown_queue`'s
+    /// `cancel_all()` reaches an already-in-flight job promptly, with no
+    /// separate rendezvous "release" signal needed (unlike `queue.rs`'s own
+    /// gate-based tests, which need to control exactly when a *scripted*
+    /// result becomes available; here the only thing under test is whether
+    /// cancellation itself is observed, so polling the token directly is
+    /// both simpler and just as deterministic — the loop cannot exit any
+    /// other way).
+    struct BlockingEngine {
+        entered_tx: flume::Sender<()>,
+    }
+
+    impl TranscriptionEngine for BlockingEngine {
+        fn transcribe(
+            &mut self,
+            _audio: &Pcm,
+            _options: &EngineOptions,
+            _sink: &mut dyn SegmentSink,
+            cancel: &CancelToken,
+        ) -> Result<(), EngineError> {
+            let _ = self.entered_tx.send(());
+            while !cancel.is_canceled() {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(EngineError::Canceled)
+        }
+
+        fn capabilities(&self) -> EngineCaps {
+            EngineCaps {
+                word_timestamps: false,
+                translate: false,
+                vad: false,
+            }
+        }
+    }
+
+    struct BlockingFactory {
+        entered_tx: flume::Sender<()>,
+    }
+
+    impl EngineFactory for BlockingFactory {
+        fn create(
+            &mut self,
+            _model: &ModelSpec,
+            _resolved: Option<&Path>,
+        ) -> Result<Box<dyn TranscriptionEngine>, CoreError> {
+            Ok(Box::new(BlockingEngine {
+                entered_tx: self.entered_tx.clone(),
+            }))
+        }
+    }
+
+    #[test]
+    fn shutdown_queue_cancels_the_in_flight_task_and_joins_the_runner() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("open store"));
+        let (entered_tx, entered_rx) = flume::bounded(1);
+        let media_dir = tempfile::tempdir().expect("media tempdir");
+
+        let mut services = services::init_with(TestDeps {
+            store: Arc::clone(&store),
+            media_dir: media_dir.path().to_path_buf(),
+            model_root: PathBuf::from("/unused-model-root"),
+            settings: humm_core::settings::Settings::default(),
+            settings_path: PathBuf::from("/unused-settings-path"),
+            engines: Box::new(BlockingFactory { entered_tx }),
+            fetcher: None,
+            capabilities: Capabilities::default(),
+            artifacts: None,
+        });
+
+        let id = TranscriptionId::new();
+        let spec = TaskSpec {
+            input: Input::Path(testdata_wav()),
+            options: TranscriptionOptions::default(),
+            output: OutputSpec::default(),
+        };
+        services.queue().enqueue(id, spec, Source::FileImport);
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the engine must have started before shutdown runs");
+
+        let queue = services
+            .queue
+            .take()
+            .expect("queue present before shutdown");
+        shutdown_queue(queue);
+
+        let row = store
+            .get_task(&id)
+            .expect("get_task")
+            .expect("the task row still exists");
+        assert_eq!(
+            row.status,
+            Status::Canceled,
+            "shutdown must cancel the in-flight task and write its terminal status \
+             before the runner is considered joined"
+        );
     }
 }

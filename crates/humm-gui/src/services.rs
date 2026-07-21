@@ -17,6 +17,10 @@
 //! an absent model never blocks other imports (design spec §2.1); the engine
 //! itself is built by [`crate::engine_factory::GuiEngineFactory`] from
 //! whatever path that ensurer just resolved.
+//!
+//! **Shutdown policy** (`HummApp::on_exit`, [`Services`]'s own doc for the
+//! mechanics): close cancels in-flight work and joins the runner; the
+//! stale-flip remains the backstop for SIGKILL.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -89,6 +93,22 @@ pub enum UpdateNotice {
 
 /// Everything `HummApp` needs to run. Constructed once at startup, by
 /// [`init`] (real adapters) or [`init_with`] (fakes, for kittest).
+///
+/// ## Shutdown policy
+///
+/// Closing the app cancels every in-flight/pending task and joins the queue's
+/// runner thread before the process exits: `HummApp::on_exit` takes `queue`
+/// (hence [`Option`] rather than a bare [`QueueHandle`] — `eframe::App::
+/// on_exit` only hands back `&mut self`, so the handle must be *taken*, not
+/// consumed by value from a borrow) and runs `queue.cancel_all()` then
+/// `queue.finish()`. Cancellation is prompt by design (a task's cancel token
+/// is checked cooperatively at every phase boundary — decode, download,
+/// engine inference — and `finish` itself waits for the runner to actually
+/// drain and stop), so this is a *graceful, bounded* shutdown: the store gets
+/// each in-flight task's terminal `canceled` write before the process exits,
+/// not a bare `SIGKILL` mid-write. The stale-task flip (`apply_stale_flip`,
+/// next launch) remains the sole backstop for the case this policy can't
+/// cover — a `SIGKILL`/crash that never reaches `on_exit` at all.
 pub struct Services {
     /// Loaded settings, shared so views can read/mutate and persist changes
     /// (`Settings::save` at `settings_path`).
@@ -98,7 +118,13 @@ pub struct Services {
     /// The persistent task store.
     pub store: Arc<SqliteStore>,
     /// Handle to the running task queue (enqueue/cancel/retry/subscribe).
-    pub queue: QueueHandle,
+    /// `Option` so `HummApp::on_exit` can `take()` it for the shutdown
+    /// sequence (see the struct doc's "Shutdown policy" section) — `None`
+    /// only after that has already happened, which only occurs once, right
+    /// before the process exits. [`Self::queue`] is the normal-operation
+    /// accessor; nothing on the ordinary running-app path should ever see
+    /// `None` here.
+    pub queue: Option<QueueHandle>,
     /// Task lifecycle events, drained by the event-pump thread (`events.rs`).
     pub events: flume::Receiver<TaskEvent>,
     /// ffmpeg/ffprobe/yt-dlp availability.
@@ -113,6 +139,20 @@ pub struct Services {
     /// About window's manual check (which reuses [`run_update_check`]) onto
     /// the same channel the startup check reports over.
     pub update_tx: flume::Sender<UpdateNotice>,
+}
+
+impl Services {
+    /// The running queue handle, for every ordinary (non-shutdown) caller.
+    ///
+    /// Panics if called after [`Self::queue`]'s handle has already been
+    /// taken for shutdown (`HummApp::on_exit`) — that only happens once, in
+    /// the window between the app closing and the process actually exiting,
+    /// during which nothing should still be calling this.
+    pub fn queue(&self) -> &QueueHandle {
+        self.queue
+            .as_ref()
+            .expect("Services::queue called after the queue was taken for shutdown")
+    }
 }
 
 /// Errors that can prevent the GUI from starting, rendered by `main.rs`'s
@@ -158,21 +198,22 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
 
     let decoder = Arc::new(FfmpegDecoder::new());
     let prober = Arc::new(FfprobeProber::new());
-    let (fetcher, custom_model_url) = {
+    let fetcher = {
         let guard = settings
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        (
-            build_fetcher(&guard, &media_caps),
-            guard.models.custom_model_url.clone(),
-        )
+        build_fetcher(&guard, &media_caps)
     };
     let model_root = paths::model_root();
 
     let use_gpu = use_gpu_from_env(std::env::var("HUMM_FORCE_CPU").ok().as_deref());
     let ensurer = DownloaderEnsurer {
         root: model_root.clone(),
-        custom_url: custom_model_url,
+        // Shared, not snapshotted: `DownloaderEnsurer` reads
+        // `models.custom_model_url` fresh from this same handle on every
+        // `ensure_model` call, so a URL set in the Models tab after this
+        // point is still honored (final-review fix 1).
+        settings: Arc::clone(&settings),
         // Mirrors the CLI's `coreml_encoder()` exactly (`humm-cli/src/run.rs`).
         coreml: cfg!(all(target_os = "macos", target_arch = "aarch64")),
     };
@@ -207,7 +248,7 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
         settings,
         settings_path,
         store,
-        queue,
+        queue: Some(queue),
         events,
         capabilities,
         model_root,
@@ -425,7 +466,7 @@ pub fn init_with(deps: TestDeps) -> Services {
         settings: Arc::new(Mutex::new(deps.settings)),
         settings_path: deps.settings_path,
         store: deps.store,
-        queue,
+        queue: Some(queue),
         events,
         capabilities: deps.capabilities,
         model_root: deps.model_root,
@@ -627,7 +668,7 @@ mod tests {
     #[test]
     fn init_with_builds_a_working_queue_and_subscription() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("open store"));
-        let services = init_with(test_deps(Arc::clone(&store)));
+        let mut services = init_with(test_deps(Arc::clone(&store)));
 
         let id = TranscriptionId::new();
         let spec = humm_core::domain::TaskSpec {
@@ -636,7 +677,7 @@ mod tests {
             output: humm_core::domain::OutputSpec::default(),
         };
         services
-            .queue
+            .queue()
             .enqueue(id, spec, humm_core::domain::Source::FileImport);
 
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -660,7 +701,7 @@ mod tests {
             }
         }
         assert!(saw_queued, "expected a Queued event for the enqueued task");
-        let _ = services.queue.finish();
+        let _ = services.queue.take().expect("queue present").finish();
     }
 
     #[test]

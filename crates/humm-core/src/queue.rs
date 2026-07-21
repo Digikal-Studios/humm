@@ -92,9 +92,15 @@ pub enum TaskEventKind {
     /// Model/VAD artifact download progress for a task run with an
     /// [`ArtifactEnsurer`] configured (GUI only —
     /// [`RunnerDeps::artifacts`]). Emitted between `Started` and
-    /// `Progress`/`SegmentAdded`, once per
-    /// [`crate::models::download::DownloadProgress`] callback from
-    /// [`ArtifactEnsurer::ensure_model`]/[`ArtifactEnsurer::ensure_vad`].
+    /// `Progress`/`SegmentAdded`, throttled across the whole artifact-ensure
+    /// phase (mirrors `QueueSink::on_progress`'s store-write throttle, same
+    /// file): a [`crate::models::download::DownloadProgress`] callback from
+    /// [`ArtifactEnsurer::ensure_model`]/[`ArtifactEnsurer::ensure_vad`]
+    /// that reports a known, nonzero `total` fires an event only the first
+    /// time a new whole percent is reached; one that reports an unknown (or
+    /// zero) `total` fires on the very first such callback, then again only
+    /// once `downloaded` crosses into a new whole mebibyte (see
+    /// [`ModelDownloadThrottle`]).
     ///
     /// The CLI never constructs an `ArtifactEnsurer` — it resolves the model
     /// synchronously before enqueueing (Buzz parity) and always leaves
@@ -483,6 +489,55 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "unknown panic payload".to_string())
 }
 
+/// Throttles [`TaskEventKind::ModelDownloadProgress`] emission across one
+/// job's whole artifact-ensure phase (module doc): [`Runner::ensure_artifacts`]
+/// builds a fresh instance per job and feeds it every
+/// [`crate::models::download::DownloadProgress`] callback from both
+/// `ensure_model` and `ensure_vad` in sequence, so the two artifacts' progress
+/// streams share (and are throttled against) the same running state.
+///
+/// Mirrors [`QueueSink::on_progress`]'s store-write throttle: a callback with
+/// a known, nonzero `total` fires only the first time a new whole percent is
+/// reached. A callback with an unknown (or zero — avoids a division by zero)
+/// `total` has no percentage to round to, so bytes stand in for it instead:
+/// it fires on the very first such callback (`last_mib` starts `None`), then
+/// again only once `downloaded` crosses into a new whole mebibyte.
+#[derive(Debug, Default)]
+struct ModelDownloadThrottle {
+    /// Last whole percent an event was emitted for, if any (`total` known).
+    last_pct: Option<i64>,
+    /// Last whole mebibyte an event was emitted for, if any (`total`
+    /// unknown or zero).
+    last_mib: Option<u64>,
+}
+
+impl ModelDownloadThrottle {
+    /// Whether `update` should produce an event, recording it as the new
+    /// baseline when it does.
+    fn should_emit(&mut self, update: &DownloadProgress) -> bool {
+        match update.total {
+            Some(total) if total > 0 => {
+                let pct = ((update.downloaded as f64 / total as f64) * 100.0).floor() as i64;
+                if self.last_pct == Some(pct) {
+                    false
+                } else {
+                    self.last_pct = Some(pct);
+                    true
+                }
+            }
+            _ => {
+                let mib = update.downloaded / (1024 * 1024);
+                if self.last_mib == Some(mib) {
+                    false
+                } else {
+                    self.last_mib = Some(mib);
+                    true
+                }
+            }
+        }
+    }
+}
+
 /// The [`SegmentSink`] the runner hands to the pipeline: it forwards segment
 /// and progress updates as [`TaskEvent`]s and writes progress to the store,
 /// throttled to whole-percent changes.
@@ -780,8 +835,21 @@ impl Runner {
         // this task is running, so that command is still unprocessed here.
         // Drain it now, before removing, so it cannot outlive this task and
         // leak a permanent entry for an id that will never be dequeued again.
+        //
+        // The removal is conditional on `id` still being absent from
+        // `pending`: a `Retry(id)` drained in this same window re-queues
+        // `id` (after its own handler already purged any *stale* canceled-
+        // set entry — `QueueHandle::retry`'s doc comment) — and if a fresh
+        // `Cancel(id)` for that retry is drained right behind it, this tail
+        // would otherwise erase that Cancel's insert before the retried run
+        // ever gets a chance to observe it, silently un-canceling a retry
+        // the caller asked to cancel. Skipping the removal whenever `id` is
+        // (again) pending leaves that fresh insert intact for the retried
+        // run's own dequeue-time check to consume instead.
         self.drain_commands_nonblocking();
-        self.canceled.remove(&id);
+        if !self.pending.iter().any(|task| task.id == id) {
+            self.canceled.remove(&id);
+        }
     }
 
     /// Writes `canceled` to the store, then emits the `Canceled` event.
@@ -877,9 +945,10 @@ impl Runner {
         }
     }
 
-    /// Ensures `model` (and the VAD model) via `ensurer`, emitting
-    /// [`TaskEventKind::ModelDownloadProgress`] for every progress callback
-    /// from either. Only called when `self.artifacts` is `Some`.
+    /// Ensures `model` (and the VAD model) via `ensurer`, emitting a
+    /// throttled [`TaskEventKind::ModelDownloadProgress`] per
+    /// [`ModelDownloadThrottle`] for progress callbacks from either. Only
+    /// called when `self.artifacts` is `Some`.
     ///
     /// A failed/canceled `ensure_model` becomes this job's [`Terminal`]
     /// directly, via the same [`classify`] every other pipeline error goes
@@ -895,7 +964,11 @@ impl Runner {
         token: &CancelToken,
     ) -> Result<(PathBuf, EngineTuning), Terminal> {
         let subscribers = Arc::clone(&self.subscribers);
+        let mut throttle = ModelDownloadThrottle::default();
         let mut on_progress = move |update: DownloadProgress| {
+            if !throttle.should_emit(&update) {
+                return;
+            }
             emit(
                 &subscribers,
                 TaskEvent {
@@ -2586,6 +2659,88 @@ mod tests {
     }
 
     #[test]
+    fn retry_and_cancel_racing_the_tail_drain_purge_leaves_the_retry_canceled() {
+        // Regression test for the tail-drain purge refinement (final-review
+        // fix 6): `run_task`'s tail used to remove `id` from the
+        // canceled-set unconditionally after its own post-terminal drain. A
+        // `Retry(id)` immediately followed by a `Cancel(id)`, both landing in
+        // that exact drain window, re-queues `id` (the `Retry` handler's own
+        // purge clears any *stale* entry first) and then re-inserts it (the
+        // `Cancel`) — but the unconditional removal right after would erase
+        // that fresh insert, silently un-canceling the very retry the caller
+        // just asked to cancel, letting it run to completion instead.
+        //
+        // Gate the first run's `mark_completed` store write (which runs
+        // *before* the tail-drain) so the test can land both commands in
+        // that window deterministically, with no reliance on thread timing.
+        let (done_ctrl, done_gate) = gate();
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("first-run")],
+            }],
+            completed_gate: Some(done_gate),
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let spec = path_task(h.input_file("a.mp3"));
+        q.enqueue(a, spec.clone(), Source::FileImport);
+        assert!(matches!(recv(&rx).kind, TaskEventKind::Queued));
+        assert!(matches!(recv(&rx).kind, TaskEventKind::Started));
+        assert!(matches!(recv(&rx).kind, TaskEventKind::SegmentAdded(_)));
+
+        // The runner is inside the gated `mark_completed` for the first
+        // run — strictly before `run_task`'s own tail-drain has run.
+        done_ctrl.wait_entered();
+        q.retry(a, spec);
+        q.cancel(a);
+        done_ctrl.release();
+
+        // The first run's own Completed event still fires (its store write
+        // already happened before the gate).
+        assert!(matches!(recv(&rx).kind, TaskEventKind::Completed { .. }));
+
+        q.finish().expect("finish");
+        let events = drain(&rx);
+        let calls = h.store_calls();
+
+        assert!(
+            calls.contains(&StoreCall::Requeue(a)),
+            "the retry must have been requeued: {calls:?}"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| matches!(c, StoreCall::Completed(id, _) if *id == a))
+                .count(),
+            1,
+            "the retry must not run to completion a second time: {calls:?}"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| matches!(c, StoreCall::Started(id) if *id == a))
+                .count(),
+            1,
+            "the retried run must never actually start — it should be pre-canceled at \
+             dequeue: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, StoreCall::Canceled(id) if *id == a)),
+            "the retry must end canceled: {calls:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Canceled)),
+            "expected a Canceled event for the retried run: {events:?}"
+        );
+    }
+
+    #[test]
     fn engine_panic_discards_cached_engine() {
         let (q, h) = build(Cfg {
             scripts: vec![
@@ -2717,6 +2872,10 @@ mod tests {
 
     #[test]
     fn ensurer_model_progress_is_emitted_per_task_between_started_and_progress() {
+        // Steps are chosen so the expected emissions are unambiguous under
+        // `ModelDownloadThrottle`: 10% and 10.4% share the same whole
+        // percent (10) — the second is throttled away — while 42% is a new
+        // whole percent and fires.
         let ensurer = FakeEnsurer {
             model_scripts: Arc::new(Mutex::new(VecDeque::from(vec![EnsureModelScript::Ok {
                 progress: vec![
@@ -2727,8 +2886,13 @@ mod tests {
                     },
                     DownloadProgress {
                         file: "ggml-small.bin".to_string(),
-                        downloaded: 100,
-                        total: Some(100),
+                        downloaded: 104,
+                        total: Some(1000),
+                    },
+                    DownloadProgress {
+                        file: "ggml-small.bin".to_string(),
+                        downloaded: 420,
+                        total: Some(1000),
                     },
                 ],
                 path: PathBuf::from("/models/ggml-small.bin"),
@@ -2767,15 +2931,90 @@ mod tests {
                         ..
                     },
                     TaskEventKind::ModelDownloadProgress {
-                        downloaded: 100,
-                        total: Some(100),
+                        downloaded: 420,
+                        total: Some(1000),
                         ..
                     },
                     TaskEventKind::SegmentAdded(_),
                     TaskEventKind::Completed { .. },
                 ]
             ),
-            "unexpected event sequence: {a_kinds:?}"
+            "unexpected event sequence (10.4% should have been throttled away): {a_kinds:?}"
+        );
+    }
+
+    #[test]
+    fn model_download_progress_events_are_throttled_to_whole_percent_or_full_mib() {
+        // Pins `ModelDownloadThrottle`'s two branches in one scripted
+        // download: a known-`total` run of steps (10%, 10.4% suppressed,
+        // 42%) followed by an unknown-`total` run of steps (first MiB
+        // fires, a same-MiB follow-up is suppressed, the next MiB fires).
+        let ensurer = FakeEnsurer {
+            model_scripts: Arc::new(Mutex::new(VecDeque::from(vec![EnsureModelScript::Ok {
+                progress: vec![
+                    DownloadProgress {
+                        file: "ggml-small.bin".to_string(),
+                        downloaded: 10,
+                        total: Some(100),
+                    },
+                    DownloadProgress {
+                        file: "ggml-small.bin".to_string(),
+                        downloaded: 104,
+                        total: Some(1000),
+                    },
+                    DownloadProgress {
+                        file: "ggml-small.bin".to_string(),
+                        downloaded: 420,
+                        total: Some(1000),
+                    },
+                    DownloadProgress {
+                        file: "ggml-small.bin".to_string(),
+                        downloaded: 500_000,
+                        total: None,
+                    },
+                    DownloadProgress {
+                        file: "ggml-small.bin".to_string(),
+                        downloaded: 600_000,
+                        total: None,
+                    },
+                    DownloadProgress {
+                        file: "ggml-small.bin".to_string(),
+                        downloaded: 1_200_000,
+                        total: None,
+                    },
+                ],
+                path: PathBuf::from("/models/ggml-small.bin"),
+            }]))),
+            vad_scripts: Arc::new(Mutex::new(VecDeque::new())),
+            model_calls: Arc::new(Mutex::new(Vec::new())),
+            vad_calls: Arc::new(Mutex::new(0)),
+            model_gate: None,
+        };
+        let (q, h) = build_with_ensurer(Cfg::default(), Arc::new(ensurer));
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        q.enqueue(a, path_task(h.input_file("a.mp3")), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        let downloads: Vec<(u64, Option<u64>)> = events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                TaskEventKind::ModelDownloadProgress {
+                    downloaded, total, ..
+                } => Some((*downloaded, *total)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            downloads,
+            vec![
+                (10, Some(100)),
+                (420, Some(1000)),
+                (500_000, None),
+                (1_200_000, None),
+            ],
+            "10.4% (same whole percent as 10%) and the second sub-MiB step must be throttled away"
         );
     }
 

@@ -23,8 +23,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use egui_kittest::{Harness, HarnessBuilder};
 use humm_core::domain::ModelSize;
 use humm_core::models::registry::{SENTINEL_SUFFIX, ggml_file_name};
 use humm_core::settings::Settings;
@@ -221,7 +221,16 @@ fn update_chip_appears_when_available_notice_is_injected() {
     // hermetically instead of racing a real network check.
     let update_tx = services.update_tx.clone();
 
-    let mut harness = Harness::new_eframe(move |_cc| HummApp::new_for_test(services));
+    // `HarnessBuilder::default()` + `.with_max_steps` rather than the
+    // shorthand `Harness::new_eframe` (which is just that builder with the
+    // default `max_steps` of 4): a real `HummApp` here is backed by
+    // `init_with`'s live queue/event-pump thread, which can occasionally
+    // need a couple of extra `Harness::run` steps to settle under
+    // event-pump churn (final-review fix 5, same rationale as
+    // `kittest_import.rs`'s `harness_with`).
+    let mut harness = HarnessBuilder::default()
+        .with_max_steps(32)
+        .build_eframe(move |_cc| HummApp::new_for_test(services));
     harness.run();
     assert!(
         harness.query_by_label("Update Available").is_none(),

@@ -110,6 +110,22 @@ impl ToastStack {
             .retain(|toast| now.saturating_duration_since(toast.pushed_at) < TOAST_DURATION);
     }
 
+    /// The duration until the earliest-expiring toast on the stack would
+    /// expire, as of `now` — `None` if the stack is empty. Saturates to
+    /// [`Duration::ZERO`] for a toast that is already past [`TOAST_DURATION`]
+    /// (e.g. called before [`Self::expire`] has pruned it) rather than
+    /// underflowing. Pure — no `Instant::now()` call — so [`ui`]'s
+    /// "schedule exactly one repaint for the next expiry" behavior is
+    /// directly unit-testable here, independent of any real `egui::Context`.
+    pub fn next_expiry(&self, now: Instant) -> Option<Duration> {
+        self.items
+            .iter()
+            .map(|toast| {
+                TOAST_DURATION.saturating_sub(now.saturating_duration_since(toast.pushed_at))
+            })
+            .min()
+    }
+
     /// Currently-active toasts, oldest first.
     pub fn items(&self) -> &[Toast] {
         &self.items
@@ -151,6 +167,16 @@ pub fn ui(
     now: Instant,
 ) -> Vec<ToastAction> {
     stack.expire(now);
+    // A toast auto-dismisses on a timer with no other input driving a
+    // repaint (task events are the only other repaint source, and a lone
+    // toast can easily sit alone for seconds) — without this, an idle app
+    // would never call `ui` again to notice the toast has expired, and it
+    // would linger on screen well past its 5-second budget until some
+    // unrelated repaint happened to occur (task_table.rs's identical
+    // pattern for an in-progress row's stale ETA text).
+    if let Some(delta) = stack.next_expiry(now) {
+        ctx.request_repaint_after(delta);
+    }
     let mut actions = Vec::new();
     let mut open_detail_ids = Vec::new();
 
@@ -271,6 +297,41 @@ mod tests {
         stack.expire(t0 + Duration::from_secs(6));
         assert_eq!(stack.items().len(), 1);
         assert_eq!(stack.items()[0].message, "new");
+    }
+
+    #[test]
+    fn next_expiry_is_none_when_the_stack_is_empty() {
+        let stack = ToastStack::default();
+        assert_eq!(stack.next_expiry(Instant::now()), None);
+    }
+
+    #[test]
+    fn next_expiry_returns_the_duration_until_the_earliest_toast_expires() {
+        let mut stack = ToastStack::default();
+        let t0 = Instant::now();
+        stack.push(ToastKind::Info, "old".to_string(), t0);
+        let t1 = t0 + Duration::from_secs(2);
+        stack.push(ToastKind::Info, "new".to_string(), t1);
+
+        // At t0+3s: "old" (pushed at t0) expires at t0+5s -> 2s left;
+        // "new" (pushed at t1 = t0+2s) expires at t0+7s -> 4s left. The
+        // earliest of the two wins.
+        let delta = stack
+            .next_expiry(t0 + Duration::from_secs(3))
+            .expect("stack is non-empty");
+        assert_eq!(delta, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn next_expiry_saturates_to_zero_for_an_already_expired_toast() {
+        let mut stack = ToastStack::default();
+        let t0 = Instant::now();
+        stack.push(ToastKind::Info, "stale".to_string(), t0);
+
+        // Past TOAST_DURATION but `expire` hasn't run yet — must saturate
+        // rather than underflow/panic.
+        let delta = stack.next_expiry(t0 + TOAST_DURATION + Duration::from_secs(1));
+        assert_eq!(delta, Some(Duration::ZERO));
     }
 
     #[test]

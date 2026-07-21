@@ -133,6 +133,7 @@ other three from M3 Task 11 (preferences/update/telemetry wiring).
 | `HUMM_DISABLE_UPDATE_CHECK` | Any non-empty value disables the *startup* background update check (F-006, ADR-015) — read exactly where Buzz's own `BUZZ_DISABLE_UPDATE_CHECK` gate sits (`main_window.py:569`): the checker/channel is still constructed unconditionally, only the network call is skipped. Does **not** gate the About window's manual "Check for updates" (an explicit user click bypasses every startup gate, including this one). |
 | `HUMM_POSTHOG_KEY` | Build-time only (`option_env!`, not read at runtime): humm's own PostHog project key. Absent at build time compiles telemetry down to a permanent no-op — there is no way to enable it at runtime without rebuilding. |
 | `HUMM_FAVORITE_LANGUAGES` | Comma-separated language codes (Buzz: `BUZZ_FAVORITE_LANGUAGES`) shown as a separator-wrapped "favorites" block at the top of the options sheet's language combo (F-023); invalid codes are silently dropped. Unset or empty renders no favorites block at all. |
+| `HUMM_SMOKE_OPEN_WINDOWS` / `HUMM_SMOKE_AUTO_CLOSE_FRAMES` | Test-only, unstable — smoke-test hooks, not user surface. Drive the `docs/gui-manual/M3.md` windowed multi-window/clean-shutdown smoke under a controller with no OS input-injection access (`app.rs`'s `SmokeHooks`): the first opens the About/Preferences viewports on the first frame; the second requests a normal window close after that many frames. |
 
 ## 6. File locations (macOS defaults shown)
 

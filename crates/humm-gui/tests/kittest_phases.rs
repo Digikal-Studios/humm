@@ -227,6 +227,10 @@ fn sample_spec(input: Input) -> TaskSpec {
 fn wide_harness(services: Services) -> Harness<'static, HummApp> {
     HarnessBuilder::default()
         .with_size(egui::Vec2::new(1700.0, 400.0))
+        // See `kittest_import.rs`'s `harness_with` for why this is raised
+        // above the default of 4 (final-review fix 5) — this file's whole
+        // point is a real, gated queue/event-pump thread driving the UI.
+        .with_max_steps(32)
         .build_eframe(move |_cc| HummApp::new_for_test(services))
 }
 
@@ -280,7 +284,7 @@ fn download_phases_render_media_then_model_then_complete() {
         })),
     });
 
-    // Enqueued directly against `services.queue` *before* `services` moves
+    // Enqueued directly against `services.queue()` *before* `services` moves
     // into the harness below (`QueueHandle::enqueue` only needs `&self`):
     // the command channel and the runner thread already exist (`init_with`
     // spawned them), so this is queued immediately regardless of whether
@@ -290,7 +294,7 @@ fn download_phases_render_media_then_model_then_complete() {
     let id = TranscriptionId::new();
     let url: url::Url = "https://example.com/clip.mp3".parse().expect("valid url");
     services
-        .queue
+        .queue()
         .enqueue(id, sample_spec(Input::Url(url)), Source::UrlImport);
 
     let mut harness = wide_harness(services);
