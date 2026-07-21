@@ -183,3 +183,61 @@ fn row_context_menu_on_completed_row_does_not_offer_restart() {
         "a completed row must not offer Restart Transcription"
     );
 }
+
+/// Review-fix coverage (design spec §2.6, resizable/persisted column
+/// widths): the table's columns are now `.resizable(true)` and its
+/// `TableBuilder` carries an explicit `id_salt`, with `egui_extras`'s
+/// `"serde"` feature on so its internal `TableState` persists through
+/// `egui::Memory` — this proves that setup renders and keeps rendering
+/// correctly across several frames without panicking, and that the same
+/// three rows stay visible throughout (the layout the user sees doesn't
+/// shift or corrupt itself from having resizable/persisted state wired in).
+///
+/// What this does *not* (and, within `egui_kittest`, cannot) prove: an
+/// actual gui.ron round-trip across a real process restart — `Harness`
+/// never calls `eframe::App::save`/serializes to disk, so real
+/// width-survives-a-restart coverage is an acceptance-level concern, not a
+/// kittest one. The persistence *mechanism itself* (egui_extras writing
+/// through `Memory::data.insert_persisted`, which eframe's `persistence`
+/// feature is what serializes to disk) is verified by reading the vendored
+/// `egui_extras` source directly (see `ui`'s doc comment in
+/// `task_table.rs`), not by a test.
+#[test]
+fn table_with_resizable_persisted_columns_renders_several_frames_without_panicking() {
+    let mut harness = wide_harness();
+    for _ in 0..5 {
+        harness.step();
+    }
+
+    harness.get_by_label_contains("Queued");
+    harness.get_by_label("Completed");
+    harness.get_by_label_contains("Failed (ffmpeg not found)");
+}
+
+/// "Reset Column Order" (header context menu) exercises the same
+/// `TableLayout::reset` → `take_pending_width_reset` → `TableBuilder::reset`
+/// path the review-fix added for clearing egui_extras's persisted column
+/// widths — this proves that path runs without panicking and that the sort
+/// genuinely returns to the Buzz default (`DateAdded`, descending) after
+/// having been changed, end to end through the real app.
+#[test]
+fn reset_column_order_restores_default_sort_without_panicking() {
+    let mut harness = wide_harness();
+    harness.run();
+
+    // Move off the default sort first, so the reset below is a real change.
+    harness.get_by_label_contains("File Name / URL").click();
+    harness.run();
+    harness.get_by_label_contains("File Name / URL \u{25b2}");
+
+    // Right-click the header, then click "Reset Column Order".
+    harness
+        .get_by_label_contains("File Name / URL \u{25b2}")
+        .click_secondary();
+    harness.run();
+    harness.get_by_label_contains("Reset Column Order").click();
+    harness.run();
+
+    // Back to Buzz's default: Date Added, descending.
+    harness.get_by_label_contains("Date Added \u{25bc}");
+}

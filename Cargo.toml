@@ -46,7 +46,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 fd-lock = "4"
 egui = "0.35"
 eframe = { version = "0.35", features = ["persistence"] }
-egui_extras = "0.35"
+egui_extras = { version = "0.35", features = ["serde"] }
 rfd = "0.17"
 fluent = "0.17"
 unic-langid = { version = "0.9", features = ["macros"] }

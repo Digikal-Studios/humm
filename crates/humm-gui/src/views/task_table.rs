@@ -19,11 +19,33 @@ use crate::format;
 use crate::i18n::tr;
 use crate::viewmodel::{ColumnId, RowVm, TableAction, TasksVm};
 
-/// Persisted column chrome for the task table: visible columns and their
-/// display order (`settings.gui.task_table_visible`/`task_table_order`).
-/// Sort state lives on [`TasksVm`] itself (`TasksVm::sort`), not here — see
+/// Stable `TableBuilder::id_salt` for the (single, app-wide) task table.
+///
+/// `egui_extras`'s own default (`"__table_state"`) would already be stable
+/// across restarts here in practice (it's a fixed constant, and the table's
+/// enclosing `Ui` — the one `CentralPanel` this app ever shows — gets a
+/// deterministic auto-id since it's unconditionally the first and only
+/// thing added to the root `Ui` every frame). Explicit anyway: a reader
+/// (or a future refactor that adds a sibling panel before this one, subtly
+/// changing that auto-id) shouldn't have to reason about that chain to
+/// know the persisted column widths (design spec §2.6) survive a restart.
+const TABLE_ID_SALT: &str = "humm-task-table";
+
+/// Persisted column chrome for the task table: visible columns, their
+/// display order, and (design spec §2.6) resizable column widths
+/// (`settings.gui.task_table_visible`/`task_table_order`). Sort state lives
+/// on [`TasksVm`] itself (`TasksVm::sort`), not here — see
 /// [`Self::to_gui_settings`] for how the two recombine into one `[gui]`
 /// settings snapshot.
+///
+/// Column *widths* are not tracked as a field here at all: they're owned
+/// entirely by `egui_extras::TableBuilder`'s own internal state, persisted
+/// through `egui::Memory`'s `data` store (which is itself serialized into
+/// `gui.ron` by eframe's `persistence` feature) once `egui_extras`'s
+/// `"serde"` feature is enabled (it is, workspace-wide) — see [`ui`]'s doc
+/// comment for how [`TABLE_ID_SALT`] keys that persisted entry, and
+/// [`Self::take_pending_width_reset`] for how "Reset Column Order" clears
+/// it.
 ///
 /// [`Self::anchor`] is the shift-click range-selection anchor: transient UI
 /// state that must survive across frames (so a later shift-click can extend
@@ -35,6 +57,16 @@ pub struct TableLayout {
     /// Row index (in current sort order) of the last plain click, if any —
     /// the shift-click range-selection anchor.
     anchor: Option<usize>,
+    /// Set by [`Self::reset`]; consumed (cleared) by
+    /// [`Self::take_pending_width_reset`] at the top of the next [`ui`]
+    /// call, which then clears `egui_extras`'s own persisted column-width
+    /// state for [`TABLE_ID_SALT`] before this frame's `TableBuilder` is
+    /// built. This has to be one frame delayed: `TableBuilder::reset`
+    /// needs a live `TableBuilder` instance, which doesn't exist yet
+    /// inside the header context-menu closure that requests the reset —
+    /// imperceptible to a human, and consistent with other
+    /// one-frame-delayed effects immediate-mode UIs commonly have.
+    pending_width_reset: bool,
 }
 
 impl Default for TableLayout {
@@ -43,6 +75,7 @@ impl Default for TableLayout {
             order: ColumnId::all().to_vec(),
             visible: ColumnId::all().to_vec(),
             anchor: None,
+            pending_width_reset: false,
         }
     }
 }
@@ -141,11 +174,23 @@ impl TableLayout {
     }
 
     /// "Reset Column Order": restores the default order and un-hides every
-    /// column (Buzz's `reset_column_order`; the accompanying sort reset is
-    /// the caller's job — see [`TasksVm::set_sort_exact`]).
+    /// column, and requests that `egui_extras`'s own persisted column-width
+    /// state be cleared too (Buzz's `reset_column_order` resets widths
+    /// alongside order/visibility — `transcription_tasks_table_widget.py:
+    /// 454-500`; the accompanying sort reset is the caller's job — see
+    /// [`TasksVm::set_sort_exact`]). The width part of the reset takes
+    /// effect one frame later — see [`Self::pending_width_reset`]'s doc.
     pub fn reset(&mut self) {
         self.order = ColumnId::all().to_vec();
         self.visible = ColumnId::all().to_vec();
+        self.pending_width_reset = true;
+    }
+
+    /// Consumes (clears) the pending width-reset flag [`Self::reset`] set,
+    /// returning whether one was pending. `ui` calls this once per frame,
+    /// at the very top, before building that frame's `TableBuilder`.
+    fn take_pending_width_reset(&mut self) -> bool {
+        std::mem::take(&mut self.pending_width_reset)
     }
 
     /// Visible columns, in display order — the single list both the header
@@ -160,9 +205,21 @@ impl TableLayout {
     }
 }
 
-/// Renders the virtualized task table: sortable header with a persisted
-/// column layout, multi-select rows with Buzz-parity status/ETA text,
-/// header/row context menus, and the Delete/⌘C/Return shortcuts.
+/// Renders the virtualized task table: sortable, resizable header with a
+/// persisted column layout, multi-select rows with Buzz-parity status/ETA
+/// text, header/row context menus, and the Delete/⌘C/Return shortcuts.
+///
+/// Column widths are resizable (design spec §2.6) and persist across
+/// restarts: `TableBuilder::id_salt(TABLE_ID_SALT)` gives `egui_extras` a
+/// stable key for its internal `TableState`, which — with `egui_extras`'s
+/// `"serde"` feature enabled workspace-wide — stores that state via
+/// `ui.data_mut(|d| d.insert_persisted(..))` (`egui_extras-0.35.0/src/
+/// table.rs:576-660`, vendored source). `insert_persisted`/`get_persisted`
+/// go through `egui::Memory`'s `data` map, which is exactly what eframe's
+/// `persistence` feature serializes into `gui.ron` on shutdown and restores
+/// on the next launch (`main.rs`'s `persistence_path: config_dir()/gui.ron`)
+/// — so resized widths survive a restart with no code in this crate reading
+/// or writing them directly.
 pub fn ui(
     ui: &mut egui::Ui,
     vm: &mut TasksVm,
@@ -186,9 +243,19 @@ pub fn ui(
     }
 
     let mut builder = TableBuilder::new(ui)
+        .id_salt(TABLE_ID_SALT)
         .striped(true)
         .sense(Sense::click())
+        .resizable(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+    if layout.take_pending_width_reset() {
+        // Clears egui_extras's persisted TableState for TABLE_ID_SALT so
+        // the next `TableState::load` recomputes fresh default widths from
+        // this frame's `Column::initial` values, instead of reusing
+        // whatever was resized (and persisted) before "Reset Column Order"
+        // was clicked.
+        builder.reset();
+    }
     for col in &visible_columns {
         builder = builder.column(
             Column::initial(col.default_width())
@@ -460,6 +527,20 @@ mod tests {
         layout.reset();
         assert_eq!(layout.order, ColumnId::all().to_vec());
         assert!(layout.is_visible(ColumnId::Notes));
+    }
+
+    #[test]
+    fn reset_requests_a_pending_width_reset_consumed_exactly_once() {
+        let mut layout = TableLayout::default();
+        // Nothing pending on a fresh layout.
+        assert!(!layout.take_pending_width_reset());
+
+        layout.reset();
+        // The request is still there until something consumes it...
+        assert!(layout.take_pending_width_reset());
+        // ...and consuming it clears it, so a second read (the next frame
+        // that *didn't* also click Reset) sees nothing pending.
+        assert!(!layout.take_pending_width_reset());
     }
 
     #[test]
