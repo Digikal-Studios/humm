@@ -31,3 +31,60 @@ table-menu-notes = Add/Edit Notes
 
 task-transcribe = Transcribe
 task-translate = Translate to English
+
+## Toolbar (views/main_window.rs, F-004)
+
+toolbar-record = Record
+toolbar-record-tooltip = Live recording arrives in a later release
+toolbar-new-file = New File Transcription
+toolbar-new-url = New URL Transcription
+toolbar-open-transcript = Open Transcript
+toolbar-open-transcript-tooltip = The transcript viewer arrives in the next milestone
+toolbar-cancel = Cancel Transcription
+toolbar-clear = Clear History
+
+## Menu bar (views/main_window.rs, F-004)
+
+menu-file = File
+menu-file-import-file = Import File…
+menu-file-import-url = Import URL…
+menu-file-import-folder = Import Folder…
+menu-help-title = Help
+menu-help-about = About humm
+menu-help-docs = Help
+menu-help-docs-tooltip = Documentation arrives with the first release
+menu-help-preferences = Preferences…
+
+## Clear-History confirm modal (views/main_window.rs, F-026)
+
+clear-confirm-title = Clear History
+clear-confirm-body = Are you sure you want to delete the selected transcription(s)? This action cannot be undone.
+clear-confirm-ok = Ok
+clear-confirm-cancel = Cancel
+clear-error = Could not delete the selected transcription(s)
+
+## Rename/Notes modals (views/rename_notes.rs, F-026)
+
+rename-title = Rename Transcription
+rename-label = Enter new name:
+rename-error = Could not rename
+notes-title = Notes
+notes-label = Enter some relevant notes for this transcription:
+notes-error = Could not save notes
+dialog-ok = OK
+dialog-cancel = Cancel
+
+## Toasts (views/toasts.rs, app.rs, F-026)
+
+toast-completed = Transcription complete
+toast-completed-suffix = file(s) written
+toast-canceled = Transcription canceled
+toast-detail-title = Transcription Failed
+toast-detail-open-log = Open log folder
+toast-detail-retry = Retry
+toast-detail-close = Close
+retry-error-unavailable = Could not restart: saved options are unavailable
+
+## Store-health banner (views/main_window.rs, app.rs, F-004)
+
+banner-store-health = humm couldn't record history updates — exports still complete; see the log file

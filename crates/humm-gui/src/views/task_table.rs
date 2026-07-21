@@ -314,13 +314,28 @@ pub fn ui(
             row.set_selected(selected);
 
             let mut row_union: Option<egui::Response> = None;
+            let mut notes_cell_response: Option<egui::Response> = None;
             for col in &visible_columns {
                 let text = cell_text(vm.sorted_rows(), idx, *col, now);
                 let mut cell_response = None;
                 row.col(|ui| {
                     cell_response = Some(interactive_cell(ui, "row-click", text));
                 });
+                if *col == ColumnId::Notes {
+                    notes_cell_response = cell_response.clone();
+                }
                 row_union = union_opt(row_union, cell_response);
+            }
+
+            // Double-click on the Notes cell opens the Notes modal (Buzz
+            // parity, `transcription_tasks_table_widget.py:576-585`'s
+            // double-click dispatch) — checked against the Notes column's
+            // *own* response, not the row-wide union, so double-clicking
+            // some other cell doesn't also open Notes.
+            if let Some(notes_response) = &notes_cell_response
+                && notes_response.double_clicked()
+            {
+                actions.push(TableAction::Notes(row_id));
             }
 
             let Some(response) = row_union else {

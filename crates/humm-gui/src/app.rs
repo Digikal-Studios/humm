@@ -1,15 +1,27 @@
 //! `HummApp`: the `eframe::App` implementation — owns the runtime
-//! [`Services`], the shared event-pump buffer, and (F-003, this task) the
-//! task table's view-model/layout, and renders the main window every frame
-//! (design spec §1/§4).
+//! [`Services`], the shared event-pump buffer, the task table's
+//! view-model/layout, and (F-004/F-026, this task) the toolbar/menu/dialog/
+//! toast/banner state, rendering the main window every frame (design spec
+//! §1/§4).
 
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
+
+use humm_core::domain::{Status, TranscriptionId};
+use humm_core::queue::{TaskEvent, TaskEventKind};
 use humm_core::settings::GuiSettings;
 
 use crate::events::{self, SharedEventQueue};
+use crate::i18n::tr;
 use crate::services::Services;
+use crate::shortcuts::ShortcutMap;
 use crate::viewmodel::{TableAction, TasksVm};
 use crate::views;
+use crate::views::main_window::{ActionState, toolbar_enablement};
+use crate::views::rename_notes::{self, DialogOutcome};
 use crate::views::task_table::TableLayout;
+use crate::views::toasts::{ToastAction, ToastKind};
 
 /// The eframe application.
 ///
@@ -39,13 +51,20 @@ pub struct HummApp {
     /// change is persisted exactly once, not re-saved on every unchanged
     /// frame.
     last_saved_gui_settings: GuiSettings,
-    /// `TableAction`s the task table has emitted (retry/rename/notes/clear/
-    /// open) — F-003 (this task) only *produces* these; wiring them to the
-    /// queue/store/dialogs is Task 8's job. Accumulated here rather than
-    /// discarded so no click is silently lost between now and then; Task 8
-    /// is expected to drain this `Vec` each frame once it starts consuming
-    /// them.
+    /// `TableAction`s the task table/toolbar/shortcuts have emitted
+    /// (retry/rename/notes/clear/open/cancel) this frame — drained every
+    /// frame by [`Self::drain_table_actions`], *after* `main_window::show`
+    /// returns (so actions pushed by this same frame's clicks are the ones
+    /// executed, not last frame's).
     pending_table_actions: Vec<TableAction>,
+    /// The resolved keyboard-shortcut bindings (F-005 defaults; `[shortcuts]`
+    /// settings overrides aren't wired yet — that's the shortcut-editor UI,
+    /// M7 — so this is always `ShortcutMap::from_settings(&HashMap::new())`,
+    /// i.e. Buzz's defaults unmodified).
+    shortcuts: ShortcutMap,
+    /// Toolbar/menu/dialog/toast/banner state (F-004/F-026): see
+    /// [`ActionState`]'s own field docs.
+    action_state: ActionState,
 }
 
 impl HummApp {
@@ -90,6 +109,11 @@ impl HummApp {
         let table_layout = TableLayout::from_gui_settings(&gui_settings);
         let last_saved_gui_settings = table_layout.to_gui_settings(tasks.sort());
 
+        // No `[shortcuts]` settings section exists yet (the override-editor
+        // UI is M7); an empty overrides map resolves every action to its
+        // Buzz default (`ShortcutMap::from_settings`'s own contract).
+        let shortcuts = ShortcutMap::from_settings(&HashMap::new());
+
         HummApp {
             services,
             event_queue,
@@ -97,6 +121,8 @@ impl HummApp {
             table_layout,
             last_saved_gui_settings,
             pending_table_actions: Vec::new(),
+            shortcuts,
+            action_state: ActionState::default(),
         }
     }
 
@@ -123,6 +149,271 @@ impl HummApp {
         }
         self.last_saved_gui_settings = current;
     }
+
+    /// Test-only seam: injects `event` directly into the event-pump buffer,
+    /// as if the real queue's runner thread had emitted it. Lets a kittest
+    /// harness exercise event-driven UI reactions (the `StoreWriteFailed`
+    /// banner, in particular) deterministically, without racing the real
+    /// queue/runner threads for a precise failure-injection point — the
+    /// same "plain `pub fn`, not `#[cfg(test)]`" pattern as
+    /// [`Self::new_for_test`] (an integration test in `tests/` links the
+    /// library's normal, non-`cfg(test)` build, so a `#[cfg(test)]` method
+    /// wouldn't even be visible to it). A no-op before the event pump
+    /// exists (i.e. before the first `eframe::App::ui` call) — harmless,
+    /// but there is nothing to inject into yet.
+    pub fn inject_event_for_test(&mut self, event: TaskEvent) {
+        if let Some(queue) = &self.event_queue {
+            queue
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push_back(event);
+        }
+    }
+
+    /// Reacts to one drained event with a toast/banner side effect, keyed on
+    /// `event.kind`. `TasksVm::apply` (already called for every event, just
+    /// before this) owns row state; this owns only the toast stack and the
+    /// store-health banner, neither of which lives on any row.
+    ///
+    /// Chosen over teaching `TasksVm::apply` to return a toast-driving
+    /// value (the brief's other offered seam): every payload this method
+    /// needs (`task_id`, `written`/`message`) is already fully available on
+    /// `event` right here, in the same loop that calls `apply` — threading
+    /// the same data back out through `apply`'s return value would only
+    /// duplicate it for no benefit, and keeps `TasksVm`'s own tests free of
+    /// toast/banner concerns that have nothing to do with row state.
+    fn react_to_event(&mut self, event: &TaskEvent, now: Instant) {
+        match &event.kind {
+            TaskEventKind::Completed { written } => {
+                let message = if written.is_empty() {
+                    tr("toast-completed")
+                } else {
+                    format!(
+                        "{} \u{2014} {} {}",
+                        tr("toast-completed"),
+                        written.len(),
+                        tr("toast-completed-suffix")
+                    )
+                };
+                self.action_state
+                    .toasts
+                    .push(ToastKind::Success, message, now);
+            }
+            TaskEventKind::Failed { message } => {
+                let first_line = message.lines().next().unwrap_or(message).to_string();
+                self.action_state.toasts.push(
+                    ToastKind::TaskFailed {
+                        task_id: event.task_id,
+                        full_message: message.clone(),
+                    },
+                    first_line,
+                    now,
+                );
+            }
+            TaskEventKind::Canceled => {
+                self.action_state
+                    .toasts
+                    .push(ToastKind::Info, tr("toast-canceled"), now);
+            }
+            TaskEventKind::StoreWriteFailed { .. } => {
+                self.action_state.banner.on_store_write_failed();
+            }
+            _ => {}
+        }
+    }
+
+    /// Applies a confirmed Rename/Notes dialog outcome: writes the store,
+    /// then refreshes the row so the table reflects it immediately. A store
+    /// write failure is logged and surfaced as an error toast (never a
+    /// panic, never silently dropped) — the dialog has already closed by
+    /// this point either way.
+    fn apply_dialog_outcome(&mut self, outcome: DialogOutcome, now: Instant) {
+        let store = Arc::clone(&self.services.store);
+        match outcome {
+            DialogOutcome::Rename { id, name } => match store.set_task_name(&id, &name) {
+                Ok(()) => self.tasks.refresh_row(id, &store),
+                Err(err) => {
+                    log::warn!("set_task_name failed for {id}: {err}");
+                    self.push_error_toast(format!("{}: {err}", tr("rename-error")), now);
+                }
+            },
+            DialogOutcome::Notes { id, text } => match store.set_task_notes(&id, &text) {
+                Ok(()) => self.tasks.refresh_row(id, &store),
+                Err(err) => {
+                    log::warn!("set_task_notes failed for {id}: {err}");
+                    self.push_error_toast(format!("{}: {err}", tr("notes-error")), now);
+                }
+            },
+        }
+    }
+
+    /// Applies the Clear-History confirm modal's Ok click: deletes every
+    /// currently-selected row from the store, then drops them from the
+    /// view-model (which also clears their selection). A store failure is
+    /// logged and surfaced as an error toast; the view-model is left
+    /// unchanged in that case (the rows are still there — because they're
+    /// still in the store).
+    fn apply_clear_confirmed(&mut self, now: Instant) {
+        let ids: Vec<TranscriptionId> = self.tasks.selection().iter().copied().collect();
+        if ids.is_empty() {
+            return;
+        }
+        match self.services.store.delete_tasks(&ids) {
+            Ok(_) => self.tasks.remove(&ids),
+            Err(err) => {
+                log::warn!("delete_tasks failed: {err}");
+                self.push_error_toast(format!("{}: {err}", tr("clear-error")), now);
+            }
+        }
+    }
+
+    /// Applies a toast/detail-popover action.
+    fn apply_toast_action(&mut self, action: ToastAction, now: Instant) {
+        match action {
+            ToastAction::Retry(id) => self.handle_retry(id, now),
+            ToastAction::OpenLogFolder => {
+                if let Err(err) = open::that(humm_core::paths::log_dir()) {
+                    log::warn!("could not open the log folder: {err}");
+                }
+            }
+        }
+    }
+
+    /// Drains this frame's `pending_table_actions` (Task 7's accumulator —
+    /// the table's context menu/keyboard shortcuts and the toolbar/global
+    /// shortcuts all push onto the same `Vec`), executing each.
+    fn drain_table_actions(&mut self, now: Instant) {
+        let actions = std::mem::take(&mut self.pending_table_actions);
+        for action in actions {
+            match action {
+                TableAction::ClearSelected => self.handle_clear_selected(),
+                TableAction::OpenSelected => {
+                    // The transcript viewer is M4; nothing to open yet
+                    // (toolbar's Open Transcript button is disabled this
+                    // milestone, but Return's shortcut still reaches here).
+                }
+                TableAction::Retry(id) => self.handle_retry(id, now),
+                TableAction::Rename(id) => self.open_rename_dialog(id),
+                TableAction::Notes(id) => self.open_notes_dialog(id),
+                TableAction::CancelSelected => self.handle_cancel_selected(),
+            }
+        }
+    }
+
+    /// Toolbar "Cancel Transcription" / ⌘X: `queue.cancel(id)` for every
+    /// selected row whose status is queued/in-progress — filtered here
+    /// (rather than gated all-or-nothing) so a selection the toolbar would
+    /// have disabled entirely still cancels whichever of its rows *are*
+    /// cancelable if reached via a path that doesn't re-check the toolbar's
+    /// own enablement (defense in depth). Never writes the store directly:
+    /// the queue owns status, and a canceled row flips via the ordinary
+    /// `Canceled` event.
+    fn handle_cancel_selected(&mut self) {
+        let ids: Vec<TranscriptionId> = self
+            .tasks
+            .sorted_rows()
+            .iter()
+            .filter(|row| self.tasks.selection().contains(&row.id))
+            .filter(|row| matches!(row.status, Status::InProgress | Status::Queued))
+            .map(|row| row.id)
+            .collect();
+        for id in ids {
+            self.services.queue.cancel(id);
+        }
+    }
+
+    /// Toolbar "Clear History" / ⌘S / Delete key: gates to a non-empty,
+    /// all-terminal-status selection (the same rule
+    /// [`toolbar_enablement`] uses to gray out the toolbar button) and, if
+    /// it passes, opens the confirm modal. A selection that fails the gate
+    /// is silently ignored on every path, including the Delete key —
+    /// deviation §6.2: Buzz's own Delete-key handler bypasses this gate
+    /// (a defect, not ported).
+    fn handle_clear_selected(&mut self) {
+        if toolbar_enablement(&self.tasks.selected_statuses()).clear {
+            self.action_state.clear_confirm_open = true;
+        }
+    }
+
+    /// Retry: reachable from the row context menu's "Restart Transcription"
+    /// and a failed-transcription toast's detail-popover Retry button.
+    /// Re-checks the row's current status before doing anything (defense in
+    /// depth — the queue itself has no terminal-status guard, and the
+    /// row's status can change between the click that offered Retry and
+    /// this handler actually running).
+    ///
+    /// Spec source: `load_task_spec` (the full persisted options); on
+    /// `Ok(None)` (an imported/foreign row with no `options_json`), falls
+    /// back to `spec_from_columns`. Any error from `load_task_spec` itself,
+    /// or an `Ok(None)`/error from the fallback, surfaces the toast
+    /// "Could not restart: saved options are unavailable" — the row is left
+    /// exactly as it was (still failed/canceled/skipped, retryable again
+    /// later).
+    fn handle_retry(&mut self, id: TranscriptionId, now: Instant) {
+        let Some(row) = self.tasks.sorted_rows().iter().find(|row| row.id == id) else {
+            return;
+        };
+        if !retry_allowed(row.status) {
+            return;
+        }
+
+        let store = Arc::clone(&self.services.store);
+        let spec = match store.load_task_spec(&id) {
+            Ok(Some(spec)) => Ok(Some(spec)),
+            Ok(None) => store.spec_from_columns(&id),
+            Err(err) => Err(err),
+        };
+        match spec {
+            Ok(Some(spec)) => self.services.queue.retry(id, spec),
+            Ok(None) | Err(_) => {
+                self.push_error_toast(tr("retry-error-unavailable"), now);
+            }
+        }
+    }
+
+    /// Row context menu "Rename": prefills from the row's *current* store
+    /// columns (not the view-model's `display_name`, which uses a
+    /// different fallback order — see [`rename_notes::rename_prefill`]'s
+    /// doc comment) and opens the modal. A store-read failure or a
+    /// since-deleted row silently does nothing (no dialog opens).
+    fn open_rename_dialog(&mut self, id: TranscriptionId) {
+        let Ok(Some(row)) = self.services.store.get_task(&id) else {
+            return;
+        };
+        let text = rename_notes::rename_prefill(
+            row.name.as_deref(),
+            row.url.as_deref(),
+            row.file.as_deref(),
+        );
+        self.action_state.dialog = rename_notes::Dialog::Rename { id, text };
+    }
+
+    /// Row context menu "Add/Edit Notes" (or a Notes-cell double-click):
+    /// prefills from the view-model's current notes text and opens the
+    /// modal. A since-removed row silently does nothing.
+    fn open_notes_dialog(&mut self, id: TranscriptionId) {
+        let Some(row) = self.tasks.sorted_rows().iter().find(|row| row.id == id) else {
+            return;
+        };
+        let text = row.notes.clone().unwrap_or_default();
+        self.action_state.dialog = rename_notes::Dialog::Notes { id, text };
+    }
+
+    /// Pushes a plain (non-`TaskFailed`, non-clickable) error toast.
+    fn push_error_toast(&mut self, message: String, now: Instant) {
+        self.action_state
+            .toasts
+            .push(ToastKind::Error, message, now);
+    }
+}
+
+/// Buzz's Restart gate (`transcription_tasks_table_widget.py:696-725`):
+/// only failed/canceled/skipped rows may be retried — a completed row is
+/// never restartable. Pure and free of any `HummApp` state so the gate
+/// itself is directly unit-testable, independent of
+/// [`HummApp::handle_retry`]'s store/queue plumbing.
+fn retry_allowed(status: Status) -> bool {
+    matches!(status, Status::Failed | Status::Canceled | Status::Skipped)
 }
 
 impl eframe::App for HummApp {
@@ -137,19 +428,52 @@ impl eframe::App for HummApp {
                 ui.ctx().clone(),
             ));
         }
+
+        let now = Instant::now();
         if let Some(event_queue) = &self.event_queue {
             for event in events::drain(event_queue) {
                 self.tasks.apply(&event, &self.services.store);
+                self.react_to_event(&event, now);
             }
         }
 
-        views::main_window::show(
+        let result = views::main_window::show(
             ui,
             &mut self.tasks,
             &mut self.table_layout,
             &mut self.pending_table_actions,
+            &self.shortcuts,
+            &mut self.action_state,
+            now,
         );
 
+        if let Some(outcome) = result.dialog_outcome {
+            self.apply_dialog_outcome(outcome, now);
+        }
+        if result.clear_confirmed {
+            self.apply_clear_confirmed(now);
+        }
+        for action in result.toast_actions {
+            self.apply_toast_action(action, now);
+        }
+
+        self.drain_table_actions(now);
+
         self.persist_layout_if_changed();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_allowed_only_for_failed_canceled_skipped() {
+        assert!(retry_allowed(Status::Failed));
+        assert!(retry_allowed(Status::Canceled));
+        assert!(retry_allowed(Status::Skipped));
+        assert!(!retry_allowed(Status::Completed));
+        assert!(!retry_allowed(Status::Queued));
+        assert!(!retry_allowed(Status::InProgress));
     }
 }

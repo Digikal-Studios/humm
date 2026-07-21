@@ -203,6 +203,12 @@ pub enum TableAction {
     Rename(TranscriptionId),
     /// Row context menu "Add/Edit Notes".
     Notes(TranscriptionId),
+    /// Toolbar "Cancel Transcription" / ⌘X: cancel every selected row whose
+    /// status is queued/in-progress (Task 8, F-004/F-026). Shares this enum
+    /// (rather than a separate action type) because the toolbar pushes onto
+    /// the same `actions: &mut Vec<TableAction>` the table and its keyboard
+    /// shortcuts already do — one accumulation point, one drain loop.
+    CancelSelected,
 }
 
 /// The task table's view-model: display rows in current sort order, plus
@@ -393,6 +399,25 @@ impl TasksVm {
     /// Clears the selection entirely.
     pub fn clear_selection(&mut self) {
         self.selection.clear();
+    }
+
+    /// Re-reads `id`'s row from `store` and replaces it in place (same
+    /// mechanics as the `Started`/terminal-event handler
+    /// [`Self::refresh_from_store`], exposed publicly) — for GUI actions
+    /// (Rename/Notes saves) that mutate a row outside the task-event stream,
+    /// so the table reflects the new name/notes immediately rather than
+    /// waiting for the next unrelated event.
+    pub fn refresh_row(&mut self, id: TranscriptionId, store: &SqliteStore) {
+        self.refresh_from_store(id, store);
+    }
+
+    /// Removes every id in `ids` from both the row list and the current
+    /// selection — for Clear History, which deletes rows directly via
+    /// [`SqliteStore::delete_tasks`] rather than through the task-event
+    /// stream (a deleted row has no terminal event of its own to react to).
+    pub fn remove(&mut self, ids: &[TranscriptionId]) {
+        self.rows.retain(|row| !ids.contains(&row.id));
+        self.selection.retain(|id| !ids.contains(id));
     }
 
     /// The lifecycle statuses of every currently-selected row — for gating
@@ -1394,6 +1419,63 @@ mod tests {
         assert!(text.contains("/tmp/a.wav"));
         assert!(text.contains("https://example.com/b.mp3"));
         assert_eq!(text.lines().count(), 2);
+    }
+
+    #[test]
+    fn refresh_row_picks_up_a_store_side_name_change() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        let spec = sample_spec(Input::Path(PathBuf::from("/tmp/a.wav")));
+        store
+            .create_task(&id, &spec, Source::FileImport)
+            .expect("create");
+        let mut vm = TasksVm::load(&store);
+        assert_eq!(vm.sorted_rows()[0].display_name, "a.wav");
+
+        store.set_task_name(&id, "My Recording").expect("rename");
+        vm.refresh_row(id, &store);
+
+        assert_eq!(vm.sorted_rows()[0].display_name, "My Recording");
+    }
+
+    #[test]
+    fn refresh_row_for_unknown_id_does_not_panic_or_insert() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut vm = TasksVm::default();
+        vm.refresh_row(TranscriptionId::new(), &store);
+        assert!(vm.sorted_rows().is_empty());
+    }
+
+    #[test]
+    fn remove_drops_the_given_rows_and_clears_their_selection() {
+        let mut rows = vec![
+            row_for_sort("a", Status::Completed, "2026-01-01T00:00:00", ""),
+            row_for_sort("b", Status::Completed, "2026-01-02T00:00:00", ""),
+        ];
+        rows.sort_by(|a, b| a.time_queued.cmp(&b.time_queued));
+        let mut vm = vm_with_rows(rows);
+        let ids: Vec<_> = vm.sorted_rows().iter().map(|r| r.id).collect();
+        vm.select_only(ids[0]);
+        vm.toggle_selection(ids[1]);
+        assert_eq!(vm.selection().len(), 2);
+
+        vm.remove(&[ids[0]]);
+
+        assert_eq!(vm.sorted_rows().len(), 1);
+        assert_eq!(vm.sorted_rows()[0].id, ids[1]);
+        assert_eq!(vm.selection(), &BTreeSet::from([ids[1]]));
+    }
+
+    #[test]
+    fn remove_of_unknown_id_is_a_noop() {
+        let mut vm = vm_with_rows(vec![row_for_sort(
+            "a",
+            Status::Completed,
+            "2026-01-01T00:00:00",
+            "",
+        )]);
+        vm.remove(&[TranscriptionId::new()]);
+        assert_eq!(vm.sorted_rows().len(), 1);
     }
 
     #[test]

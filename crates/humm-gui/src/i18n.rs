@@ -45,6 +45,51 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "table-menu-notes",
         "task-transcribe",
         "task-translate",
+        // Toolbar (F-004, Task 8)
+        "toolbar-record",
+        "toolbar-record-tooltip",
+        "toolbar-new-file",
+        "toolbar-new-url",
+        "toolbar-open-transcript",
+        "toolbar-open-transcript-tooltip",
+        "toolbar-cancel",
+        "toolbar-clear",
+        // Menu bar (F-004, Task 8)
+        "menu-file",
+        "menu-file-import-file",
+        "menu-file-import-url",
+        "menu-file-import-folder",
+        "menu-help-title",
+        "menu-help-about",
+        "menu-help-docs",
+        "menu-help-docs-tooltip",
+        "menu-help-preferences",
+        // Clear-History confirm modal (F-026, Task 8)
+        "clear-confirm-title",
+        "clear-confirm-body",
+        "clear-confirm-ok",
+        "clear-confirm-cancel",
+        "clear-error",
+        // Rename/Notes modals (F-026, Task 8)
+        "rename-title",
+        "rename-label",
+        "rename-error",
+        "notes-title",
+        "notes-label",
+        "notes-error",
+        "dialog-ok",
+        "dialog-cancel",
+        // Toasts (F-026, Task 8)
+        "toast-completed",
+        "toast-completed-suffix",
+        "toast-canceled",
+        "toast-detail-title",
+        "toast-detail-open-log",
+        "toast-detail-retry",
+        "toast-detail-close",
+        "retry-error-unavailable",
+        // Store-health banner (F-004, Task 8)
+        "banner-store-health",
     ]
 }
 
