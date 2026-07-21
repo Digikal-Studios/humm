@@ -13,10 +13,15 @@ path = "src/main.rs"
 humm-core.workspace = true
 humm-media = { path = "../humm-media", version = "0.1.0" }
 humm-whisper = { path = "../humm-whisper", version = "0.1.0" }
+humm-store = { path = "../humm-store", version = "0.1.0" }
 clap = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
 chrono = { workspace = true }
+ctrlc = { workspace = true }
+flume = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

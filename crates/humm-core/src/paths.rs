@@ -68,12 +68,16 @@ pub fn media_dir() -> PathBuf {
 /// Buzz (the app humm ports from) keeps its database at the platform
 /// user-data root for app "Buzz" plus `Buzz.sqlite` (macOS:
 /// `~/Library/Application Support/Buzz/Buzz.sqlite`). humm never writes to
-/// this file; it only reads it, and only when a caller asks to import (a
-/// later milestone). Returns `None` when the platform data directory can't
-/// be determined or the file doesn't exist.
+/// this file; it only reads it, and only when a caller asks to import.
+/// Returns `None` when the platform data directory can't be determined or
+/// the file doesn't exist.
+///
+/// Honors `HUMM_BUZZ_SQLITE` if set: the override is used verbatim (still
+/// gated on the file existing, so an unset/nonexistent path disables the
+/// one-time Buzz import). This lets integration tests run hermetically
+/// without importing whatever real Buzz history happens to be on the host.
 pub fn buzz_sqlite_path() -> Option<PathBuf> {
-    let base = directories::BaseDirs::new()?;
-    buzz_sqlite_path_from(base.data_dir())
+    buzz_sqlite_path_with_env(std::env::var_os("HUMM_BUZZ_SQLITE").as_deref())
 }
 
 fn model_root_from(env: Option<&OsStr>) -> PathBuf {
@@ -108,6 +112,19 @@ fn data_dir_from(env: Option<&OsStr>) -> PathBuf {
     directories::BaseDirs::new()
         .map(|dirs| dirs.data_dir().join("humm"))
         .unwrap_or_else(|| PathBuf::from("humm"))
+}
+
+/// Resolves [`buzz_sqlite_path`] from an explicit `HUMM_BUZZ_SQLITE` value:
+/// when set, the override wins (gated on existence); otherwise the platform
+/// default is used. Split out (parameterized on the env value) so tests can
+/// exercise the override logic without mutating process environment.
+fn buzz_sqlite_path_with_env(env: Option<&OsStr>) -> Option<PathBuf> {
+    if let Some(value) = env {
+        let candidate = PathBuf::from(value);
+        return candidate.is_file().then_some(candidate);
+    }
+    let base = directories::BaseDirs::new()?;
+    buzz_sqlite_path_from(base.data_dir())
 }
 
 /// Given the platform's base data directory, returns Buzz's sqlite path if
@@ -274,5 +291,23 @@ mod tests {
         std::fs::write(&db_path, b"").expect("write stub db");
         let resolved = buzz_sqlite_path_from(dir.path());
         assert_eq!(resolved, Some(db_path));
+    }
+
+    #[test]
+    fn buzz_sqlite_override_uses_the_env_path_when_it_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let override_db = dir.path().join("Custom.sqlite");
+        std::fs::write(&override_db, b"").expect("write override db");
+        let resolved = buzz_sqlite_path_with_env(Some(override_db.as_os_str()));
+        assert_eq!(resolved, Some(override_db));
+    }
+
+    #[test]
+    fn buzz_sqlite_override_disables_import_when_the_env_path_is_missing() {
+        // A hermetic test points `HUMM_BUZZ_SQLITE` at a path that doesn't
+        // exist to disable the one-time import entirely.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("nope.sqlite");
+        assert_eq!(buzz_sqlite_path_with_env(Some(missing.as_os_str())), None);
     }
 }

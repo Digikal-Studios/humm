@@ -30,6 +30,7 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 log = { version = "0.4", features = ["std"] }
 whisper-rs = "0.16"
 clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
 tempfile = "3"
 insta = "1"
 pretty_assertions = "1"

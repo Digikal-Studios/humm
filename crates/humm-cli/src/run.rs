@@ -1,37 +1,65 @@
-//! `humm add`: resolve the model, load the engine, and run one
-//! `run_file_job` per input file — the flow specified in
-//! `docs/superpowers/plans/2026-07-20-m1-headless-core-path.md` Task 8.
+//! `humm add`: resolve the model, then drive one transcription task per input
+//! through the persistent store + task queue (F-002, F-024, F-025, F-026,
+//! F-029).
+//!
+//! Flow (parity order from `buzz/cli.py`, model resolved synchronously
+//! *before* any task is queued — `cli.py:219-221`):
+//! 1. Grammar/usage validation (Task 10) + language parse.
+//! 2. Load [`Settings`] (`paths::settings_path()`).
+//! 3. Open [`SqliteStore`]; first-run Buzz import (non-fatal), then
+//!    `cancel_stale_tasks()` (a crashed/killed prior run leaves stale
+//!    `queued`/`in_progress` rows — F-029).
+//! 4. Resolve the model synchronously, streaming download progress.
+//! 5. VAD is cache-only: enabled iff a complete VAD model is already present
+//!    (Buzz parity — `whisper_cpp.py:380` `vad_enabled = os.path.exists(...)`;
+//!    Buzz never downloads it during transcription).
+//! 6. Spawn the task runner; enqueue one [`TaskSpec`] per input.
+//! 7. Install a Ctrl-C handler: first signal cancels every task, second exits.
+//! 8. Drain [`TaskEvent`]s, rendering progress/ETA (human) or one JSON object
+//!    per line (`--json`); print written paths to stdout, errors to stderr.
+//! 9. Exit code: any canceled → 130; else any failed → 2; else 0 (ADR-007).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-use humm_core::boundary::SegmentSink;
+use serde::Serialize;
+
+use humm_core::boundary::{
+    AudioDecoder, MediaFetcher, MediaProber, TaskStore, TranscriptionEngine,
+};
 use humm_core::cancel::CancelToken;
 use humm_core::domain::{
-    DEFAULT_TEMPERATURE, JobSpec, Millis, ModelSpec, OutputFormat, OutputSpec, Segment,
-    TranscriptionOptions,
+    DEFAULT_TEMPERATURE, Input, Millis, ModelSize, ModelSpec, OutputFormat, OutputSpec, Source,
+    TaskSpec, TranscriptionId, TranscriptionOptions,
 };
+use humm_core::error::CoreError;
 use humm_core::language::Language;
 use humm_core::models::download::{DownloadProgress, ModelDownloader};
 use humm_core::models::registry::local_vad_model_path;
 use humm_core::paths;
-use humm_core::pipeline::{EngineTuning, run_file_job};
-use humm_media::{FfmpegDecoder, FfprobeProber};
+use humm_core::pipeline::EngineTuning;
+use humm_core::queue::{
+    EngineFactory, QueueHandle, RunnerDeps, TaskEvent, TaskEventKind, spawn_task_runner,
+};
+use humm_core::settings::Settings;
+use humm_media::{FfmpegDecoder, FfprobeProber, YtDlpFetcher, probe_binaries};
+use humm_store::SqliteStore;
 use humm_whisper::WhisperEngine;
 
 use crate::args::{AddArgs, ModelTypeArg};
 
-/// Runs `humm add`. Returns the process exit code per ADR-007: `0` every
-/// input succeeded, `1` a usage/config error aborted the whole run before
-/// any file could be processed, `2` at least one input failed but the run
-/// otherwise completed.
+/// Runs `humm add`. Returns the process exit code per ADR-007: `0` every input
+/// succeeded, `1` a usage/config error aborted the run before any task could be
+/// queued, `2` at least one task failed, `130` at least one task was canceled
+/// (SIGINT / stale-recovery).
 pub fn run_add(args: AddArgs) -> ExitCode {
-    // Informational, not a validation gate: print unconditionally before any
-    // check below, then continue regardless (ADR-007: humm is headless, so
-    // `--hide-gui` is accepted-but-inert, matching Buzz's own acceptance of
-    // the flag rather than rejecting it).
+    // Informational, not a validation gate (ADR-007: `--hide-gui` is
+    // accepted-but-inert since humm is headless).
     if args.hide_gui {
         eprintln!("note: --hide-gui has no effect; humm is headless (ADR-007)");
     }
@@ -42,172 +70,97 @@ pub fn run_add(args: AddArgs) -> ExitCode {
 
     let language = match parse_language(&args.language) {
         Ok(language) => language,
-        Err(message) => return fail(message),
+        Err(message) => return usage_fail(message),
     };
 
-    let mut failed: Vec<String> = Vec::new();
-    let mut existing_files: Vec<PathBuf> = Vec::new();
-    for file in &args.files {
-        let path = PathBuf::from(file);
-        if path.exists() {
-            existing_files.push(path);
-        } else {
-            report_failure(&path, "no such file");
-            failed.push(path.display().to_string());
-        }
-    }
-
-    // No model download if every input is missing (brief Run-flow step 1) —
-    // fail fast rather than paying for a model resolution nobody needs.
-    if !existing_files.is_empty() {
-        match process_existing_files(&args, &existing_files, language) {
-            Ok(mut job_failures) => failed.append(&mut job_failures),
-            Err(exit_code) => return exit_code,
-        }
-    }
-
-    if failed.is_empty() {
-        ExitCode::from(0)
-    } else {
-        eprintln!(
-            "Error: {} of {} input(s) failed:",
-            failed.len(),
-            args.files.len()
-        );
-        for input in &failed {
-            eprintln!("  {input}");
-        }
-        ExitCode::from(2)
-    }
+    execute(&args, language)
 }
 
-/// Validates the semantics clap's grammar can't express by itself, in the
-/// order `.superpowers/sdd/task-10-brief.md` specifies — all before any
-/// model/store work. Returns `Some(exit_code)` to abort `run_add` early,
-/// `None` once every check has passed.
+/// Validates the semantics clap's grammar can't express, in the order
+/// `task-10-brief.md` specifies — all before any store/model work. Returns
+/// `Some(exit_code)` (a usage error, with the `--help` hint) to abort, `None`
+/// once every check passes.
 fn validate_add_args(args: &AddArgs) -> Option<ExitCode> {
     if args.files.is_empty() {
-        return Some(fail("No input files"));
+        return Some(usage_fail("No input files"));
     }
 
     if args.extract_speech {
-        return Some(fail(
+        return Some(usage_fail(
             "speech extraction is not yet available in humm — it arrives in a later release",
         ));
     }
 
     if args.model_type == ModelTypeArg::OpenAiApi {
-        return Some(fail(
+        return Some(usage_fail(
             "the OpenAI API backend is not yet available in humm — it arrives with cloud \
              support; use a local model type meanwhile",
         ));
     }
 
-    if args.model_type == ModelTypeArg::HuggingFace {
+    if args.model_type == ModelTypeArg::HuggingFace && args.hfid.is_none() {
         // cli.py:146-147, verbatim.
-        if args.hfid.is_none() {
-            return Some(fail("--hfid is required when --model-type is huggingface"));
-        }
-        // TEMPORARY (Task 11 replaces this with the real huggingface
-        // resolution flow — not a tested behavior, see
-        // .superpowers/sdd/task-10-brief.md):
-        // validation above already accepted the flags, but there is no
-        // runtime for this backend yet, and silently falling through to the
-        // local whisper-rs flow would transcribe with the wrong model.
-        return Some(fail("the huggingface model type is wired in the next task"));
+        return Some(usage_fail(
+            "--hfid is required when --model-type is huggingface",
+        ));
     }
 
     // `-m whisper|whispercpp|fasterwhisper` all run the local whisper-rs
-    // backend (ADR-008 consolidation); `--hfid` with a non-huggingface type
-    // is ignored exactly as Buzz ignores it, and `--openai-token` without
-    // `-m openaiapi` is accepted-and-unused (Buzz behavior) — neither needs
-    // code here.
+    // backend (ADR-008); `--hfid` with a non-huggingface type and
+    // `--openai-token` without `-m openaiapi` are both accepted-and-ignored
+    // exactly as Buzz does — neither needs code here.
     None
 }
 
-/// Resolves the model, ensures VAD (best-effort), loads the engine, then runs
-/// `run_file_job` for every file in `existing_files`. Returns the display
-/// strings of any per-file job failures on `Ok`; returns the process exit
-/// code directly (`Err`) when a config-level step (model download, engine
-/// load) fails the whole run.
-fn process_existing_files(
-    args: &AddArgs,
-    existing_files: &[PathBuf],
-    language: Option<Language>,
-) -> Result<Vec<String>, ExitCode> {
-    let cancel = CancelToken::new();
+/// The real run: steps 2–9 above. Returns the process exit code. Config-level
+/// failures (settings/store/model) print an actionable cause via [`run_fail`]
+/// (no usage hint) and return `1`.
+fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
+    let settings = match Settings::load(&paths::settings_path()) {
+        Ok(settings) => settings,
+        Err(err) => return run_fail(err),
+    };
+
+    let store = match SqliteStore::open(&paths::db_path()) {
+        Ok(store) => Arc::new(store),
+        Err(err) => return run_fail(err),
+    };
+
+    import_buzz_history(&store);
+    match store.cancel_stale_tasks() {
+        Ok(0) => {}
+        Ok(n) => log::info!("recovered {n} stale task(s) from a prior run as canceled"),
+        Err(err) => log::warn!("cancel_stale_tasks failed (continuing): {err}"),
+    }
+
     let model_root = paths::model_root();
-    let downloader = ModelDownloader::new(model_root.clone());
-
-    // Always route through `resolve_model` rather than a bare
-    // `local_model_path` check: a present ggml whose CoreML encoder never
-    // finished on an earlier run (network drop, cancel, checksum) is retried
-    // here instead of being silently skipped forever. `resolve_model`
-    // fast-paths without touching the network when everything is already
-    // cached, so this costs nothing in the common case.
-    let model_path = {
-        let mut progress = ProgressLine::new();
-        let mut render =
-            |update: DownloadProgress| render_download_progress(&mut progress, &update);
-        let result =
-            downloader.resolve_model(args.model_size, coreml_encoder(), &mut render, &cancel);
-        progress.finish();
-        match result {
-            Ok(resolved) => {
-                if resolved.coreml_degraded {
-                    eprintln!(
-                        "Note: the CoreML encoder could not be downloaded (network issue); \
-                         using the local model without CoreML acceleration. It will be retried \
-                         on the next run."
-                    );
-                }
-                resolved.path
-            }
-            Err(err) => return Err(fail(err)),
-        }
+    // The model download is cancellable in principle; the Ctrl-C handler is
+    // installed later (brief step 7), so a SIGINT during a long model download
+    // is the default terminate, matching Buzz.
+    let download_cancel = CancelToken::new();
+    let resolved = match resolve_model(args, &settings, &model_root, &download_cancel) {
+        Ok(resolved) => resolved,
+        Err(exit_code) => return exit_code,
     };
+    if resolved.coreml_degraded && !args.json {
+        eprintln!(
+            "Note: the CoreML encoder could not be downloaded (network issue); using the local \
+             model without CoreML acceleration. It will be retried on the next run."
+        );
+    }
 
-    let vad_model = match local_vad_model_path(&model_root) {
-        Some(path) => Some(path),
-        None => {
-            let mut progress = ProgressLine::new();
-            let mut render =
-                |update: DownloadProgress| render_download_progress(&mut progress, &update);
-            let result = downloader.ensure_vad_model(&mut render, &cancel);
-            progress.finish();
-            match result {
-                Ok(path) => Some(path),
-                Err(err) => {
-                    // F-045 parity: an absent VAD model silently disables VAD
-                    // rather than failing the run.
-                    log::warn!("VAD model unavailable ({err}); continuing without VAD");
-                    None
-                }
-            }
-        }
-    };
-
-    // `use_gpu` is a load-time decision (consumed here at `WhisperEngine::load`),
-    // not an `EngineOptions` field — `EngineTuning` carries it to this call site.
+    let use_gpu = use_gpu_from_env(std::env::var("HUMM_FORCE_CPU").ok().as_deref());
     let tuning = EngineTuning {
-        vad_model,
-        use_gpu: use_gpu_from_env(std::env::var("HUMM_FORCE_CPU").ok().as_deref()),
+        // Cache-only VAD (Buzz `whisper_cpp.py:380`): enabled iff already
+        // downloaded, never fetched as a side effect of `humm add`.
+        vad_model: local_vad_model_path(&model_root),
+        use_gpu,
         threads: threads_from_env(std::env::var("HUMM_WHISPER_N_THREADS").ok().as_deref()),
     };
 
-    let mut engine = match WhisperEngine::load(&model_path, tuning.use_gpu) {
-        Ok(engine) => engine,
-        Err(err) => return Err(fail(err)),
-    };
-
-    let decoder = FfmpegDecoder::new();
-    let prober = FfprobeProber::new();
-
     let formats = output_formats(args);
     if formats.is_empty() {
-        // Buzz parity: zero formats still transcribes, it just writes
-        // nothing — but that's surprising enough to be worth a warning.
-        log::warn!("no export format selected (--txt/--srt/--vtt)");
+        log::warn!("no export format selected (--txt/--srt/--vtt); nothing will be written");
     }
 
     let options = TranscriptionOptions {
@@ -215,7 +168,7 @@ fn process_existing_files(
         task: args.task,
         model: ModelSpec {
             size: args.model_size,
-            hf_repo: None,
+            hf_repo: resolved.hf_repo.clone(),
         },
         word_timestamps: args.word_timestamps,
         initial_prompt: args.prompt.clone(),
@@ -230,39 +183,562 @@ fn process_existing_files(
         ),
     };
 
-    let mut failed = Vec::new();
-    for file in existing_files {
-        let job = JobSpec {
-            input: file.clone(),
+    let decoder: Arc<dyn AudioDecoder> = Arc::new(FfmpegDecoder::new());
+    let prober: Arc<dyn MediaProber> = Arc::new(FfprobeProber::new());
+    let fetcher = build_fetcher(&settings);
+    let store_dyn: Arc<dyn TaskStore> = Arc::clone(&store) as Arc<dyn TaskStore>;
+
+    let deps = RunnerDeps {
+        store: store_dyn,
+        decoder,
+        prober,
+        fetcher,
+        engines: Box::new(CliEngineFactory {
+            model_path: resolved.path,
+            use_gpu,
+        }),
+        tuning,
+        media_dir: paths::media_dir(),
+    };
+
+    let handle = spawn_task_runner(deps);
+    let events = handle.subscribe();
+
+    let mut enqueued: Vec<TranscriptionId> = Vec::new();
+    let mut labels: HashMap<TranscriptionId, String> = HashMap::new();
+    for file in &args.files {
+        let input = Input::parse(file);
+        let source = match &input {
+            Input::Url(_) => Source::UrlImport,
+            Input::Path(_) => Source::FileImport,
+        };
+        let id = TranscriptionId::new();
+        labels.insert(id, input.display_name());
+        let spec = TaskSpec {
+            input,
             options: options.clone(),
             output: output.clone(),
         };
-        let mut sink = JobProgressSink::new(file);
-        let result = run_file_job(
-            &job,
-            &tuning,
-            &decoder,
-            &prober,
-            &mut engine,
-            &mut sink,
-            &cancel,
-        );
-        sink.finish();
-        match result {
-            Ok(outcome) => {
-                for path in &outcome.written {
-                    println!("{}", path.display());
+        handle.enqueue(id, spec, source);
+        enqueued.push(id);
+    }
+
+    // Hand the handle to the Ctrl-C surface (shared so `cancel_all` can run
+    // while the drain owns nothing) and install the signal handler.
+    let shared: Arc<Mutex<Option<QueueHandle>>> = Arc::new(Mutex::new(Some(handle)));
+    install_ctrlc(Arc::clone(&shared));
+
+    let exit = drain_and_render(&events, &enqueued, &labels, args.json, args.quiet);
+
+    // Signal "no more work" and join the runner. Take the handle out from
+    // under the lock *before* the (blocking) `finish`, so a late Ctrl-C never
+    // waits on us.
+    let handle = shared.lock().ok().and_then(|mut guard| guard.take());
+    if let Some(handle) = handle {
+        let _ = handle.finish();
+    }
+
+    exit
+}
+
+/// Runs the one-time Buzz import when a Buzz database is present and the import
+/// hasn't already completed. Non-fatal by contract (Q-6): failures are logged,
+/// never surfaced. Must run *before* `cancel_stale_tasks` so an imported stale
+/// row is flipped like any other (Task 4 contract).
+fn import_buzz_history(store: &SqliteStore) {
+    match store.buzz_import_done() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(err) => {
+            log::warn!("could not check Buzz-import state (skipping import): {err}");
+            return;
+        }
+    }
+    let Some(buzz_db) = paths::buzz_sqlite_path() else {
+        return;
+    };
+    match store.import_buzz_db(&buzz_db) {
+        Ok(outcome) => log::info!(
+            "imported Buzz history from {}: {} task(s), {} segment(s)",
+            buzz_db.display(),
+            outcome.tasks,
+            outcome.segments
+        ),
+        Err(err) => log::warn!("Buzz import failed (continuing without it): {err}"),
+    }
+}
+
+/// The resolved model: the local ggml path to load, whether CoreML degraded,
+/// and the Hugging Face repo id (for the persisted [`ModelSpec`]).
+struct ResolvedModelInfo {
+    path: PathBuf,
+    coreml_degraded: bool,
+    hf_repo: Option<String>,
+}
+
+/// Resolves the model synchronously (parity: before any task queues), streaming
+/// download progress as a human stderr line or a `model_download_progress`
+/// JSON event. Failures return an `Err(ExitCode)` already printed by
+/// [`run_fail`] (exit 1, no usage hint).
+fn resolve_model(
+    args: &AddArgs,
+    settings: &Settings,
+    model_root: &std::path::Path,
+    cancel: &CancelToken,
+) -> Result<ResolvedModelInfo, ExitCode> {
+    let is_custom =
+        args.model_type != ModelTypeArg::HuggingFace && args.model_size == ModelSize::Custom;
+    if is_custom && settings.models.custom_model_url.is_none() {
+        return Err(run_fail(format!(
+            "no custom model URL configured — set models.custom_model_url in {}",
+            paths::settings_path().display()
+        )));
+    }
+
+    let downloader = ModelDownloader::new(model_root.to_path_buf());
+    let coreml = coreml_encoder();
+    let json = args.json;
+    let quiet = args.quiet;
+
+    let mut line = ProgressLine::new();
+    let mut render = |update: DownloadProgress| {
+        if json {
+            if let Some(text) = to_json_line(&JsonEvent::ModelDownloadProgress {
+                file: &update.file,
+                downloaded: update.downloaded,
+                total: update.total,
+            }) {
+                println!("{text}");
+            }
+        } else if !quiet {
+            render_download_progress(&mut line, &update);
+        }
+    };
+
+    let result = if args.model_type == ModelTypeArg::HuggingFace {
+        // Validation guarantees `hfid` is `Some` for the huggingface type.
+        let repo = args.hfid.as_deref().unwrap_or_default();
+        downloader
+            .resolve_hf_repo(repo, coreml, &mut render, cancel)
+            .map(|resolved| (resolved.path, resolved.coreml_degraded))
+    } else if is_custom {
+        // `is_none()` was rejected above, so this unwrap-or-default never hits
+        // the default.
+        let url = settings
+            .models
+            .custom_model_url
+            .as_deref()
+            .unwrap_or_default();
+        downloader
+            .ensure_custom_model(url, &mut render, cancel)
+            .map(|path| (path, false))
+    } else {
+        downloader
+            .resolve_model(args.model_size, coreml, &mut render, cancel)
+            .map(|resolved| (resolved.path, resolved.coreml_degraded))
+    };
+
+    // The closure's mutable borrow of `line` ends here (its last use is in the
+    // `result` computation above), so `finish` can flush the final line.
+    line.finish();
+
+    match result {
+        Ok((path, coreml_degraded)) => Ok(ResolvedModelInfo {
+            path,
+            coreml_degraded,
+            hf_repo: if args.model_type == ModelTypeArg::HuggingFace {
+                args.hfid.clone()
+            } else {
+                None
+            },
+        }),
+        Err(err) => Err(run_fail(err)),
+    }
+}
+
+/// Builds the URL fetcher when yt-dlp is available, else `None` (URL tasks then
+/// fail actionably — the queue's `YTDLP_MISSING` message). Cookie file resolves
+/// `HUMM_DOWNLOAD_COOKIEFILE` (env wins) then `settings.downloads.cookie_file`.
+fn build_fetcher(settings: &Settings) -> Option<Arc<dyn MediaFetcher>> {
+    // No yt-dlp on this machine → no URL fetcher (URL tasks then fail
+    // actionably in the queue). The version string itself is unused.
+    probe_binaries().yt_dlp?;
+    let cookie_file = std::env::var_os("HUMM_DOWNLOAD_COOKIEFILE")
+        .map(PathBuf::from)
+        .or_else(|| settings.downloads.cookie_file.clone());
+    Some(Arc::new(YtDlpFetcher::new(cookie_file)))
+}
+
+/// The [`EngineFactory`] the runner uses: loads a [`WhisperEngine`] from the
+/// pre-resolved model path. The runner caches per equal [`ModelSpec`], and one
+/// CLI run has one spec, so `create` runs once.
+struct CliEngineFactory {
+    model_path: PathBuf,
+    use_gpu: bool,
+}
+
+impl EngineFactory for CliEngineFactory {
+    fn create(&mut self, _model: &ModelSpec) -> Result<Box<dyn TranscriptionEngine>, CoreError> {
+        WhisperEngine::load(&self.model_path, self.use_gpu)
+            .map(|engine| Box::new(engine) as Box<dyn TranscriptionEngine>)
+            .map_err(CoreError::from)
+    }
+}
+
+/// Drains the event stream until every enqueued task has reached a terminal
+/// state (the runner stays alive until `finish`), rendering each event, and
+/// returns the exit code: any canceled → 130; else any failed → 2; else 0.
+fn drain_and_render(
+    events: &flume::Receiver<TaskEvent>,
+    enqueued: &[TranscriptionId],
+    labels: &HashMap<TranscriptionId, String>,
+    json: bool,
+    quiet: bool,
+) -> ExitCode {
+    let mut remaining: HashSet<TranscriptionId> = enqueued.iter().copied().collect();
+    let mut any_failed = false;
+    let mut any_canceled = false;
+    let mut human = HumanRenderer::new(quiet, labels);
+
+    while !remaining.is_empty() {
+        match events.recv() {
+            Ok(event) => {
+                if json {
+                    emit_json(&event, labels);
+                } else {
+                    human.on_event(&event);
+                }
+                match &event.kind {
+                    TaskEventKind::Completed { .. } => {
+                        remaining.remove(&event.task_id);
+                    }
+                    TaskEventKind::Failed { .. } => {
+                        any_failed = true;
+                        remaining.remove(&event.task_id);
+                    }
+                    TaskEventKind::Canceled => {
+                        any_canceled = true;
+                        remaining.remove(&event.task_id);
+                    }
+                    _ => {}
                 }
             }
-            Err(err) => {
-                report_failure(file, &err.to_string());
-                failed.push(file.display().to_string());
-            }
+            // The runner dropped every subscriber sender unexpectedly (it is
+            // panic-free by construction, so this is not expected): stop with
+            // whatever terminal states we saw.
+            Err(_) => break,
         }
     }
 
-    Ok(failed)
+    if any_canceled {
+        ExitCode::from(130)
+    } else if any_failed {
+        ExitCode::from(2)
+    } else {
+        ExitCode::from(0)
+    }
 }
+
+/// Installs the Ctrl-C handler: the first SIGINT cancels every queued/running
+/// task (turning the run into exit 130); a second exits immediately. The
+/// handler borrows the shared handle (`cancel_all` is `&self`); the main flow
+/// later `take`s it for `finish`.
+fn install_ctrlc(shared: Arc<Mutex<Option<QueueHandle>>>) {
+    let signaled = Arc::new(AtomicBool::new(false));
+    let result = ctrlc::set_handler(move || {
+        if signaled.swap(true, Ordering::SeqCst) {
+            // Second signal: don't wait for a graceful drain.
+            std::process::exit(130);
+        }
+        if let Ok(guard) = shared.lock()
+            && let Some(handle) = guard.as_ref()
+        {
+            handle.cancel_all();
+        }
+        eprintln!("canceling… (press Ctrl-C again to exit immediately)");
+    });
+    if let Err(err) = result {
+        log::warn!("could not install Ctrl-C handler ({err}); cancellation via SIGINT disabled");
+    }
+}
+
+// -- Human-readable rendering ------------------------------------------------
+
+/// Renders task events as human-readable progress (stderr) and results
+/// (written paths to stdout, errors to stderr). Tasks run one at a time, so a
+/// single rewriting [`ProgressLine`] suffices.
+struct HumanRenderer<'a> {
+    line: ProgressLine,
+    quiet: bool,
+    labels: &'a HashMap<TranscriptionId, String>,
+    started: HashMap<TranscriptionId, Instant>,
+}
+
+impl<'a> HumanRenderer<'a> {
+    fn new(quiet: bool, labels: &'a HashMap<TranscriptionId, String>) -> Self {
+        HumanRenderer {
+            line: ProgressLine::new(),
+            quiet,
+            labels,
+            started: HashMap::new(),
+        }
+    }
+
+    fn label(&self, id: &TranscriptionId) -> String {
+        self.labels
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
+    }
+
+    fn on_event(&mut self, event: &TaskEvent) {
+        match &event.kind {
+            TaskEventKind::Queued => {}
+            TaskEventKind::Started => {
+                self.started.insert(event.task_id, Instant::now());
+                self.line.reset();
+            }
+            TaskEventKind::DownloadProgress(fraction) => {
+                if self.quiet {
+                    return;
+                }
+                let pct = pct_of(*fraction);
+                let label = self.label(&event.task_id);
+                // Negative key namespace keeps the download phase from
+                // colliding with the (same-percent) transcribe phase.
+                self.line
+                    .update(-(pct + 1), &format!("downloading {label}  {pct}%"));
+            }
+            TaskEventKind::Progress(fraction) => {
+                if self.quiet {
+                    return;
+                }
+                let pct = pct_of(*fraction);
+                let elapsed = self
+                    .started
+                    .get(&event.task_id)
+                    .map(|start| start.elapsed().as_secs_f64())
+                    .unwrap_or(0.0);
+                let label = self.label(&event.task_id);
+                let text = match format_eta(elapsed, *fraction) {
+                    Some(eta) => format!("{label}  {pct}% — ETA: {eta}"),
+                    None => format!("{label}  {pct}%"),
+                };
+                self.line.update(pct, &text);
+            }
+            TaskEventKind::SegmentAdded(_) => {}
+            TaskEventKind::Completed { written } => {
+                self.line.finish();
+                for path in written {
+                    println!("{}", path.display());
+                }
+            }
+            TaskEventKind::Failed { message } => {
+                self.line.finish();
+                let label = self.label(&event.task_id);
+                eprintln!("error: {label}: {message}");
+            }
+            TaskEventKind::Canceled => {
+                self.line.finish();
+            }
+        }
+    }
+}
+
+/// Throttled single-line progress renderer: rewrites the same terminal line via
+/// `\r` on a TTY; emits plain change-triggered lines otherwise.
+struct ProgressLine {
+    tty: bool,
+    last_key: Option<i64>,
+}
+
+impl ProgressLine {
+    fn new() -> Self {
+        ProgressLine {
+            tty: std::io::stderr().is_terminal(),
+            last_key: None,
+        }
+    }
+
+    /// Forgets the last key, so the next `update` always renders (used at task
+    /// boundaries where the percent counter restarts).
+    fn reset(&mut self) {
+        self.last_key = None;
+    }
+
+    fn update(&mut self, key: i64, text: &str) {
+        if self.last_key == Some(key) {
+            return;
+        }
+        self.last_key = Some(key);
+        if self.tty {
+            eprint!("\r{text}");
+            let _ = std::io::stderr().flush();
+        } else {
+            eprintln!("{text}");
+        }
+    }
+
+    fn finish(&mut self) {
+        if self.tty && self.last_key.is_some() {
+            eprintln!();
+        }
+        self.last_key = None;
+    }
+}
+
+fn render_download_progress(progress: &mut ProgressLine, update: &DownloadProgress) {
+    let downloaded_mb = update.downloaded as f64 / 1_000_000.0;
+    match update.total.filter(|&total| total > 0) {
+        Some(total) => {
+            let percent = ((update.downloaded as f64 / total as f64) * 100.0).round() as i64;
+            let total_mb = total as f64 / 1_000_000.0;
+            progress.update(
+                percent,
+                &format!(
+                    "Downloading {}  {percent}% ({downloaded_mb:.1}/{total_mb:.1} MB)",
+                    update.file
+                ),
+            );
+        }
+        None => {
+            let bucket = (update.downloaded / 1_000_000) as i64;
+            progress.update(
+                bucket,
+                &format!("Downloading {}  ({downloaded_mb:.1} MB)", update.file),
+            );
+        }
+    }
+}
+
+/// Estimated time remaining, ported from Buzz's in-progress ETA
+/// (`buzz/widgets/transcription_tasks_table_widget.py:73-90`): with `elapsed >
+/// 2s` and `0 < fraction < 1`, `remaining = (1 - p) * elapsed / p`, rendered
+/// `NNm NNs` (≥ 60 s) or `NNs`. `None` when no meaningful estimate exists.
+///
+/// The remaining seconds are rounded to the nearest whole second before the
+/// minute/second split — a deliberate, minor refinement over Buzz's truncation
+/// that also absorbs the `f32`-fraction representation error (so, e.g.,
+/// `(300.0, 0.2)` renders the intended `20m 0s`, not `19m 59s`).
+fn format_eta(elapsed_secs: f64, fraction: f32) -> Option<String> {
+    let p = f64::from(fraction);
+    if elapsed_secs <= 2.0 || p <= 0.0 || p >= 1.0 {
+        return None;
+    }
+    let remaining = ((1.0 - p) * elapsed_secs / p).round();
+    let secs = remaining as i64;
+    if secs >= 60 {
+        Some(format!("{}m {}s", secs / 60, secs % 60))
+    } else {
+        Some(format!("{secs}s"))
+    }
+}
+
+fn pct_of(fraction: f32) -> i64 {
+    (fraction.clamp(0.0, 1.0) * 100.0).round() as i64
+}
+
+// -- JSON rendering ----------------------------------------------------------
+
+/// The `--json` event schema (stable from M2; field names verbatim). Each
+/// serializes as one line: `{"event":"<name>", ...}`.
+#[derive(Debug, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+enum JsonEvent<'a> {
+    ModelDownloadProgress {
+        file: &'a str,
+        downloaded: u64,
+        total: Option<u64>,
+    },
+    Queued {
+        task_id: String,
+        input: &'a str,
+    },
+    Started {
+        task_id: String,
+    },
+    DownloadProgress {
+        task_id: String,
+        fraction: f32,
+    },
+    Progress {
+        task_id: String,
+        fraction: f32,
+    },
+    Segment {
+        task_id: String,
+        start_ms: i64,
+        end_ms: i64,
+        text: &'a str,
+    },
+    Completed {
+        task_id: String,
+        written: Vec<String>,
+    },
+    Failed {
+        task_id: String,
+        error: &'a str,
+    },
+    Canceled {
+        task_id: String,
+    },
+}
+
+/// Maps a [`TaskEvent`] to its [`JsonEvent`] and prints it as one line on
+/// stdout. Nothing else is written to stdout in `--json` mode.
+fn emit_json(event: &TaskEvent, labels: &HashMap<TranscriptionId, String>) {
+    let task_id = event.task_id.to_string();
+    let empty = String::new();
+    let label = labels.get(&event.task_id).unwrap_or(&empty);
+    let value = match &event.kind {
+        TaskEventKind::Queued => JsonEvent::Queued {
+            task_id,
+            input: label,
+        },
+        TaskEventKind::Started => JsonEvent::Started { task_id },
+        TaskEventKind::DownloadProgress(fraction) => JsonEvent::DownloadProgress {
+            task_id,
+            fraction: *fraction,
+        },
+        TaskEventKind::Progress(fraction) => JsonEvent::Progress {
+            task_id,
+            fraction: *fraction,
+        },
+        TaskEventKind::SegmentAdded(segment) => JsonEvent::Segment {
+            task_id,
+            start_ms: segment.start.0,
+            end_ms: segment.end.0,
+            text: &segment.text,
+        },
+        TaskEventKind::Completed { written } => JsonEvent::Completed {
+            task_id,
+            written: written.iter().map(|p| p.display().to_string()).collect(),
+        },
+        TaskEventKind::Failed { message } => JsonEvent::Failed {
+            task_id,
+            error: message,
+        },
+        TaskEventKind::Canceled => JsonEvent::Canceled { task_id },
+    };
+    if let Some(text) = to_json_line(&value) {
+        println!("{text}");
+    }
+}
+
+/// Serializes `value` to a single JSON line, or `None` (logged) on the
+/// otherwise-impossible serialization error — never printing a partial/empty
+/// line that would corrupt the `--json` stream.
+fn to_json_line(value: &impl Serialize) -> Option<String> {
+    match serde_json::to_string(value) {
+        Ok(text) => Some(text),
+        Err(err) => {
+            log::error!("failed to serialize JSON event: {err}");
+            None
+        }
+    }
+}
+
+// -- Shared helpers ----------------------------------------------------------
 
 fn coreml_encoder() -> bool {
     cfg!(all(target_os = "macos", target_arch = "aarch64"))
@@ -294,13 +770,17 @@ fn parse_language(input: &str) -> Result<Option<Language>, &'static str> {
     }
 }
 
-fn report_failure(file: &Path, cause: &str) {
-    eprintln!("error: {}: {cause}", file.display());
+/// A usage/validation error: actionable cause + the `--help` hint, exit 1.
+fn usage_fail(message: impl std::fmt::Display) -> ExitCode {
+    eprintln!("error: {message}");
+    eprintln!("Run `humm add --help` for usage.");
+    ExitCode::from(1)
 }
 
-fn fail(message: impl std::fmt::Display) -> ExitCode {
-    eprintln!("Error: {message}");
-    eprintln!("Run `humm add --help` for usage.");
+/// A runtime/config error (settings, model download, engine load): the
+/// actionable cause alone, no usage hint, exit 1 (M1 messaging ticket).
+fn run_fail(message: impl std::fmt::Display) -> ExitCode {
+    eprintln!("error: {message}");
     ExitCode::from(1)
 }
 
@@ -322,99 +802,179 @@ fn paragraph_split_from_env(value: Option<&str>) -> Millis {
         .unwrap_or(Millis(2000))
 }
 
-/// Throttled single-line progress renderer: rewrites the same terminal line
-/// via `\r` when stderr is a TTY; emits plain, change-triggered lines
-/// otherwise (brief: "`\r<file>  NN%` to stderr on TTY... plain occasional
-/// lines otherwise").
-struct ProgressLine {
-    tty: bool,
-    last_key: Option<i64>,
-}
-
-impl ProgressLine {
-    fn new() -> Self {
-        ProgressLine {
-            tty: std::io::stderr().is_terminal(),
-            last_key: None,
-        }
-    }
-
-    fn update(&mut self, key: i64, text: &str) {
-        if self.last_key == Some(key) {
-            return;
-        }
-        self.last_key = Some(key);
-        if self.tty {
-            eprint!("\r{text}");
-            let _ = std::io::stderr().flush();
-        } else {
-            eprintln!("{text}");
-        }
-    }
-
-    fn finish(&mut self) {
-        if self.tty && self.last_key.is_some() {
-            eprintln!();
-        }
-    }
-}
-
-fn render_download_progress(progress: &mut ProgressLine, update: &DownloadProgress) {
-    let downloaded_mb = update.downloaded as f64 / 1_000_000.0;
-    match update.total.filter(|&total| total > 0) {
-        Some(total) => {
-            let percent = ((update.downloaded as f64 / total as f64) * 100.0).round() as i64;
-            let total_mb = total as f64 / 1_000_000.0;
-            progress.update(
-                percent,
-                &format!(
-                    "Downloading {}  {percent}% ({downloaded_mb:.1}/{total_mb:.1} MB)",
-                    update.file
-                ),
-            );
-        }
-        None => {
-            let bucket = (update.downloaded / 1_000_000) as i64;
-            progress.update(
-                bucket,
-                &format!("Downloading {}  ({downloaded_mb:.1} MB)", update.file),
-            );
-        }
-    }
-}
-
-struct JobProgressSink<'a> {
-    file: &'a Path,
-    line: ProgressLine,
-}
-
-impl<'a> JobProgressSink<'a> {
-    fn new(file: &'a Path) -> Self {
-        JobProgressSink {
-            file,
-            line: ProgressLine::new(),
-        }
-    }
-
-    fn finish(&mut self) {
-        self.line.finish();
-    }
-}
-
-impl SegmentSink for JobProgressSink<'_> {
-    fn on_segment(&mut self, _segment: Segment) {}
-
-    fn on_progress(&mut self, fraction: f32) {
-        let percent = (fraction.clamp(0.0, 1.0) * 100.0).round() as i64;
-        self.line
-            .update(percent, &format!("{}  {percent}%", self.file.display()));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use humm_core::domain::Segment;
     use pretty_assertions::assert_eq;
+
+    // -- format_eta (Step 1) --------------------------------------------------
+
+    #[test]
+    fn format_eta_none_when_elapsed_under_two_seconds() {
+        assert_eq!(format_eta(1.0, 0.5), None);
+    }
+
+    #[test]
+    fn format_eta_seconds_only_under_a_minute() {
+        assert_eq!(format_eta(10.0, 0.5), Some("10s".to_string()));
+    }
+
+    #[test]
+    fn format_eta_minutes_and_seconds_over_a_minute() {
+        assert_eq!(format_eta(300.0, 0.2), Some("20m 0s".to_string()));
+    }
+
+    #[test]
+    fn format_eta_none_at_zero_or_full_fraction() {
+        assert_eq!(format_eta(10.0, 0.0), None);
+        assert_eq!(format_eta(10.0, 1.0), None);
+    }
+
+    // -- JSON event serialization (Step 1) ------------------------------------
+
+    fn json_for(kind: TaskEventKind, id: &str, label: &str) -> String {
+        let task_id = TranscriptionId::parse(id).expect("valid uuid");
+        let mut labels = HashMap::new();
+        labels.insert(task_id, label.to_string());
+        // Re-derive exactly what `emit_json` would build, then serialize.
+        let task_id_str = task_id.to_string();
+        let value = match &kind {
+            TaskEventKind::Queued => JsonEvent::Queued {
+                task_id: task_id_str,
+                input: label,
+            },
+            TaskEventKind::Started => JsonEvent::Started {
+                task_id: task_id_str,
+            },
+            TaskEventKind::DownloadProgress(f) => JsonEvent::DownloadProgress {
+                task_id: task_id_str,
+                fraction: *f,
+            },
+            TaskEventKind::Progress(f) => JsonEvent::Progress {
+                task_id: task_id_str,
+                fraction: *f,
+            },
+            TaskEventKind::SegmentAdded(s) => JsonEvent::Segment {
+                task_id: task_id_str,
+                start_ms: s.start.0,
+                end_ms: s.end.0,
+                text: &s.text,
+            },
+            TaskEventKind::Completed { written } => JsonEvent::Completed {
+                task_id: task_id_str,
+                written: written.iter().map(|p| p.display().to_string()).collect(),
+            },
+            TaskEventKind::Failed { message } => JsonEvent::Failed {
+                task_id: task_id_str,
+                error: message,
+            },
+            TaskEventKind::Canceled => JsonEvent::Canceled {
+                task_id: task_id_str,
+            },
+        };
+        to_json_line(&value).expect("serializes")
+    }
+
+    const ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[test]
+    fn json_model_download_progress_matches_schema() {
+        let text = to_json_line(&JsonEvent::ModelDownloadProgress {
+            file: "ggml-small.bin",
+            downloaded: 1024,
+            total: Some(487_000_000),
+        })
+        .expect("serializes");
+        assert_eq!(
+            text,
+            r#"{"event":"model_download_progress","file":"ggml-small.bin","downloaded":1024,"total":487000000}"#
+        );
+    }
+
+    #[test]
+    fn json_queued_matches_schema() {
+        assert_eq!(
+            json_for(TaskEventKind::Queued, ID, "/path/or/url"),
+            r#"{"event":"queued","task_id":"550e8400-e29b-41d4-a716-446655440000","input":"/path/or/url"}"#
+        );
+    }
+
+    #[test]
+    fn json_started_matches_schema() {
+        assert_eq!(
+            json_for(TaskEventKind::Started, ID, ""),
+            r#"{"event":"started","task_id":"550e8400-e29b-41d4-a716-446655440000"}"#
+        );
+    }
+
+    #[test]
+    fn json_download_progress_matches_schema() {
+        assert_eq!(
+            json_for(TaskEventKind::DownloadProgress(0.5), ID, ""),
+            r#"{"event":"download_progress","task_id":"550e8400-e29b-41d4-a716-446655440000","fraction":0.5}"#
+        );
+    }
+
+    #[test]
+    fn json_progress_matches_schema() {
+        assert_eq!(
+            json_for(TaskEventKind::Progress(0.5), ID, ""),
+            r#"{"event":"progress","task_id":"550e8400-e29b-41d4-a716-446655440000","fraction":0.5}"#
+        );
+    }
+
+    #[test]
+    fn json_segment_matches_schema() {
+        let segment = Segment {
+            start: Millis(40),
+            end: Millis(299),
+            text: "hello".to_string(),
+            translation: String::new(),
+        };
+        assert_eq!(
+            json_for(TaskEventKind::SegmentAdded(segment), ID, ""),
+            r#"{"event":"segment","task_id":"550e8400-e29b-41d4-a716-446655440000","start_ms":40,"end_ms":299,"text":"hello"}"#
+        );
+    }
+
+    #[test]
+    fn json_completed_matches_schema() {
+        assert_eq!(
+            json_for(
+                TaskEventKind::Completed {
+                    written: vec![PathBuf::from("/path.srt")]
+                },
+                ID,
+                ""
+            ),
+            r#"{"event":"completed","task_id":"550e8400-e29b-41d4-a716-446655440000","written":["/path.srt"]}"#
+        );
+    }
+
+    #[test]
+    fn json_failed_matches_schema() {
+        assert_eq!(
+            json_for(
+                TaskEventKind::Failed {
+                    message: "boom".to_string()
+                },
+                ID,
+                ""
+            ),
+            r#"{"event":"failed","task_id":"550e8400-e29b-41d4-a716-446655440000","error":"boom"}"#
+        );
+    }
+
+    #[test]
+    fn json_canceled_matches_schema() {
+        assert_eq!(
+            json_for(TaskEventKind::Canceled, ID, ""),
+            r#"{"event":"canceled","task_id":"550e8400-e29b-41d4-a716-446655440000"}"#
+        );
+    }
+
+    // -- Validation / helpers (carried from M1) -------------------------------
 
     #[test]
     fn parse_language_empty_is_auto_detect() {
@@ -463,13 +1023,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_add_args_rejects_huggingface_even_with_hfid() {
-        // TEMPORARY: no huggingface runtime yet (Task 11 replaces this).
+    fn validate_add_args_accepts_huggingface_with_hfid() {
+        // The huggingface backend is now wired (Task 11): a type + hfid pair
+        // passes validation and resolves at runtime.
         let mut args = base_add_args();
         args.files = vec!["dummy.mp3".to_string()];
         args.model_type = ModelTypeArg::HuggingFace;
         args.hfid = Some("openai/whisper-tiny".to_string());
-        assert!(validate_add_args(&args).is_some());
+        assert!(validate_add_args(&args).is_none());
     }
 
     #[test]
@@ -559,6 +1120,15 @@ mod tests {
     fn output_formats_empty_when_no_flags_selected() {
         let args = base_add_args();
         assert!(output_formats(&args).is_empty());
+    }
+
+    #[test]
+    fn pct_of_rounds_and_clamps() {
+        assert_eq!(pct_of(0.0), 0);
+        assert_eq!(pct_of(0.425), 43);
+        assert_eq!(pct_of(1.0), 100);
+        assert_eq!(pct_of(1.5), 100);
+        assert_eq!(pct_of(-0.5), 0);
     }
 
     fn base_add_args() -> AddArgs {
