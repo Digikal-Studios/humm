@@ -172,6 +172,36 @@ fn buzz_attach_uri(path: &Path) -> String {
     }
 }
 
+/// Folds a `DETACH DATABASE buzz` failure into an already-failed import's
+/// error, so a caller that only logs the returned [`StoreError`] still
+/// learns that the `buzz` alias may still be attached to this connection —
+/// same-process retries would then fail at `ATTACH` with a confusing
+/// "already in use" error rather than the original problem repeating.
+/// `StoreError` is `#[non_exhaustive]`, so unrecognized/future variants fall
+/// through the wildcard arm as a [`StoreError::Query`] carrying the original
+/// error's `Display` text plus the appended detail — nothing is lost.
+fn augment_with_detach_failure(err: StoreError, detach_err: StoreError) -> StoreError {
+    let suffix = format!(
+        "; additionally, DETACH DATABASE buzz failed ({detach_err}) — the \
+         alias may still be attached and retries in this process may fail"
+    );
+    match err {
+        StoreError::Open { path, detail } => StoreError::Open {
+            path,
+            detail: format!("{detail}{suffix}"),
+        },
+        StoreError::Query { detail } => StoreError::Query {
+            detail: format!("{detail}{suffix}"),
+        },
+        StoreError::Corrupt { detail } => StoreError::Corrupt {
+            detail: format!("{detail}{suffix}"),
+        },
+        other => StoreError::Query {
+            detail: format!("{other}{suffix}"),
+        },
+    }
+}
+
 /// SQLite-backed [`TaskStore`] implementation (ADR-004). Schema v1 is a
 /// Buzz-superset of `transcription`/`transcription_segment` plus humm's
 /// `options_json`/`kind` additions (see `crate::schema`).
@@ -314,7 +344,15 @@ impl SqliteStore {
                 detach?;
                 Ok(ok)
             }
-            Err(err) => Err(err),
+            // The import already failed; if DETACH *also* failed, don't
+            // silently drop that — `buzz` may still be attached to this
+            // long-lived connection, so same-process retries could fail on
+            // `ATTACH` with a confusing "already in use" error. Fold both
+            // failures into one error rather than picking just one.
+            Err(err) => Err(match detach {
+                Ok(()) => err,
+                Err(detach_err) => augment_with_detach_failure(err, detach_err),
+            }),
         }
     }
 
@@ -366,13 +404,21 @@ impl SqliteStore {
         let segments = if new_ids.is_empty() {
             0
         } else {
+            // One bound parameter per imported id. SQLite caps bound
+            // parameters per statement (`SQLITE_LIMIT_VARIABLE_NUMBER`: 999
+            // on SQLite < 3.32, 32766 on the bundled current version) — an
+            // enormous Buzz history (999+/32766+ *new* rows in one import)
+            // would fail this statement. Accepted for personal-scale
+            // histories; not worth a batching scheme for this one-time,
+            // one-user import.
             let placeholders = vec!["?"; new_ids.len()].join(", ");
             let sql = format!(
                 "INSERT INTO transcription_segment \
                  (end_time, start_time, text, translation, transcription_id) \
                  SELECT end_time, start_time, text, translation, transcription_id \
                  FROM buzz.transcription_segment \
-                 WHERE transcription_id IN ({placeholders})"
+                 WHERE transcription_id IN ({placeholders}) \
+                 ORDER BY id"
             );
             tx.execute(&sql, params_from_iter(new_ids.iter()))
                 .map_err(query_error)?
@@ -1050,5 +1096,43 @@ mod tests {
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks[0].id, second);
         assert_eq!(tasks[1].id, first);
+    }
+
+    #[test]
+    fn augment_with_detach_failure_appends_detach_detail_to_the_import_error() {
+        let err = StoreError::Query {
+            detail: "no such table: buzz.transcription".to_string(),
+        };
+        let detach_err = StoreError::Query {
+            detail: "database buzz is locked".to_string(),
+        };
+
+        let augmented = augment_with_detach_failure(err, detach_err);
+        let StoreError::Query { detail } = augmented else {
+            panic!("expected Query variant, got {augmented:?}");
+        };
+        assert!(detail.contains("no such table: buzz.transcription"));
+        assert!(detail.contains("DETACH DATABASE buzz failed"));
+        assert!(detail.contains("database buzz is locked"));
+        assert!(detail.contains("may still be attached"));
+    }
+
+    #[test]
+    fn augment_with_detach_failure_preserves_open_variant_and_path() {
+        let err = StoreError::Open {
+            path: PathBuf::from("/tmp/humm.sqlite"),
+            detail: "disk full".to_string(),
+        };
+        let detach_err = StoreError::Corrupt {
+            detail: "malformed database schema".to_string(),
+        };
+
+        let augmented = augment_with_detach_failure(err, detach_err);
+        let StoreError::Open { path, detail } = augmented else {
+            panic!("expected Open variant, got {augmented:?}");
+        };
+        assert_eq!(path, PathBuf::from("/tmp/humm.sqlite"));
+        assert!(detail.starts_with("disk full"));
+        assert!(detail.contains("malformed database schema"));
     }
 }
