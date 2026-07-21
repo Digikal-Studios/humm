@@ -57,7 +57,17 @@ pub struct DownloadSettings {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UpdateSettings {
-    /// Timestamp of the last update check.
+    /// Timestamp of the last update check, as a naive-local ISO-8601 string
+    /// in the exact format `%Y-%m-%dT%H:%M:%S%.f` (no timezone offset/`Z`
+    /// suffix) — the same format `humm-store`'s `now_iso()` writes and
+    /// Buzz's `datetime.now().isoformat()` produces. This is a load-bearing
+    /// format contract: [`crate::update::should_check`] parses this field
+    /// with that exact format string and treats anything else (including a
+    /// valid-but-differently-shaped RFC3339 timestamp with a `Z`/offset) as
+    /// unparseable, which makes it fall back to "check is due". A caller
+    /// that persists `last_check` must write it with `now_iso()` (or an
+    /// equivalent `%Y-%m-%dT%H:%M:%S%.f` formatter), not `to_rfc3339()` or
+    /// any timezone-aware formatter.
     pub last_check: Option<String>,
     /// Latest version reported by the last successful update check.
     pub available_version: Option<String>,
@@ -176,7 +186,11 @@ mod tests {
         let mut settings = Settings::default();
         settings.models.custom_model_url = Some("https://example.com/model.bin".to_string());
         settings.downloads.cookie_file = Some(Path::new("/tmp/cookies.txt").to_path_buf());
-        settings.updates.last_check = Some("2026-07-21T00:00:00Z".to_string());
+        // Canonical `last_check` format (`%Y-%m-%dT%H:%M:%S%.f`, no zone) —
+        // see the field's doc comment: `update::should_check` parses this
+        // exact shape, so the test data must model the real contract rather
+        // than an RFC3339 `Z`-suffixed value that would silently fail it.
+        settings.updates.last_check = Some("2026-07-21T00:00:00".to_string());
         settings.updates.available_version = Some("1.2.3".to_string());
 
         settings.save(&path).expect("save");

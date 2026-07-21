@@ -113,6 +113,16 @@ fn parse_numeric_version(version: &str) -> Option<Vec<i64>> {
 /// `datetime.now().isoformat()`; see `humm-store`'s `now_iso`), `now`, and
 /// whether checking is disabled.
 ///
+/// **Format contract:** `last_check_iso` is parsed with the exact format
+/// string `%Y-%m-%dT%H:%M:%S%.f` — no timezone offset, no `Z` suffix. This
+/// is the same shape [`crate::settings::UpdateSettings::last_check`] is
+/// documented to hold, and the same shape `humm-store`'s (crate-private)
+/// `now_iso()` writes; the canonical reader/writer pair for this field is
+/// `now_iso()` (write) and this function (read). A timestamp in any other
+/// shape — including an otherwise-valid RFC3339 string with a `Z`/offset —
+/// is treated as unparseable, which per the next paragraph means "check is
+/// due", not a hard failure.
+///
 /// Ports Buzz's `should_check_for_updates` (`update_checker.py:42-67`) minus
 /// its Windows/macOS platform gate (see the module doc comment): `disabled`
 /// always wins and returns `false`; a missing or unparseable `last_check_iso`
@@ -259,6 +269,15 @@ mod tests {
     fn is_newer_version_shorter_remote_is_zero_padded() {
         // "1.5" pads to "1.5.0", which is still newer than "1.4.5".
         assert!(is_newer_version("1.4.5", "1.5"));
+    }
+
+    #[test]
+    fn is_newer_version_current_longer_than_remote_pads_remote_by_multiple_zeros() {
+        // Reverse-direction padding check: current ("1.4.5.1") has two more
+        // components than remote ("1.5"), so remote is zero-padded twice
+        // (to "1.5.0.0"), not just once — still newer than current at the
+        // second component (5 > 4).
+        assert!(is_newer_version("1.4.5.1", "1.5"));
     }
 
     #[test]
