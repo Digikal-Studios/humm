@@ -78,7 +78,9 @@ pub fn ggml_file_name(size: ModelSize) -> String {
 pub(crate) fn repo_for(size: ModelSize) -> Result<&'static str, ModelError> {
     match size {
         ModelSize::Custom => Err(ModelError::Unsupported {
-            detail: "custom model URLs arrive with M2".to_string(),
+            detail: "the custom model size has no download repo — custom models are fetched \
+                     from the models.custom_model_url setting"
+                .to_string(),
         }),
         ModelSize::Lumii => Ok(LUMII_REPO),
         _ => Ok(WHISPER_CPP_REPO),
@@ -125,9 +127,21 @@ pub fn hf_repo_model_file_name(repo: &str) -> String {
 /// guaranteed ggml equivalent, and falls through to
 /// [`crate::models::download::ModelDownloader::resolve_hf_repo`]'s generic
 /// repo-file-listing path instead.
+///
+/// `Custom` is deliberately excluded even though `"custom"` parses as a
+/// [`ModelSize`]: it has no fixed repo (see [`repo_for`]), so an
+/// `openai/whisper-custom` repo id must fall through to the generic
+/// repo-file-listing path too, instead of hitting `repo_for`'s
+/// [`ModelError::Unsupported`] via this mapping.
 pub fn openai_whisper_model_size(repo: &str) -> Option<ModelSize> {
-    repo.strip_prefix("openai/whisper-")
-        .and_then(|name| ModelSize::from_str(name).ok())
+    let size = repo
+        .strip_prefix("openai/whisper-")
+        .and_then(|name| ModelSize::from_str(name).ok())?;
+    if size == ModelSize::Custom {
+        None
+    } else {
+        Some(size)
+    }
 }
 
 /// The download URL for `size`'s ggml model file at a given `base`
@@ -302,7 +316,10 @@ mod tests {
     fn ggml_url_custom_is_unsupported() {
         let err = ggml_url(ModelSize::Custom).unwrap_err();
         assert!(matches!(err, ModelError::Unsupported { .. }));
-        assert!(err.to_string().contains("custom model URLs arrive with M2"));
+        assert!(
+            err.to_string()
+                .contains("custom models are fetched from the models.custom_model_url setting")
+        );
     }
 
     #[test]
@@ -369,6 +386,15 @@ mod tests {
         // third-party mirror or fork falls through to the generic
         // repo-file-listing path instead.
         assert_eq!(openai_whisper_model_size("someone-else/whisper-tiny"), None);
+    }
+
+    #[test]
+    fn openai_whisper_model_size_none_for_custom() {
+        // `"custom"` parses as `ModelSize::Custom`, but `Custom` has no fixed
+        // repo (`repo_for`) — this mapping must not route
+        // `openai/whisper-custom` into `repo_for`'s `Unsupported` error;
+        // it falls through to the generic repo-file-listing path instead.
+        assert_eq!(openai_whisper_model_size("openai/whisper-custom"), None);
     }
 
     #[test]

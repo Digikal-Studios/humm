@@ -19,8 +19,14 @@
 //!   `mark_failed` / `mark_canceled` is written to the store *before* the
 //!   matching `Completed`/`Failed`/`Canceled` event is emitted, so a consumer
 //!   reacting to the event always sees a consistent store.
-//! - **No panics.** Store and engine errors are mapped to task failure, never
-//!   propagated as a panic — one bad task must not wedge the queue.
+//! - **No panics.** Engine/pipeline errors are mapped to task failure, never
+//!   propagated as a panic — one bad task must not wedge the queue. Store
+//!   *write* failures (`mark_started`/`mark_completed`/`mark_failed`/
+//!   `mark_canceled`/`update_progress`/`update_file`) are a different case:
+//!   they are logged and the run continues regardless — a deliberate choice,
+//!   since finishing the transcription beats aborting on a DB hiccup, and the
+//!   task's terminal state is decided by the pipeline outcome, not by whether
+//!   the store write for it happened to succeed.
 //! - **Two mutexes, never nested.** [`Runner`] and [`QueueHandle`] share a
 //!   subscriber list and a "current task" slot, each behind its own `Mutex`.
 //!   Every critical section locks exactly one of them and releases it before
@@ -599,7 +605,10 @@ impl Runner {
             if let Some(total) = fetched.total
                 && total > 0
             {
-                let fraction = fetched.downloaded as f32 / total as f32;
+                // Clamped to the doc'd `0.0..=1.0` range: a low/stale
+                // `total_bytes_estimate` can otherwise let `downloaded`
+                // exceed `total`.
+                let fraction = (fetched.downloaded as f32 / total as f32).min(1.0);
                 emit(
                     &subscribers,
                     TaskEvent {
@@ -1409,6 +1418,38 @@ mod tests {
                 .any(|c| matches!(c, StoreCall::Completed(x, _) if *x == a))
         );
         assert_eq!(h.fetch_calls.lock().expect("fetch").len(), 1);
+    }
+
+    #[test]
+    fn url_task_download_progress_fraction_is_clamped_to_one() {
+        // A low/stale `total` estimate (e.g. from a server's
+        // `Content-Length` on a 206 response) can let `downloaded` exceed
+        // `total`; the `DownloadProgress` doc promises `0.0..=1.0`.
+        let (q, _h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            fetch_steps: vec![FetchProgress {
+                downloaded: 150,
+                total: Some(100),
+            }],
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        q.enqueue(a, url_task(), Source::UrlImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        let downloads: Vec<f32> = events
+            .iter()
+            .filter_map(|e| match e.kind {
+                TaskEventKind::DownloadProgress(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(downloads, vec![1.0]);
     }
 
     #[test]

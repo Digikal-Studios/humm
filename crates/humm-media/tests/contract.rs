@@ -1,4 +1,4 @@
-//! Contract tests for `humm-media` against real `ffmpeg`/`ffprobe`
+//! Contract tests for `humm-media` against real `ffmpeg`/`ffprobe`/`yt-dlp`
 //! binaries and Buzz's test fixtures. All `#[ignore]`; run with:
 //!
 //! ```text

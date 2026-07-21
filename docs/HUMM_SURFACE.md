@@ -53,6 +53,9 @@ Buzz, which has none either). Every `humm add` run tries to use Silero VAD
   full) is logged (`log::warn!`) and the run continues **without VAD** —
   transcription still completes normally, just without the voice-activity
   offset remap. VAD is never a hard requirement for `humm add` to succeed.
+- **Kill-switch:** VAD stays default-on for real users; `HUMM_DISABLE_VAD`
+  (any non-empty value) is a test-only escape hatch that skips it entirely
+  (see §5).
 
 See `crates/humm-cli/src/run.rs`'s `ensure_vad()` for the implementation.
 
@@ -104,6 +107,7 @@ stderr. `--quiet` suppresses the progress lines only.
 | `HUMM_LOG_DIR` | Log directory. Default: platform log location (macOS `~/Library/Logs/humm`). |
 | `HUMM_FORCE_CPU` | Any value other than unset or `false` forces CPU inference (disables Metal/CoreML). Mirrors Buzz's `BUZZ_FORCE_CPU`. |
 | `HUMM_WHISPER_N_THREADS` | Whisper thread-count override (else `max(1, cpus/2)`). |
+| `HUMM_DISABLE_VAD` | Any non-empty value skips VAD entirely (no cache lookup, no download; §2). VAD is default-on for real users — this is a test-only kill-switch (used by hermetic `humm-cli` tests to stay network-free). |
 | `HUMM_PARAGRAPH_SPLIT_TIME` | Millisecond gap between segments that starts a new paragraph on export (default `2000`). |
 | `HUMM_DOWNLOAD_COOKIEFILE` | Cookie file passed to yt-dlp for authenticated URL downloads. Takes precedence over `settings.downloads.cookie_file`. |
 | `HUMM_FFMPEG` / `HUMM_FFPROBE` / `HUMM_YTDLP` | Override the ffmpeg / ffprobe / yt-dlp binary path (else looked up on `PATH`). |
@@ -132,3 +136,9 @@ import has not already run, humm copies Buzz's transcription history into its
 own store once (idempotent; failures are non-fatal). Stale `in_progress`/
 `queued` rows (Buzz's or humm's) are then flipped to `canceled` at every
 startup so a crashed run leaves no phantom "running" task.
+
+Running two `humm add` invocations concurrently is unsupported: the second
+process's startup stale-recovery scan can transiently flip the first
+process's still-genuinely-running `in_progress` row to `canceled` before it
+finishes; single-instance handling (so a second launch can't race the first
+this way) arrives with the GUI.

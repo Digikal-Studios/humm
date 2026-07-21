@@ -8,8 +8,9 @@
 //!   `HUMM_CONFIG_DIR`/`HUMM_MODEL_ROOT` seeded with the Buzz stub `ggml-tiny`
 //!   (loads under CPU, transcribes to zero segments — Global Constraint 4), so
 //!   the full store + queue path runs network-free. Buzz import is disabled
-//!   (`HUMM_BUZZ_SQLITE` → a nonexistent path) and GPU is forced off
-//!   (`HUMM_FORCE_CPU`) so they run under the sandbox.
+//!   (`HUMM_BUZZ_SQLITE` → a nonexistent path), GPU is forced off
+//!   (`HUMM_FORCE_CPU`), and VAD is disabled (`HUMM_DISABLE_VAD`) so they run
+//!   under the sandbox with no network at all.
 //! - **Acceptance** (`acceptance_*`, all `#[ignore]`): real tiny model + real
 //!   audio, process signals, and a local HTTP server. Run sandbox-lifted with
 //!   `cargo test -p humm-cli -- --ignored`.
@@ -260,7 +261,10 @@ fn help_lists_full_m2_grammar() {
 /// A hermetic environment: temp log/data/config dirs and a temp model root
 /// seeded with the Buzz stub `ggml-tiny` (+ completeness sentinel + CoreML
 /// negative marker) so `-s tiny` resolves with no network. Buzz import is
-/// disabled and GPU forced off.
+/// disabled, GPU forced off, and VAD disabled (`HUMM_DISABLE_VAD`) so no test
+/// reaches the network for the Silero model either (Constraint 8: no network
+/// in non-ignored tests) — the `#[ignore]` acceptance tests that want real VAD
+/// override it back with `.env("HUMM_DISABLE_VAD", "")`.
 struct Env {
     log: tempfile::TempDir,
     data: tempfile::TempDir,
@@ -287,7 +291,8 @@ impl Env {
             .env("HUMM_CONFIG_DIR", self.config.path())
             .env("HUMM_MODEL_ROOT", self.model_root.path())
             .env("HUMM_BUZZ_SQLITE", self.data.path().join("no-buzz.sqlite"))
-            .env("HUMM_FORCE_CPU", "true");
+            .env("HUMM_FORCE_CPU", "true")
+            .env("HUMM_DISABLE_VAD", "1");
         c
     }
 
@@ -453,9 +458,12 @@ fn add_json_emits_a_valid_event_stream() {
         event_names.push(name);
     }
 
-    // Any `model_download_progress` events (a first-run VAD fetch) legitimately
-    // precede the task stream (both are JSON — the "nothing non-JSON on stdout"
-    // check above already covered them). Assert the per-task subsequence.
+    // `HUMM_DISABLE_VAD` (set by `Env::cmd()`) keeps this hermetic run free of
+    // a VAD-fetch `model_download_progress` event, but the filter stays
+    // defensive: any such event would legitimately precede the task stream
+    // (both are JSON — the "nothing non-JSON on stdout" check above already
+    // covered them) rather than break this assertion. Assert the per-task
+    // subsequence.
     let task_events: Vec<&str> = event_names
         .iter()
         .map(String::as_str)
@@ -838,6 +846,9 @@ fn acceptance_url_import_downloads_and_transcribes() {
 
     let url = format!("http://127.0.0.1:{port}/whisper-french.mp3");
     env.cmd()
+        // Real VAD for this acceptance test (Env::cmd()'s default disables
+        // it for hermetic tests).
+        .env("HUMM_DISABLE_VAD", "")
         .arg("add")
         .arg(&url)
         .arg("--txt")
@@ -960,6 +971,9 @@ fn add_transcribes_and_exports() {
     let out_dir = tempfile::tempdir().unwrap();
     let output = env
         .cmd()
+        // Real VAD for this acceptance test (Env::cmd()'s default disables
+        // it for hermetic tests).
+        .env("HUMM_DISABLE_VAD", "")
         .arg("add")
         .arg(&input)
         .arg("--srt")

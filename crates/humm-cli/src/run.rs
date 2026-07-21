@@ -16,6 +16,7 @@
 //!    humm ships no file and downloads it on first run to match that outcome.
 //!    A fetch failure degrades to no-VAD (`whisper_cpp.py:380`'s absent-model
 //!    case) — the *failure* mode, never the default — and never fails the run.
+//!    `HUMM_DISABLE_VAD` (test-only) skips this step outright.
 //! 6. Spawn the task runner; enqueue one [`TaskSpec`] per input.
 //! 7. Install a Ctrl-C handler: first signal cancels every task, second exits.
 //! 8. Drain [`TaskEvent`]s, rendering progress/ETA (human) or one JSON object
@@ -369,12 +370,21 @@ fn report_download(json: bool, quiet: bool, line: &mut ProgressLine, update: &Do
 /// match that outcome. Any fetch failure (offline, network blip) degrades to
 /// `None` — VAD silently off, the run continues — which is `whisper_cpp.py:380`'s
 /// absent-model behavior as the *failure* mode, not the default.
+///
+/// `HUMM_DISABLE_VAD` (any non-empty value) skips both the cache lookup and
+/// the download outright, returning `None` immediately — a test-only
+/// kill-switch (hermetic `humm-cli` tests would otherwise reach the network
+/// on every run to fetch the Silero model) that never changes the default:
+/// real users keep VAD on unless they set it.
 fn ensure_vad(
     model_root: &std::path::Path,
     json: bool,
     quiet: bool,
     cancel: &CancelToken,
 ) -> Option<PathBuf> {
+    if vad_disabled_from_env(std::env::var("HUMM_DISABLE_VAD").ok().as_deref()) {
+        return None;
+    }
     if let Some(path) = local_vad_model_path(model_root) {
         return Some(path);
     }
@@ -827,6 +837,13 @@ fn use_gpu_from_env(value: Option<&str>) -> bool {
     !matches!(value, Some(v) if v != "false")
 }
 
+/// `HUMM_DISABLE_VAD` semantics: unset or empty leaves VAD on (the default for
+/// real users); any non-empty value disables it — a test-only kill-switch so
+/// hermetic `humm-cli` tests never reach the network for the Silero model.
+fn vad_disabled_from_env(value: Option<&str>) -> bool {
+    value.is_some_and(|v| !v.is_empty())
+}
+
 fn threads_from_env(value: Option<&str>) -> Option<u32> {
     value.and_then(|v| v.parse().ok())
 }
@@ -1116,6 +1133,19 @@ mod tests {
         assert!(!use_gpu_from_env(Some("true")));
         assert!(!use_gpu_from_env(Some("1")));
         assert!(!use_gpu_from_env(Some("")));
+    }
+
+    #[test]
+    fn vad_disabled_from_env_unset_or_empty_leaves_vad_on() {
+        assert!(!vad_disabled_from_env(None));
+        assert!(!vad_disabled_from_env(Some("")));
+    }
+
+    #[test]
+    fn vad_disabled_from_env_any_non_empty_value_disables_vad() {
+        assert!(vad_disabled_from_env(Some("1")));
+        assert!(vad_disabled_from_env(Some("true")));
+        assert!(vad_disabled_from_env(Some("false")));
     }
 
     #[test]
