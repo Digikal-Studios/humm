@@ -84,8 +84,6 @@ pub struct EngineOptions {
     pub vad_model: Option<PathBuf>,
     /// Thread count override; `None` uses the adapter's default.
     pub threads: Option<u32>,
-    /// Whether to use GPU acceleration (Metal/CoreML). Defaults to `true`.
-    pub use_gpu: bool,
 }
 
 /// Capabilities an engine implementation supports, for UI/CLI feature gating.
@@ -114,6 +112,12 @@ pub trait MediaProber: Send + Sync {
 }
 
 /// Receives incremental transcription results as they're produced.
+///
+/// Implementations must not panic: [`Self::on_segment`] and
+/// [`Self::on_progress`] may be invoked from FFI callback contexts (e.g. the
+/// whisper.cpp new-segment/progress callbacks) where unwinding across the
+/// foreign frame aborts the process. Handle errors by degrading gracefully
+/// (drop the update, set a flag) rather than panicking.
 pub trait SegmentSink {
     /// Called once per recognized segment, in order.
     fn on_segment(&mut self, segment: Segment);

@@ -38,7 +38,7 @@ Verification method legend:
 | F-042 | Model sizes & custom models (ggml URL, HF repo id, lumii) | unit + contract | in-progress (ggml sizes incl. lumii implemented + unit tested, Task 5; custom-URL/HF-repo id support deferred to M2) |
 | F-043 | Model download & cache (resume, SHA256, sentinels, layout) | unit + contract | in-progress (download/resume/SHA256/sentinel/CoreML zip implemented + unit tested (Task 5) and verified against real huggingface.co network in a contract test (Task 5); `.pt`/HF-hub layouts are N/A per ADR-008 backend consolidation; custom-URL download deferred to M2) |
 | F-044 | Model management UI (download/delete/show location) | gui-manual | not-started |
-| F-045 | Silero VAD on file transcription (offset remap) | contract + diff | implemented (manual VAD via WhisperVadContext + VadRemap, incl. VAD remap empirics, Task 6; contract test passes — first segment ≥ speech onset on original timeline; diff vs Buzz pending) |
+| F-045 | Silero VAD on file transcription (offset remap) | contract + diff | implemented (manual VAD via WhisperVadContext + VadRemap, incl. VAD remap empirics, Task 6; contract test passes — first segment ≥ speech onset on original timeline; diff vs Buzz pending; VAD timestamps sample-exact (more accurate than Buzz's linear rescale) — M2 diff harness must tolerance-compare) |
 | F-060 | Live recording window (device, meter, options) | gui-manual | not-started |
 | F-061 | Real-time transcription loop (chunking, silence cuts, rolling prompt) | unit (chunker) + gui-manual | not-started |
 | F-062 | Display modes incl. append-and-correct merge | unit (merge algorithm) + gui-manual | not-started |

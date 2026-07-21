@@ -110,6 +110,60 @@ fn ensure_vad_model_downloads_verifies_and_resumes() {
     );
 }
 
+/// Simulates the "process died after the body completed but before the
+/// rename" window: a `.partial` byte-identical to the full resource. The next
+/// `ensure_vad_model` sends `Range: bytes=<full-len>-`, the server answers
+/// HTTP 416 (Range Not Satisfiable), and recovery must verify the `.partial`
+/// against its published digest and promote it in place — never wedge in a
+/// permanent 416 loop. (Finding 2.)
+#[test]
+#[ignore = "requires network (huggingface.co)"]
+fn ensure_vad_model_recovers_from_http_416_completed_partial() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let downloader = ModelDownloader::new(dir.path());
+    let cancel = CancelToken::new();
+
+    // Fully download once to obtain the real, verified bytes.
+    let final_path = downloader
+        .ensure_vad_model(&mut |_| {}, &cancel)
+        .expect("initial ensure_vad_model should succeed");
+    let full_bytes = std::fs::read(&final_path).expect("read full model file");
+    let expected_sha = sha256_of(&final_path);
+
+    // Recreate the pre-rename crash state: a COMPLETE `.partial`, no final
+    // file, no sentinel.
+    let sentinel_path = dir.path().join(format!(
+        "{}{}",
+        registry::VAD_MODEL_FILE,
+        registry::SENTINEL_SUFFIX
+    ));
+    let partial_path = dir
+        .path()
+        .join(format!("{}.partial", registry::VAD_MODEL_FILE));
+    std::fs::write(&partial_path, &full_bytes).expect("write complete partial");
+    std::fs::remove_file(&sentinel_path).expect("remove sentinel");
+    std::fs::remove_file(&final_path).expect("remove final file");
+
+    // This resume request gets a 416 (offset == resource length). Recovery
+    // must verify-and-promote, not error out.
+    let recovered = downloader
+        .ensure_vad_model(&mut |_| {}, &cancel)
+        .expect("ensure_vad_model should recover from HTTP 416, not wedge");
+
+    assert_eq!(recovered, final_path);
+    assert!(recovered.is_file(), "final file should be restored");
+    assert!(sentinel_path.is_file(), "sentinel should be written");
+    assert!(
+        !partial_path.exists(),
+        "the completed partial should have been renamed away"
+    );
+    assert_eq!(
+        sha256_of(&recovered),
+        expected_sha,
+        "promoted file must be byte-identical to the verified download"
+    );
+}
+
 fn sha256_of(path: &std::path::Path) -> String {
     use sha2::{Digest, Sha256};
     let bytes = std::fs::read(path).expect("read file for hashing");

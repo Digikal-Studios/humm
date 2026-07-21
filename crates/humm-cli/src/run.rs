@@ -15,7 +15,7 @@ use humm_core::domain::{
 };
 use humm_core::language::Language;
 use humm_core::models::download::{DownloadProgress, ModelDownloader};
-use humm_core::models::registry::{local_model_path, local_vad_model_path};
+use humm_core::models::registry::local_vad_model_path;
 use humm_core::paths;
 use humm_core::pipeline::{EngineTuning, run_file_job};
 use humm_media::{FfmpegDecoder, FfprobeProber};
@@ -86,19 +86,31 @@ fn process_existing_files(
     let model_root = paths::model_root();
     let downloader = ModelDownloader::new(model_root.clone());
 
-    let model_path = match local_model_path(&model_root, args.model_size) {
-        Some(path) => path,
-        None => {
-            let mut progress = ProgressLine::new();
-            let mut render =
-                |update: DownloadProgress| render_download_progress(&mut progress, &update);
-            let result =
-                downloader.ensure_model(args.model_size, coreml_encoder(), &mut render, &cancel);
-            progress.finish();
-            match result {
-                Ok(path) => path,
-                Err(err) => return Err(fail(err)),
+    // Always route through `resolve_model` rather than a bare
+    // `local_model_path` check: a present ggml whose CoreML encoder never
+    // finished on an earlier run (network drop, cancel, checksum) is retried
+    // here instead of being silently skipped forever. `resolve_model`
+    // fast-paths without touching the network when everything is already
+    // cached, so this costs nothing in the common case.
+    let model_path = {
+        let mut progress = ProgressLine::new();
+        let mut render =
+            |update: DownloadProgress| render_download_progress(&mut progress, &update);
+        let result =
+            downloader.resolve_model(args.model_size, coreml_encoder(), &mut render, &cancel);
+        progress.finish();
+        match result {
+            Ok(resolved) => {
+                if resolved.coreml_degraded {
+                    eprintln!(
+                        "Note: the CoreML encoder could not be downloaded (network issue); \
+                         using the local model without CoreML acceleration. It will be retried \
+                         on the next run."
+                    );
+                }
+                resolved.path
             }
+            Err(err) => return Err(fail(err)),
         }
     };
 
@@ -122,14 +134,15 @@ fn process_existing_files(
         }
     };
 
-    let use_gpu = use_gpu_from_env(std::env::var("HUMM_FORCE_CPU").ok().as_deref());
+    // `use_gpu` is a load-time decision (consumed here at `WhisperEngine::load`),
+    // not an `EngineOptions` field — `EngineTuning` carries it to this call site.
     let tuning = EngineTuning {
         vad_model,
-        use_gpu,
+        use_gpu: use_gpu_from_env(std::env::var("HUMM_FORCE_CPU").ok().as_deref()),
         threads: threads_from_env(std::env::var("HUMM_WHISPER_N_THREADS").ok().as_deref()),
     };
 
-    let mut engine = match WhisperEngine::load(&model_path, use_gpu) {
+    let mut engine = match WhisperEngine::load(&model_path, tuning.use_gpu) {
         Ok(engine) => engine,
         Err(err) => return Err(fail(err)),
     };

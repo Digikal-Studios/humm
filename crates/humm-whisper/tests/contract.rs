@@ -74,7 +74,9 @@ fn engine() -> WhisperEngine {
     WhisperEngine::load(&ensure_tiny_model(), true).expect("load tiny model")
 }
 
-/// Base options: transcribe French, GPU on, everything else default.
+/// Base options: transcribe French, everything else default. (GPU use is a
+/// load-time decision — `WhisperEngine::load(.., use_gpu)` — not an
+/// `EngineOptions` field.)
 fn french_options() -> EngineOptions {
     EngineOptions {
         language: Language::parse("fr"),
@@ -84,7 +86,6 @@ fn french_options() -> EngineOptions {
         temperature: vec![0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
         vad_model: None,
         threads: None,
-        use_gpu: true,
     }
 }
 

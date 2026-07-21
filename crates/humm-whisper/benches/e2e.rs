@@ -62,8 +62,9 @@ fn ffmpeg_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Base options: transcribe French, GPU on — matches the contract tests'
-/// `french_options`.
+/// Base options: transcribe French — matches the contract tests'
+/// `french_options`. (GPU use is a load-time decision, not an
+/// `EngineOptions` field.)
 fn french_options() -> EngineOptions {
     EngineOptions {
         language: Language::parse("fr"),
@@ -73,7 +74,6 @@ fn french_options() -> EngineOptions {
         temperature: vec![0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
         vad_model: None,
         threads: None,
-        use_gpu: true,
     }
 }
 

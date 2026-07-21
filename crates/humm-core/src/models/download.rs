@@ -19,7 +19,8 @@ use crate::domain::ModelSize;
 use crate::error::ModelError;
 
 use super::registry::{
-    self, VAD_MODEL_FILE, VAD_MODEL_REPO, VAD_MODEL_URL, coreml_zip_url, ggml_file_name, ggml_url,
+    self, CoremlState, VAD_MODEL_FILE, VAD_MODEL_REPO, VAD_MODEL_URL, coreml_encoder_dir,
+    coreml_no_encoder_marker, coreml_state, coreml_zip_url, ggml_file_name, ggml_url,
     partial_path_for, repo_for, sentinel_path_for,
 };
 
@@ -58,12 +59,16 @@ impl ModelDownloader {
     /// Returns the path to the ggml model file. When `coreml_encoder` is
     /// `true`, only "this repo doesn't publish a CoreML encoder for this
     /// model" (HTTP 404) degrades gracefully — that case is resolved to
-    /// `Ok(())` internally by [`Self::ensure_coreml_encoder`]
-    /// (`model_loader.py:706-738`, Lumii ships no CoreML encoder at all).
-    /// Every other CoreML failure (`ChecksumMismatch` from a
-    /// corrupted/tampered zip, I/O errors, non-404 HTTP failures,
-    /// cancellation) propagates to the caller — a real failure must not be
-    /// silently downgraded to "no CoreML".
+    /// `Ok(())` internally by [`Self::ensure_coreml_encoder`] (which also
+    /// records a negative-cache marker) (`model_loader.py:706-738`, Lumii
+    /// ships no CoreML encoder at all). Every other CoreML failure
+    /// (`ChecksumMismatch` from a corrupted/tampered zip, I/O errors,
+    /// non-404 HTTP failures, cancellation) propagates to the caller — a real
+    /// failure must not be silently downgraded to "no CoreML".
+    ///
+    /// Callers that already hold a *usable* local ggml and want to tolerate a
+    /// CoreML transport blip (not hard-fail a working model on a network
+    /// hiccup) should use [`Self::resolve_model`] instead.
     pub fn ensure_model(
         &self,
         size: ModelSize,
@@ -71,18 +76,88 @@ impl ModelDownloader {
         progress: &mut dyn FnMut(DownloadProgress),
         cancel: &CancelToken,
     ) -> Result<PathBuf, ModelError> {
-        let repo = repo_for(size)?;
-        let file_name = ggml_file_name(size);
-        let url = ggml_url(size)?;
-        let final_path = self.root.join(&file_name);
-
-        self.ensure_artifact(&url, &final_path, Some(repo), progress, cancel)?;
+        let final_path = self.ensure_ggml(size, progress, cancel)?;
 
         if coreml_encoder {
-            propagate_coreml_result(self.ensure_coreml_encoder(size, progress, cancel))?;
+            // Every error reaching here is genuine: 404 ("no encoder
+            // published") is already resolved to `Ok(())` inside
+            // `ensure_coreml_encoder`. Propagate the rest — a corrupt zip's
+            // `ChecksumMismatch`, an I/O failure, a non-404 HTTP error, or
+            // cancellation must never be silently downgraded to "no CoreML".
+            self.ensure_coreml_encoder(size, progress, cancel)?;
         }
 
         Ok(final_path)
+    }
+
+    /// Ensures just `size`'s ggml model file (no CoreML), returning its path.
+    /// The shared prerequisite of [`Self::ensure_model`] and
+    /// [`Self::resolve_model`].
+    fn ensure_ggml(
+        &self,
+        size: ModelSize,
+        progress: &mut dyn FnMut(DownloadProgress),
+        cancel: &CancelToken,
+    ) -> Result<PathBuf, ModelError> {
+        let repo = repo_for(size)?;
+        let final_path = self.root.join(ggml_file_name(size));
+        let url = ggml_url(size)?;
+        self.ensure_artifact(&url, &final_path, Some(repo), progress, cancel)?;
+        Ok(final_path)
+    }
+
+    /// Resolves `size`'s ggml model for use, ensuring the CoreML encoder when
+    /// `coreml_encoder` is `true`, and — crucially — tolerating a CoreML
+    /// *transport* failure once the ggml model is usable locally.
+    ///
+    /// This is the model fast path the CLI runs on every `humm add`. Unlike a
+    /// bare [`crate::models::registry::local_model_path`] check (ggml file +
+    /// sentinel), it does not treat "ggml present" as "fully resolved": if the
+    /// CoreML encoder step never completed on an earlier run (a network drop,
+    /// a cancel, a checksum failure), [`CoremlState::Missing`] is retried here
+    /// instead of being silently skipped forever. [`CoremlState::Complete`]
+    /// and [`CoremlState::KnownAbsent`] (upstream publishes none) both need no
+    /// work.
+    ///
+    /// Failure policy once the ggml is usable (see [`coreml_failure_action`]):
+    /// a transport error (`Http`) degrades to a warning and
+    /// [`ResolvedModel::coreml_degraded`] `= true`, so the run continues
+    /// without CoreML acceleration and retries next run; a `ChecksumMismatch`
+    /// (corrupt/tampered encoder zip) or any other non-transport error
+    /// propagates. Failure to obtain the ggml itself always propagates —
+    /// without it there is no usable model.
+    pub fn resolve_model(
+        &self,
+        size: ModelSize,
+        coreml_encoder: bool,
+        progress: &mut dyn FnMut(DownloadProgress),
+        cancel: &CancelToken,
+    ) -> Result<ResolvedModel, ModelError> {
+        let path = self.ensure_ggml(size, progress, cancel)?;
+
+        let mut coreml_degraded = false;
+        if coreml_encoder
+            && coreml_state(&self.root, size) == CoremlState::Missing
+            && let Err(err) = self.ensure_coreml_encoder(size, progress, cancel)
+        {
+            match coreml_failure_action(&err) {
+                CoremlFailureAction::Degrade => {
+                    log::warn!(
+                        "CoreML encoder for {} unavailable ({err}); the local ggml model is \
+                         usable, so continuing without CoreML acceleration (it will be retried \
+                         on the next run)",
+                        size.ggml_name()
+                    );
+                    coreml_degraded = true;
+                }
+                CoremlFailureAction::Propagate => return Err(err),
+            }
+        }
+
+        Ok(ResolvedModel {
+            path,
+            coreml_degraded,
+        })
     }
 
     /// Ensures the Silero VAD model is present in the cache (downloading or
@@ -107,6 +182,14 @@ impl ModelDownloader {
     /// otherwise download/resume to `<final_path>.partial`, verify SHA256
     /// when `sha_repo` is given, then rename to `final_path` and write the
     /// sentinel last.
+    ///
+    /// Handles HTTP 416 (Range Not Satisfiable) explicitly: a resume request
+    /// whose offset is past the end of the resource means the `.partial` is
+    /// already (at least) complete — most likely a fully-downloaded body
+    /// whose process died in the narrow window between the last write and the
+    /// rename. Recovering (verify-and-promote, or discard-and-restart-once)
+    /// keeps a completed-but-unrenamed `.partial` from wedging the download in
+    /// a permanent 416 loop.
     fn ensure_artifact(
         &self,
         url: &str,
@@ -124,22 +207,54 @@ impl ModelDownloader {
             std::fs::create_dir_all(parent)?;
         }
 
-        let file_name = file_name_of(final_path);
         let partial_path = partial_path_for(final_path);
-
         let partial_len = std::fs::metadata(&partial_path).ok().map(|m| m.len());
         let range = resume_plan(partial_len);
         let response = self.send_get(url, range.as_deref())?;
+
+        if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            return self
+                .recover_from_range_not_satisfiable(url, final_path, sha_repo, progress, cancel);
+        }
         if !response.status().is_success() {
             return Err(ModelError::Http {
                 detail: format!("{url}: HTTP {}", response.status()),
             });
         }
+
+        self.finalize_download(
+            response,
+            final_path,
+            sha_repo,
+            range.is_some(),
+            progress,
+            cancel,
+        )
+    }
+
+    /// Common download tail shared by the resume, fresh, and 416-restart
+    /// paths: stream `response` into the `.partial`, verify its SHA256 when
+    /// `sha_repo` is given, then rename to `final_path` and write the sentinel
+    /// last. `resumed_range` records whether the request that produced
+    /// `response` carried a `Range` header (so a `206` appends rather than
+    /// truncates).
+    fn finalize_download(
+        &self,
+        response: reqwest::blocking::Response,
+        final_path: &Path,
+        sha_repo: Option<&str>,
+        resumed_range: bool,
+        progress: &mut dyn FnMut(DownloadProgress),
+        cancel: &CancelToken,
+    ) -> Result<(), ModelError> {
+        let file_name = file_name_of(final_path);
+        let partial_path = partial_path_for(final_path);
+
         self.write_response_stream(
             response,
             &partial_path,
             &file_name,
-            range.is_some(),
+            resumed_range,
             progress,
             cancel,
         )?;
@@ -149,8 +264,86 @@ impl ModelDownloader {
         }
 
         std::fs::rename(&partial_path, final_path)?;
-        std::fs::write(&sentinel, b"")?;
+        std::fs::write(sentinel_path_for(final_path), b"")?;
         Ok(())
+    }
+
+    /// Downloads `url` from scratch (no `Range`) into `final_path`. Used to
+    /// recover from a 416 whose `.partial` could not be verified as complete.
+    fn download_fresh(
+        &self,
+        url: &str,
+        final_path: &Path,
+        sha_repo: Option<&str>,
+        progress: &mut dyn FnMut(DownloadProgress),
+        cancel: &CancelToken,
+    ) -> Result<(), ModelError> {
+        let response = self.send_get(url, None)?;
+        if !response.status().is_success() {
+            return Err(ModelError::Http {
+                detail: format!("{url}: HTTP {}", response.status()),
+            });
+        }
+        self.finalize_download(response, final_path, sha_repo, false, progress, cancel)
+    }
+
+    /// Recovers from an HTTP 416 on a resume request (see [`Self::ensure_artifact`]).
+    ///
+    /// If a digest is obtainable and the `.partial` matches it, promote the
+    /// `.partial` in place (rename + sentinel) — no re-download. Otherwise (no
+    /// digest obtainable, or a mismatch) discard the `.partial` and download
+    /// fresh exactly once, so a stale or corrupt `.partial` can never wedge
+    /// the download in a permanent 416 loop.
+    fn recover_from_range_not_satisfiable(
+        &self,
+        url: &str,
+        final_path: &Path,
+        sha_repo: Option<&str>,
+        progress: &mut dyn FnMut(DownloadProgress),
+        cancel: &CancelToken,
+    ) -> Result<(), ModelError> {
+        let file_name = file_name_of(final_path);
+        let partial_path = partial_path_for(final_path);
+
+        let verified_complete =
+            self.verify_partial_is_complete(sha_repo, &file_name, &partial_path)?;
+
+        match on_range_not_satisfiable(verified_complete) {
+            RangeRecovery::Promote => {
+                std::fs::rename(&partial_path, final_path)?;
+                std::fs::write(sentinel_path_for(final_path), b"")?;
+                Ok(())
+            }
+            RangeRecovery::RestartFresh => {
+                remove_and_warn(&partial_path);
+                self.download_fresh(url, final_path, sha_repo, progress, cancel)
+            }
+        }
+    }
+
+    /// Attempts to verify the `.partial` at `partial_path` as a complete
+    /// artifact against its upstream digest, for 416 recovery. Returns
+    /// `Some(true)` if a published digest matches, `Some(false)` on mismatch,
+    /// and `None` when verification is impossible (no `sha_repo`, no digest
+    /// published, or the digest lookup failed as a transport error — an
+    /// unverifiable partial is restarted fresh, never trusted). A local I/O
+    /// error while hashing propagates.
+    fn verify_partial_is_complete(
+        &self,
+        sha_repo: Option<&str>,
+        file_name: &str,
+        partial_path: &Path,
+    ) -> Result<Option<bool>, ModelError> {
+        let Some(repo) = sha_repo else {
+            return Ok(None);
+        };
+        match self.expected_sha256(repo, file_name) {
+            Ok(Some(expected)) => {
+                let actual = sha256_file(partial_path)?;
+                Ok(Some(actual == expected))
+            }
+            Ok(None) | Err(_) => Ok(None),
+        }
     }
 
     /// Downloads and extracts `size`'s CoreML encoder zip
@@ -163,11 +356,15 @@ impl ModelDownloader {
         progress: &mut dyn FnMut(DownloadProgress),
         cancel: &CancelToken,
     ) -> Result<(), ModelError> {
-        let ggml_name = size.ggml_name();
-        let target_dir = self.root.join(format!("ggml-{ggml_name}-encoder.mlmodelc"));
-        if target_dir.join(registry::SENTINEL_SUFFIX).is_file() {
-            return Ok(());
+        // Both terminal states — a complete extracted encoder and a recorded
+        // "upstream has none" — need no work and no network.
+        match coreml_state(&self.root, size) {
+            CoremlState::Complete | CoremlState::KnownAbsent => return Ok(()),
+            CoremlState::Missing => {}
         }
+
+        let ggml_name = size.ggml_name();
+        let target_dir = coreml_encoder_dir(&self.root, size);
 
         let repo = repo_for(size)?;
         let url = coreml_zip_url(size)?;
@@ -185,6 +382,17 @@ impl ModelDownloader {
                 "no CoreML encoder published for {ggml_name} (HTTP 404); continuing without it"
             );
             let _ = std::fs::remove_file(&partial_zip_path);
+            // Record the known-absent state so future runs treat the missing
+            // encoder as a *resolved* (absent) artifact — the model fast path
+            // stops retrying and stops re-probing the network (Lumii, e.g.,
+            // publishes no CoreML encoder at all).
+            let marker = coreml_no_encoder_marker(&self.root, size);
+            if let Err(e) = std::fs::write(&marker, b"") {
+                log::warn!(
+                    "failed to write CoreML negative-cache marker {}: {e}",
+                    marker.display()
+                );
+            }
             return Ok(());
         }
         if !response.status().is_success() {
@@ -396,21 +604,65 @@ fn remove_and_warn(path: &Path) {
     }
 }
 
-/// `ensure_model`'s CoreML-step propagation policy, factored out as a named,
-/// independently-tested unit rather than inline call-site logic: every
-/// `Err` reaching this point is a genuine failure and must pass through
-/// unchanged.
-///
-/// [`ModelDownloader::ensure_coreml_encoder`] already resolves "this repo
-/// doesn't publish a CoreML encoder for this model" (HTTP 404) to `Ok(())`
-/// internally, so by the time a `Result` reaches this function there is no
-/// "acceptable failure" left to swallow — a prior version of `ensure_model`
-/// treated every non-`Canceled` error here as "log a warning and continue,"
-/// which silently hid a corrupted/tampered CoreML zip's `ChecksumMismatch`
-/// (and any I/O or non-404 HTTP failure) from the caller. Fixed per code
-/// review.
-fn propagate_coreml_result(result: Result<(), ModelError>) -> Result<(), ModelError> {
-    result
+/// Outcome of [`ModelDownloader::resolve_model`]: the usable ggml model path,
+/// plus whether a wanted CoreML encoder had to be skipped due to a transport
+/// error (so the caller can surface a user-facing notice).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedModel {
+    /// Path to the usable ggml model file.
+    pub path: PathBuf,
+    /// `true` iff CoreML was wanted and [`CoremlState::Missing`] but could not
+    /// be ensured due to a transport error, while the local ggml stayed
+    /// usable, so the run proceeds without CoreML acceleration (and retries on
+    /// the next run).
+    pub coreml_degraded: bool,
+}
+
+/// Whether a failure to ensure the CoreML encoder — when the ggml model is
+/// already usable locally — should be tolerated (degrade to "no CoreML") or
+/// propagated as a hard error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoremlFailureAction {
+    /// A transport blip (`Http`): a usable local ggml must not be hard-failed
+    /// over a network hiccup — warn, continue without CoreML, retry later.
+    Degrade,
+    /// A genuine artifact or environment failure (`ChecksumMismatch` from a
+    /// corrupt/tampered zip, I/O error, cancellation, ...): propagate.
+    Propagate,
+}
+
+/// The degrade-vs-propagate decision for a CoreML-ensure failure, given that
+/// the ggml is already usable. Only a transport error (`Http`) degrades; a
+/// `ChecksumMismatch` (a corrupt artifact, not a network blip) and every
+/// other error propagate.
+fn coreml_failure_action(err: &ModelError) -> CoremlFailureAction {
+    match err {
+        ModelError::Http { .. } => CoremlFailureAction::Degrade,
+        _ => CoremlFailureAction::Propagate,
+    }
+}
+
+/// The two outcomes of an HTTP 416 recovery, decided purely from whether the
+/// `.partial` could be verified as a complete artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeRecovery {
+    /// The `.partial` verified as complete — promote it (rename + sentinel).
+    Promote,
+    /// The `.partial` could not be verified (no digest obtainable, or a
+    /// mismatch) — discard it and download fresh once.
+    RestartFresh,
+}
+
+/// Decides how to recover from a 416 given the `.partial` verification result:
+/// `Some(true)` (verified complete) promotes it; `Some(false)` (mismatch) and
+/// `None` (no digest obtainable) both restart fresh. There is deliberately no
+/// "loop on 416" outcome, so a completed-but-unrenamed or stale `.partial`
+/// cannot wedge the download permanently.
+fn on_range_not_satisfiable(verified_complete: Option<bool>) -> RangeRecovery {
+    match verified_complete {
+        Some(true) => RangeRecovery::Promote,
+        Some(false) | None => RangeRecovery::RestartFresh,
+    }
 }
 
 /// Decides whether/how to resume a `.partial` download: `None` for a
@@ -553,47 +805,60 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn propagate_coreml_result_passes_through_ok() {
-        assert!(propagate_coreml_result(Ok(())).is_ok());
+    fn coreml_failure_action_degrades_only_on_transport_error() {
+        // A usable local ggml must not be hard-failed over a network blip.
+        assert_eq!(
+            coreml_failure_action(&ModelError::Http {
+                detail: "connection reset".to_string(),
+            }),
+            CoremlFailureAction::Degrade
+        );
     }
 
     #[test]
-    fn propagate_coreml_result_propagates_checksum_mismatch() {
-        let err = ModelError::ChecksumMismatch {
-            file: "ggml-small-encoder.mlmodelc.zip".to_string(),
-        };
-        assert!(matches!(
-            propagate_coreml_result(Err(err)),
-            Err(ModelError::ChecksumMismatch { .. })
-        ));
+    fn coreml_failure_action_propagates_checksum_mismatch() {
+        // A corrupt/tampered encoder zip is not a transport blip — surface it.
+        assert_eq!(
+            coreml_failure_action(&ModelError::ChecksumMismatch {
+                file: "ggml-small-encoder.mlmodelc.zip".to_string(),
+            }),
+            CoremlFailureAction::Propagate
+        );
     }
 
     #[test]
-    fn propagate_coreml_result_propagates_io_error() {
-        let err = ModelError::Io(std::io::Error::other("disk full"));
-        assert!(matches!(
-            propagate_coreml_result(Err(err)),
-            Err(ModelError::Io(_))
-        ));
+    fn coreml_failure_action_propagates_io_canceled_and_unsupported() {
+        assert_eq!(
+            coreml_failure_action(&ModelError::Io(std::io::Error::other("disk full"))),
+            CoremlFailureAction::Propagate
+        );
+        assert_eq!(
+            coreml_failure_action(&ModelError::Canceled),
+            CoremlFailureAction::Propagate
+        );
+        assert_eq!(
+            coreml_failure_action(&ModelError::Unsupported {
+                detail: "nope".to_string(),
+            }),
+            CoremlFailureAction::Propagate
+        );
     }
 
     #[test]
-    fn propagate_coreml_result_propagates_http_error() {
-        let err = ModelError::Http {
-            detail: "500".to_string(),
-        };
-        assert!(matches!(
-            propagate_coreml_result(Err(err)),
-            Err(ModelError::Http { .. })
-        ));
+    fn on_range_not_satisfiable_promotes_only_verified_partial() {
+        assert_eq!(on_range_not_satisfiable(Some(true)), RangeRecovery::Promote);
     }
 
     #[test]
-    fn propagate_coreml_result_propagates_canceled() {
-        assert!(matches!(
-            propagate_coreml_result(Err(ModelError::Canceled)),
-            Err(ModelError::Canceled)
-        ));
+    fn on_range_not_satisfiable_restarts_on_mismatch_or_unverifiable() {
+        // Mismatch (corrupt/stale partial) and "no digest obtainable" both
+        // discard and restart fresh — never trust an unverified partial, and
+        // never loop on 416.
+        assert_eq!(
+            on_range_not_satisfiable(Some(false)),
+            RangeRecovery::RestartFresh
+        );
+        assert_eq!(on_range_not_satisfiable(None), RangeRecovery::RestartFresh);
     }
 
     #[test]

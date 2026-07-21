@@ -135,7 +135,6 @@ pub fn run_file_job(
         temperature: job.options.temperature.clone(),
         vad_model: tuning.vad_model.clone(),
         threads: tuning.threads,
-        use_gpu: tuning.use_gpu,
     };
 
     let mut tee = TeeSink {
