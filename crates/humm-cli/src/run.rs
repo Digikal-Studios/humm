@@ -21,15 +21,23 @@ use humm_core::pipeline::{EngineTuning, run_file_job};
 use humm_media::{FfmpegDecoder, FfprobeProber};
 use humm_whisper::WhisperEngine;
 
-use crate::args::AddArgs;
+use crate::args::{AddArgs, ModelTypeArg};
 
 /// Runs `humm add`. Returns the process exit code per ADR-007: `0` every
 /// input succeeded, `1` a usage/config error aborted the whole run before
 /// any file could be processed, `2` at least one input failed but the run
 /// otherwise completed.
 pub fn run_add(args: AddArgs) -> ExitCode {
-    if args.files.is_empty() {
-        return fail("No input files");
+    // Informational, not a validation gate: print unconditionally before any
+    // check below, then continue regardless (ADR-007: humm is headless, so
+    // `--hide-gui` is accepted-but-inert, matching Buzz's own acceptance of
+    // the flag rather than rejecting it).
+    if args.hide_gui {
+        eprintln!("note: --hide-gui has no effect; humm is headless (ADR-007)");
+    }
+
+    if let Some(exit_code) = validate_add_args(&args) {
+        return exit_code;
     }
 
     let language = match parse_language(&args.language) {
@@ -40,11 +48,12 @@ pub fn run_add(args: AddArgs) -> ExitCode {
     let mut failed: Vec<String> = Vec::new();
     let mut existing_files: Vec<PathBuf> = Vec::new();
     for file in &args.files {
-        if file.exists() {
-            existing_files.push(file.clone());
+        let path = PathBuf::from(file);
+        if path.exists() {
+            existing_files.push(path);
         } else {
-            report_failure(file, "no such file");
-            failed.push(file.display().to_string());
+            report_failure(&path, "no such file");
+            failed.push(path.display().to_string());
         }
     }
 
@@ -70,6 +79,50 @@ pub fn run_add(args: AddArgs) -> ExitCode {
         }
         ExitCode::from(2)
     }
+}
+
+/// Validates the semantics clap's grammar can't express by itself, in the
+/// order `.superpowers/sdd/task-10-brief.md` specifies — all before any
+/// model/store work. Returns `Some(exit_code)` to abort `run_add` early,
+/// `None` once every check has passed.
+fn validate_add_args(args: &AddArgs) -> Option<ExitCode> {
+    if args.files.is_empty() {
+        return Some(fail("No input files"));
+    }
+
+    if args.extract_speech {
+        return Some(fail(
+            "speech extraction is not yet available in humm — it arrives in a later release",
+        ));
+    }
+
+    if args.model_type == ModelTypeArg::OpenAiApi {
+        return Some(fail(
+            "the OpenAI API backend is not yet available in humm — it arrives with cloud \
+             support; use a local model type meanwhile",
+        ));
+    }
+
+    if args.model_type == ModelTypeArg::HuggingFace {
+        // cli.py:146-147, verbatim.
+        if args.hfid.is_none() {
+            return Some(fail("--hfid is required when --model-type is huggingface"));
+        }
+        // TEMPORARY (Task 11 replaces this with the real huggingface
+        // resolution flow — not a tested behavior, see
+        // .superpowers/sdd/task-10-brief.md):
+        // validation above already accepted the flags, but there is no
+        // runtime for this backend yet, and silently falling through to the
+        // local whisper-rs flow would transcribe with the wrong model.
+        return Some(fail("the huggingface model type is wired in the next task"));
+    }
+
+    // `-m whisper|whispercpp|fasterwhisper` all run the local whisper-rs
+    // backend (ADR-008 consolidation); `--hfid` with a non-huggingface type
+    // is ignored exactly as Buzz ignores it, and `--openai-token` without
+    // `-m openaiapi` is accepted-and-unused (Buzz behavior) — neither needs
+    // code here.
+    None
 }
 
 /// Resolves the model, ensures VAD (best-effort), loads the engine, then runs
@@ -379,6 +432,79 @@ mod tests {
     }
 
     #[test]
+    fn validate_add_args_rejects_empty_files() {
+        let args = base_add_args();
+        assert!(validate_add_args(&args).is_some());
+    }
+
+    #[test]
+    fn validate_add_args_rejects_extract_speech() {
+        let mut args = base_add_args();
+        args.files = vec!["dummy.mp3".to_string()];
+        args.extract_speech = true;
+        assert!(validate_add_args(&args).is_some());
+    }
+
+    #[test]
+    fn validate_add_args_rejects_openaiapi_model_type() {
+        let mut args = base_add_args();
+        args.files = vec!["dummy.mp3".to_string()];
+        args.model_type = ModelTypeArg::OpenAiApi;
+        assert!(validate_add_args(&args).is_some());
+    }
+
+    #[test]
+    fn validate_add_args_rejects_huggingface_without_hfid() {
+        let mut args = base_add_args();
+        args.files = vec!["dummy.mp3".to_string()];
+        args.model_type = ModelTypeArg::HuggingFace;
+        args.hfid = None;
+        assert!(validate_add_args(&args).is_some());
+    }
+
+    #[test]
+    fn validate_add_args_rejects_huggingface_even_with_hfid() {
+        // TEMPORARY: no huggingface runtime yet (Task 11 replaces this).
+        let mut args = base_add_args();
+        args.files = vec!["dummy.mp3".to_string()];
+        args.model_type = ModelTypeArg::HuggingFace;
+        args.hfid = Some("openai/whisper-tiny".to_string());
+        assert!(validate_add_args(&args).is_some());
+    }
+
+    #[test]
+    fn validate_add_args_ignores_hfid_for_non_huggingface_type() {
+        let mut args = base_add_args();
+        args.files = vec!["dummy.mp3".to_string()];
+        args.model_type = ModelTypeArg::Whisper;
+        args.hfid = Some("some/repo".to_string());
+        assert!(validate_add_args(&args).is_none());
+    }
+
+    #[test]
+    fn validate_add_args_ignores_openai_token_for_non_openaiapi_type() {
+        let mut args = base_add_args();
+        args.files = vec!["dummy.mp3".to_string()];
+        args.model_type = ModelTypeArg::Whisper;
+        args.openai_token = Some("token".to_string());
+        assert!(validate_add_args(&args).is_none());
+    }
+
+    #[test]
+    fn validate_add_args_accepts_local_backend_types() {
+        for model_type in [
+            ModelTypeArg::Whisper,
+            ModelTypeArg::WhisperCpp,
+            ModelTypeArg::FasterWhisper,
+        ] {
+            let mut args = base_add_args();
+            args.files = vec!["dummy.mp3".to_string()];
+            args.model_type = model_type;
+            assert!(validate_add_args(&args).is_none());
+        }
+    }
+
+    #[test]
     fn use_gpu_from_env_unset_allows_gpu() {
         assert!(use_gpu_from_env(None));
     }
@@ -438,14 +564,21 @@ mod tests {
     fn base_add_args() -> AddArgs {
         AddArgs {
             task: humm_core::domain::TaskKind::Transcribe,
+            model_type: ModelTypeArg::Whisper,
             model_size: humm_core::domain::ModelSize::Small,
+            hfid: None,
             language: String::new(),
             prompt: String::new(),
             word_timestamps: false,
+            extract_speech: false,
+            openai_token: None,
             srt: false,
             vtt: false,
             txt: false,
             output_directory: None,
+            hide_gui: false,
+            json: false,
+            quiet: false,
             files: Vec::new(),
         }
     }
