@@ -103,6 +103,23 @@ pub struct HummApp {
     /// The Preferences window's state, rebuilt fresh (Models tab re-scanned
     /// from disk) each time it's opened; `None` while closed.
     preferences_state: Option<PreferencesState>,
+    /// Environment-gated smoke-test hooks (`HUMM_SMOKE_OPEN_WINDOWS`/
+    /// `HUMM_SMOKE_AUTO_CLOSE_FRAMES`, see [`SmokeHooks`]) — read once here
+    /// in [`Self::build`], never re-read per frame. Exist solely so the M3
+    /// `gui-manual` multi-window smoke (`docs/gui-manual/M3.md` item 35) can
+    /// run under a controller that cannot inject OS-level input
+    /// (Accessibility permissions unavailable in the automation
+    /// environment); not a user-facing surface — deliberately absent from
+    /// `docs/HUMM_SURFACE.md`.
+    smoke_hooks: SmokeHooks,
+    /// One-shot guard for `smoke_hooks.open_windows`'s effect — applies on
+    /// the first `eframe::App::ui` call only, same once-guard shape as
+    /// `telemetry_fired`.
+    smoke_windows_opened: bool,
+    /// Frames rendered since construction; only consulted when
+    /// `smoke_hooks.auto_close_frames` is `Some`, to know when that many
+    /// frames have elapsed and shutdown should be requested.
+    smoke_frame_count: u32,
 }
 
 impl HummApp {
@@ -172,6 +189,13 @@ impl HummApp {
         // Buzz default (`ShortcutMap::from_settings`'s own contract).
         let shortcuts = ShortcutMap::from_settings(&HashMap::new());
 
+        // Smoke-test hooks (see `SmokeHooks`'s doc comment): read once here,
+        // never re-read per frame.
+        let smoke_open_env = std::env::var("HUMM_SMOKE_OPEN_WINDOWS").ok();
+        let smoke_close_env = std::env::var("HUMM_SMOKE_AUTO_CLOSE_FRAMES").ok();
+        let smoke_hooks =
+            smoke_hooks_from_env(smoke_open_env.as_deref(), smoke_close_env.as_deref());
+
         // Chip persistence across sessions (binding decision, Buzz-equivalent):
         // a stale-but-still-newer `available_version` from a previous
         // session's check shows the chip immediately, before this session's
@@ -214,6 +238,9 @@ impl HummApp {
             about_state: AboutState::default(),
             preferences_open: false,
             preferences_state: None,
+            smoke_hooks,
+            smoke_windows_opened: false,
+            smoke_frame_count: 0,
         }
     }
 
@@ -729,6 +756,42 @@ impl HummApp {
         services::fire_launch_telemetry(&self.services);
     }
 
+    /// Applies `smoke_hooks.open_windows`'s effect on the first
+    /// `eframe::App::ui` call only — every later call is a no-op, the same
+    /// once-guard shape as [`Self::fire_telemetry_once`]. Sets exactly the
+    /// same `action_state.about_requested`/`preferences_requested` flags the
+    /// Help-menu clicks / ⌘, shortcut set
+    /// (`views::main_window::show_menu_bar`/`handle_shortcuts`) — there is
+    /// no parallel window-opening code path here; the very same drain in
+    /// [`eframe::App::ui`] that already turns those flags into
+    /// `about_open`/`preferences_open` for the real menu path does the rest.
+    fn apply_smoke_open_windows_once(&mut self) {
+        if self.smoke_windows_opened {
+            return;
+        }
+        self.smoke_windows_opened = true;
+        if self.smoke_hooks.open_windows {
+            self.action_state.about_requested = true;
+            self.action_state.preferences_requested = true;
+        }
+    }
+
+    /// Counts this frame against `smoke_hooks.auto_close_frames` and, once
+    /// the count reaches it, requests a normal shutdown
+    /// (`egui::ViewportCommand::Close`) — the same close path a user
+    /// clicking the window's close button takes, so `eframe`'s own
+    /// persistence (`gui.ron`) still runs. A no-op whenever the hook is
+    /// unset (the default, non-smoke case).
+    fn apply_smoke_auto_close(&mut self, ctx: &egui::Context) {
+        let Some(target_frames) = self.smoke_hooks.auto_close_frames else {
+            return;
+        };
+        self.smoke_frame_count += 1;
+        if self.smoke_frame_count >= target_frames {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
     /// Drains `services.update_rx` and applies every [`UpdateNotice`] this
     /// frame: `Available` always updates the toolbar chip (whichever check
     /// — startup or the About window's manual one — found it); `UpToDate`
@@ -887,6 +950,36 @@ fn retry_allowed(status: Status) -> bool {
     matches!(status, Status::Failed | Status::Canceled | Status::Skipped)
 }
 
+/// Environment-gated smoke-test hooks (see the `smoke_hooks` field doc on
+/// [`HummApp`]): parsed once, at construction, from
+/// `HUMM_SMOKE_OPEN_WINDOWS`/`HUMM_SMOKE_AUTO_CLOSE_FRAMES`. Exist solely so
+/// the M3 `gui-manual` multi-window smoke (`docs/gui-manual/M3.md` item 35)
+/// can run without OS input injection — never a user-facing surface, never
+/// documented in `docs/HUMM_SURFACE.md`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SmokeHooks {
+    /// `HUMM_SMOKE_OPEN_WINDOWS` was set to any non-empty value.
+    open_windows: bool,
+    /// `HUMM_SMOKE_AUTO_CLOSE_FRAMES` parsed as a positive `u32`; `None`
+    /// when the var is unset, empty, zero, or fails to parse as a `u32`.
+    auto_close_frames: Option<u32>,
+}
+
+/// Pure parse of the two smoke-hook env values into a [`SmokeHooks`]. Takes
+/// `Option<&str>` (the already-`std::env::var(..).ok()`'d value) rather than
+/// reading the environment itself, so it's directly unit-testable without
+/// mutating real process-global env state.
+fn smoke_hooks_from_env(open: Option<&str>, close: Option<&str>) -> SmokeHooks {
+    let open_windows = open.is_some_and(|value| !value.is_empty());
+    let auto_close_frames = close
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|&frames| frames > 0);
+    SmokeHooks {
+        open_windows,
+        auto_close_frames,
+    }
+}
+
 impl eframe::App for HummApp {
     /// eframe 0.35's per-frame entry point: `App::ui` (not the classic
     /// `App::update`), handed the root viewport's `egui::Ui` directly rather
@@ -901,6 +994,8 @@ impl eframe::App for HummApp {
         }
 
         self.fire_telemetry_once();
+        self.apply_smoke_open_windows_once();
+        self.apply_smoke_auto_close(ui.ctx());
         self.drain_pending_argv_import();
         self.drain_update_notices();
 
@@ -993,5 +1088,51 @@ mod tests {
         assert!(!retry_allowed(Status::Completed));
         assert!(!retry_allowed(Status::Queued));
         assert!(!retry_allowed(Status::InProgress));
+    }
+
+    #[test]
+    fn smoke_hooks_from_env_open_nonempty_sets_open_windows_true() {
+        assert!(smoke_hooks_from_env(Some("1"), None).open_windows);
+        assert!(smoke_hooks_from_env(Some("anything"), None).open_windows);
+    }
+
+    #[test]
+    fn smoke_hooks_from_env_open_empty_or_absent_leaves_open_windows_false() {
+        assert!(!smoke_hooks_from_env(None, None).open_windows);
+        assert!(!smoke_hooks_from_env(Some(""), None).open_windows);
+    }
+
+    #[test]
+    fn smoke_hooks_from_env_close_positive_integer_parses_to_some() {
+        assert_eq!(
+            smoke_hooks_from_env(None, Some("5")).auto_close_frames,
+            Some(5)
+        );
+        assert_eq!(
+            smoke_hooks_from_env(None, Some("1")).auto_close_frames,
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn smoke_hooks_from_env_close_zero_is_none() {
+        assert_eq!(
+            smoke_hooks_from_env(None, Some("0")).auto_close_frames,
+            None
+        );
+    }
+
+    #[test]
+    fn smoke_hooks_from_env_close_garbage_is_none() {
+        assert_eq!(
+            smoke_hooks_from_env(None, Some("not-a-number")).auto_close_frames,
+            None
+        );
+    }
+
+    #[test]
+    fn smoke_hooks_from_env_close_absent_or_empty_is_none() {
+        assert_eq!(smoke_hooks_from_env(None, None).auto_close_frames, None);
+        assert_eq!(smoke_hooks_from_env(None, Some("")).auto_close_frames, None);
     }
 }
