@@ -256,6 +256,30 @@ impl TasksVm {
         vm
     }
 
+    /// Builds a [`TasksVm`] directly from a pre-built row list, sorted per
+    /// the built-in default (`DateAdded`, descending) — bypassing
+    /// [`Self::load`]'s per-row `store.load_task_spec`/`model_display_columns`
+    /// reads entirely.
+    ///
+    /// **Bench-only.** Not a production constructor: it exists so
+    /// `benches/table_scroll.rs` can synthesize a 100 000-row view-model
+    /// cheaply (every [`RowVm`] field is already `pub`, so the bench builds
+    /// them directly) without either paying for 100 000 real
+    /// `SqliteStore::create_task` + `load_task_spec` round trips just to
+    /// populate test data, or duplicating this struct's private fields in
+    /// the bench crate. `#[doc(hidden)]` and the `_bench` name keep it out
+    /// of the crate's normal public-API surface and obvious at every call
+    /// site that it isn't one.
+    #[doc(hidden)]
+    pub fn for_bench(rows: Vec<RowVm>) -> Self {
+        let mut vm = TasksVm {
+            rows,
+            ..TasksVm::default()
+        };
+        vm.resort();
+        vm
+    }
+
     /// Folds one [`TaskEvent`] into the view-model, per its kind:
     ///
     /// - [`TaskEventKind::Queued`]: reads the new row from `store`

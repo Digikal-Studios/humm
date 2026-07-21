@@ -123,8 +123,9 @@ warning lines only.
 ### 5.1 `humm-gui`-only environment variables
 
 The CLI-shared variables above apply to `humm-gui` too (it calls the same
-`humm-core::paths`/`humm-core::env` functions). These four are GUI-specific
-(M3 Task 11):
+`humm-core::paths`/`humm-core::env` functions). These four are GUI-specific:
+`HUMM_FAVORITE_LANGUAGES` from M3 Task 9 (import paths + options sheet); the
+other three from M3 Task 11 (preferences/update/telemetry wiring).
 
 | Variable | Effect |
 |----------|--------|

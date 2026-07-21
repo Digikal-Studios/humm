@@ -2156,7 +2156,6 @@ dependencies = [
  "chrono",
  "clap",
  "ctrlc",
- "fd-lock",
  "flume",
  "humm-core",
  "humm-media",
@@ -2200,6 +2199,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "criterion",
  "eframe",
  "egui",
  "egui_extras",

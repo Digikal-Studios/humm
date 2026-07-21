@@ -71,7 +71,12 @@
 //! (correctly) by whichever one gets there first; nothing this process
 //! enqueues after its own successful claim can look stale yet (there hasn't
 //! been time for it to run), so there is nothing genuinely-running for the
-//! interloper to wrongly cancel.
+//! interloper to wrongly cancel. This isn't just a timing argument — it's
+//! load-bearing on call-site *ordering*: both callers (`humm-cli`'s
+//! `run.rs::execute` and `humm-gui`'s `services.rs::init`) call
+//! [`acquire_instance_lock`] and run the stale flip strictly *before* that
+//! same process's first `enqueue` call, so by construction no row this
+//! process itself creates exists yet for an interloper to race.
 
 use std::fs::{File, OpenOptions};
 use std::io;

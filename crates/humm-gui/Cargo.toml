@@ -35,3 +35,8 @@ egui_kittest = { workspace = true }
 tempfile = { workspace = true }
 pretty_assertions = { workspace = true }
 rusqlite = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "table_scroll"
+harness = false
