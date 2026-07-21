@@ -587,6 +587,13 @@ impl<'a> HumanRenderer<'a> {
             TaskEventKind::Canceled => {
                 self.line.finish();
             }
+            TaskEventKind::StoreWriteFailed { operation, detail } => {
+                // Out of band (ADR-018): does not interrupt the progress
+                // line's task-boundary state, so no `self.line.finish()`.
+                if !self.quiet {
+                    eprintln!("warning: history not recorded ({operation}): {detail}");
+                }
+            }
         }
     }
 }
@@ -728,6 +735,11 @@ enum JsonEvent<'a> {
     Canceled {
         task_id: String,
     },
+    StoreWriteFailed {
+        task_id: String,
+        operation: &'a str,
+        detail: &'a str,
+    },
 }
 
 /// Maps a [`TaskEvent`] to its [`JsonEvent`] and prints it as one line on
@@ -765,6 +777,11 @@ fn emit_json(event: &TaskEvent, labels: &HashMap<TranscriptionId, String>) {
             error: message,
         },
         TaskEventKind::Canceled => JsonEvent::Canceled { task_id },
+        TaskEventKind::StoreWriteFailed { operation, detail } => JsonEvent::StoreWriteFailed {
+            task_id,
+            operation,
+            detail,
+        },
     };
     if let Some(text) = to_json_line(&value) {
         println!("{text}");
@@ -925,6 +942,11 @@ mod tests {
             TaskEventKind::Canceled => JsonEvent::Canceled {
                 task_id: task_id_str,
             },
+            TaskEventKind::StoreWriteFailed { operation, detail } => JsonEvent::StoreWriteFailed {
+                task_id: task_id_str,
+                operation,
+                detail,
+            },
         };
         to_json_line(&value).expect("serializes")
     }
@@ -1024,6 +1046,21 @@ mod tests {
         assert_eq!(
             json_for(TaskEventKind::Canceled, ID, ""),
             r#"{"event":"canceled","task_id":"550e8400-e29b-41d4-a716-446655440000"}"#
+        );
+    }
+
+    #[test]
+    fn json_store_write_failed_matches_schema() {
+        assert_eq!(
+            json_for(
+                TaskEventKind::StoreWriteFailed {
+                    operation: "mark_started".to_string(),
+                    detail: "database query failed: boom".to_string(),
+                },
+                ID,
+                ""
+            ),
+            r#"{"event":"store_write_failed","task_id":"550e8400-e29b-41d4-a716-446655440000","operation":"mark_started","detail":"database query failed: boom"}"#
         );
     }
 

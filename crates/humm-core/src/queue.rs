@@ -19,14 +19,18 @@
 //!   `mark_failed` / `mark_canceled` is written to the store *before* the
 //!   matching `Completed`/`Failed`/`Canceled` event is emitted, so a consumer
 //!   reacting to the event always sees a consistent store.
-//! - **No panics.** Engine/pipeline errors are mapped to task failure, never
-//!   propagated as a panic — one bad task must not wedge the queue. Store
-//!   *write* failures (`mark_started`/`mark_completed`/`mark_failed`/
-//!   `mark_canceled`/`update_progress`/`update_file`) are a different case:
-//!   they are logged and the run continues regardless — a deliberate choice,
-//!   since finishing the transcription beats aborting on a DB hiccup, and the
-//!   task's terminal state is decided by the pipeline outcome, not by whether
-//!   the store write for it happened to succeed.
+//! - **Panics are contained.** `run_job` runs inside `catch_unwind`: an
+//!   engine/pipeline panic is mapped to task failure (never propagated as a
+//!   panic — one bad task must not wedge the queue) and discards the cached
+//!   engine, since an engine that panicked mid-run must not be reused.
+//! - **Store-write failures never abort a run (ADR-018).** Every store write
+//!   (`mark_started`/`mark_completed`/`mark_failed`/`mark_canceled`/
+//!   `update_progress`/`update_file`) is logged *and* emits a
+//!   [`TaskEventKind::StoreWriteFailed`] event on failure, so subscribers
+//!   (CLI, GUI) can surface it — but the run continues regardless: finishing
+//!   the transcription beats aborting on a DB hiccup, and a task's terminal
+//!   state is decided by the pipeline outcome, not by whether the store write
+//!   for it happened to succeed.
 //! - **Two mutexes, never nested.** [`Runner`] and [`QueueHandle`] share a
 //!   subscriber list and a "current task" slot, each behind its own `Mutex`.
 //!   Every critical section locks exactly one of them and releases it before
@@ -43,7 +47,7 @@ use crate::boundary::{
 };
 use crate::cancel::CancelToken;
 use crate::domain::{Input, ModelSpec, Segment, Source, TaskSpec, TranscriptionId};
-use crate::error::{CoreError, EngineError, MediaError};
+use crate::error::{CoreError, EngineError, MediaError, StoreError};
 use crate::pipeline::{EngineTuning, JobOutcome, run_file_job};
 
 /// The message emitted to yt-dlp-less URL tasks: exactly this string is
@@ -56,7 +60,8 @@ const YTDLP_MISSING: &str =
 /// The per-task order is `Queued` → (`Started` → `DownloadProgress`* →
 /// `Progress`/`SegmentAdded`* → one of `Completed`/`Failed`) — unless the task
 /// is canceled before it starts, in which case it is `Queued` → `Canceled`
-/// with no `Started`.
+/// with no `Started`. `StoreWriteFailed` is out of band: it may interleave
+/// anywhere in that sequence (ADR-018) and never changes it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaskEventKind {
     /// The task was accepted and persisted; it is waiting its turn.
@@ -83,6 +88,15 @@ pub enum TaskEventKind {
     },
     /// The task was canceled (before or during its run).
     Canceled,
+    /// A store write for this task failed (ADR-018): the run continues
+    /// regardless — the task's terminal state is decided by the pipeline
+    /// outcome, not by whether this write succeeded.
+    StoreWriteFailed {
+        /// The store method that failed, e.g. `"mark_started"`.
+        operation: String,
+        /// The failure's diagnostic detail (the store error's message).
+        detail: String,
+    },
 }
 
 /// A [`TaskEventKind`] tagged with the task it belongs to.
@@ -146,6 +160,31 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 fn emit(subscribers: &Mutex<Vec<flume::Sender<TaskEvent>>>, event: TaskEvent) {
     let mut subs = lock_recover(subscribers);
     subs.retain(|tx| tx.send(event.clone()).is_ok());
+}
+
+/// Logs and emits [`TaskEventKind::StoreWriteFailed`] for a store write that
+/// failed at `operation` (the store method name, e.g. `"mark_started"`) —
+/// the ADR-018 policy: the failure is surfaced to subscribers, but never
+/// aborts the run. Shared by [`Runner`] (which owns `subscribers`) and
+/// [`QueueSink`] (which holds a clone of it), so every call site reports the
+/// same way.
+fn emit_store_write_failed(
+    subscribers: &Mutex<Vec<flume::Sender<TaskEvent>>>,
+    id: TranscriptionId,
+    operation: &str,
+    err: &StoreError,
+) {
+    log::error!("{operation} failed for task {id}: {err}");
+    emit(
+        subscribers,
+        TaskEvent {
+            task_id: id,
+            kind: TaskEventKind::StoreWriteFailed {
+                operation: operation.to_string(),
+                detail: err.to_string(),
+            },
+        },
+    );
 }
 
 /// A command sent from a [`QueueHandle`] to the runner thread.
@@ -289,6 +328,18 @@ fn classify(error: CoreError) -> Terminal {
     }
 }
 
+/// Extracts a human-readable message from a `catch_unwind` panic payload:
+/// `panic!("literal")` payloads downcast to `&str`, `panic!("{}", x)` and
+/// `.expect(msg)` payloads downcast to `String`; anything else (a custom
+/// payload passed to `panic_any`) falls back to a generic message.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic payload".to_string())
+}
+
 /// The [`SegmentSink`] the runner hands to the pipeline: it forwards segment
 /// and progress updates as [`TaskEvent`]s and writes progress to the store,
 /// throttled to whole-percent changes.
@@ -324,7 +375,7 @@ impl SegmentSink for QueueSink {
         if self.last_pct != Some(pct) {
             self.last_pct = Some(pct);
             if let Err(err) = self.store.update_progress(&self.id, f64::from(fraction)) {
-                log::error!("update_progress failed for task {}: {err}", self.id);
+                emit_store_write_failed(&self.subscribers, self.id, "update_progress", &err);
             }
         }
         emit(
@@ -362,9 +413,12 @@ struct Runner {
     media_dir: PathBuf,
     /// Tasks accepted but not yet run (FIFO).
     pending: VecDeque<PendingTask>,
-    /// Ids canceled but not yet dequeued (Buzz's canceled-set). *Consumed*: an
-    /// id is removed when its task is dequeued-and-canceled, so the set cannot
-    /// grow without bound.
+    /// Ids canceled but not yet dequeued (Buzz's canceled-set). *Consumed*: a
+    /// pending id is removed as soon as its task is dequeued. A `Cancel(id)`
+    /// sent for the task that is *already* running isn't processed until the
+    /// runner next drains its command channel — which `run_task` does once
+    /// more at its own tail, right before removing `id` there too — so that
+    /// redundant insert can never outlive the task it targeted.
     canceled: HashSet<TranscriptionId>,
     /// Once set, exit after the pending queue drains.
     finishing: bool,
@@ -413,29 +467,28 @@ impl Runner {
     /// Applies one command to the runner's state.
     fn handle_command(&mut self, command: Command) {
         match command {
-            Command::Enqueue { id, spec, source } => match self
-                .store
-                .create_task(&id, &spec, source)
-            {
-                Ok(()) => {
-                    self.emit(TaskEvent {
-                        task_id: id,
-                        kind: TaskEventKind::Queued,
-                    });
-                    self.pending.push_back(PendingTask { id, spec });
-                }
-                Err(err) => {
-                    let message = CoreError::from(err).to_string();
-                    log::error!("create_task failed for task {id}: {message}");
-                    if let Err(err2) = self.store.mark_failed(&id, &message) {
-                        log::error!("mark_failed after create_task error failed for {id}: {err2}");
+            Command::Enqueue { id, spec, source } => {
+                match self.store.create_task(&id, &spec, source) {
+                    Ok(()) => {
+                        self.emit(TaskEvent {
+                            task_id: id,
+                            kind: TaskEventKind::Queued,
+                        });
+                        self.pending.push_back(PendingTask { id, spec });
                     }
-                    self.emit(TaskEvent {
-                        task_id: id,
-                        kind: TaskEventKind::Failed { message },
-                    });
+                    Err(err) => {
+                        let message = CoreError::from(err).to_string();
+                        log::error!("create_task failed for task {id}: {message}");
+                        if let Err(err2) = self.store.mark_failed(&id, &message) {
+                            self.store_write_failed(id, "mark_failed", &err2);
+                        }
+                        self.emit(TaskEvent {
+                            task_id: id,
+                            kind: TaskEventKind::Failed { message },
+                        });
+                    }
                 }
-            },
+            }
             Command::Cancel(id) => {
                 self.canceled.insert(id);
             }
@@ -483,20 +536,44 @@ impl Runner {
         }
 
         if let Err(err) = self.store.mark_started(&id) {
-            log::error!("mark_started failed for task {id}: {err}");
+            self.store_write_failed(id, "mark_started", &err);
         }
         self.emit(TaskEvent {
             task_id: id,
             kind: TaskEventKind::Started,
         });
 
-        let terminal = self.run_job(id, &spec, &token);
+        // Contain a panicking engine/pipeline: it must fail this one task,
+        // never take down the runner thread (and the rest of the queue with
+        // it). `run_job` takes `&mut self`, so the closure is not
+        // (statically) unwind-safe — `AssertUnwindSafe` is sound here because
+        // a panic mid-`run_job` leaves no in-progress mutation we rely on
+        // afterward: `engine_cache` is explicitly cleared below rather than
+        // trusted, and every other field `run_job` might have touched is
+        // either write-only-on-success (`engine_cache`, again) or unrelated
+        // to this task's outcome.
+        let terminal = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.run_job(id, &spec, &token)
+        })) {
+            Ok(terminal) => terminal,
+            Err(payload) => {
+                let msg = panic_message(&*payload);
+                // A previously cached engine — or one `run_job` built but
+                // never got to cache (the panic happened before its
+                // unconditional cache-assignment ran) — must not be reused:
+                // discard it unconditionally.
+                self.engine_cache = None;
+                Terminal::Failed(format!(
+                    "internal error: task panicked: {msg} — see the log file"
+                ))
+            }
+        };
         self.set_current(None);
 
         match terminal {
             Terminal::Completed(outcome) => {
                 if let Err(err) = self.store.mark_completed(&id, &outcome.segments) {
-                    log::error!("mark_completed failed for task {id}: {err}");
+                    self.store_write_failed(id, "mark_completed", &err);
                 }
                 self.emit(TaskEvent {
                     task_id: id,
@@ -508,7 +585,7 @@ impl Runner {
             Terminal::Canceled => self.write_canceled(id),
             Terminal::Failed(message) => {
                 if let Err(err) = self.store.mark_failed(&id, &message) {
-                    log::error!("mark_failed failed for task {id}: {err}");
+                    self.store_write_failed(id, "mark_failed", &err);
                 }
                 self.emit(TaskEvent {
                     task_id: id,
@@ -516,17 +593,34 @@ impl Runner {
                 });
             }
         }
+
+        // Consume the id from the canceled-set at terminal time. `cancel(id)`
+        // always sends `Command::Cancel(id)` over the channel — even for the
+        // task that's already current, where the token (tripped directly by
+        // the handle) is the real cancellation mechanism and this command is
+        // otherwise redundant — and nothing else drains the channel while
+        // this task is running, so that command is still unprocessed here.
+        // Drain it now, before removing, so it cannot outlive this task and
+        // leak a permanent entry for an id that will never be dequeued again.
+        self.drain_commands_nonblocking();
+        self.canceled.remove(&id);
     }
 
     /// Writes `canceled` to the store, then emits the `Canceled` event.
     fn write_canceled(&self, id: TranscriptionId) {
         if let Err(err) = self.store.mark_canceled(&id) {
-            log::error!("mark_canceled failed for task {id}: {err}");
+            self.store_write_failed(id, "mark_canceled", &err);
         }
         self.emit(TaskEvent {
             task_id: id,
             kind: TaskEventKind::Canceled,
         });
+    }
+
+    /// Logs and emits [`TaskEventKind::StoreWriteFailed`] for a store write
+    /// that failed at `operation` (ADR-018).
+    fn store_write_failed(&self, id: TranscriptionId, operation: &str, err: &StoreError) {
+        emit_store_write_failed(&self.subscribers, id, operation, err);
     }
 
     /// Resolves the input (downloading a URL if needed), acquires the engine,
@@ -625,7 +719,7 @@ impl Runner {
         };
 
         if let Err(err) = self.store.update_file(&id, &local) {
-            log::error!("update_file failed for task {id}: {err}");
+            self.store_write_failed(id, "update_file", &err);
         }
         Ok(local)
     }
@@ -863,6 +957,9 @@ mod tests {
             segments: Vec<Segment>,
         },
         Fail,
+        /// Panics instead of returning — exercises the runner's
+        /// `catch_unwind` containment.
+        Panic,
         Block(Gate),
     }
 
@@ -896,6 +993,7 @@ mod tests {
                 Some(EngineScript::Fail) => Err(EngineError::Inference {
                     detail: "boom".into(),
                 }),
+                Some(EngineScript::Panic) => panic!("engine exploded"),
                 Some(EngineScript::Block(g)) => {
                     g.wait();
                     if cancel.is_canceled() {
@@ -1105,6 +1203,24 @@ mod tests {
 
     fn recv(rx: &flume::Receiver<TaskEvent>) -> TaskEvent {
         rx.recv_timeout(Duration::from_secs(5)).expect("event")
+    }
+
+    /// Receives events until one satisfies `pred` (inclusive), returning
+    /// every event seen along the way. Times out (via `recv`) if `pred` is
+    /// never satisfied.
+    fn events_until(
+        rx: &flume::Receiver<TaskEvent>,
+        pred: impl Fn(&TaskEvent) -> bool,
+    ) -> Vec<TaskEvent> {
+        let mut events = Vec::new();
+        loop {
+            let event = recv(rx);
+            let matched = pred(&event);
+            events.push(event);
+            if matched {
+                return events;
+            }
+        }
     }
 
     fn kinds(events: &[TaskEvent], id: TranscriptionId) -> Vec<TaskEventKind> {
@@ -1725,5 +1841,185 @@ mod tests {
         );
         // A's create never recorded (it errored before recording).
         assert!(!calls.contains(&StoreCall::Create(a)));
+    }
+
+    #[test]
+    fn engine_panic_fails_the_task_and_queue_survives() {
+        let (q, h) = build(Cfg {
+            scripts: vec![
+                EngineScript::Panic,
+                EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![seg("ok")],
+                },
+            ],
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let b = TranscriptionId::new();
+        q.enqueue(a, path_task(h.input_file("a.mp3")), Source::FileImport);
+        q.enqueue(b, path_task(h.input_file("b.mp3")), Source::FileImport);
+        // If the panic escaped the runner thread, B would never run: `finish`
+        // would still return `Ok` (it logs a join panic and moves on), but B's
+        // events would never arrive and this call would hang until the
+        // `drain` timeout. Reaching past `finish` with B completed is itself
+        // evidence the unwind never left the runner thread.
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        let calls = h.store_calls();
+        assert!(calls.iter().any(|c| matches!(
+            c,
+            StoreCall::Failed(x, m)
+                if *x == a && m.contains("task panicked") && m.contains("engine exploded")
+        )));
+        assert!(events.iter().any(|e| e.task_id == a
+            && matches!(&e.kind, TaskEventKind::Failed { message }
+                if message.contains("task panicked") && message.contains("engine exploded"))));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == b && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+    }
+
+    #[test]
+    fn cancel_of_running_task_leaves_no_stale_canceled_id() {
+        let (engine_ctrl, engine_gate) = gate();
+        let (q, h) = build(Cfg {
+            scripts: vec![
+                EngineScript::Block(engine_gate),
+                EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![seg("b")],
+                },
+                EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![seg("c")],
+                },
+            ],
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let b = TranscriptionId::new();
+        let c = TranscriptionId::new();
+        q.enqueue(a, path_task(h.input_file("a.mp3")), Source::FileImport);
+        // A is now executing in the engine; cancel it and let it terminate.
+        engine_ctrl.wait_entered();
+        q.cancel(a);
+        engine_ctrl.release();
+        assert!(
+            events_until(&rx, |e| e.task_id == a
+                && matches!(e.kind, TaskEventKind::Canceled))
+            .iter()
+            .any(|e| matches!(e.kind, TaskEventKind::Canceled))
+        );
+
+        // Re-canceling an id whose task has already terminated targets
+        // nothing (no task is pending or current with this id) — a no-op.
+        q.cancel(a);
+        q.enqueue(b, path_task(h.input_file("b.mp3")), Source::FileImport);
+        q.enqueue(c, path_task(h.input_file("c.mp3")), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        let calls = h.store_calls();
+        // A was written canceled exactly once — the post-termination
+        // `cancel(a)` triggered no second write.
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| matches!(c, StoreCall::Canceled(x) if *x == a))
+                .count(),
+            1
+        );
+        // B and C — enqueued fresh, unrelated ids — ran to completion and
+        // were never canceled: a leftover `canceled` entry for the
+        // already-terminated `a` cannot affect them.
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == b && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == c && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c2| matches!(c2, StoreCall::Canceled(x) if *x == b || *x == c))
+        );
+    }
+
+    #[test]
+    fn engine_panic_discards_cached_engine() {
+        let (q, h) = build(Cfg {
+            scripts: vec![
+                EngineScript::Panic,
+                EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![],
+                },
+            ],
+            ..Cfg::default()
+        });
+        let a = TranscriptionId::new();
+        let b = TranscriptionId::new();
+        let mut spec_a = path_task(h.input_file("a.mp3"));
+        let mut spec_b = path_task(h.input_file("b.mp3"));
+        spec_a.options = options_for(ModelSize::Small);
+        spec_b.options = options_for(ModelSize::Small);
+        q.enqueue(a, spec_a, Source::FileImport);
+        q.enqueue(b, spec_b, Source::FileImport);
+        q.finish().expect("finish");
+
+        let created = h.created.lock().expect("created").clone();
+        // Same model for both, but the factory was asked twice: the engine
+        // that panicked mid-A was discarded, not reused for B.
+        assert_eq!(
+            created,
+            vec![
+                ModelSpec {
+                    size: ModelSize::Small,
+                    hf_repo: None,
+                },
+                ModelSpec {
+                    size: ModelSize::Small,
+                    hf_repo: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn store_write_failure_emits_store_write_failed_event() {
+        let (q, h) = build(Cfg {
+            fail_started: true,
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("ok")],
+            }],
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        q.enqueue(a, path_task(h.input_file("a.mp3")), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        assert!(events.iter().any(|e| e.task_id == a
+            && matches!(&e.kind, TaskEventKind::StoreWriteFailed { operation, .. }
+                if operation == "mark_started")));
+        // Policy: a store-write failure never aborts the run — the task still
+        // completes.
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
     }
 }

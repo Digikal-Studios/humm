@@ -74,19 +74,25 @@ One JSON object per line on **stdout**; nothing else is written to stdout in
 {"event":"completed","task_id":"550e8400-e29b-41d4-a716-446655440000","written":["/path.srt"]}
 {"event":"failed","task_id":"550e8400-e29b-41d4-a716-446655440000","error":"..."}
 {"event":"canceled","task_id":"550e8400-e29b-41d4-a716-446655440000"}
+{"event":"store_write_failed","task_id":"550e8400-e29b-41d4-a716-446655440000","operation":"mark_started","detail":"..."}
 ```
 
 Per task the order is `queued` → `started` → (`download_progress`* for URL
 inputs) → (`progress`/`segment`*) → one of `completed`/`failed`/`canceled` — or
 `queued` → `canceled`/`failed` if it never starts. `model_download_progress`
 events (if any) precede all per-task events. `total` may be `null` when the
-size is unknown.
+size is unknown. `store_write_failed` is out of band and additive (ADR-018): a
+history write (`operation` names the store method, e.g. `mark_started`) failed
+and is logged, but the run is unaffected — it may appear anywhere in a task's
+sequence and never changes it.
 
 Human mode instead prints, to **stderr**, a per-task progress line
 `<input>  NN% — ETA: <eta>` (ETA rendered `NNm NNs` or `NNs`, Buzz's formula)
 and a URL download phase line `downloading <url>  NN%`; written export paths go
 to **stdout** (one per line); failures print `error: <input>: <cause>` to
-stderr. `--quiet` suppresses the progress lines only.
+stderr; a `store_write_failed` event prints `warning: history not recorded
+(<operation>): <detail>` to stderr. `--quiet` suppresses the progress and
+warning lines only.
 
 ## 4. Exit codes
 
