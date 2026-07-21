@@ -7,13 +7,19 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 use crate::language::Language;
 
 /// A point in time or a duration, expressed in whole milliseconds.
 ///
 /// Newtype to avoid unit confusion; whisper.cpp reports centiseconds, which
 /// adapters convert to milliseconds at the boundary (`ms = cs * 10`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// Serializes as a bare JSON integer (`#[serde(transparent)]`), not a
+/// single-element object or array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Millis(
     /// The millisecond value.
     pub i64,
@@ -36,16 +42,64 @@ impl std::ops::Sub for Millis {
 }
 
 /// Error returned when a string doesn't match any known variant of a domain
-/// enum (`TaskKind`, `OutputFormat`, `ModelSize`).
+/// enum (`TaskKind`, `OutputFormat`, `ModelSize`, `Status`, `Source`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct ParseEnumError(String);
+
+/// A stable identifier for one queued/running/completed transcription task.
+///
+/// Wraps a random (v4) UUID — Buzz's `FileTranscriptionTask.uid`
+/// (`transcriber.py:195`); Buzz also keeps a deprecated `id: int`, which humm
+/// does not port. Serializes as its hyphenated lowercase string form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TranscriptionId(uuid::Uuid);
+
+impl TranscriptionId {
+    /// Generates a new, random (v4) id. Two calls never produce the same id.
+    pub fn new() -> Self {
+        TranscriptionId(uuid::Uuid::new_v4())
+    }
+
+    /// Parses an id from its hyphenated string form (as produced by this
+    /// type's `Display`); `None` if `s` is not a valid UUID.
+    pub fn parse(s: &str) -> Option<Self> {
+        uuid::Uuid::parse_str(s).ok().map(TranscriptionId)
+    }
+}
+
+impl Default for TranscriptionId {
+    fn default() -> Self {
+        TranscriptionId::new()
+    }
+}
+
+impl std::fmt::Display for TranscriptionId {
+    /// Hyphenated, lowercase form, e.g. `550e8400-e29b-41d4-a716-446655440000`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.hyphenated())
+    }
+}
+
+impl Serialize for TranscriptionId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for TranscriptionId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        TranscriptionId::parse(&s)
+            .ok_or_else(|| serde::de::Error::custom(format!("invalid transcription id: {s:?}")))
+    }
+}
 
 /// A single transcribed span of audio: start/end time, recognized text, and
 /// (when translation was requested) the translated text.
 ///
 /// Ported from Buzz's `Segment` dataclass (`transcriber.py:29-34`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Segment {
     /// Start time of the segment.
     pub start: Millis,
@@ -60,7 +114,8 @@ pub struct Segment {
 /// Whisper task: transcribe in the source language, or translate to English.
 ///
 /// Ported from Buzz's `Task` enum (`transcriber.py:18-20`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskKind {
     /// Produce text in the audio's source language.
     Transcribe,
@@ -94,7 +149,8 @@ impl FromStr for TaskKind {
 ///
 /// Ported from Buzz's `OutputFormat` enum (`transcriber.py:212-215`). Ordered
 /// `Txt < Srt < Vtt` (declaration order) so it can live in a `BTreeSet`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OutputFormat {
     /// Plain text.
     Txt,
@@ -227,6 +283,116 @@ impl FromStr for ModelSize {
     }
 }
 
+// `ModelSize`'s wire values (`"tiny.en"`, `"large-v3-turbo"`) mix `.` and `-`
+// separators that no `#[serde(rename_all = ...)]` case convention produces,
+// so serialize/deserialize manually through `as_str`/`FromStr`.
+impl Serialize for ModelSize {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ModelSize {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        ModelSize::from_str(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Lifecycle status of a queued or running transcription task.
+///
+/// Ported from Buzz's `FileTranscriptionTask.Status` enum (`transcriber.py:177-183`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Status {
+    /// Waiting in the queue; not yet started.
+    Queued,
+    /// Currently transcribing.
+    InProgress,
+    /// Finished successfully.
+    Completed,
+    /// Finished with an error.
+    Failed,
+    /// Canceled by the user before completion.
+    Canceled,
+    /// Skipped without running (e.g. its input no longer existed at run time).
+    Skipped,
+}
+
+impl Status {
+    /// The Buzz-compatible wire value, e.g. `"in_progress"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Queued => "queued",
+            Status::InProgress => "in_progress",
+            Status::Completed => "completed",
+            Status::Failed => "failed",
+            Status::Canceled => "canceled",
+            Status::Skipped => "skipped",
+        }
+    }
+}
+
+impl FromStr for Status {
+    type Err = ParseEnumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "queued" => Ok(Status::Queued),
+            "in_progress" => Ok(Status::InProgress),
+            "completed" => Ok(Status::Completed),
+            "failed" => Ok(Status::Failed),
+            "canceled" => Ok(Status::Canceled),
+            "skipped" => Ok(Status::Skipped),
+            other => Err(ParseEnumError(format!("unknown status: {other:?}"))),
+        }
+    }
+}
+
+/// Where a transcription task's input came from.
+///
+/// Ported from Buzz's `FileTranscriptionTask.Source` enum (`transcriber.py:185-188`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    /// Imported from a local file the user picked or dropped.
+    FileImport,
+    /// Imported from a remote URL (e.g. a YouTube link).
+    UrlImport,
+    /// Picked up automatically by folder-watch.
+    FolderWatch,
+    /// Captured from a live microphone recording. This is humm's own
+    /// addition (Q-10 in `docs/OPEN_QUESTIONS.md`), not present in Buzz;
+    /// unused until live recording ships in M5.
+    LiveRecording,
+}
+
+impl Source {
+    /// The Buzz-compatible wire value, e.g. `"file_import"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Source::FileImport => "file_import",
+            Source::UrlImport => "url_import",
+            Source::FolderWatch => "folder_watch",
+            Source::LiveRecording => "live_recording",
+        }
+    }
+}
+
+impl FromStr for Source {
+    type Err = ParseEnumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "file_import" => Ok(Source::FileImport),
+            "url_import" => Ok(Source::UrlImport),
+            "folder_watch" => Ok(Source::FolderWatch),
+            "live_recording" => Ok(Source::LiveRecording),
+            other => Err(ParseEnumError(format!("unknown source: {other:?}"))),
+        }
+    }
+}
+
 /// The default fallback temperature schedule whisper.cpp retries decoding at
 /// when a segment fails quality checks.
 ///
@@ -234,20 +400,21 @@ impl FromStr for ModelSize {
 pub const DEFAULT_TEMPERATURE: [f32; 6] = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0];
 
 /// Which model to run inference with.
-///
-/// `backend` and `custom` fields (HF repo id, ggml URL) arrive in M2/M6
-/// (ADR-008); only the size is modeled here.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelSpec {
     /// The model size to load.
     pub size: ModelSize,
+    /// Hugging Face repo id, set when the model was selected by repo (`humm
+    /// add -m huggingface --hfid <repo>`) rather than by [`ModelSize`];
+    /// `None` for the built-in sizes.
+    pub hf_repo: Option<String>,
 }
 
 /// Full set of options for one transcription run, persisted in full with every
 /// queued job (fixes Buzz's restart-loses-options bug structurally).
 ///
 /// Ported from Buzz's `TranscriptionOptions` dataclass (`transcriber.py:141-158`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptionOptions {
     /// Force a specific source language, or `None` to auto-detect.
     pub language: Option<Language>,
@@ -274,6 +441,7 @@ impl Default for TranscriptionOptions {
             task: TaskKind::Transcribe,
             model: ModelSpec {
                 size: ModelSize::Small,
+                hf_repo: None,
             },
             word_timestamps: false,
             initial_prompt: String::new(),
@@ -287,7 +455,7 @@ impl Default for TranscriptionOptions {
 /// Ported from Buzz's `FileTranscriptionOptions.output_formats` plus the
 /// filename-templating and paragraph-splitting settings threaded through
 /// Buzz's exporter.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutputSpec {
     /// Which formats to export.
     pub formats: BTreeSet<OutputFormat>,
@@ -316,6 +484,62 @@ pub struct JobSpec {
     /// Path to the input media file.
     pub input: PathBuf,
     /// Transcription options for this job.
+    pub options: TranscriptionOptions,
+    /// Where and how to write the results.
+    pub output: OutputSpec,
+}
+
+/// Where a transcription task reads its media from: a local file or a remote
+/// URL.
+///
+/// Serializes externally tagged with a lowercase key: `{"path": "..."}` or
+/// `{"url": "..."}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Input {
+    /// A local filesystem path.
+    Path(PathBuf),
+    /// A remote URL (e.g. a direct media link or a `yt-dlp`-resolvable page).
+    Url(url::Url),
+}
+
+impl Input {
+    /// Parses `s` as a URL only if it has both a scheme *and* a host;
+    /// otherwise treats it as a filesystem path.
+    ///
+    /// Mirrors Buzz's `is_url` (`cli.py:48-50`), which checks
+    /// `urlparse(path)` for a truthy `scheme` *and* `netloc` — so
+    /// scheme-only strings like `"a:b"` (an opaque URI with no authority)
+    /// fall back to `Path`, matching Buzz.
+    pub fn parse(s: &str) -> Input {
+        match url::Url::parse(s) {
+            Ok(url) if url.has_host() => Input::Url(url),
+            _ => Input::Path(PathBuf::from(s)),
+        }
+    }
+
+    /// A human-readable label for this input: the full path display for
+    /// [`Input::Path`] (not just the file stem), or the full URL string for
+    /// [`Input::Url`].
+    pub fn display_name(&self) -> String {
+        match self {
+            Input::Path(path) => path.display().to_string(),
+            Input::Url(url) => url.to_string(),
+        }
+    }
+}
+
+/// A single unit of work bound for the task queue: transcribe `input` per
+/// `options`, writing `output`.
+///
+/// Unlike [`JobSpec`] (a plain-path job the M1 pipeline runs directly),
+/// `TaskSpec` accepts a [`url::Url`] input for the queued CLI/GUI task list;
+/// its serde form is what the M2 SQLite store persists as `options_json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskSpec {
+    /// The media to transcribe: a local file or a remote URL.
+    pub input: Input,
+    /// Transcription options for this task.
     pub options: TranscriptionOptions,
     /// Where and how to write the results.
     pub output: OutputSpec,
@@ -462,6 +686,7 @@ mod tests {
                 task: TaskKind::Transcribe,
                 model: ModelSpec {
                     size: ModelSize::Small,
+                    hf_repo: None,
                 },
                 word_timestamps: false,
                 initial_prompt: String::new(),
@@ -482,5 +707,171 @@ mod tests {
                 paragraph_split: Millis(2000),
             }
         );
+    }
+
+    // -- Status / Source (F-024, F-029 groundwork) ------------------------
+
+    const ALL_STATUSES: [Status; 6] = [
+        Status::Queued,
+        Status::InProgress,
+        Status::Completed,
+        Status::Failed,
+        Status::Canceled,
+        Status::Skipped,
+    ];
+
+    #[test]
+    fn status_round_trips_through_from_str() {
+        for status in ALL_STATUSES {
+            assert_eq!(Status::from_str(status.as_str()).unwrap(), status);
+        }
+    }
+
+    #[test]
+    fn status_as_str_matches_buzz_wire_values() {
+        assert_eq!(Status::Queued.as_str(), "queued");
+        assert_eq!(Status::InProgress.as_str(), "in_progress");
+        assert_eq!(Status::Completed.as_str(), "completed");
+        assert_eq!(Status::Failed.as_str(), "failed");
+        assert_eq!(Status::Canceled.as_str(), "canceled");
+        assert_eq!(Status::Skipped.as_str(), "skipped");
+    }
+
+    #[test]
+    fn status_unknown_string_is_err() {
+        assert!(Status::from_str("bogus").is_err());
+    }
+
+    const ALL_SOURCES: [Source; 4] = [
+        Source::FileImport,
+        Source::UrlImport,
+        Source::FolderWatch,
+        Source::LiveRecording,
+    ];
+
+    #[test]
+    fn source_round_trips_through_from_str() {
+        for source in ALL_SOURCES {
+            assert_eq!(Source::from_str(source.as_str()).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn source_as_str_matches_buzz_wire_values() {
+        assert_eq!(Source::FileImport.as_str(), "file_import");
+        assert_eq!(Source::UrlImport.as_str(), "url_import");
+        assert_eq!(Source::FolderWatch.as_str(), "folder_watch");
+        assert_eq!(Source::LiveRecording.as_str(), "live_recording");
+    }
+
+    #[test]
+    fn source_unknown_string_is_err() {
+        assert!(Source::from_str("bogus").is_err());
+    }
+
+    // -- TranscriptionId ---------------------------------------------------
+
+    #[test]
+    fn transcription_id_new_twice_are_distinct() {
+        assert_ne!(TranscriptionId::new(), TranscriptionId::new());
+    }
+
+    #[test]
+    fn transcription_id_display_round_trips_through_parse() {
+        let id = TranscriptionId::new();
+        let text = id.to_string();
+        assert_eq!(TranscriptionId::parse(&text), Some(id));
+    }
+
+    #[test]
+    fn transcription_id_parse_rejects_non_uuid() {
+        assert_eq!(TranscriptionId::parse("not-a-uuid"), None);
+    }
+
+    // -- Input ---------------------------------------------------------
+
+    #[test]
+    fn input_parse_url_with_scheme_and_host() {
+        assert_eq!(
+            Input::parse("https://example.com/a.mp3"),
+            Input::Url(url::Url::parse("https://example.com/a.mp3").unwrap())
+        );
+        assert_eq!(
+            Input::parse("ftp://host/x"),
+            Input::Url(url::Url::parse("ftp://host/x").unwrap())
+        );
+    }
+
+    #[test]
+    fn input_parse_falls_back_to_path_without_scheme_and_host() {
+        assert_eq!(
+            Input::parse("audio.mp3"),
+            Input::Path(PathBuf::from("audio.mp3"))
+        );
+        assert_eq!(
+            Input::parse("/abs/path.mp3"),
+            Input::Path(PathBuf::from("/abs/path.mp3"))
+        );
+        // Scheme present, no host: Buzz's `is_url` requires both.
+        assert_eq!(Input::parse("a:b"), Input::Path(PathBuf::from("a:b")));
+    }
+
+    #[test]
+    fn input_display_name() {
+        assert_eq!(
+            Input::Path(PathBuf::from("/a/b/audio.mp3")).display_name(),
+            "/a/b/audio.mp3"
+        );
+        let url = url::Url::parse("https://example.com/a.mp3").unwrap();
+        assert_eq!(
+            Input::Url(url.clone()).display_name(),
+            "https://example.com/a.mp3"
+        );
+    }
+
+    // -- Serde wire format --------------------------------------------------
+
+    #[test]
+    fn model_size_serializes_to_buzz_wire_values() {
+        assert_eq!(
+            serde_json::to_string(&ModelSize::LargeV3Turbo).unwrap(),
+            "\"large-v3-turbo\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ModelSize::TinyEn).unwrap(),
+            "\"tiny.en\""
+        );
+    }
+
+    #[test]
+    fn task_spec_round_trips_through_json() {
+        let spec = TaskSpec {
+            input: Input::Url(url::Url::parse("https://example.com/audio.mp3").unwrap()),
+            options: TranscriptionOptions {
+                language: Language::parse("fr"),
+                task: TaskKind::Transcribe,
+                model: ModelSpec {
+                    size: ModelSize::LargeV3Turbo,
+                    hf_repo: Some("openai/whisper-large-v3-turbo".to_string()),
+                },
+                word_timestamps: true,
+                initial_prompt: "hello there".to_string(),
+                temperature: vec![0.1, 0.3],
+            },
+            output: OutputSpec {
+                formats: [OutputFormat::Srt, OutputFormat::Vtt].into_iter().collect(),
+                directory: Some(PathBuf::from("/tmp/out")),
+                file_name_template: Some("{{ input_file_name }}".to_string()),
+                paragraph_split: Millis(1500),
+            },
+        };
+
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains("\"task\":\"transcribe\""));
+        assert!(json.contains("\"large-v3-turbo\""));
+        assert!(json.contains("\"url\":\"https://example.com/audio.mp3\""));
+
+        let round_tripped: TaskSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, spec);
     }
 }

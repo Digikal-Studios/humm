@@ -6,6 +6,8 @@
 //! this file follows the source (Global Constraint 3) and the discrepancy is
 //! reported alongside this task's other findings.
 
+use serde::{Deserialize, Serialize};
+
 /// A whisper-supported language: an ISO 639-1 (mostly) code plus its English
 /// display name, taken from Buzz's language table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +156,23 @@ impl Language {
     }
 }
 
+impl Serialize for Language {
+    /// Serializes as the bare code string, e.g. `"fr"`.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.code())
+    }
+}
+
+impl<'de> Deserialize<'de> for Language {
+    /// Deserializes from the bare code string; an unrecognized code fails
+    /// with a message naming it.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let code = String::deserialize(deserializer)?;
+        Language::parse(&code)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown language code: {code:?}")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +213,28 @@ mod tests {
     fn cantonese_is_last_entry_ported_verbatim() {
         let cantonese = Language::parse("yue").expect("yue should parse");
         assert_eq!(cantonese.english_name(), "Cantonese");
+    }
+
+    #[test]
+    fn language_serializes_as_bare_code_string() {
+        let french = Language::parse("fr").unwrap();
+        assert_eq!(serde_json::to_string(&french).unwrap(), "\"fr\"");
+    }
+
+    #[test]
+    fn language_round_trips_through_json() {
+        let french = Language::parse("fr").unwrap();
+        let json = serde_json::to_string(&french).unwrap();
+        let round_tripped: Language = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped.code(), french.code());
+    }
+
+    #[test]
+    fn language_deserialize_unknown_code_names_it_in_error() {
+        let err = serde_json::from_str::<Language>("\"xx\"").unwrap_err();
+        assert!(
+            err.to_string().contains("xx"),
+            "error should name the unknown code: {err}"
+        );
     }
 }

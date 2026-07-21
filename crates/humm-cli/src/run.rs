@@ -162,6 +162,7 @@ fn process_existing_files(
         task: args.task,
         model: ModelSpec {
             size: args.model_size,
+            hf_repo: None,
         },
         word_timestamps: args.word_timestamps,
         initial_prompt: args.prompt.clone(),
