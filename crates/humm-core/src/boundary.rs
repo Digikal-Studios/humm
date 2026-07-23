@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::cancel::CancelToken;
 use crate::domain::{Millis, Segment, Source, TaskKind, TaskSpec, TranscriptionId};
-use crate::error::{EngineError, MediaError, StoreError};
+use crate::error::{AudioError, EngineError, MediaError, StoreError};
 use crate::language::Language;
 
 /// Sample rate (Hz) all decoded PCM and captured audio is normalized to.
@@ -149,6 +149,58 @@ impl PlaybackPcm {
         }
         Millis((self.frames() as i64 * 1000) / i64::from(self.sample_rate))
     }
+}
+
+/// The configuration an [`AudioOutput`] stream is opened at: the sample rate
+/// and channel count the `fill` callback produces interleaved `f32` frames in.
+///
+/// Distinct from [`crate::domain::OutputFormat`]/export outputs — this is a
+/// live audio-device stream spec, not a transcript file format. `humm-audio`'s
+/// `Player` opens its output at the [`PlaybackPcm`]'s own rate/channels so the
+/// steady-state fill at speed `1.0` is a bit-exact copy; the adapter
+/// negotiates the device's real rate and resamples internally (ADR-005) so
+/// this spec is preserved from the caller's perspective.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamSpec {
+    /// Sample rate in Hz the `fill` callback is invoked at.
+    pub sample_rate: u32,
+    /// Interleaved channel count the `fill` callback writes.
+    pub channels: u16,
+}
+
+/// The real-time fill callback an [`AudioOutput`] invokes to produce audio.
+///
+/// Called repeatedly on the audio thread with an interleaved `f32` buffer to
+/// fill ([`StreamSpec::channels`] samples per frame); it must not block or
+/// allocate in its steady state. Boxed so implementations can store it behind
+/// the `dyn` boundary; `Send` so it can move onto the audio thread.
+pub type FillCallback = Box<dyn FnMut(&mut [f32]) + Send>;
+
+/// An audio output device the playback engine can open a stream against.
+///
+/// Implemented by `humm-audio`'s `CpalOutput` (the cpal boundary, ADR-005);
+/// unit tests substitute a mock whose captured `fill` closure they pull
+/// synchronously, so the varispeed `Player` is testable without a real audio
+/// thread.
+pub trait AudioOutput: Send + Sync {
+    /// Opens an output stream at `spec`. `fill` is invoked repeatedly on the
+    /// real-time audio thread to fill an interleaved `f32` buffer
+    /// (`spec.channels` per frame); it must not block or allocate in its
+    /// steady state. The returned [`OutputStream`] starts paused — call
+    /// [`OutputStream::play`] to begin.
+    fn open(
+        &self,
+        spec: StreamSpec,
+        fill: FillCallback,
+    ) -> Result<Box<dyn OutputStream>, AudioError>;
+}
+
+/// A handle to an open audio output stream. Dropping it stops the stream.
+pub trait OutputStream: Send {
+    /// Starts (or resumes) invoking the `fill` callback on the audio thread.
+    fn play(&mut self) -> Result<(), AudioError>;
+    /// Pauses the stream: the `fill` callback stops being invoked.
+    fn pause(&mut self) -> Result<(), AudioError>;
 }
 
 /// Parameters for a single transcription run, translated from

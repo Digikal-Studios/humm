@@ -79,6 +79,37 @@ pub enum EngineError {
     Canceled,
 }
 
+/// Errors from the audio output boundary (the cpal device/stream — ADR-005).
+///
+/// Implemented against by `humm-audio`'s `CpalOutput`; the varispeed `Player`
+/// surfaces these when opening or controlling its output stream. A missing or
+/// unusable output device degrades the viewer's player rather than crashing
+/// (`docs/superpowers/specs/2026-07-23-m4-transcript-viewer-design.md` §2.1).
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum AudioError {
+    /// No usable audio output device is available (none present, or the
+    /// default device could not be acquired).
+    #[error("no audio output device available — {detail}")]
+    DeviceUnavailable {
+        /// Diagnostic detail (host/device error, or a hint to check the
+        /// system's audio output selection).
+        detail: String,
+    },
+    /// The output stream could not be built at any usable configuration.
+    #[error("failed to build audio output stream: {detail}")]
+    StreamBuild {
+        /// Diagnostic detail (cpal build error, unsupported format).
+        detail: String,
+    },
+    /// Starting or pausing playback on the stream failed.
+    #[error("failed to control audio output stream: {detail}")]
+    StreamPlay {
+        /// Diagnostic detail (cpal play/pause error).
+        detail: String,
+    },
+}
+
 /// Errors from the model registry/downloader.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -266,6 +297,24 @@ mod tests {
             path: PathBuf::from("/audio/missing.mp3"),
         };
         assert!(err.to_string().contains("missing.mp3"));
+    }
+
+    #[test]
+    fn audio_error_device_unavailable_renders_detail() {
+        let err = AudioError::DeviceUnavailable {
+            detail: "no default output device".to_string(),
+        };
+        assert!(err.to_string().contains("no default output device"));
+    }
+
+    #[test]
+    fn audio_error_stream_build_renders_detail() {
+        let err = AudioError::StreamBuild {
+            detail: "format not supported".to_string(),
+        };
+        let message = err.to_string();
+        assert!(message.contains("build"));
+        assert!(message.contains("format not supported"));
     }
 
     #[test]
