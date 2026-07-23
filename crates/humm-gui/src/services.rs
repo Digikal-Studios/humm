@@ -639,7 +639,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use std::time::{Duration, Instant};
 
-    fn test_deps(store: Arc<SqliteStore>) -> TestDeps {
+    fn test_deps(store: Arc<SqliteStore>, dir: &Path) -> TestDeps {
         struct FailingFactory;
         impl EngineFactory for FailingFactory {
             fn create(
@@ -654,10 +654,12 @@ mod tests {
             store,
             // Unused by this test: the enqueued task is a `Input::Path`, and
             // `media_dir` is only ever touched by the runner's URL-fetch path.
-            media_dir: PathBuf::from("/unused-media-dir"),
-            model_root: PathBuf::from("/unused-model-root"),
+            // Still a real tempdir path (not a sentinel string) so nothing
+            // silently degrades if that ever changes.
+            media_dir: dir.join("media"),
+            model_root: dir.join("models"),
             settings: Settings::default(),
-            settings_path: PathBuf::from("/unused-settings-path"),
+            settings_path: dir.join("settings.toml"),
             engines: Box::new(FailingFactory),
             fetcher: None,
             capabilities: Capabilities::default(),
@@ -668,7 +670,8 @@ mod tests {
     #[test]
     fn init_with_builds_a_working_queue_and_subscription() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("open store"));
-        let mut services = init_with(test_deps(Arc::clone(&store)));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut services = init_with(test_deps(Arc::clone(&store), dir.path()));
 
         let id = TranscriptionId::new();
         let spec = humm_core::domain::TaskSpec {

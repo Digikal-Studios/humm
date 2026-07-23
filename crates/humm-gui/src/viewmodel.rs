@@ -211,6 +211,25 @@ pub enum TableAction {
     CancelSelected,
 }
 
+/// `col`'s comparable projection of `row` — exactly the value
+/// [`TasksVm::resort`]'s comparator orders by (lowercased for the free-text
+/// columns so sorting is case-insensitive; verbatim for `Status` (Buzz wire
+/// string) and the two date columns (ISO-8601 sorts lexically identically to
+/// chronologically)). The single definition both [`TasksVm::resort`] and
+/// [`TasksVm::mutate`]'s resort-skip check use, so the skip can never drift
+/// from the real ordering rules (carried M3 ticket, spec §8.2).
+fn sort_key(row: &RowVm, col: ColumnId) -> String {
+    match col {
+        ColumnId::FileName => row.display_name.to_lowercase(),
+        ColumnId::Model => row.model_text.to_lowercase(),
+        ColumnId::Task => row.task_text.to_lowercase(),
+        ColumnId::Status => row.status.as_str().to_string(),
+        ColumnId::DateCompleted => row.time_ended.as_deref().unwrap_or("").to_string(),
+        ColumnId::DateAdded => row.time_queued.clone(),
+        ColumnId::Notes => row.notes.as_deref().unwrap_or("").to_lowercase(),
+    }
+}
+
 /// The task table's view-model: display rows in current sort order, plus
 /// multi-row selection. Constructed once via [`TasksVm::load`]; kept current
 /// afterward via [`TasksVm::apply`] rather than re-querying the whole table
@@ -220,6 +239,12 @@ pub struct TasksVm {
     rows: Vec<RowVm>,
     sort: (ColumnId, bool),
     selection: BTreeSet<TranscriptionId>,
+    /// Test-only [`TasksVm::resort`] invocation counter — how
+    /// `mutate_skips_resort_when_sort_key_unchanged` /
+    /// `mutate_resorts_when_key_changes` observe whether [`TasksVm::mutate`]'s
+    /// resort-skip actually fired, without a production-facing seam.
+    #[cfg(test)]
+    resort_calls: u32,
 }
 
 impl Default for TasksVm {
@@ -231,6 +256,8 @@ impl Default for TasksVm {
             rows: Vec::new(),
             sort: (ColumnId::DateAdded, true),
             selection: BTreeSet::new(),
+            #[cfg(test)]
+            resort_calls: 0,
         }
     }
 }
@@ -483,36 +510,13 @@ impl TasksVm {
     /// correct approach at this milestone's scale (personal task history,
     /// not a bulk-import workload).
     fn resort(&mut self) {
+        #[cfg(test)]
+        {
+            self.resort_calls += 1;
+        }
         let (col, descending) = self.sort;
         self.rows.sort_by(|a, b| {
-            let ordering = match col {
-                ColumnId::FileName => a
-                    .display_name
-                    .to_lowercase()
-                    .cmp(&b.display_name.to_lowercase()),
-                ColumnId::Model => a
-                    .model_text
-                    .to_lowercase()
-                    .cmp(&b.model_text.to_lowercase()),
-                ColumnId::Task => a.task_text.to_lowercase().cmp(&b.task_text.to_lowercase()),
-                // Sorted by the Buzz-compatible wire string, not the
-                // (dynamic, ETA-bearing) display text — a stable key that
-                // doesn't change every second an in-progress row is visible.
-                ColumnId::Status => a.status.as_str().cmp(b.status.as_str()),
-                // ISO-8601 strings sort lexically identically to chronologically.
-                ColumnId::DateCompleted => a
-                    .time_ended
-                    .as_deref()
-                    .unwrap_or("")
-                    .cmp(b.time_ended.as_deref().unwrap_or("")),
-                ColumnId::DateAdded => a.time_queued.cmp(&b.time_queued),
-                ColumnId::Notes => a
-                    .notes
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .cmp(&b.notes.as_deref().unwrap_or("").to_lowercase()),
-            };
+            let ordering = sort_key(a, col).cmp(&sort_key(b, col));
             if descending {
                 ordering.reverse()
             } else {
@@ -521,18 +525,26 @@ impl TasksVm {
         });
     }
 
-    /// Finds `id`'s row (if any) and applies `f` to it in place, then
-    /// re-sorts. Logs and does nothing for an id with no row — the "ignore
-    /// gracefully" contract [`Self::apply`] documents.
+    /// Finds `id`'s row (if any) and applies `f` to it in place. Skips the
+    /// re-sort (carried M3 ticket, spec §8.2) when the active sort column's
+    /// [`sort_key`] projection of the row is unchanged by `f` — most events
+    /// (e.g. `Progress` under the default `DateAdded` sort) mutate fields the
+    /// current sort key doesn't read at all, so re-sorting the whole table on
+    /// every one is wasted work. Logs and does nothing for an id with no row
+    /// — the "ignore gracefully" contract [`Self::apply`] documents.
     fn mutate(&mut self, id: TranscriptionId, f: impl FnOnce(&mut RowVm)) {
-        match self.rows.iter_mut().find(|row| row.id == id) {
-            Some(row) => f(row),
-            None => {
-                log::debug!("TasksVm::apply: event for unknown task {id}, ignoring");
-                return;
-            }
+        let Some(index) = self.rows.iter().position(|row| row.id == id) else {
+            log::debug!("TasksVm::apply: event for unknown task {id}, ignoring");
+            return;
+        };
+
+        let col = self.sort.0;
+        let before = sort_key(&self.rows[index], col);
+        f(&mut self.rows[index]);
+        let after = sort_key(&self.rows[index], col);
+        if before != after {
+            self.resort();
         }
-        self.resort();
     }
 
     /// [`TaskEventKind::Queued`]'s handler: reads the new row from `store`
@@ -1357,6 +1369,62 @@ mod tests {
         // "canceled" < "queued" lexically.
         assert_eq!(vm.sorted_rows()[0].status, Status::Canceled);
         assert_eq!(vm.sorted_rows()[1].status, Status::Queued);
+    }
+
+    // -- mutate resort-skip (carried M3 ticket, spec §8.2) -----------------
+
+    /// Sorted by `DateAdded`, whose `sort_key` reads `time_queued` — a field
+    /// `mutate`'s status/progress mutation below never touches — so the
+    /// resort-skip should keep `resort()` from running at all. Observed via
+    /// the `#[cfg(test)]` `resort_calls` counter (the "factor resort into a
+    /// fn and count invocations" option from the task brief).
+    #[test]
+    fn mutate_skips_resort_when_sort_key_unchanged() {
+        let mut vm = vm_with_rows(vec![
+            row_for_sort("a", Status::Queued, "2026-01-01T00:00:00", ""),
+            row_for_sort("b", Status::Queued, "2026-01-02T00:00:00", ""),
+        ]);
+        vm.set_sort_exact(ColumnId::DateAdded, false);
+        let id = vm.sorted_rows()[0].id;
+        let resort_calls_before = vm.resort_calls;
+
+        vm.mutate(id, |row| {
+            row.status = Status::InProgress;
+            row.progress = 0.5;
+        });
+
+        assert_eq!(
+            vm.resort_calls, resort_calls_before,
+            "DateAdded's sort key is untouched by a status/progress mutation; resort() must \
+             not run"
+        );
+        assert_eq!(vm.sorted_rows()[0].status, Status::InProgress);
+    }
+
+    /// Sorted by `Status`: mutating the queued row's status to `Canceled`
+    /// (which sorts before `Failed`) both moves it to the front and — the
+    /// other half of the same guarantee — must actually invoke `resort()`
+    /// (the skip must not become an accidental "never resort").
+    #[test]
+    fn mutate_resorts_when_key_changes() {
+        let mut vm = vm_with_rows(vec![
+            row_for_sort("a", Status::Failed, "2026-01-01T00:00:00", ""),
+            row_for_sort("b", Status::Queued, "2026-01-02T00:00:00", ""),
+        ]);
+        vm.set_sort_exact(ColumnId::Status, false);
+        assert_eq!(vm.sorted_rows()[0].status, Status::Failed);
+        let queued_id = vm.sorted_rows()[1].id;
+        let resort_calls_before = vm.resort_calls;
+
+        vm.mutate(queued_id, |row| {
+            row.status = Status::Canceled;
+        });
+
+        assert!(
+            vm.resort_calls > resort_calls_before,
+            "Status's sort key changed; resort() must run"
+        );
+        assert_eq!(vm.sorted_rows()[0].status, Status::Canceled);
     }
 
     // -- selection --------------------------------------------------------

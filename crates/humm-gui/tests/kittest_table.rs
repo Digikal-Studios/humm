@@ -91,13 +91,13 @@ fn seeded_store() -> SqliteStore {
     store
 }
 
-fn test_services(store: Arc<SqliteStore>) -> Services {
+fn test_services(store: Arc<SqliteStore>, dir: &Path) -> Services {
     services::init_with(TestDeps {
         store,
-        media_dir: PathBuf::from("/unused-media-dir"),
-        model_root: PathBuf::from("/unused-model-root"),
+        media_dir: dir.join("media"),
+        model_root: dir.join("models"),
         settings: humm_core::settings::Settings::default(),
-        settings_path: PathBuf::from("/unused-settings-path"),
+        settings_path: dir.join("settings.toml"),
         engines: Box::new(NeverCalledEngineFactory),
         fetcher: None,
         capabilities: Capabilities::default(),
@@ -111,16 +111,22 @@ fn test_services(store: Arc<SqliteStore>) -> Services {
 /// the later columns (Date Added, Notes) out of a synthetic click/tap's
 /// reach — every test in this file needs every column reachable, not just
 /// whichever happen to fit in 800pt.
-fn wide_harness() -> Harness<'static, HummApp> {
+///
+/// Returns the harness alongside the `TempDir` backing its (unused but now
+/// real, not sentinel-string) `media_dir`/`model_root`/`settings_path` —
+/// the caller must keep it alive for the harness's lifetime.
+fn wide_harness() -> (Harness<'static, HummApp>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(seeded_store());
-    let mut harness = Harness::new_eframe(move |_cc| HummApp::new_for_test(test_services(store)));
+    let services = test_services(store, dir.path());
+    let mut harness = Harness::new_eframe(move |_cc| HummApp::new_for_test(services));
     harness.set_size(egui::Vec2::new(1700.0, 400.0));
-    harness
+    (harness, dir)
 }
 
 #[test]
 fn table_shows_three_seeded_rows_with_exact_buzz_status_texts() {
-    let mut harness = wide_harness();
+    let (mut harness, _dir) = wide_harness();
     harness.run();
 
     // Byte-exact Buzz status strings (format.rs's own unit tests pin the
@@ -141,7 +147,7 @@ fn table_shows_three_seeded_rows_with_exact_buzz_status_texts() {
 
 #[test]
 fn header_click_toggles_the_sort_indicator() {
-    let mut harness = wide_harness();
+    let (mut harness, _dir) = wide_harness();
     harness.run();
 
     // Default sort: Date Added, descending (Buzz parity).
@@ -155,7 +161,7 @@ fn header_click_toggles_the_sort_indicator() {
 
 #[test]
 fn row_context_menu_gates_restart_to_failed_canceled_skipped() {
-    let mut harness = wide_harness();
+    let (mut harness, _dir) = wide_harness();
     harness.run();
 
     // Right-click the Failed row's status cell: Restart Transcription must
@@ -169,7 +175,7 @@ fn row_context_menu_gates_restart_to_failed_canceled_skipped() {
 
 #[test]
 fn row_context_menu_on_completed_row_does_not_offer_restart() {
-    let mut harness = wide_harness();
+    let (mut harness, _dir) = wide_harness();
     harness.run();
 
     // Completed is NOT in Buzz's restartable set — right-clicking a
@@ -205,7 +211,7 @@ fn row_context_menu_on_completed_row_does_not_offer_restart() {
 /// `task_table.rs`), not by a test.
 #[test]
 fn table_with_resizable_persisted_columns_renders_several_frames_without_panicking() {
-    let mut harness = wide_harness();
+    let (mut harness, _dir) = wide_harness();
     for _ in 0..5 {
         harness.step();
     }
@@ -223,7 +229,7 @@ fn table_with_resizable_persisted_columns_renders_several_frames_without_panicki
 /// having been changed, end to end through the real app.
 #[test]
 fn reset_column_order_restores_default_sort_without_panicking() {
-    let mut harness = wide_harness();
+    let (mut harness, _dir) = wide_harness();
     harness.run();
 
     // Move off the default sort first, so the reset below is a real change.

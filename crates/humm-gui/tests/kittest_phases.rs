@@ -272,9 +272,9 @@ fn download_phases_render_media_then_model_then_complete() {
     let services = services::init_with(TestDeps {
         store,
         media_dir: media_dir.path().to_path_buf(),
-        model_root: PathBuf::from("/unused-model-root"),
+        model_root: media_dir.path().join("models"),
         settings: humm_core::settings::Settings::default(),
-        settings_path: PathBuf::from("/unused-settings-path"),
+        settings_path: media_dir.path().join("settings.toml"),
         engines: Box::new(FakeEngineFactory),
         fetcher: Some(Arc::new(GatedFetcher { gate: fetch_gate })),
         capabilities: Capabilities::default(),

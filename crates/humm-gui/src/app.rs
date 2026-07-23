@@ -1993,9 +1993,9 @@ mod shutdown_tests {
         let mut services = services::init_with(TestDeps {
             store: Arc::clone(&store),
             media_dir: media_dir.path().to_path_buf(),
-            model_root: PathBuf::from("/unused-model-root"),
+            model_root: media_dir.path().join("models"),
             settings: humm_core::settings::Settings::default(),
-            settings_path: PathBuf::from("/unused-settings-path"),
+            settings_path: media_dir.path().join("settings.toml"),
             engines: Box::new(BlockingFactory { entered_tx }),
             fetcher: None,
             capabilities: Capabilities::default(),

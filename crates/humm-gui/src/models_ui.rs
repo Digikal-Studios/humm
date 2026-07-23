@@ -391,8 +391,11 @@ fn format_bytes(bytes: u64) -> String {
 /// `CancelToken::cancel`; a confirmed Delete calls [`delete`] and refreshes;
 /// Reveal calls `open::that(root)` (the flat cache root — every model's
 /// "parent" either way, `docs/design/ARCHITECTURE.md` §5). The custom-URL
-/// field persists to `settings.models.custom_model_url` on change or
-/// focus-loss, blank meaning `None` (binding decision).
+/// field persists to `settings.models.custom_model_url` on focus-loss only
+/// (carried M3 ticket, spec §8.3 — not per keystroke, which would otherwise
+/// hit disk on every character typed); egui's single-line `TextEdit`
+/// surrenders focus on Enter, so pressing Enter also commits, blank meaning
+/// `None` (binding decision).
 pub fn ui(
     ui: &mut egui::Ui,
     state: &mut ModelsTabState,
@@ -434,7 +437,11 @@ pub fn ui(
     ui.horizontal(|ui| {
         ui.label(tr("models-custom-url-label"));
         let response = ui.text_edit_singleline(&mut state.custom_url);
-        if response.changed() || response.lost_focus() {
+        // `lost_focus()` alone (not `changed()`): persist once the field is
+        // actually committed, not on every keystroke. Covers Enter too —
+        // egui's single-line `TextEdit` surrenders focus (so `lost_focus()`
+        // fires) when Enter is pressed, rather than inserting a newline.
+        if response.lost_focus() {
             custom_url_committed = true;
         }
     });

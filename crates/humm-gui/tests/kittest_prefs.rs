@@ -23,7 +23,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use egui_kittest::kittest::Queryable;
+use egui::accesskit::Role;
+use egui_kittest::kittest::{By, Queryable};
 use egui_kittest::{Harness, HarnessBuilder};
 use humm_core::domain::ModelSize;
 use humm_core::models::registry::{SENTINEL_SUFFIX, ggml_file_name};
@@ -60,7 +61,7 @@ fn privacy_toggles_persist_to_the_settings_file() {
     let store = Arc::new(SqliteStore::open_in_memory().expect("open store"));
     let services = services::init_with(TestDeps {
         store,
-        media_dir: PathBuf::from("/unused-media-dir"),
+        media_dir: settings_dir.path().join("media"),
         model_root: model_root_dir.path().to_path_buf(),
         settings: Settings::default(),
         settings_path: settings_path.clone(),
@@ -201,17 +202,86 @@ fn models_tab_shows_planted_tiny_as_downloaded_and_delete_confirm_removes_it() {
     );
 }
 
+// -- Models tab: custom-URL field persists on focus-loss, not per keystroke --
+
+/// Carried M3 ticket (spec §8.3): typing into the custom-URL field must not
+/// hit disk per keystroke — only once the field loses focus (here, via Tab;
+/// egui's singleline `TextEdit` treats Enter the same way, per its own
+/// internal `surrender_focus` on Enter). `.focus()`/`.type_text()` on the
+/// field's `Role::TextInput` node (not literal synthetic keystrokes) is the
+/// same "drive the real widget, don't fight cursor/selection mechanics"
+/// approach `kittest_viewer.rs`'s Esc/Enter-in-search-bar tests use — safe
+/// here because the field starts empty, so there is no prefilled text/cursor
+/// state to fight (unlike `kittest_actions.rs`'s Rename dialog, which avoids
+/// simulated typing for exactly that reason).
+#[test]
+fn custom_url_field_persists_on_lost_focus_not_per_keystroke() {
+    let root = tempfile::tempdir().expect("model root tempdir");
+    let settings_path = root.path().join("settings.toml");
+    let state = ModelsTabState::new(root.path(), None);
+
+    let fixture = ModelsFixture {
+        state,
+        root: root.path().to_path_buf(),
+        settings: Arc::new(Mutex::new(Settings::default())),
+        settings_path: settings_path.clone(),
+    };
+
+    let mut harness = Harness::new_ui_state(
+        |ui, fixture: &mut ModelsFixture| {
+            models_ui::ui(
+                ui,
+                &mut fixture.state,
+                &fixture.root,
+                &fixture.settings,
+                &fixture.settings_path,
+            );
+        },
+        fixture,
+    );
+    harness.run();
+
+    harness.get(By::new().role(Role::TextInput)).focus();
+    harness.run(); // the focus request takes effect
+
+    harness
+        .get(By::new().role(Role::TextInput))
+        .type_text("https://example.com/custom.bin");
+    harness.run();
+
+    assert!(
+        !settings_path.exists(),
+        "typing into the field must not persist per keystroke"
+    );
+
+    // Tab away: a singleline `TextEdit` surrenders focus (same path Enter
+    // takes), which must now commit.
+    harness.key_press(egui::Key::Tab);
+    harness.run();
+
+    assert!(
+        settings_path.exists(),
+        "losing focus must persist the field"
+    );
+    let reloaded = Settings::load(&settings_path).expect("settings file was written");
+    assert_eq!(
+        reloaded.models.custom_model_url.as_deref(),
+        Some("https://example.com/custom.bin")
+    );
+}
+
 // -- Toolbar update chip: appears once an Available notice lands -------------
 
 #[test]
 fn update_chip_appears_when_available_notice_is_injected() {
+    let dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(SqliteStore::open_in_memory().expect("open store"));
     let services = services::init_with(TestDeps {
         store,
-        media_dir: PathBuf::from("/unused-media-dir"),
-        model_root: PathBuf::from("/unused-model-root"),
+        media_dir: dir.path().join("media"),
+        model_root: dir.path().join("models"),
         settings: Settings::default(),
-        settings_path: PathBuf::from("/unused-settings-path"),
+        settings_path: dir.path().join("settings.toml"),
         engines: Box::new(NeverCalledEngineFactory),
         fetcher: None,
         capabilities: Capabilities::default(),

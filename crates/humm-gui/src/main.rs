@@ -29,7 +29,7 @@ fn main() -> eframe::Result {
     // Files passed as argv (Finder "open with" parity — deviation #12 in the
     // design spec): opened as the options sheet's request on the app's
     // first frame (`HummApp::drain_pending_argv_import`).
-    let pending_import: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();
+    let pending_import: Vec<PathBuf> = import_paths_from_args(std::env::args().skip(1));
     if !pending_import.is_empty() {
         log::info!(
             "{} file(s) passed on the command line; opening the import options sheet",
@@ -80,6 +80,19 @@ fn main() -> eframe::Result {
         Ok(services) => run_app(services, pending_import),
         Err(err) => run_error_app(err),
     }
+}
+
+/// Extracts import paths from raw CLI args (already past `argv[0]` — see the
+/// call site in `main`), filtering out anything starting with `-` — a
+/// single- or double-dash flag, or a bare `--` — before it's treated as an
+/// import path (carried M3 ticket, spec §8.4). Without this, a flag some
+/// external launcher passes (e.g. macOS's `-psn_...` process-serial-number
+/// argument, or a future humm-gui CLI flag) would silently become a bogus
+/// "file to import" entry in the options sheet instead of being ignored.
+fn import_paths_from_args(args: impl Iterator<Item = String>) -> Vec<PathBuf> {
+    args.filter(|arg| !arg.starts_with('-'))
+        .map(PathBuf::from)
+        .collect()
 }
 
 /// Shows the native "already running" dialog (design spec §3.1 / ADR-017):
@@ -148,5 +161,54 @@ impl eframe::App for ErrorApp {
                 std::process::exit(1);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(raw: &[&str]) -> impl Iterator<Item = String> {
+        raw.iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn import_paths_from_args_filters_out_single_and_double_dash_flags_and_bare_double_dash() {
+        assert_eq!(
+            import_paths_from_args(args(&[
+                "-v",
+                "/tmp/a.wav",
+                "--verbose",
+                "/tmp/b.wav",
+                "--",
+                "/tmp/c.wav",
+            ])),
+            vec![
+                PathBuf::from("/tmp/a.wav"),
+                PathBuf::from("/tmp/b.wav"),
+                PathBuf::from("/tmp/c.wav"),
+            ]
+        );
+    }
+
+    #[test]
+    fn import_paths_from_args_empty_when_every_arg_is_a_flag() {
+        assert!(import_paths_from_args(args(&["-v", "--verbose", "-psn_0_12345"])).is_empty());
+    }
+
+    #[test]
+    fn import_paths_from_args_keeps_every_path_when_no_flags_are_present() {
+        assert_eq!(
+            import_paths_from_args(args(&["/tmp/a.wav", "/tmp/b.wav"])),
+            vec![PathBuf::from("/tmp/a.wav"), PathBuf::from("/tmp/b.wav")]
+        );
+    }
+
+    #[test]
+    fn import_paths_from_args_empty_for_no_args() {
+        assert!(import_paths_from_args(args(&[])).is_empty());
     }
 }

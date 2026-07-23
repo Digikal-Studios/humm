@@ -9,7 +9,7 @@
 //!   no `.unwrap()` to call; the panic-on-miss behavior is exactly the
 //!   assertion the brief's `.unwrap()` was reaching for.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use egui_kittest::{Harness, kittest::Queryable};
@@ -38,15 +38,17 @@ impl EngineFactory for NeverCalledEngineFactory {
 /// Builds [`Services`] from a fresh in-memory store — no real settings file,
 /// database, or subprocess is touched. `_cc` is accepted only to match
 /// `egui_kittest::Harness::new_eframe`'s builder-closure shape (a later task
-/// may want it, e.g. to seed egui memory); it's unused here.
-fn test_services(_cc: &eframe::CreationContext<'_>) -> Services {
+/// may want it, e.g. to seed egui memory); it's unused here. `dir` backs
+/// `media_dir`/`model_root`/`settings_path` with a real (if untouched)
+/// tempdir instead of a sentinel path string.
+fn test_services(_cc: &eframe::CreationContext<'_>, dir: &Path) -> Services {
     let store = Arc::new(SqliteStore::open_in_memory().expect("open in-memory store"));
     services::init_with(TestDeps {
         store,
-        media_dir: PathBuf::from("/unused-media-dir"),
-        model_root: PathBuf::from("/unused-model-root"),
+        media_dir: dir.join("media"),
+        model_root: dir.join("models"),
         settings: humm_core::settings::Settings::default(),
-        settings_path: PathBuf::from("/unused-settings-path"),
+        settings_path: dir.join("settings.toml"),
         engines: Box::new(NeverCalledEngineFactory),
         fetcher: None,
         capabilities: Capabilities::default(),
@@ -56,14 +58,18 @@ fn test_services(_cc: &eframe::CreationContext<'_>) -> Services {
 
 #[test]
 fn app_shows_empty_state_hero_on_fresh_store() {
-    let mut harness = Harness::new_eframe(|cc| HummApp::new_for_test(test_services(cc)));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut harness =
+        Harness::new_eframe(|cc| HummApp::new_for_test(test_services(cc, dir.path())));
     harness.run();
     harness.get_by_label_contains("Drop media here");
 }
 
 #[test]
 fn app_renders_several_frames_without_panicking() {
-    let mut harness = Harness::new_eframe(|cc| HummApp::new_for_test(test_services(cc)));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut harness =
+        Harness::new_eframe(|cc| HummApp::new_for_test(test_services(cc, dir.path())));
     for _ in 0..3 {
         harness.step();
     }

@@ -105,13 +105,13 @@ fn sample_spec(input: Input) -> TaskSpec {
     }
 }
 
-fn test_services(store: Arc<SqliteStore>, engines: Box<dyn EngineFactory>) -> Services {
+fn test_services(store: Arc<SqliteStore>, engines: Box<dyn EngineFactory>, dir: &Path) -> Services {
     services::init_with(TestDeps {
         store,
-        media_dir: PathBuf::from("/unused-media-dir"),
-        model_root: PathBuf::from("/unused-model-root"),
+        media_dir: dir.join("media"),
+        model_root: dir.join("models"),
         settings: humm_core::settings::Settings::default(),
-        settings_path: PathBuf::from("/unused-settings-path"),
+        settings_path: dir.join("settings.toml"),
         engines,
         fetcher: None,
         capabilities: Capabilities::default(),
@@ -132,18 +132,25 @@ fn test_services(store: Arc<SqliteStore>, engines: Box<dyn EngineFactory>) -> Se
 /// else here asserts on simulated elapsed time) while letting
 /// `notes_double_click_opens_modal_and_persists_back_to_the_store` land two
 /// `click()` calls inside the real double-click window.
+///
+/// Returns the harness alongside the `TempDir` backing its (unused but now
+/// real, not sentinel-string) `media_dir`/`model_root`/`settings_path` —
+/// the caller must keep it alive for the harness's lifetime.
 fn wide_harness(
     store: Arc<SqliteStore>,
     engines: Box<dyn EngineFactory>,
-) -> Harness<'static, HummApp> {
-    HarnessBuilder::default()
+) -> (Harness<'static, HummApp>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = test_services(store, engines, dir.path());
+    let harness = HarnessBuilder::default()
         .with_size(egui::Vec2::new(1700.0, 500.0))
         .with_step_dt(0.01)
         // See `kittest_import.rs`'s `harness_with` for why this is raised
         // above the default of 4 (final-review fix 5): a real queue/
         // event-pump thread backs this harness too.
         .with_max_steps(32)
-        .build_eframe(move |_cc| HummApp::new_for_test(test_services(store, engines)))
+        .build_eframe(move |_cc| HummApp::new_for_test(services));
+    (harness, dir)
 }
 
 // -- Toolbar enablement ----------------------------------------------------
@@ -160,7 +167,7 @@ fn toolbar_cancel_and_clear_disabled_with_nothing_selected() {
         )
         .expect("create");
 
-    let mut harness = wide_harness(store, Box::new(NeverCalledEngineFactory));
+    let (mut harness, _dir) = wide_harness(store, Box::new(NeverCalledEngineFactory));
     harness.run();
 
     let cancel = harness.get_by_label("Cancel Transcription");
@@ -187,7 +194,7 @@ fn toolbar_cancel_enabled_and_clear_disabled_for_a_queued_selection() {
         )
         .expect("create");
 
-    let mut harness = wide_harness(store, Box::new(NeverCalledEngineFactory));
+    let (mut harness, _dir) = wide_harness(store, Box::new(NeverCalledEngineFactory));
     harness.run();
     harness.get_by_label_contains("Queued").click();
     harness.run();
@@ -217,7 +224,7 @@ fn toolbar_clear_enabled_and_cancel_disabled_for_a_completed_selection() {
         .expect("create");
     store.mark_completed(&id, &[]).expect("mark completed");
 
-    let mut harness = wide_harness(store, Box::new(NeverCalledEngineFactory));
+    let (mut harness, _dir) = wide_harness(store, Box::new(NeverCalledEngineFactory));
     harness.run();
     harness.get_by_label("Completed").click();
     harness.run();
@@ -257,7 +264,7 @@ fn toolbar_both_disabled_for_a_mixed_selection() {
         .mark_completed(&completed_id, &[])
         .expect("mark completed");
 
-    let mut harness = wide_harness(store, Box::new(NeverCalledEngineFactory));
+    let (mut harness, _dir) = wide_harness(store, Box::new(NeverCalledEngineFactory));
     harness.run();
     harness.get_by_label_contains("Queued").click();
     harness.run();
@@ -294,7 +301,7 @@ fn clear_history_deletes_the_row_only_after_confirm() {
     store.mark_completed(&id, &[]).expect("mark completed");
     let store_for_assert = Arc::clone(&store);
 
-    let mut harness = wide_harness(store, Box::new(NeverCalledEngineFactory));
+    let (mut harness, _dir) = wide_harness(store, Box::new(NeverCalledEngineFactory));
     harness.run();
     harness.get_by_label("Completed").click();
     harness.run();
@@ -363,7 +370,7 @@ fn rename_dialog_prefills_and_persists_on_ok() {
         None
     );
 
-    let mut harness = wide_harness(store, Box::new(NeverCalledEngineFactory));
+    let (mut harness, _dir) = wide_harness(store, Box::new(NeverCalledEngineFactory));
     harness.run();
 
     harness.get_by_label_contains("clip.wav").click_secondary();
@@ -421,7 +428,7 @@ fn notes_double_click_opens_modal_and_persists_back_to_the_store() {
         .expect("seed notes");
     let store_for_assert = Arc::clone(&store);
 
-    let mut harness = wide_harness(store, Box::new(NeverCalledEngineFactory));
+    let (mut harness, _dir) = wide_harness(store, Box::new(NeverCalledEngineFactory));
     harness.run();
 
     let notes_cell = harness.get_by_label("existing note");
@@ -477,7 +484,7 @@ fn retry_on_a_failed_row_reaches_completion() {
     store.mark_failed(&id, "boom").expect("mark failed");
     let store_for_assert = Arc::clone(&store);
 
-    let mut harness = wide_harness(store, Box::new(FakeSucceedingEngineFactory));
+    let (mut harness, _dir) = wide_harness(store, Box::new(FakeSucceedingEngineFactory));
     harness.run();
 
     harness
@@ -522,7 +529,7 @@ fn retry_on_a_failed_row_reaches_completion() {
 #[test]
 fn store_write_failed_event_shows_the_banner_and_dismiss_clears_it() {
     let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
-    let mut harness = wide_harness(store, Box::new(NeverCalledEngineFactory));
+    let (mut harness, _dir) = wide_harness(store, Box::new(NeverCalledEngineFactory));
     harness.run(); // spawns the (lazily-created) event pump
 
     harness.state_mut().inject_event_for_test(TaskEvent {
@@ -586,7 +593,7 @@ fn modal_open_suppresses_delete_and_command_s_while_rename_is_open() {
     // the shortcuts, Clear's own gate wouldn't be what stops it either.
     store.mark_completed(&id, &[]).expect("mark completed");
 
-    let mut harness = wide_harness(store, Box::new(NeverCalledEngineFactory));
+    let (mut harness, _dir) = wide_harness(store, Box::new(NeverCalledEngineFactory));
     harness.run();
 
     // A plain click first: selection is separate from a context-menu

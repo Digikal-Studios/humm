@@ -11,8 +11,10 @@
 //! preserved parity behaviors are resume-via-Range, SHA256 verification
 //! against upstream digests, and CoreML zip extraction (F-043).
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::cancel::CancelToken;
 use crate::domain::ModelSize;
@@ -23,6 +25,44 @@ use super::registry::{
     coreml_no_encoder_marker, coreml_state, ggml_file_name, partial_path_for, repo_for,
     sentinel_path_for,
 };
+
+/// Process-wide registry of per-final-path download locks (carried M3
+/// ticket, `docs/superpowers/.../task-13-brief.md` step 1): guards
+/// [`ModelDownloader::ensure_artifact`]'s whole partial→verify→promote
+/// sequence, so two concurrent callers racing the *same* artifact (e.g. a
+/// Preferences-tab prefetch and an in-task `ensure_model` call for the same
+/// model) never both download it — the second comer blocks on the artifact's
+/// lock, then re-checks the completeness sentinel and takes the fast path.
+///
+/// Keyed by the artifact's `final_path` rather than a coarser process-wide
+/// lock so unrelated artifacts (e.g. two different model sizes) never
+/// serialize against each other. Entries are never removed — the number of
+/// distinct artifacts a process ever ensures in its lifetime is small (a
+/// handful of model sizes plus VAD/custom), so the leaked `Arc<Mutex<()>>`
+/// map entries are not worth the complexity of pruning.
+static ARTIFACT_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Returns (creating if necessary) the shared lock guarding `final_path` in
+/// [`ARTIFACT_LOCKS`].
+fn artifact_lock(final_path: &Path) -> Arc<Mutex<()>> {
+    let mut locks = lock_recover(&ARTIFACT_LOCKS);
+    Arc::clone(
+        locks
+            .entry(final_path.to_path_buf())
+            .or_insert_with(|| Arc::new(Mutex::new(()))),
+    )
+}
+
+/// Locks a `Mutex`, recovering the guard if a previous holder panicked —
+/// same rationale as `queue::lock_recover`: a panic elsewhere (e.g. a test)
+/// must not permanently poison the shared lock registry for every other
+/// caller in the process.
+fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// One incremental progress update for a single artifact download.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,6 +339,13 @@ impl ModelDownloader {
     /// completion marker, the extracted directory's in-directory sentinel,
     /// and so never wants *this* sentinel written) calls
     /// [`Self::download_and_verify`] directly instead (`F-043` ticket b).
+    ///
+    /// Holds [`artifact_lock`]'s per-`final_path` lock across the entire
+    /// partial→verify→promote sequence (carried M3 ticket, step 1): a second
+    /// concurrent caller for the same artifact blocks here rather than
+    /// racing its own download, then — once it acquires the lock — re-checks
+    /// the completeness sentinel (now written by the first caller) and takes
+    /// the same fast path a call arriving after completion would.
     fn ensure_artifact(
         &self,
         url: &str,
@@ -308,6 +355,15 @@ impl ModelDownloader {
         cancel: &CancelToken,
     ) -> Result<(), ModelError> {
         let sentinel = sentinel_path_for(final_path);
+        if final_path.is_file() && sentinel.is_file() {
+            return Ok(());
+        }
+
+        let lock = artifact_lock(final_path);
+        let _guard = lock_recover(&lock);
+
+        // Re-check under the lock: another thread may have completed the
+        // download (and written the sentinel) while this caller waited.
         if final_path.is_file() && sentinel.is_file() {
             return Ok(());
         }
@@ -1620,6 +1676,68 @@ mod tests {
             1,
             "fast path must not touch the network"
         );
+    }
+
+    /// Carried M3 ticket (spec §8.1, step 1): two threads calling
+    /// `ensure_artifact` (via `ensure_custom_model`, which — like `ensure_ggml`/
+    /// `ensure_vad_model` — routes every download through it) for the *same*
+    /// final path must serialize on the per-artifact lock, not each start
+    /// their own download. A `Barrier` releases both threads at essentially
+    /// the same instant so the missing-lock bug gets a real chance to race
+    /// (rather than relying on incidental thread-spawn timing to ever
+    /// overlap); with the lock in place the outcome is deterministic either
+    /// way: exactly one full download, both calls `Ok`.
+    ///
+    /// Binds TCP (`TestServer::start`) — blocked under the sandbox, run with
+    /// it lifted (see this task's report for the full pre-existing set).
+    #[test]
+    fn concurrent_ensure_of_same_artifact_downloads_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let full_bytes = b"totally-fake-concurrent-download-bytes-for-testing".to_vec();
+
+        let server = TestServer::start();
+        let custom_path = "/someuser/somerepo/resolve/main/concurrent-model.bin";
+        server.set_route(custom_path, Canned::ok(full_bytes.clone()));
+        let url = format!("{}{custom_path}", server.base_url());
+
+        let downloader = Arc::new(ModelDownloader::with_hf_base(dir.path(), server.base_url()));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let downloader = Arc::clone(&downloader);
+                let url = url.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let cancel = CancelToken::new();
+                    barrier.wait();
+                    downloader.ensure_custom_model(&url, &mut |_| {}, &cancel)
+                })
+            })
+            .collect();
+
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread panicked"))
+            .collect();
+        for result in &results {
+            assert!(
+                result.is_ok(),
+                "both concurrent callers must succeed: {result:?}"
+            );
+        }
+
+        let requests = server.requests();
+        let full_downloads = requests.iter().filter(|r| r.path == custom_path).count();
+        assert_eq!(
+            full_downloads, 1,
+            "the per-artifact lock must serialize concurrent ensures into exactly one \
+             download, with the second comer taking the fast path: {requests:?}"
+        );
+
+        let final_path = dir.path().join(registry::custom_model_file_name());
+        assert_eq!(std::fs::read(&final_path).unwrap(), full_bytes);
+        assert!(sentinel_path_for(&final_path).is_file());
     }
 
     /// `openai/whisper-tiny` maps to `ModelSize::Tiny` and delegates to

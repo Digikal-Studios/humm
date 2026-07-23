@@ -64,13 +64,13 @@ impl TranscriptionEngine for FakeEngine {
     }
 }
 
-fn test_services(store: Arc<SqliteStore>, capabilities: Capabilities) -> Services {
+fn test_services(store: Arc<SqliteStore>, capabilities: Capabilities, dir: &Path) -> Services {
     services::init_with(TestDeps {
         store,
-        media_dir: PathBuf::from("/unused-media-dir"),
-        model_root: PathBuf::from("/unused-model-root"),
+        media_dir: dir.join("media"),
+        model_root: dir.join("models"),
         settings: humm_core::settings::Settings::default(),
-        settings_path: PathBuf::from("/unused-settings-path"),
+        settings_path: dir.join("settings.toml"),
         engines: Box::new(FakeSucceedingEngineFactory),
         fetcher: None,
         capabilities,
@@ -78,8 +78,16 @@ fn test_services(store: Arc<SqliteStore>, capabilities: Capabilities) -> Service
     })
 }
 
-fn harness_with(store: Arc<SqliteStore>, capabilities: Capabilities) -> Harness<'static, HummApp> {
-    HarnessBuilder::default()
+/// Returns the harness alongside the `TempDir` backing its (unused but now
+/// real, not sentinel-string) `media_dir`/`model_root`/`settings_path` —
+/// the caller must keep it alive for the harness's lifetime.
+fn harness_with(
+    store: Arc<SqliteStore>,
+    capabilities: Capabilities,
+) -> (Harness<'static, HummApp>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = test_services(store, capabilities, dir.path());
+    let harness = HarnessBuilder::default()
         .with_size(egui::Vec2::new(1000.0, 700.0))
         // The default `max_steps` (4) is tuned for a static UI; a real
         // `HummApp` backed by `init_with`'s live queue/event-pump thread can
@@ -87,7 +95,8 @@ fn harness_with(store: Arc<SqliteStore>, capabilities: Capabilities) -> Harness<
         // under event-pump churn, which otherwise flakes with a spurious
         // "exceeded max_steps" panic (final-review fix 5).
         .with_max_steps(32)
-        .build_eframe(move |_cc| HummApp::new_for_test(test_services(store, capabilities)))
+        .build_eframe(move |_cc| HummApp::new_for_test(services));
+    (harness, dir)
 }
 
 /// Polls `store` until it has exactly `expected` rows (`list_tasks`), so a
@@ -115,7 +124,7 @@ fn wait_for_task_count(store: &SqliteStore, expected: usize) -> Vec<humm_store::
 #[test]
 fn open_options_sheet_shows_the_file_count_and_extract_speech_is_disabled() {
     let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
-    let mut harness = harness_with(store, Capabilities::default());
+    let (mut harness, _dir) = harness_with(store, Capabilities::default());
     harness.run();
 
     harness
@@ -141,7 +150,7 @@ fn open_options_sheet_shows_the_file_count_and_extract_speech_is_disabled() {
 fn run_with_srt_checked_enqueues_full_options_closes_the_sheet_and_stays_sticky_on_reopen() {
     let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
     let store_for_assert = Arc::clone(&store);
-    let mut harness = harness_with(store, Capabilities::default());
+    let (mut harness, _dir) = harness_with(store, Capabilities::default());
     harness.run();
 
     harness
@@ -214,7 +223,7 @@ fn url_dialog_invalid_input_shows_the_exact_error_and_stays_open() {
         yt_dlp: true,
         ..Capabilities::default()
     };
-    let mut harness = harness_with(store, capabilities);
+    let (mut harness, _dir) = harness_with(store, capabilities);
     harness.run();
 
     harness.get_by_label("New URL Transcription").click();
