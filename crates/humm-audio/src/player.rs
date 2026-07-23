@@ -46,12 +46,18 @@
 //! The loop range is two source-frame bounds (two [`AtomicI64`]s, `-1` =
 //! disabled). Crossing `end` mid-fill wraps to `start` *within the same fill
 //! call*, sample-exactly (spec deviations ledger #3; Buzz loops ~50 ms early
-//! off a 16 ms poll). Two independent atomics can be read torn while the UI
-//! thread updates them; a torn read yields either the old or new bound for one
-//! `~10 ms` buffer and is made harmless by validating `start < end` before
-//! using the range (an invalid pair simply disables looping for that one
-//! buffer — corrected on the next call). This is cheaper than a mutex and,
-//! unlike a mutex, can never block the real-time thread.
+//! off a 16 ms poll). `set_loop` writes the two bounds as independent
+//! `Relaxed` stores; the C++/Rust memory model gives **no ordering
+//! guarantee** between them as observed by another thread — which store a
+//! concurrent `fill` sees first is unspecified, so the write order does not
+//! by itself make one observation more likely than the other. Correctness
+//! does not depend on any such ordering: `fill` reads both atomics once per
+//! buffer and validates `start < end` (and `start < total_frames`) before
+//! trusting the pair, so *every* torn combination (old/old, old/new, new/old,
+//! new/new) either yields a valid range or is rejected and simply disables
+//! looping for that one `~10 ms` buffer, self-correcting on the next call.
+//! This is cheaper than a mutex and, unlike a mutex, can never block the
+//! real-time thread.
 //!
 //! [`PlaybackPcm`]: humm_core::boundary::PlaybackPcm
 
@@ -87,6 +93,14 @@ struct Shared {
     total_frames: u64,
     /// Current playback position, as a source-frame index. The master clock.
     position: AtomicU64,
+    /// Generation counter bumped by every `Player::seek` call, letting the
+    /// `fill` closure detect a seek that lands between its entry read and
+    /// its end-of-buffer `position` store (see `commit_position`, Finding
+    /// 1). `seek()` writes `position` first, then increments this counter
+    /// with `Release`; the fill's reads use `Acquire`, so observing a new
+    /// generation also guarantees the paired `position` write is visible —
+    /// a guarantee plain `Relaxed` cannot give across two distinct atomics.
+    seek_generation: AtomicU64,
     /// Whether the `fill` callback is consuming frames (vs. emitting silence).
     playing: AtomicBool,
     /// Playback speed as `f32` bits (see [`f32::to_bits`]).
@@ -117,6 +131,41 @@ impl Shared {
             Some((start, end.min(self.total_frames)))
         } else {
             None
+        }
+    }
+
+    /// Reads the current seek generation with `Acquire` ordering, so a
+    /// caller that observes a new value also observes the `position` write
+    /// that produced it (paired with the `Release` bump in
+    /// `bump_seek_generation`).
+    fn seek_generation(&self) -> u64 {
+        self.seek_generation.load(Ordering::Acquire)
+    }
+
+    /// Bumps the seek generation with `Release` ordering, publishing that a
+    /// new seek target is now visible in `position`. Called by `Player::seek`
+    /// after writing `position`.
+    fn bump_seek_generation(&self) {
+        self.seek_generation.fetch_add(1, Ordering::Release);
+    }
+
+    /// Commits a fill buffer's computed end-of-buffer cursor to `position` —
+    /// unless a seek landed after `gen_at_entry` was captured, in which case
+    /// the seek's target wins instead of being silently overwritten (Finding
+    /// 1: an unconditional store here could clobber a seek that raced in
+    /// mid-buffer). Returns `(resulting_frame, generation_now_observed)`: the
+    /// frame the caller's local cursor should carry into the next buffer, and
+    /// the generation it should remember to compare against next time.
+    fn commit_position(&self, gen_at_entry: u64, computed_cursor: u64, total: u64) -> (u64, u64) {
+        let gen_now = self.seek_generation();
+        if gen_now == gen_at_entry {
+            let published = computed_cursor.min(total);
+            self.position.store(published, Ordering::Relaxed);
+            (published, gen_now)
+        } else {
+            // A seek raced in after entry; adopt its target instead of
+            // overwriting it.
+            (self.position.load(Ordering::Relaxed), gen_now)
         }
     }
 
@@ -176,6 +225,7 @@ impl Player {
             sample_rate,
             total_frames,
             position: AtomicU64::new(0),
+            seek_generation: AtomicU64::new(0),
             playing: AtomicBool::new(false),
             speed_bits: AtomicU32::new(1.0f32.to_bits()),
             loop_start: AtomicI64::new(NO_LOOP),
@@ -228,9 +278,12 @@ impl Player {
 
     /// Seeks to `pos`, clamped to `[0, duration]`. Takes effect on the next
     /// `fill` call (the audio thread reconciles its cursor with this atomic).
+    /// Bumps the seek generation so a `fill` buffer already in flight yields
+    /// to this target instead of silently overwriting it (Finding 1).
     pub fn seek(&self, pos: Millis) {
         let frame = self.shared.millis_to_frames(pos);
         self.shared.position.store(frame, Ordering::Relaxed);
+        self.shared.bump_seek_generation();
     }
 
     /// Sets the playback speed, clamped to `0.1..=5.0` (spec §2.1). Engages the
@@ -256,9 +309,16 @@ impl Player {
                 let start_f = self.shared.millis_to_frames(start);
                 let end_f = self.shared.millis_to_frames(end);
                 if start_f < end_f {
-                    // Publish end before start so a concurrent `fill` that
-                    // observes the new start also observes an end at least as
-                    // large (the torn-read guard tolerates the reverse too).
+                    // The store order between these two `Relaxed` atomics
+                    // carries no observation guarantee for a concurrent
+                    // `fill` — two independent `Relaxed` atomics have no
+                    // relative ordering visible to a third thread under the
+                    // C++/Rust memory model, regardless of which is written
+                    // first here. Correctness instead comes from
+                    // `Shared::loop_range`'s validation, which tolerates
+                    // every torn combination of old/new start and end: an
+                    // invalid pair just disables looping for one buffer,
+                    // corrected on the next call.
                     self.shared.loop_end.store(end_f as i64, Ordering::Relaxed);
                     self.shared
                         .loop_start
@@ -313,16 +373,24 @@ impl Drop for Player {
 /// Builds the real-time `fill` closure over `shared`.
 ///
 /// The closure owns two pieces of *local* (audio-thread-only) state — a
-/// fractional cursor and the last position it published — so it can carry
-/// sub-frame precision across calls (the atomic `position` holds only whole
-/// frames) and detect a UI-thread seek (the atomic changing out from under it).
-/// No heap state is captured, so there is no allocation on any fill path.
+/// fractional cursor and the seek generation it last resynced against — so it
+/// can carry sub-frame precision across calls (the atomic `position` holds
+/// only whole frames) and detect a UI-thread seek via `Shared::seek_generation`.
+/// A seek is checked for **twice** per buffer: once at entry (to resync
+/// `cursor` before consuming any frames) and once more, via
+/// `Shared::commit_position`, right before the end-of-buffer `position`
+/// store — closing the race where a seek lands *after* the entry check but
+/// *before* this closure would otherwise overwrite `position` with its own
+/// stale computed value (Finding 1: that overwrite used to silently lose the
+/// seek). No heap state is captured, so there is no allocation on any fill
+/// path.
 fn make_fill(shared: Arc<Shared>) -> FillCallback {
     // Fractional source-frame cursor; the atomic holds only its floored value.
     let mut cursor: f64 = 0.0;
-    // Last whole-frame value this closure published to `position`, so a
-    // mismatch on entry means the UI thread seeked and we must resync.
-    let mut last_published: u64 = 0;
+    // The seek generation this closure last resynced `cursor` against; a
+    // mismatch against `shared.seek_generation()` means a seek landed and we
+    // must resync (at entry) or must not clobber it (at exit).
+    let mut last_seen_gen: u64 = 0;
 
     Box::new(move |out: &mut [f32]| {
         let ch = shared.channels;
@@ -332,10 +400,12 @@ fn make_fill(shared: Arc<Shared>) -> FillCallback {
             return;
         }
 
-        // Resync the local cursor if the UI thread moved the position (seek).
-        let published = shared.position.load(Ordering::Relaxed);
-        if published != last_published {
-            cursor = published as f64;
+        // Resync the local cursor if the UI thread seeked before this call
+        // started.
+        let gen_at_entry = shared.seek_generation();
+        if gen_at_entry != last_seen_gen {
+            cursor = shared.position.load(Ordering::Relaxed) as f64;
+            last_seen_gen = gen_at_entry;
         }
 
         if !shared.playing.load(Ordering::Relaxed) {
@@ -394,10 +464,13 @@ fn make_fill(shared: Arc<Shared>) -> FillCallback {
             cursor += speed;
         }
 
-        // Publish the whole-frame position for the UI thread.
-        let published = (cursor as u64).min(total);
-        shared.position.store(published, Ordering::Relaxed);
-        last_published = published;
+        // Commit the computed cursor to `position` — unless a seek landed
+        // after `gen_at_entry` was captured, in which case honor that seek
+        // instead of overwriting it with this stale computed value (Finding
+        // 1).
+        let (resolved, gen_now) = shared.commit_position(gen_at_entry, cursor as u64, total);
+        cursor = resolved as f64;
+        last_seen_gen = gen_now;
     })
 }
 
@@ -597,6 +670,80 @@ mod tests {
         let expected: Vec<f32> = (0..20).map(|i| i as f32).collect();
         assert_eq!(out, expected);
         assert_eq!(h.player.position(), Millis(10));
+    }
+
+    #[test]
+    fn seek_during_fill_is_not_lost() {
+        // Finding 1: a `seek()` landing between the fill's entry-generation
+        // read and its end-of-buffer `position` store must not be silently
+        // clobbered by that store. Both shapes are driven manually here
+        // (read-entry -> interleaved seek -> end-store) so the interleaving
+        // is deterministic rather than depending on real thread timing.
+        let total: u64 = 1000;
+
+        // --- OLD shape: unconditional end-store loses the seek. ---
+        {
+            let h = Harness::ramp(total as usize, 1);
+            h.player.play();
+            let shared = &h.player.shared;
+
+            // 1. read-entry.
+            let _gen_at_entry = shared.seek_generation();
+            // Playback computed cursor 250 from the frames it consumed this
+            // buffer, before the seek below landed.
+            let stale_computed_cursor: u64 = 250;
+
+            // 2. interleave: a UI-thread seek lands mid-buffer.
+            h.player.seek(Millis(700));
+            assert_eq!(h.player.position(), Millis(700));
+
+            // 3. end-store, OLD shape (player.rs:398-400 pre-fix):
+            //    unconditional — this is the clobber the fix removes.
+            shared
+                .position
+                .store(stale_computed_cursor, Ordering::Relaxed);
+            assert_eq!(
+                h.player.position(),
+                Millis(250),
+                "reproduces the bug: an unconditional end-store silently \
+                 loses the interleaved seek"
+            );
+        }
+
+        // --- NEW shape: `commit_position` honors the newer seek. ---
+        let mut h = Harness::ramp(total as usize, 1);
+        h.player.play();
+
+        // 1. read-entry.
+        let gen_at_entry = h.player.shared.seek_generation();
+        let stale_computed_cursor: u64 = 250;
+
+        // 2. interleave: seek lands after entry was captured but before the
+        //    fill's end-store runs.
+        h.player.seek(Millis(700));
+
+        // 3. end-store, NEW shape: re-checks the generation and yields to
+        //    the newer seek instead of overwriting it.
+        let (resolved, gen_now) =
+            h.player
+                .shared
+                .commit_position(gen_at_entry, stale_computed_cursor, total);
+        assert_ne!(gen_now, gen_at_entry, "the seek must bump the generation");
+        assert_eq!(
+            resolved, 700,
+            "the seek's target must win over the stale computed cursor"
+        );
+        assert_eq!(
+            h.player.position(),
+            Millis(700),
+            "the interleaved seek survives the fill's end-store"
+        );
+
+        // The real fill path converges the same way end-to-end: the next
+        // buffer resumes from the seek target, not the pre-seek trajectory.
+        let out = h.pull(10);
+        assert_eq!(out[0], 700.0, "fill resumes playback from the seek target");
+        assert_eq!(h.player.position(), Millis(710));
     }
 
     #[test]

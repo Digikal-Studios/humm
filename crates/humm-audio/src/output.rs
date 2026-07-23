@@ -475,4 +475,67 @@ mod tests {
         map_frame(&src, &mut dst);
         assert_eq!(dst, [0.1, 0.2, 0.2, 0.2]);
     }
+
+    #[test]
+    fn resample_state_converts_rate_without_device() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        // 44.1 kHz -> 48 kHz mono: the non-44.1kHz device branch (Finding 3
+        // had no behavioral coverage for it). No real device or audio thread
+        // is involved — a synthetic fill closure stands in for the player.
+        let src_rate = 44_100u32;
+        let device_rate = 48_000u32;
+        let ratio = f64::from(device_rate) / f64::from(src_rate);
+
+        // A synthetic 440 Hz sine, generated on demand by the fill closure;
+        // also counts the total number of source frames the resampler pulled.
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let consumed_in_fill = consumed.clone();
+        let mut phase: f32 = 0.0;
+        let step = 2.0 * std::f32::consts::PI * 440.0 / src_rate as f32;
+        let fill: FillCallback = Box::new(move |buf: &mut [f32]| {
+            for s in buf.iter_mut() {
+                *s = phase.sin();
+                phase += step;
+            }
+            consumed_in_fill.fetch_add(buf.len(), AtomicOrdering::Relaxed);
+        });
+
+        let mut state = ResampleState::new(src_rate, device_rate, 1, 1, fill)
+            .expect("resampler builds for a real 44.1kHz -> 48kHz ratio");
+
+        // Pull many device-rate buffers of varied sizes (including sizes that
+        // don't evenly divide RESAMPLE_OUT_CHUNK) so internal chunk
+        // boundaries are crossed repeatedly without panicking.
+        let buffer_sizes = [128usize, 512, 1024, 4000, 37, 1, 900];
+        let mut total_out_frames: u64 = 0;
+        let mut saw_nonsilence = false;
+
+        for _ in 0..40 {
+            for &frames in &buffer_sizes {
+                let mut data = vec![0.0f32; frames]; // 1 device channel
+                state.render(&mut data);
+                if data.iter().any(|&s| s.abs() > 1e-4) {
+                    saw_nonsilence = true;
+                }
+                total_out_frames += frames as u64;
+            }
+        }
+
+        assert!(saw_nonsilence, "resampled output must not be silent");
+
+        // Frame-count sanity: the total source frames the resampler pulled
+        // from `fill` should track the device/source ratio, modulo the
+        // bounded internal buffering slop (at most ~1 refill chunk running
+        // ahead of what render() has drained so far).
+        let consumed_frames = consumed.load(AtomicOrdering::Relaxed) as f64;
+        let expected_frames = total_out_frames as f64 / ratio;
+        let rel_err = (consumed_frames - expected_frames).abs() / expected_frames;
+        assert!(
+            rel_err < 0.05,
+            "consumed {consumed_frames} source frames for {total_out_frames} device \
+             frames at ratio {ratio}; expected ~{expected_frames} (rel err {rel_err})"
+        );
+    }
 }
