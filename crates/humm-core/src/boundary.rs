@@ -63,6 +63,92 @@ pub struct MediaInfo {
     pub has_audio: bool,
     /// Whether the file has at least one video stream.
     pub has_video: bool,
+    /// Dimensions/frame rate of the file's video stream, if it has one.
+    /// `None` whenever `has_video` is `false` (same cover-art exclusion:
+    /// an embedded `attached_pic` stream is never reported here either).
+    pub video: Option<VideoStreamInfo>,
+}
+
+/// Dimensions and frame rate of a probed video stream
+/// (`ffmpeg_video_player.py:39-75`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VideoStreamInfo {
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+    /// Frames per second. Parsed from ffprobe's `r_frame_rate` (`"n/d"` →
+    /// `f64`), falling back to `25.0` on a missing/malformed value and
+    /// floored to `1.0` (`ffmpeg_video_player.py:61-66,236`).
+    pub fps: f64,
+}
+
+/// One decoded video frame, in RGBA byte order (ADR deviation from Buzz's
+/// `rgb24` — see deviations ledger #10), ready for GPU texture upload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VideoFrame {
+    /// Presentation timestamp, synthesized from the frame's ffmpeg read
+    /// order as `start + n·(1000/fps)` (Buzz parity,
+    /// `ffmpeg_video_player.py:120-175`).
+    pub ts: Millis,
+    /// Interleaved RGBA bytes, `width * height * 4` long.
+    pub rgba: Vec<u8>,
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+}
+
+/// Decoded interleaved playback PCM, at whatever channel count/sample rate
+/// the decoder produced it (unlike [`Pcm`]'s fixed mono `SAMPLE_RATE`) —
+/// used for audio-player playback rather than transcription. Buzz decodes
+/// playback audio to 44.1 kHz stereo (`sounddevice_player.py:28-35`);
+/// [`AudioDecoder::decode_playback`] mirrors that.
+///
+/// Backed by `Arc<[f32]>` for the same cheap-clone reason as [`Pcm`].
+#[derive(Debug, Clone)]
+pub struct PlaybackPcm {
+    samples: Arc<[f32]>,
+    /// Interleaved channel count (e.g. `2` for stereo).
+    pub channels: u16,
+    /// Sample rate in Hz.
+    pub sample_rate: u32,
+}
+
+impl PlaybackPcm {
+    /// Wraps interleaved decoded samples at `channels`/`sample_rate`.
+    pub fn new(samples: Vec<f32>, channels: u16, sample_rate: u32) -> Self {
+        PlaybackPcm {
+            samples: samples.into(),
+            channels,
+            sample_rate,
+        }
+    }
+
+    /// The raw interleaved samples.
+    pub fn samples(&self) -> &[f32] {
+        &self.samples
+    }
+
+    /// Number of frames (samples per channel): `samples().len() / channels`.
+    /// `0` when `channels` is `0`.
+    pub fn frames(&self) -> usize {
+        if self.channels == 0 {
+            0
+        } else {
+            self.samples.len() / usize::from(self.channels)
+        }
+    }
+
+    /// Duration implied by [`Self::frames`] at [`Self::sample_rate`],
+    /// rounded down to the nearest millisecond. `Millis(0)` when
+    /// `sample_rate` is `0`.
+    pub fn duration(&self) -> Millis {
+        if self.sample_rate == 0 {
+            return Millis(0);
+        }
+        Millis((self.frames() as i64 * 1000) / i64::from(self.sample_rate))
+    }
 }
 
 /// Parameters for a single transcription run, translated from
@@ -102,6 +188,13 @@ pub struct EngineCaps {
 pub trait AudioDecoder: Send + Sync {
     /// Decodes `path` to PCM, checking `cancel` cooperatively.
     fn decode(&self, path: &Path, cancel: &CancelToken) -> Result<Pcm, MediaError>;
+
+    /// Decodes `path` to whole-file interleaved playback PCM (44.1 kHz
+    /// stereo — Buzz parity, `sounddevice_player.py:28-35`), checking
+    /// `cancel` cooperatively. Distinct from [`Self::decode`]: this feeds
+    /// the audio player, not the transcription engine.
+    fn decode_playback(&self, path: &Path, cancel: &CancelToken)
+    -> Result<PlaybackPcm, MediaError>;
 }
 
 /// Probes container/stream metadata. Implemented by the ffprobe subprocess
@@ -109,6 +202,34 @@ pub trait AudioDecoder: Send + Sync {
 pub trait MediaProber: Send + Sync {
     /// Probes `path` for duration and stream presence.
     fn probe(&self, path: &Path) -> Result<MediaInfo, MediaError>;
+}
+
+/// Opens a decoded video frame stream. Implemented by the ffmpeg rawvideo
+/// subprocess adapter (`ffmpeg_video_player.py:82-175`).
+pub trait VideoStreamer: Send + Sync {
+    /// Opens `path`'s video stream starting at `start`, reading frames
+    /// according to `info` (as previously reported by [`MediaProber`]).
+    fn open(
+        &self,
+        path: &Path,
+        start: Millis,
+        info: &VideoStreamInfo,
+    ) -> Result<Box<dyn FrameStream>, MediaError>;
+}
+
+/// A live decoded-frame stream from an open [`VideoStreamer`], polled by
+/// display timer.
+pub trait FrameStream: Send {
+    /// Best frame for `position` per Buzz's drain-stale rule
+    /// (`ffmpeg_video_player.py:177-200`); `None` means keep showing the
+    /// last frame returned (no fresh frame is ready yet, or none ever
+    /// will be for this position).
+    fn frame_for(&mut self, position: Millis) -> Option<VideoFrame>;
+
+    /// Restarts decoding at `position` (kill the current subprocess and
+    /// respawn one seeked there — Buzz has no separate seek path, just
+    /// `start()` again, `ffmpeg_video_player.py:264-271`).
+    fn seek(&mut self, position: Millis) -> Result<(), MediaError>;
 }
 
 /// Progress of a media download, as reported by a [`MediaFetcher`].

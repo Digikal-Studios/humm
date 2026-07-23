@@ -1089,7 +1089,7 @@ pub fn spawn_task_runner(deps: RunnerDeps) -> QueueHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::boundary::{EngineCaps, EngineOptions, MediaInfo, Pcm};
+    use crate::boundary::{EngineCaps, EngineOptions, MediaInfo, Pcm, PlaybackPcm};
     use crate::domain::{Millis, ModelSize, OutputSpec, TranscriptionOptions};
     use crate::error::{ModelError, StoreError};
     use pretty_assertions::assert_eq;
@@ -1267,6 +1267,14 @@ mod tests {
                 .push(path.to_path_buf());
             Ok(self.pcm.clone())
         }
+
+        fn decode_playback(
+            &self,
+            _path: &Path,
+            _cancel: &CancelToken,
+        ) -> Result<PlaybackPcm, MediaError> {
+            Ok(PlaybackPcm::new(vec![0.0; 4], 2, 44_100))
+        }
     }
 
     struct FakeProber;
@@ -1277,6 +1285,7 @@ mod tests {
                 duration: Some(Millis(1000)),
                 has_audio: true,
                 has_video: false,
+                video: None,
             })
         }
     }

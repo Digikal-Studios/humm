@@ -9,15 +9,17 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use humm_core::boundary::{AudioDecoder, FetchProgress, MediaFetcher, MediaProber};
+use humm_core::boundary::{AudioDecoder, FetchProgress, MediaFetcher, MediaProber, VideoStreamer};
 use humm_core::cancel::CancelToken;
+use humm_core::domain::Millis;
 use humm_core::error::MediaError;
-use humm_media::{FfmpegDecoder, FfprobeProber, YtDlpFetcher, probe_binaries};
+use humm_media::{FfmpegDecoder, FfmpegVideoStreamer, FfprobeProber, YtDlpFetcher, probe_binaries};
 
 /// Root of Buzz's test fixtures, honoring `HUMM_BUZZ_TESTDATA` (Global
 /// Constraint 4).
@@ -61,6 +63,41 @@ fn write_sine_wav(path: &Path, freq_hz: f64, seconds: f64, sample_rate: u32, amp
     buf.extend_from_slice(&samples);
 
     std::fs::write(path, buf).expect("write sine wav");
+}
+
+/// Resolves the ffmpeg binary the same way `FfmpegDecoder::new`/
+/// `FfmpegVideoStreamer::new` do (`HUMM_FFMPEG` override, else `ffmpeg` on
+/// `PATH`), for generating fixtures directly via a raw subprocess.
+fn ffmpeg_binary() -> PathBuf {
+    std::env::var_os("HUMM_FFMPEG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("ffmpeg"))
+}
+
+/// Generates a short H.264 + AAC mp4 fixture entirely from ffmpeg's `lavfi`
+/// test sources — `testsrc2` (default 320×240) for video, `sine` for audio
+/// — so dimensions/fps/duration are exactly known without shipping a binary
+/// fixture. Used by the video/probe contract tests below.
+fn write_video_fixture(dir: &Path, duration_secs: u32, fps: u32) -> PathBuf {
+    let path = dir.join("fixture.mp4");
+    let status = Command::new(ffmpeg_binary())
+        .args(["-y", "-f", "lavfi"])
+        .arg("-i")
+        .arg(format!("testsrc2=duration={duration_secs}:rate={fps}"))
+        .args(["-f", "lavfi"])
+        .arg("-i")
+        .arg(format!("sine=duration={duration_secs}"))
+        .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+        .args(["-c:a", "aac", "-shortest"])
+        .args(["-loglevel", "error"])
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("spawn ffmpeg to generate video fixture");
+    assert!(status.success(), "ffmpeg video fixture generation failed");
+    path
 }
 
 #[test]
@@ -247,6 +284,170 @@ fn cancel_kills_decode_pre_canceled_fast_path() {
     assert!(
         elapsed < Duration::from_secs(2),
         "cancellation took too long: {elapsed:?}"
+    );
+}
+
+// --- `decode_playback`/video `FrameStream` contract tests (F-083) ---------
+
+#[test]
+#[ignore = "requires ffmpeg"]
+fn decode_playback_stereo_44100_matches_duration() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("sine.wav");
+    // Source is mono at a non-44.1kHz rate on purpose: decode_playback must
+    // resample/upmix to stereo 44.1 kHz regardless of the source format
+    // (`sounddevice_player.py:28-35`).
+    write_sine_wav(&path, 440.0, 2.0, 22_050, 0.5);
+
+    let decoder = FfmpegDecoder::new();
+    let cancel = CancelToken::new();
+    let pcm = decoder
+        .decode_playback(&path, &cancel)
+        .expect("decode_playback should succeed");
+
+    assert_eq!(pcm.channels, 2);
+    assert_eq!(pcm.sample_rate, 44_100);
+    assert_eq!(
+        pcm.samples().len(),
+        pcm.frames() * 2,
+        "interleaved stereo: samples().len() == frames() * channels"
+    );
+    assert!(
+        pcm.samples().iter().all(|s| s.is_finite()),
+        "decoded samples must all be finite"
+    );
+
+    let expected_frames = (2.0 * 44_100.0) as i64;
+    let actual_frames = pcm.frames() as i64;
+    let tolerance = (expected_frames as f64 * 0.01).ceil() as i64;
+    assert!(
+        (actual_frames - expected_frames).abs() <= tolerance,
+        "expected ~{expected_frames} frames (±1%), got {actual_frames}"
+    );
+
+    let expected_ms = 2000i64;
+    let actual_ms = pcm.duration().0;
+    assert!(
+        (actual_ms - expected_ms).abs() <= 20,
+        "expected ~{expected_ms}ms duration, got {actual_ms}ms"
+    );
+}
+
+#[test]
+#[ignore = "requires ffmpeg"]
+fn video_stream_yields_monotonic_frames_with_dimensions() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_video_fixture(dir.path(), 2, 25);
+
+    let prober = FfprobeProber::new();
+    let info = prober.probe(&path).expect("probe should succeed");
+    let video_info = info.video.expect("expected a video stream");
+
+    let streamer = FfmpegVideoStreamer::new();
+    let mut stream = streamer
+        .open(&path, Millis(0), &video_info)
+        .expect("open should succeed");
+
+    let frame_ms = (1000.0 / video_info.fps).round() as i64;
+    let mut frames = Vec::new();
+    let mut position = Millis(0);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while frames.len() < 50 {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for frames; got {} of 50",
+            frames.len()
+        );
+        match stream.frame_for(position) {
+            Some(frame) => {
+                position = Millis(position.0 + frame_ms);
+                frames.push(frame);
+            }
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+
+    for frame in &frames {
+        assert_eq!(frame.width, video_info.width);
+        assert_eq!(frame.height, video_info.height);
+        assert_eq!(
+            frame.rgba.len(),
+            (video_info.width * video_info.height * 4) as usize,
+            "rgba buffer should be width*height*4 bytes"
+        );
+    }
+
+    let timestamps: Vec<i64> = frames.iter().map(|f| f.ts.0).collect();
+    assert_eq!(timestamps[0], 0, "first frame's ts should be 0");
+    for pair in timestamps.windows(2) {
+        assert!(
+            pair[1] > pair[0],
+            "timestamps should be strictly ascending: {timestamps:?}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires ffmpeg"]
+fn video_seek_restarts_at_position() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_video_fixture(dir.path(), 2, 25);
+
+    let prober = FfprobeProber::new();
+    let info = prober.probe(&path).expect("probe should succeed");
+    let video_info = info.video.expect("expected a video stream");
+    let frame_ms = 1000.0 / video_info.fps;
+
+    let streamer = FfmpegVideoStreamer::new();
+    let mut stream = streamer
+        .open(&path, Millis(0), &video_info)
+        .expect("open should succeed");
+
+    stream.seek(Millis(1000)).expect("seek should succeed");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let frame = loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for a frame after seek"
+        );
+        if let Some(frame) = stream.frame_for(Millis(1000)) {
+            break frame;
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+
+    assert!(
+        (frame.ts.0 as f64) >= 1000.0 - frame_ms,
+        "expected first frame after seek(1000) to have ts >= {}, got {}",
+        1000.0 - frame_ms,
+        frame.ts.0
+    );
+}
+
+#[test]
+#[ignore = "requires ffmpeg"]
+fn probe_reports_video_info() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_video_fixture(dir.path(), 2, 25);
+
+    let prober = FfprobeProber::new();
+    let info = prober.probe(&path).expect("probe should succeed");
+
+    assert!(info.has_video, "expected a video stream");
+    assert!(info.has_audio, "expected an audio stream");
+    let video = info.video.expect("expected video stream info");
+    // testsrc2's default size is 320x240.
+    assert_eq!(video.width, 320);
+    assert_eq!(video.height, 240);
+    assert!(
+        (video.fps - 25.0).abs() < 1e-6,
+        "expected 25 fps, got {}",
+        video.fps
+    );
+    assert!(
+        info.duration.expect("duration should be known").0 > 0,
+        "duration should be positive"
     );
 }
 

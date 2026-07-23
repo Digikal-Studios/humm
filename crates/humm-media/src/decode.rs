@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 
-use humm_core::boundary::{AudioDecoder, Pcm};
+use humm_core::boundary::{AudioDecoder, Pcm, PlaybackPcm};
 use humm_core::cancel::CancelToken;
 use humm_core::error::MediaError;
 
@@ -46,13 +46,9 @@ impl Default for FfmpegDecoder {
 
 impl AudioDecoder for FfmpegDecoder {
     fn decode(&self, path: &Path, cancel: &CancelToken) -> Result<Pcm, MediaError> {
-        if cancel.is_canceled() {
-            return Err(MediaError::Canceled);
-        }
-
         // `whisper_audio.py:39-50`, f32le per ADR-003.
-        let mut child = Command::new(&self.binary)
-            .arg("-nostdin")
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("-nostdin")
             .args(["-threads", "0"])
             .arg("-i")
             .arg(path)
@@ -61,59 +57,100 @@ impl AudioDecoder for FfmpegDecoder {
             .args(["-acodec", "pcm_f32le"])
             .args(["-ar", "16000"])
             .args(["-loglevel", "error"])
-            .arg("-")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|err| map_spawn_error("ffmpeg", "HUMM_FFMPEG", &self.binary, err))?;
+            .arg("-");
 
-        let mut stdout = child.stdout.take().expect("stdout was piped at spawn");
-        let mut stderr = child.stderr.take().expect("stderr was piped at spawn");
+        let raw = run_ffmpeg_pcm(cmd, &self.binary, cancel)?;
+        Ok(Pcm::new(bytes_to_f32(&raw)))
+    }
 
-        // Drain stderr on a separate thread: ffmpeg can block writing to a
-        // full stderr pipe while we're still reading stdout, deadlocking
-        // both sides if we read them sequentially instead.
-        let stderr_handle = thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = stderr.read_to_end(&mut buf);
-            buf
-        });
+    fn decode_playback(
+        &self,
+        path: &Path,
+        cancel: &CancelToken,
+    ) -> Result<PlaybackPcm, MediaError> {
+        // `sounddevice_player.py:28-35`: playback is decoded to 44.1 kHz
+        // stereo (distinct from `decode`'s mono 16 kHz for the engine).
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("-nostdin")
+            .arg("-i")
+            .arg(path)
+            .args(["-f", "f32le"])
+            .args(["-ac", "2"])
+            .args(["-ar", "44100"])
+            .args(["-loglevel", "error"])
+            .arg("-");
 
-        let mut raw = Vec::new();
-        let mut chunk = [0u8; READ_CHUNK_BYTES];
-        loop {
-            if cancel.is_canceled() {
+        let raw = run_ffmpeg_pcm(cmd, &self.binary, cancel)?;
+        Ok(PlaybackPcm::new(bytes_to_f32(&raw), 2, 44_100))
+    }
+}
+
+/// Spawns `cmd` (already configured with every ffmpeg argument except
+/// stdio), streams its stdout to completion checking `cancel`
+/// cooperatively, and returns the raw decoded bytes. Shared by
+/// [`AudioDecoder::decode`] and [`AudioDecoder::decode_playback`], which
+/// differ only in ffmpeg's argument list.
+fn run_ffmpeg_pcm(
+    mut cmd: Command,
+    binary: &Path,
+    cancel: &CancelToken,
+) -> Result<Vec<u8>, MediaError> {
+    if cancel.is_canceled() {
+        return Err(MediaError::Canceled);
+    }
+
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| map_spawn_error("ffmpeg", "HUMM_FFMPEG", binary, err))?;
+
+    let mut stdout = child.stdout.take().expect("stdout was piped at spawn");
+    let mut stderr = child.stderr.take().expect("stderr was piped at spawn");
+
+    // Drain stderr on a separate thread: ffmpeg can block writing to a
+    // full stderr pipe while we're still reading stdout, deadlocking
+    // both sides if we read them sequentially instead.
+    let stderr_handle = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        buf
+    });
+
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; READ_CHUNK_BYTES];
+    loop {
+        if cancel.is_canceled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stderr_handle.join();
+            return Err(MediaError::Canceled);
+        }
+        let n = match stdout.read(&mut chunk) {
+            Ok(n) => n,
+            Err(err) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = stderr_handle.join();
-                return Err(MediaError::Canceled);
+                return Err(MediaError::Io(err));
             }
-            let n = match stdout.read(&mut chunk) {
-                Ok(n) => n,
-                Err(err) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = stderr_handle.join();
-                    return Err(MediaError::Io(err));
-                }
-            };
-            if n == 0 {
-                break;
-            }
-            raw.extend_from_slice(&chunk[..n]);
+        };
+        if n == 0 {
+            break;
         }
-
-        let status = child.wait().map_err(MediaError::Io)?;
-        let stderr_bytes = stderr_handle.join().unwrap_or_default();
-
-        if !status.success() {
-            let detail = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
-            return Err(MediaError::DecodeFailed { detail });
-        }
-
-        Ok(Pcm::new(bytes_to_f32(&raw)))
+        raw.extend_from_slice(&chunk[..n]);
     }
+
+    let status = child.wait().map_err(MediaError::Io)?;
+    let stderr_bytes = stderr_handle.join().unwrap_or_default();
+
+    if !status.success() {
+        let detail = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
+        return Err(MediaError::DecodeFailed { detail });
+    }
+
+    Ok(raw)
 }
 
 /// Converts little-endian `f32` PCM bytes to samples. A trailing partial
@@ -176,6 +213,17 @@ mod tests {
         cancel.cancel();
         let err = decoder
             .decode(Path::new("/irrelevant"), &cancel)
+            .expect_err("should be canceled");
+        assert!(matches!(err, MediaError::Canceled));
+    }
+
+    #[test]
+    fn decode_playback_pre_canceled_token_short_circuits_before_spawning() {
+        let decoder = FfmpegDecoder::with_binary("/nonexistent/ffmpeg-binary-for-test");
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let err = decoder
+            .decode_playback(Path::new("/irrelevant"), &cancel)
             .expect_err("should be canceled");
         assert!(matches!(err, MediaError::Canceled));
     }

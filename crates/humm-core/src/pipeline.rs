@@ -204,7 +204,7 @@ pub fn run_file_job(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::boundary::{EngineCaps, MediaInfo, Pcm};
+    use crate::boundary::{EngineCaps, MediaInfo, Pcm, PlaybackPcm};
     use crate::domain::{Millis, OutputFormat, OutputSpec, TranscriptionOptions};
     use crate::error::EngineError;
     use pretty_assertions::assert_eq;
@@ -237,6 +237,14 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.pcm.clone())
         }
+
+        fn decode_playback(
+            &self,
+            _path: &Path,
+            _cancel: &CancelToken,
+        ) -> Result<PlaybackPcm, MediaError> {
+            Ok(PlaybackPcm::new(vec![0.0; 4], 2, 44_100))
+        }
     }
 
     enum ProbeBehavior {
@@ -265,6 +273,7 @@ mod tests {
                 duration: Some(Millis(329)),
                 has_audio: true,
                 has_video: false,
+                video: None,
             }),
         }
     }
@@ -595,6 +604,7 @@ mod tests {
                 duration: Some(Millis(0)),
                 has_audio: false,
                 has_video: false,
+                video: None,
             }),
         };
         let mut engine = FakeEngine {
