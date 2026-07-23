@@ -32,10 +32,11 @@ use humm_core::boundary::{
 };
 use humm_core::cancel::CancelToken;
 use humm_core::domain::{Millis, ModelSize, Segment, TaskKind};
+use humm_core::error::EngineError;
 use humm_core::language::Language;
 use humm_core::models::download::ModelDownloader;
 use humm_media::FfmpegDecoder;
-use humm_whisper::WhisperEngine;
+use humm_whisper::{LiveOptions, WhisperEngine};
 
 fn testdata_dir() -> PathBuf {
     std::env::var_os("HUMM_BUZZ_TESTDATA")
@@ -85,6 +86,16 @@ fn french_options() -> EngineOptions {
         word_timestamps: false,
         temperature: vec![0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
         vad_model: None,
+        threads: None,
+    }
+}
+
+/// Live-mode equivalent of [`french_options`] (F-061, ADR-008).
+fn french_live_options() -> LiveOptions {
+    LiveOptions {
+        language: Language::parse("fr"),
+        task: TaskKind::Transcribe,
+        temperature: vec![0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
         threads: None,
     }
 }
@@ -361,4 +372,62 @@ fn vad_remaps_to_original_timeline() {
         .transcribe(&pcm, &word_options, &mut word_sink, &CancelToken::new())
         .expect("VAD-on word-mode transcription");
     assert_original_timeline("word", &word_sink.segments);
+}
+
+/// Contract 6 (F-061, ADR-008): live mode transcribes two successive chunks,
+/// the second call fed the first call's own returned text as its rolling
+/// prompt, both succeeding with non-empty text; a third call given a
+/// pre-canceled token errors with `Canceled` promptly rather than running the
+/// whole chunk.
+#[test]
+#[ignore = "requires ffmpeg + a real whisper tiny model (downloaded/cached on first run)"]
+fn live_transcribes_successive_chunks_then_cancels_promptly() {
+    let pcm = decode("whisper-french.mp3");
+    let samples = pcm.samples();
+
+    // Two distinct ~3 s chunks of the ~8.5 s French speech fixture, so both
+    // live calls have real (if different) speech content.
+    let chunk_len = (SAMPLE_RATE as usize) * 3;
+    let chunk_a = &samples[..chunk_len.min(samples.len())];
+    let chunk_b_start = chunk_len.min(samples.len());
+    let chunk_b_end = (chunk_len * 2).min(samples.len());
+    let chunk_b = &samples[chunk_b_start..chunk_b_end];
+
+    let mut engine = engine();
+    let opts = french_live_options();
+
+    let first = engine
+        .transcribe_live(chunk_a, &opts, "", &CancelToken::new())
+        .expect("first live chunk should transcribe");
+    assert!(
+        !first.trim().is_empty(),
+        "expected non-empty first live utterance"
+    );
+
+    // Second call rolls the first call's own text forward as its prompt —
+    // exactly what the session loop does between chunks.
+    let second = engine
+        .transcribe_live(chunk_b, &opts, &first, &CancelToken::new())
+        .expect("second live chunk (rolling prompt) should transcribe");
+    assert!(
+        !second.trim().is_empty(),
+        "expected non-empty second live utterance"
+    );
+
+    // Third call: a pre-canceled token must abort promptly rather than
+    // running the chunk to completion.
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let start = Instant::now();
+    let result = engine.transcribe_live(chunk_a, &opts, &second, &cancel);
+    let elapsed = start.elapsed();
+
+    assert!(
+        matches!(result, Err(EngineError::Canceled)),
+        "expected Canceled, got {result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "pre-canceled live call took too long: {elapsed:?}"
+    );
 }

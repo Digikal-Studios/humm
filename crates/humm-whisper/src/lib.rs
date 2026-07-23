@@ -6,5 +6,5 @@
 mod engine;
 mod words;
 
-pub use engine::WhisperEngine;
+pub use engine::{LiveOptions, WhisperEngine};
 pub use words::{TokenInfo, group_words};
