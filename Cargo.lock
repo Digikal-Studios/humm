@@ -2285,6 +2285,7 @@ dependencies = [
  "humm-core",
  "log",
  "pretty_assertions",
+ "rtrb",
  "rubato",
 ]
 
@@ -2325,6 +2326,7 @@ dependencies = [
  "pretty_assertions",
  "regex",
  "reqwest",
+ "rtrb",
  "serde",
  "serde_json",
  "sha2",
@@ -4357,6 +4359,12 @@ dependencies = [
  "hashbrown 0.16.1",
  "thiserror 2.0.19",
 ]
+
+[[package]]
+name = "rtrb"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ade083ccbb4bf536df69d1f6432cc23deb7acccff86b183f3923a6fd56a1153"
 
 [[package]]
 name = "rubato"

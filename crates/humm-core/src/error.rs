@@ -110,6 +110,14 @@ pub enum AudioError {
         /// Diagnostic detail (cpal play/pause error).
         detail: String,
     },
+    /// A capture caller requested a specific input device by id, and no
+    /// currently enumerated input device matches it (disconnected, renamed,
+    /// or never existed).
+    #[error("audio input device not found: {id}")]
+    DeviceNotFound {
+        /// The requested device id that could not be matched.
+        id: String,
+    },
 }
 
 /// Errors from the model registry/downloader.
@@ -317,6 +325,16 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("build"));
         assert!(message.contains("format not supported"));
+    }
+
+    #[test]
+    fn audio_error_device_not_found_renders_id() {
+        let err = AudioError::DeviceNotFound {
+            id: "USB Microphone".to_string(),
+        };
+        let message = err.to_string();
+        assert!(message.contains("not found"));
+        assert!(message.contains("USB Microphone"));
     }
 
     #[test]

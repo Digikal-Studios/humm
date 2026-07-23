@@ -9,6 +9,7 @@ repository.workspace = true
 humm-core.workspace = true
 cpal.workspace = true
 rubato.workspace = true
+rtrb.workspace = true
 log.workspace = true
 
 [dev-dependencies]
