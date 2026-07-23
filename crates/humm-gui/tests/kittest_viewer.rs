@@ -17,8 +17,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use egui::accesskit::Role;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{By, Queryable};
 use humm_core::boundary::{
     AudioDecoder, AudioOutput, FillCallback, FrameStream, MediaInfo, MediaProber, OutputStream,
     Pcm, PlaybackPcm, StreamSpec, TaskStore, VideoStreamInfo, VideoStreamer,
@@ -30,9 +31,10 @@ use humm_core::domain::{
 };
 use humm_core::error::{AudioError, MediaError};
 use humm_core::settings::Settings;
+use humm_core::viewer::edit::Field;
 use humm_gui::import::FileDialogs;
 use humm_gui::shortcuts::ShortcutMap;
-use humm_gui::viewer::{ViewerDeps, ViewerVm};
+use humm_gui::viewer::{CellEditor, EditCol, ViewerDeps, ViewerVm};
 use humm_gui::views::viewer::viewer_ui;
 use humm_store::SqliteStore;
 
@@ -209,10 +211,14 @@ fn text_mode_shows_paragraph_joined_text() {
     let mut harness = build_harness(fixture);
     harness.run();
 
-    // Open the View menu and switch to Text mode.
+    // Open the View menu and switch to Text mode. The editor table now renders
+    // a "Text" *column header* (a Label) in Timestamps mode, so target the
+    // menu entry by its Button role to avoid the collision.
     harness.get_by_label("View").click();
     harness.run();
-    harness.get_by_label_contains("Text").click();
+    harness
+        .get(By::new().role(Role::Button).label_contains("Text"))
+        .click();
     harness.run();
 
     // Segments joined with a single space (gap 0 < 2000ms split).
@@ -235,13 +241,15 @@ fn translation_menu_entry_hidden_without_translations() {
         "Translation menu entry must be hidden when the transcript has no translations"
     );
 
-    // With a translation present, the entry appears.
+    // With a translation present, the menu entry appears. (The table also now
+    // renders a "Translation" column header — a Label — so target the menu
+    // entry by its Button role.)
     let (with_tr, _dir2) = fixture("/tmp/b.wav", &[seg(0, 1000, "hello", "hola")]);
     let mut harness2 = build_harness(with_tr);
     harness2.run();
     harness2.get_by_label("View").click();
     harness2.run();
-    harness2.get_by_label_contains("Translation");
+    harness2.get(By::new().role(Role::Button).label_contains("Translation"));
 }
 
 #[test]
@@ -251,4 +259,105 @@ fn empty_transcript_shows_explanatory_state() {
     harness.run();
 
     harness.get_by_label_contains("No segments");
+}
+
+/// The milestone acceptance "edits survive restart" automated half: a commit
+/// driven through the editing seam is read back by a *fresh* `ViewerVm::open`
+/// on the same store — proving the write reached disk, not just memory. (The
+/// windowed manual restart is the other half.)
+#[test]
+fn edit_survives_reopen() {
+    let (mut fixture, _dir) = fixture(
+        "/tmp/a.wav",
+        &[seg(0, 1000, "a", ""), seg(1000, 2000, "b", "")],
+    );
+    let id = fixture.vm.id;
+
+    // A timestamp commit that clamps its neighbor, plus a text commit — both
+    // through the store-backed editing seam.
+    assert!(
+        fixture
+            .vm
+            .apply_timestamp_edit(&fixture.deps, 1, Field::Start, Millis(800), false),
+        "the start edit must land"
+    );
+    fixture
+        .vm
+        .apply_text_edit(&fixture.deps, 0, EditCol::Text, "a-edited".to_string());
+
+    // Reopen a fresh VM over the same store — the "restart".
+    let reopened = ViewerVm::open(id, &fixture.deps, &Settings::default()).expect("reopen");
+    assert_eq!(
+        reopened.rows[1].start,
+        Millis(800),
+        "edited start survived reopen"
+    );
+    assert_eq!(
+        reopened.rows[0].end,
+        Millis(800),
+        "clamped neighbor end survived reopen"
+    );
+    assert_eq!(
+        reopened.rows[0].text, "a-edited",
+        "edited text survived reopen"
+    );
+}
+
+/// A 100k-segment transcript renders (several frames) without panicking — the
+/// virtualized table must never materialize a per-row editor (the perf bench is
+/// Task 14; this is the smoke half).
+#[test]
+fn table_renders_100k_rows_without_panic() {
+    let segs: Vec<Segment> = (0..100_000i64)
+        .map(|i| seg(i * 1000, i * 1000 + 900, "segment text", ""))
+        .collect();
+    let (fixture, _dir) = fixture("/tmp/big.wav", &segs);
+    let mut harness = build_harness(fixture);
+
+    // Initial render plus a couple more frames to exercise virtualization.
+    harness.run();
+    harness.run();
+    harness.run();
+
+    assert_eq!(harness.state().vm.rows.len(), 100_000);
+}
+
+/// Esc commits a text-cell edit (the Buzz `CustomTextEdit` quirk, spec ledger
+/// #6). Typing into a `TextEdit` via kittest is timing-fragile (M3 precedent),
+/// so this drives the editing-state seam: it opens a Text-cell editor with a
+/// changed buffer, presses Esc, and asserts the commit landed in memory AND the
+/// store, and that the editor closed.
+#[test]
+fn esc_commits_text_edit() {
+    let (mut fixture, _dir) = fixture("/tmp/a.wav", &[seg(0, 1000, "original", "")]);
+    let id = fixture.vm.id;
+    fixture.vm.selected = Some(0);
+    fixture.vm.editing = Some(CellEditor::new(
+        0,
+        EditCol::Text,
+        "edited-by-esc".to_string(),
+        Millis(0),
+    ));
+
+    let mut harness = build_harness(fixture);
+    harness.run(); // render the open editor once (it grabs focus)
+
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+
+    assert!(
+        harness.state().vm.editing.is_none(),
+        "Esc closes (commits) the editor"
+    );
+    assert_eq!(harness.state().vm.rows[0].text, "edited-by-esc");
+    let persisted = harness
+        .state()
+        .deps
+        .store
+        .get_segment_rows(id)
+        .expect("reread");
+    assert_eq!(
+        persisted[0].text, "edited-by-esc",
+        "the Esc-committed text persisted to the store"
+    );
 }

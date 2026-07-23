@@ -9,16 +9,27 @@
 //!
 //! Ported from `transcription_viewer_widget.py` (`_setup_toolbar`,
 //! `reset_view`) and `transcription_view_mode_tool_button.py` (the View menu).
-//! Playback controls, the editor table, the find bar, export, and resize are
-//! filled in by Tasks 8-12; here they are disabled buttons with tooltips.
+//! Timestamps mode now embeds the real segment editor table
+//! ([`crate::views::viewer_table`], F-081); the find bar, export, and resize
+//! remain disabled buttons with tooltips until Tasks 9/11/12, and the player
+//! strip is still the Task 10 stub. The viewer-level nudge shortcuts
+//! (⌘←/⌘→/⌘⇧←/⌘⇧→), the "edited · saved" autosave indicator, and the
+//! unsaved-edit warning banner are wired here.
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use humm_core::settings::Settings;
+use humm_core::viewer::edit::{Field, NUDGE_MS};
 
 use crate::i18n::tr;
 use crate::shortcuts::{ShortcutAction, ShortcutMap};
-use crate::viewer::{PlayerState, ViewMode, ViewerDeps, ViewerVm, display_timestamp};
+use crate::viewer::{PlayerState, ViewMode, ViewerDeps, ViewerVm};
+use crate::views::viewer_table;
+
+/// How long the "edited · saved" autosave indicator stays visible after a
+/// successful store write (design spec §2.2: "~1.5 s").
+const SAVED_FLASH_DURATION: Duration = Duration::from_millis(1500);
 
 /// Renders one transcript viewer's chrome into `ui`.
 ///
@@ -33,13 +44,16 @@ pub fn viewer_ui(
     shortcuts: &ShortcutMap,
     settings: &Mutex<Settings>,
 ) {
-    // Reserved for later M4 tasks (Task 10 playback opens streams through
-    // `deps`; Tasks 8/10 persist splitter/rate into `settings`). The window
-    // skeleton this task renders touches neither.
-    let _ = (deps, settings);
+    // `settings` is reserved for the splitter/rate persistence Task 10 adds;
+    // this task persists per-edit through `deps.store`, not settings.
+    let _ = settings;
 
     consume_mode_shortcuts(ui, vm, shortcuts);
+    // Nudge shortcuts act on the selected row and are consumed only inside the
+    // focused viewer viewport (design spec §7).
+    consume_nudge_shortcuts(ui, vm, deps, shortcuts);
     show_toolbar(ui, vm, shortcuts);
+    show_unsaved_banner(ui, vm);
     ui.separator();
 
     if vm.rows.is_empty() {
@@ -48,9 +62,56 @@ pub fn viewer_ui(
     }
 
     match vm.mode {
-        ViewMode::Timestamps => show_timestamps(ui, vm),
+        ViewMode::Timestamps => show_timestamps(ui, vm, deps),
         ViewMode::Text | ViewMode::Translation => show_text_body(ui, vm),
     }
+}
+
+/// Consumes the four nudge shortcuts (⌘←/⌘→ start ∓/±, ⌘⇧←/⌘⇧→ end ∓/±) from
+/// *this* viewport's input, shifting the selected row's Start/End by ±500 ms
+/// through the shared store-backed commit rule (floor-zero nudge path). A no-op
+/// with nothing selected. Each fires at most once per frame, reading the row's
+/// current value fresh (design spec §2.2).
+fn consume_nudge_shortcuts(
+    ui: &egui::Ui,
+    vm: &mut ViewerVm,
+    deps: &ViewerDeps,
+    shortcuts: &ShortcutMap,
+) {
+    let (dec_start, inc_start, dec_end, inc_end) = ui.input_mut(|input| {
+        (
+            input.consume_shortcut(&shortcuts.get(ShortcutAction::DecreaseSegmentStart)),
+            input.consume_shortcut(&shortcuts.get(ShortcutAction::IncreaseSegmentStart)),
+            input.consume_shortcut(&shortcuts.get(ShortcutAction::DecreaseSegmentEnd)),
+            input.consume_shortcut(&shortcuts.get(ShortcutAction::IncreaseSegmentEnd)),
+        )
+    });
+    if dec_start {
+        vm.nudge_selected(deps, Field::Start, -NUDGE_MS);
+    }
+    if inc_start {
+        vm.nudge_selected(deps, Field::Start, NUDGE_MS);
+    }
+    if dec_end {
+        vm.nudge_selected(deps, Field::End, -NUDGE_MS);
+    }
+    if inc_end {
+        vm.nudge_selected(deps, Field::End, NUDGE_MS);
+    }
+}
+
+/// The inline unsaved-edit warning banner: shown when a committed edit's store
+/// write failed (the edit stays in memory but could not be persisted —
+/// ADR-018). The app's toast stack is unreachable from a deferred viewport, so
+/// the viewer carries its own banner (see `viewer.rs`'s module note).
+fn show_unsaved_banner(ui: &mut egui::Ui, vm: &ViewerVm) {
+    if !vm.unsaved {
+        return;
+    }
+    let color = ui.visuals().warn_fg_color;
+    ui.horizontal(|ui| {
+        ui.colored_label(color, tr("viewer-unsaved-warning"));
+    });
 }
 
 /// Consumes the three view-mode shortcuts (⌘E/⌘L/⌘T) — but only from *this*
@@ -125,7 +186,27 @@ fn show_toolbar(ui: &mut egui::Ui, vm: &mut ViewerVm, shortcuts: &ShortcutMap) {
             tr("viewer-identify-speakers-tooltip"),
         );
         disabled_button(ui, tr("viewer-find"), tr("viewer-find-pending"));
+        show_autosave_indicator(ui, vm);
     });
+}
+
+/// The "edited · saved" autosave indicator: flashes for [`SAVED_FLASH_DURATION`]
+/// after a successful store write, then clears itself. Visibility is driven off
+/// `saved_flash` + `Instant::elapsed`, with `request_repaint_after` so it clears
+/// without further input (design spec §2.2 / UX_SPEC J-6).
+fn show_autosave_indicator(ui: &mut egui::Ui, vm: &mut ViewerVm) {
+    let Some(flashed_at) = vm.saved_flash else {
+        return;
+    };
+    let elapsed = flashed_at.elapsed();
+    if elapsed >= SAVED_FLASH_DURATION {
+        vm.saved_flash = None;
+        return;
+    }
+    ui.separator();
+    ui.label(egui::RichText::new(tr("viewer-saved")).weak());
+    ui.ctx()
+        .request_repaint_after(SAVED_FLASH_DURATION - elapsed);
 }
 
 /// One View-menu entry with its shortcut hint; returns whether it was clicked.
@@ -154,25 +235,26 @@ fn show_empty_state(ui: &mut egui::Ui) {
     });
 }
 
-/// Timestamps mode: a virtualized placeholder list of the segments (one row
-/// per segment: `HH:MM:SS.mmm  text`) standing in for the editor table Task 8
-/// ships, plus the stub player strip. Virtualized via `show_rows` so even a
-/// 100k-segment transcript renders only the visible rows.
-fn show_timestamps(ui: &mut egui::Ui, vm: &ViewerVm) {
-    let row_height = ui.text_style_height(&egui::TextStyle::Body);
+/// Timestamps mode: the real segment editor table (F-081,
+/// [`crate::views::viewer_table`]) above the stub player strip. The table is
+/// given a fixed height so the player strip keeps its space below; the table
+/// itself virtualizes, so a 100k-segment transcript renders only visible rows.
+fn show_timestamps(ui: &mut egui::Ui, vm: &mut ViewerVm, deps: &ViewerDeps) {
+    let line_height = ui.text_style_height(&egui::TextStyle::Body);
     let available = ui.available_height();
-    // Reserve a strip for the stub player at the bottom.
-    let player_strip = row_height * 2.0;
-    let table_height = (available - player_strip).max(row_height);
+    // Reserve a strip for the Task 10 player below the table.
+    let strip = (line_height * 3.0).min(available * 0.35);
+    let table_height = (available - strip).max(line_height * 4.0);
 
-    egui::ScrollArea::vertical()
-        .max_height(table_height)
-        .auto_shrink([false, false])
-        .show_rows(ui, row_height, vm.rows.len(), |ui, range| {
-            for row in &vm.rows[range] {
-                ui.label(format!("{}  {}", display_timestamp(row.start), row.text));
-            }
-        });
+    let table_width = ui.available_width();
+    let _edits = ui
+        .allocate_ui(egui::vec2(table_width, table_height), |ui| {
+            viewer_table::ui(ui, vm, deps)
+        })
+        .inner;
+    // Task 10 (playback) consumes `_edits` to keep an active loop range
+    // following committed Start/End boundary edits — the documented seam; no
+    // player exists yet.
 
     show_player_strip(ui, vm);
 }

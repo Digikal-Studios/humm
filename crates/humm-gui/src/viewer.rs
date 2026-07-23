@@ -10,21 +10,34 @@
 //! across every open viewer.
 //!
 //! This module is pure state + store I/O — no egui. The window chrome lives in
-//! [`crate::views::viewer`]. Playback/search/editing state land in later M4
-//! tasks (8-12); this task ships the window skeleton, view modes, and the
-//! open/focus paths only.
+//! [`crate::views::viewer`] and the editor table in
+//! [`crate::views::viewer_table`]. Playback/search state land in later M4 tasks
+//! (9-12); Task 8 adds the segment-editing state ([`CellEditor`],
+//! [`ViewerVm::selected`]/[`ViewerVm::editing`]) and the store-backed commit
+//! rules ([`ViewerVm::apply_timestamp_edit`]/[`ViewerVm::apply_text_edit`]).
+//!
+//! **Store-failure surfacing (ADR-018):** the app's toast stack lives on
+//! `HummApp` and is unreachable from a viewer's deferred-viewport render
+//! closure (which captures only `Arc`-shared state — Task 7's handoff note). A
+//! failed edit write therefore raises [`ViewerVm::unsaved`], which the viewer
+//! renders as its own inline warning banner rather than an app toast — the
+//! "inline banner is acceptable" fallback the task brief allows, keeping the
+//! edit in memory and never crashing.
 //!
 //! Ported from Buzz's `TranscriptionViewerWidget.__init__`/
 //! `_load_segments_and_settings`/`reset_view`
 //! (`transcription_viewer_widget.py:78-143,1078-1145`).
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use humm_core::boundary::{AudioDecoder, AudioOutput, MediaProber, VideoStreamer};
 use humm_core::domain::{Millis, Segment, Status, TranscriptionId};
 use humm_core::error::StoreError;
 use humm_core::settings::Settings;
+use humm_core::viewer::edit::{EditOutcome, Field, SegmentTimes, timestamp_edit};
 use humm_core::viewer::text_view;
+use humm_core::viewer::timestamp::parse_timestamp;
 use humm_store::{SegmentRow, SqliteStore};
 
 use crate::import::FileDialogs;
@@ -80,6 +93,82 @@ pub enum PlayerState {
     Unavailable,
 }
 
+/// Which of the four editor columns a cell editor targets (design spec §2.2:
+/// Start | End | Text | Translation). Start/End edit timestamps; Text/
+/// Translation edit free text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditCol {
+    /// The segment's start timestamp.
+    Start,
+    /// The segment's end timestamp.
+    End,
+    /// The recognized text.
+    Text,
+    /// The translated text.
+    Translation,
+}
+
+impl EditCol {
+    /// The core [`Field`] this column maps its edit rule onto, or `None` for
+    /// the two free-text columns (which never go through [`timestamp_edit`]).
+    pub fn as_time_field(self) -> Option<Field> {
+        match self {
+            EditCol::Start => Some(Field::Start),
+            EditCol::End => Some(Field::End),
+            EditCol::Text | EditCol::Translation => None,
+        }
+    }
+
+    /// Whether this column edits a timestamp (Start/End) rather than text.
+    pub fn is_timestamp(self) -> bool {
+        self.as_time_field().is_some()
+    }
+}
+
+/// The single active inline cell editor, when the user is editing one cell.
+///
+/// Only ever one cell edits at a time (Buzz opens exactly one delegate editor),
+/// so the whole table's editing state is this one optional value on
+/// [`ViewerVm`] — every other cell renders as a plain label, which is what
+/// keeps a 100k-row table cheap (design spec §2.2: "only the actively-edited
+/// cell instantiates a `TextEdit`").
+#[derive(Debug, Clone)]
+pub struct CellEditor {
+    /// Index into [`ViewerVm::rows`] of the row being edited.
+    pub row: usize,
+    /// Which column of that row is being edited.
+    pub col: EditCol,
+    /// The live editor text (the `TextEdit` buffer): filtered to `[0-9:.]` for
+    /// timestamp columns (Buzz `QRegularExpressionValidator` parity), free for
+    /// text columns.
+    pub buffer: String,
+    /// The last valid millisecond value for a timestamp column — the value a
+    /// garbage buffer reverts to on commit (Buzz `TimeStampLineEdit`'s
+    /// `_milliseconds`); also the base the in-editor `+`/`-` keys nudge from.
+    /// Unused for text columns.
+    pub last_valid_ms: Millis,
+    /// Transient one-shot focus latch: true on the frame the editor opens so
+    /// the table grabs keyboard focus exactly once. A UI detail, not part of
+    /// the editor's semantic state — hence `pub(crate)`, set by [`Self::new`]
+    /// and cleared by the table on first render.
+    pub(crate) just_opened: bool,
+}
+
+impl CellEditor {
+    /// Opens an editor for `col` on `row`, seeded with `buffer` and (for
+    /// timestamp columns) a `last_valid_ms` revert target. The focus latch is
+    /// armed so the table focuses the new `TextEdit` on its first frame.
+    pub fn new(row: usize, col: EditCol, buffer: String, last_valid_ms: Millis) -> Self {
+        CellEditor {
+            row,
+            col,
+            buffer,
+            last_valid_ms,
+            just_opened: true,
+        }
+    }
+}
+
 /// One open transcript viewer's state.
 ///
 /// Segments are loaded into [`Self::rows`] once at [`Self::open`] and every
@@ -129,6 +218,22 @@ pub struct ViewerVm {
     pub segment_looping_enabled: bool,
     /// Placeholder playback state (Task 10 replaces this with the real player).
     pub player: PlayerState,
+    /// The single selected editor-table row, if any (Buzz single-row
+    /// selection). The nudge shortcuts (⌘←/⌘→/⌘⇧←/⌘⇧→) act on this row.
+    pub selected: Option<usize>,
+    /// The active inline cell editor, if the user is editing one cell.
+    pub editing: Option<CellEditor>,
+    /// Set to `Some(now)` on every successful store write; drives the
+    /// "edited · saved" autosave indicator, which shows for ~1.5 s then clears
+    /// itself (design spec §2.2 / UX_SPEC J-6).
+    pub saved_flash: Option<Instant>,
+    /// Set true when a store write for a committed edit failed: the edit stays
+    /// in memory (never lost) but is flagged unsaved, surfaced as an inline
+    /// warning banner in the viewer (ADR-018 consistency — the app's toast
+    /// stack lives on `HummApp` and is unreachable from a deferred-viewport
+    /// callback, so the viewer carries its own banner; see the module note).
+    /// Cleared by the next successful write.
+    pub unsaved: bool,
 }
 
 impl ViewerVm {
@@ -171,6 +276,10 @@ impl ViewerVm {
             find_widget_visible: settings.viewer.find_widget_visible,
             segment_looping_enabled: settings.viewer.segment_looping_enabled,
             player: PlayerState::Unavailable,
+            selected: None,
+            editing: None,
+            saved_flash: None,
+            unsaved: false,
         })
     }
 
@@ -219,6 +328,179 @@ impl ViewerVm {
             })
             .collect()
     }
+
+    /// Commits a proposed new timestamp for `rows[idx]`'s `field`, running the
+    /// pure core clamp/reject rule ([`timestamp_edit`]) over a live slice view
+    /// of the in-memory rows, then — on `Apply` — persisting the value row (and
+    /// the clamped neighbor, when the edit crossed a boundary) to the store and
+    /// mutating memory to match. Returns whether an edit landed (`false` = the
+    /// core rule rejected it: `start >= end` / `end <= start`; nothing written,
+    /// no flash — Buzz's silent no-op).
+    ///
+    /// `floor` mirrors the core rule's `max(0, new_value)` clamp: the nudge
+    /// path (⌘-arrows and the in-editor `+`/`-` keys) passes `true`; a direct
+    /// cell commit passes `false` (Buzz `setModelData` never floors —
+    /// `viewer::edit`'s doc).
+    ///
+    /// Store-write outcome (ADR-018): on success, `saved_flash` fires and the
+    /// unsaved flag clears; on failure, the memory mutation is kept (the edit
+    /// is never lost) and [`Self::unsaved`] is raised so the viewer surfaces
+    /// its inline warning banner.
+    pub fn apply_timestamp_edit(
+        &mut self,
+        deps: &ViewerDeps,
+        idx: usize,
+        field: Field,
+        new_value: Millis,
+        floor: bool,
+    ) -> bool {
+        let times: Vec<SegmentTimes> = self
+            .rows
+            .iter()
+            .map(|row| SegmentTimes {
+                id: row.id,
+                start: row.start,
+                end: row.end,
+            })
+            .collect();
+
+        let (value, neighbor) = match timestamp_edit(&times, idx, field, new_value, floor) {
+            EditOutcome::Rejected => return false,
+            EditOutcome::Apply { value, neighbor } => (value, neighbor),
+        };
+
+        // Mutate the edited row in memory.
+        match field {
+            Field::Start => self.rows[idx].start = value,
+            Field::End => self.rows[idx].end = value,
+        }
+
+        // Mutate the neighbor row in memory, if the edit crossed its boundary.
+        // A Start edit only ever clamps the previous row (`idx - 1`); an End
+        // edit only ever clamps the next row (`idx + 1`) — the two adjacencies
+        // `timestamp_edit` can return.
+        let neighbor_idx = neighbor.map(|(neighbor_id, neighbor_field, neighbor_value)| {
+            let neighbor_idx = match field {
+                Field::Start => idx - 1,
+                Field::End => idx + 1,
+            };
+            debug_assert_eq!(self.rows[neighbor_idx].id, neighbor_id);
+            match neighbor_field {
+                Field::Start => self.rows[neighbor_idx].start = neighbor_value,
+                Field::End => self.rows[neighbor_idx].end = neighbor_value,
+            }
+            neighbor_idx
+        });
+
+        // Persist: the value row (both times read back from memory) and, when
+        // present, the clamped neighbor row. `id`/`start`/`end` are all `Copy`,
+        // so this reads them out without cloning the row's text.
+        let (edited_id, edited_start, edited_end) = {
+            let row = &self.rows[idx];
+            (row.id, row.start, row.end)
+        };
+        let mut ok = self.write_times(deps, edited_id, edited_start, edited_end);
+        if let Some(neighbor_idx) = neighbor_idx {
+            let (neighbor_id, neighbor_start, neighbor_end) = {
+                let row = &self.rows[neighbor_idx];
+                (row.id, row.start, row.end)
+            };
+            ok &= self.write_times(deps, neighbor_id, neighbor_start, neighbor_end);
+        }
+        self.record_save(ok);
+        true
+    }
+
+    /// The nudge-shortcut path (⌘←/⌘→/⌘⇧←/⌘⇧→, design spec §2.2): shifts the
+    /// *selected* row's `field` by `delta` ms, reading its current value fresh
+    /// from memory so a second nudge in a row compounds on the first (floors at
+    /// zero via the core rule). Returns whether an edit landed; a no-op with
+    /// nothing selected.
+    pub fn nudge_selected(&mut self, deps: &ViewerDeps, field: Field, delta: i64) -> bool {
+        let Some(idx) = self.selected else {
+            return false;
+        };
+        if idx >= self.rows.len() {
+            return false;
+        }
+        let base = match field {
+            Field::Start => self.rows[idx].start,
+            Field::End => self.rows[idx].end,
+        };
+        self.apply_timestamp_edit(deps, idx, field, Millis(base.0 + delta), true)
+    }
+
+    /// Commits a Text or Translation cell edit: stores `text` as-typed (Buzz
+    /// trims nothing) and mutates memory. A Translation edit whose text is
+    /// non-blank raises [`Self::has_translations`] (unhiding the Translation
+    /// view/column/export entries — spec ledger #7; never lowered, matching
+    /// Buzz's `update_translation`). Store-write outcome handled as in
+    /// [`Self::apply_timestamp_edit`].
+    ///
+    /// `col` must be [`EditCol::Text`] or [`EditCol::Translation`]; a timestamp
+    /// column is a no-op (those commit through [`Self::apply_timestamp_edit`]).
+    pub fn apply_text_edit(&mut self, deps: &ViewerDeps, idx: usize, col: EditCol, text: String) {
+        let id = self.rows[idx].id;
+        let ok = match col {
+            EditCol::Text => {
+                self.rows[idx].text = text.clone();
+                self.write_result(deps.store.update_segment_text(id, &text))
+            }
+            EditCol::Translation => {
+                self.rows[idx].translation = text.clone();
+                if !text.trim().is_empty() {
+                    self.has_translations = true;
+                }
+                self.write_result(deps.store.update_segment_translation(id, &text))
+            }
+            EditCol::Start | EditCol::End => return,
+        };
+        self.record_save(ok);
+    }
+
+    /// Task 10 (playback) hook — spec §2.2 `on_timestamp_being_edited`: while a
+    /// Start/End cell editor is open, an active loop range follows the value in
+    /// the editor buffer *live* (before commit). Returns the edited row, its
+    /// [`Field`], and the buffer's current parse (floored at zero), or `None`
+    /// when no timestamp cell is being edited. The player does not exist until
+    /// Task 10, so nothing consumes this yet — it is the documented seam the
+    /// loop-range live-follow wires into, kept as real (public) API rather than
+    /// dead code.
+    pub fn editing_timestamp_preview(&self) -> Option<(usize, Field, Millis)> {
+        let editor = self.editing.as_ref()?;
+        let field = editor.col.as_time_field()?;
+        let ms = parse_timestamp(&editor.buffer).unwrap_or(editor.last_valid_ms);
+        Some((editor.row, field, Millis(ms.0.max(0))))
+    }
+
+    /// Persists one row's `start`/`end`, logging (not propagating) a store
+    /// error and reporting success so the caller can flag an unsaved edit.
+    fn write_times(&self, deps: &ViewerDeps, id: i64, start: Millis, end: Millis) -> bool {
+        self.write_result(deps.store.update_segment_times(id, start, end))
+    }
+
+    /// Collapses a store write `Result` to a success bool, logging any error.
+    fn write_result(&self, result: Result<(), StoreError>) -> bool {
+        if let Err(err) = result {
+            log::warn!("viewer edit: store write failed for {}: {err}", self.id);
+            false
+        } else {
+            true
+        }
+    }
+
+    /// Records a store-write outcome: success arms the autosave flash and
+    /// clears the unsaved flag; failure keeps the (already-applied) memory edit
+    /// and raises the unsaved flag for the warning banner.
+    fn record_save(&mut self, ok: bool) {
+        if ok {
+            self.saved_flash = Some(Instant::now());
+            self.unsaved = false;
+        } else {
+            self.saved_flash = None;
+            self.unsaved = true;
+        }
+    }
 }
 
 /// Whether a transcript in `status` can be opened in the viewer: Buzz's gate
@@ -256,6 +538,7 @@ mod tests {
         Input, ModelSize, ModelSpec, OutputSpec, Source, TaskKind, TaskSpec, TranscriptionOptions,
     };
     use humm_core::error::{AudioError, MediaError};
+    use humm_core::viewer::edit::NUDGE_MS;
     use std::path::{Path, PathBuf};
 
     // -- fake adapters: never exercised by these VM tests, but ViewerDeps needs
@@ -472,5 +755,160 @@ mod tests {
         // Guard holds: mode stays Timestamps, body stays empty.
         assert_eq!(vm.mode, ViewMode::Timestamps);
         assert_eq!(vm.text_body, "");
+    }
+
+    /// The [`SegmentRow::id`]s the store issued for a freshly-seeded transcript,
+    /// in ascending order — the handles the edit APIs address rows by.
+    fn row_ids(store: &SqliteStore, id: TranscriptionId) -> Vec<i64> {
+        store
+            .get_segment_rows(id)
+            .expect("rows")
+            .into_iter()
+            .map(|row| row.id)
+            .collect()
+    }
+
+    #[test]
+    fn apply_timestamp_edit_writes_value_and_clamped_neighbor_to_store() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        // Two abutting segments; editing row 1's start below row 0's end must
+        // clamp row 0's end to match (the overlap rule).
+        let id = seed(
+            &store,
+            "/tmp/a.wav",
+            &[seg(0, 1000, "a", ""), seg(1000, 2000, "b", "")],
+        );
+        let deps = deps(Arc::clone(&store));
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+
+        // Drop row 1's start to 800: below row 0's end (1000) → row 0's end is
+        // pulled back to 800 too.
+        let landed = vm.apply_timestamp_edit(&deps, 1, Field::Start, Millis(800), false);
+        assert!(landed, "a valid start edit must land");
+
+        // Memory: both rows moved.
+        assert_eq!(vm.rows[1].start, Millis(800));
+        assert_eq!(vm.rows[0].end, Millis(800));
+        // A successful write arms the flash and leaves nothing unsaved.
+        assert!(vm.saved_flash.is_some());
+        assert!(!vm.unsaved);
+
+        // Store: both rows persisted — proven by a fresh read, not memory.
+        let persisted = store.get_segment_rows(id).expect("reread");
+        assert_eq!(persisted[0].end, Millis(800), "neighbor end persisted");
+        assert_eq!(persisted[1].start, Millis(800), "value start persisted");
+        // The untouched fields are intact.
+        assert_eq!(persisted[0].start, Millis(0));
+        assert_eq!(persisted[1].end, Millis(2000));
+    }
+
+    #[test]
+    fn apply_timestamp_edit_rejected_leaves_store_and_flash_untouched() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(&store, "/tmp/a.wav", &[seg(0, 1000, "a", "")]);
+        let deps = deps(Arc::clone(&store));
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+
+        // start >= end → rejected: no write, no flash, memory unchanged.
+        let landed = vm.apply_timestamp_edit(&deps, 0, Field::Start, Millis(1000), false);
+        assert!(!landed);
+        assert_eq!(vm.rows[0].start, Millis(0));
+        assert!(vm.saved_flash.is_none());
+        assert_eq!(
+            store.get_segment_rows(id).expect("reread")[0].start,
+            Millis(0)
+        );
+    }
+
+    #[test]
+    fn apply_text_edit_translation_unhides_translation_column() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        // No translations at load → the Translation column/menu/export are
+        // hidden.
+        let id = seed(
+            &store,
+            "/tmp/a.wav",
+            &[seg(0, 1000, "hello", ""), seg(1000, 2000, "world", "")],
+        );
+        let deps = deps(Arc::clone(&store));
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+        assert!(!vm.has_translations);
+
+        vm.apply_text_edit(&deps, 0, EditCol::Translation, "hola".to_string());
+
+        // The flag flips → the Translation column unhides.
+        assert!(vm.has_translations);
+        assert_eq!(vm.rows[0].translation, "hola");
+        // Persisted (fresh read).
+        let ids = row_ids(&store, id);
+        let persisted = store.get_segment_rows(id).expect("reread");
+        assert_eq!(persisted[0].translation, "hola");
+        assert_eq!(persisted[0].id, ids[0]);
+        // A blank translation edit never lowers the flag (Buzz parity).
+        vm.apply_text_edit(&deps, 0, EditCol::Translation, "   ".to_string());
+        assert!(vm.has_translations, "flag is never lowered once raised");
+    }
+
+    #[test]
+    fn apply_text_edit_stores_text_as_typed_without_trimming() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(&store, "/tmp/a.wav", &[seg(0, 1000, "hello", "")]);
+        let deps = deps(Arc::clone(&store));
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+
+        vm.apply_text_edit(&deps, 0, EditCol::Text, "  padded  ".to_string());
+        assert_eq!(vm.rows[0].text, "  padded  ");
+        assert_eq!(
+            store.get_segment_rows(id).expect("reread")[0].text,
+            "  padded  ",
+            "Buzz stores text as-typed — no trim"
+        );
+    }
+
+    #[test]
+    fn nudge_uses_fresh_values_after_prior_edit() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        // One wide segment so two +500 ms end nudges both stay valid.
+        let id = seed(&store, "/tmp/a.wav", &[seg(0, 1000, "a", "")]);
+        let deps = deps(Arc::clone(&store));
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+        vm.selected = Some(0);
+
+        // First nudge: end 1000 → 1500.
+        assert!(vm.nudge_selected(&deps, Field::End, NUDGE_MS));
+        assert_eq!(vm.rows[0].end, Millis(1500));
+        // Second nudge reads the *updated* 1500, not the stale 1000 → 2000.
+        assert!(vm.nudge_selected(&deps, Field::End, NUDGE_MS));
+        assert_eq!(vm.rows[0].end, Millis(2000));
+
+        // And the fresh value is what reached the store.
+        assert_eq!(
+            store.get_segment_rows(id).expect("reread")[0].end,
+            Millis(2000)
+        );
+    }
+
+    #[test]
+    fn nudge_start_floors_at_zero() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(&store, "/tmp/a.wav", &[seg(300, 5000, "a", "")]);
+        let deps = deps(Arc::clone(&store));
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+        vm.selected = Some(0);
+
+        // start 300 − 500 = −200 → floored to 0 (nudge path, floor = true).
+        assert!(vm.nudge_selected(&deps, Field::Start, -NUDGE_MS));
+        assert_eq!(vm.rows[0].start, Millis(0));
+    }
+
+    #[test]
+    fn nudge_without_selection_is_a_noop() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(&store, "/tmp/a.wav", &[seg(0, 1000, "a", "")]);
+        let deps = deps(Arc::clone(&store));
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+        assert!(vm.selected.is_none());
+        assert!(!vm.nudge_selected(&deps, Field::End, NUDGE_MS));
+        assert_eq!(vm.rows[0].end, Millis(1000));
     }
 }

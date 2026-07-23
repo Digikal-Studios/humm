@@ -181,6 +181,13 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "viewer-empty",
         "viewer-player-pending",
         "viewer-open-error",
+        // Transcript segment editor table (views/viewer_table.rs, F-081)
+        "viewer-col-start",
+        "viewer-col-end",
+        "viewer-col-text",
+        "viewer-col-translation",
+        "viewer-saved",
+        "viewer-unsaved-warning",
     ]
 }
 
