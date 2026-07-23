@@ -15,8 +15,9 @@
 //! in a vertical splitter: the audio/video player row, the playback-controls
 //! bar ([`crate::views::playback_controls`]), and the current-segment frame,
 //! all driven off the [`ViewerVm`]'s player (the audio master clock). Export
-//! is a live menu ([`crate::views::export_menu`], F-084); resize remains a
-//! disabled button with a tooltip until Task 12. The viewer-level nudge
+//! is a live menu ([`crate::views::export_menu`], F-084); Resize opens the
+//! resizer window (F-086 — the button latches `resize_requested`, which
+//! `app.rs` harvests to open/focus the resizer). The viewer-level nudge
 //! shortcuts (⌘←/⌘→/⌘⇧←/⌘⇧→), the playback shortcuts
 //! (⌘P/⌘⇧P/⌘⌥P/⌘G), the "edited · saved" autosave indicator, and the
 //! unsaved-edit warning banner are wired here.
@@ -295,7 +296,12 @@ fn show_toolbar(ui: &mut egui::Ui, vm: &mut ViewerVm, deps: &ViewerDeps, shortcu
         ui.separator();
         export_menu::toolbar_menu(ui, vm, deps);
         disabled_button(ui, tr("viewer-translate"), tr("viewer-translate-tooltip"));
-        disabled_button(ui, tr("viewer-resize"), tr("viewer-resize-pending"));
+        // Resize (F-086): opens this transcript's resizer window. Enabled this
+        // task; the click only latches `resize_requested`, which `app.rs`
+        // harvests to open/focus the resizer (Buzz `on_resize_button_clicked`).
+        if ui.button(tr("viewer-resize")).clicked() {
+            vm.resize_requested = true;
+        }
         disabled_button(
             ui,
             tr("viewer-identify-speakers"),

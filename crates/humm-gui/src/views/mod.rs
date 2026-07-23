@@ -9,6 +9,7 @@ pub mod options_sheet;
 pub mod playback_controls;
 pub mod preferences;
 pub mod rename_notes;
+pub mod resizer;
 pub mod task_table;
 pub mod toasts;
 pub mod update_notice;

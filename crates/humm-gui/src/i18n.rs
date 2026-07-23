@@ -172,7 +172,6 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "viewer-translate",
         "viewer-translate-tooltip",
         "viewer-resize",
-        "viewer-resize-pending",
         "viewer-identify-speakers",
         "viewer-identify-speakers-tooltip",
         "viewer-find",
@@ -209,6 +208,24 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "viewer-export-filter",
         "viewer-export-failed",
         "export-written",
+        // Transcript resizer window (views/resizer.rs, F-086)
+        "resizer-settings",
+        "resizer-create-new",
+        "resizer-extend-heading",
+        "resizer-extend-label",
+        "resizer-extend-button",
+        "resizer-resize-heading",
+        "resizer-resize-label",
+        "resizer-resize-button",
+        "resizer-resize-disabled-tooltip",
+        "resizer-merge-heading",
+        "resizer-merge-by-gap",
+        "resizer-split-by-punctuation",
+        "resizer-split-by-max-length",
+        "resizer-merge-button",
+        "resizer-merge-disabled-tooltip",
+        "resizer-merging",
+        "resizer-merge-error",
     ]
 }
 

@@ -209,7 +209,6 @@ viewer-export = Export
 viewer-translate = Translate
 viewer-translate-tooltip = Translation arrives with the API backend milestone
 viewer-resize = Resize
-viewer-resize-pending = Resize lands later this milestone
 viewer-identify-speakers = Identify Speakers
 viewer-identify-speakers-tooltip = Speaker identification arrives in a later release
 viewer-find = Find
@@ -249,3 +248,26 @@ viewer-export-dialog-title = Save File
 viewer-export-filter = Text files
 viewer-export-failed = The export could not be written — see the log for details
 export-written = Written to { $path }
+
+## Transcript resizer window (views/resizer.rs, F-086)
+##
+## Section labels/tooltips are byte-exact ports of Buzz's
+## `transcription_resizer_widget.py` strings.
+
+resizer-settings = Settings
+resizer-create-new = Create new transcript
+resizer-extend-heading = Extend end time
+resizer-extend-label = Extend endings by up to (seconds)
+resizer-extend-button = Extend endings
+resizer-resize-heading = Resize Options
+resizer-resize-label = Desired subtitle length
+resizer-resize-button = Resize
+resizer-resize-disabled-tooltip = Available only if word level timings were disabled during transcription
+resizer-merge-heading = Merge Options
+resizer-merge-by-gap = Merge by gap
+resizer-split-by-punctuation = Split by punctuation
+resizer-split-by-max-length = Split by max length
+resizer-merge-button = Merge
+resizer-merge-disabled-tooltip = Available only if word level timings were enabled during transcription
+resizer-merging = Merging…
+resizer-merge-error = The merge could not run:

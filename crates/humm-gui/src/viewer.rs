@@ -479,6 +479,13 @@ pub struct ViewerVm {
     /// exists (deviation #1: focus the existing window instead of duplicating
     /// it). The render closure sends `ViewportCommand::Focus` and clears it.
     pub focus_requested: bool,
+    /// One-shot latch set by the Resize toolbar button (F-086): the app
+    /// harvests it each frame to open (or focus) this transcript's resizer
+    /// window, then clears it (Buzz `on_resize_button_clicked`). The viewer's
+    /// render closure only *requests* it — opening the resizer is an app-level
+    /// action (it owns the resizer-window map), the same intent-latch shape as
+    /// [`Self::close_requested`]/[`Self::focus_requested`].
+    pub resize_requested: bool,
     /// The shared viewer geometry captured from settings at open, applied to
     /// this window's viewport builder for its whole lifetime (Buzz applies
     /// geometry once, at window open — `load_geometry`). Captured per-VM rather
@@ -620,6 +627,7 @@ impl ViewerVm {
             text_body: String::new(),
             close_requested: false,
             focus_requested: false,
+            resize_requested: false,
             initial_geometry: settings.viewer.geometry,
             observed_geometry: None,
             playback_controls_visible: settings.viewer.playback_controls_visible,

@@ -28,18 +28,22 @@ use humm_core::boundary::{
 };
 use humm_core::cancel::CancelToken;
 use humm_core::domain::{
-    Input, Millis, ModelSize, ModelSpec, OutputFormat, OutputSpec, Segment, Source, TaskKind,
-    TaskSpec, TranscriptionId, TranscriptionOptions,
+    Input, Millis, ModelSize, ModelSpec, OutputFormat, OutputSpec, Segment, Source, Status,
+    TaskKind, TaskSpec, TranscriptionId, TranscriptionOptions,
 };
-use humm_core::error::{AudioError, MediaError};
+use humm_core::error::{AudioError, CoreError, MediaError};
 use humm_core::export::{DEFAULT_PARAGRAPH_SPLIT, TextKey, write_format};
+use humm_core::queue::EngineFactory;
 use humm_core::settings::Settings;
 use humm_core::viewer::edit::Field;
 use humm_core::viewer::search::{RowMatch, SEARCH_DEBOUNCE_MS, results_label};
+use humm_gui::app::HummApp;
 use humm_gui::import::FileDialogs;
+use humm_gui::services::{self, Capabilities, Services, TestDeps};
 use humm_gui::shortcuts::ShortcutMap;
 use humm_gui::viewer::{CellEditor, EditCol, PlayerState, SearchResults, ViewerDeps, ViewerVm};
 use humm_gui::views::playback_controls;
+use humm_gui::views::resizer::{self, ResizerAction, ResizerVm};
 use humm_gui::views::viewer::viewer_ui;
 use humm_store::SqliteStore;
 
@@ -834,4 +838,218 @@ fn export_entry_writes_file_and_toasts() {
         .last_export_folder(id)
         .expect("read last export folder");
     assert_eq!(persisted.as_deref(), Some(export_dir.path()));
+}
+
+// -- F-086 resizer window (Task 12) --------------------------------------
+
+/// A spec with a caller-chosen word-timestamps flag — the resizer's Resize
+/// (needs it **off**) / Merge (needs it **on**) section gate.
+fn spec_for_wt(file: &str, word_timestamps: bool) -> TaskSpec {
+    let mut spec = spec_for(file);
+    spec.options.word_timestamps = word_timestamps;
+    spec
+}
+
+/// The resizer render fixture: a loaded [`ResizerVm`] plus everything
+/// [`resizer::ui`] needs.
+struct ResizerFixture {
+    vm: ResizerVm,
+    settings: Mutex<Settings>,
+    settings_path: PathBuf,
+}
+
+/// Seeds a completed transcription (with the given word-timestamps flag) and
+/// opens a resizer VM over it.
+fn resizer_fixture(word_timestamps: bool) -> (ResizerFixture, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(SqliteStore::open(&dir.path().join("humm.db")).expect("open store"));
+    let id = TranscriptionId::new();
+    store
+        .create_task(
+            &id,
+            &spec_for_wt("/tmp/clip.wav", word_timestamps),
+            Source::FileImport,
+        )
+        .expect("create task");
+    store
+        .mark_completed(&id, &[seg(0, 1000, "hello world", "")])
+        .expect("mark completed");
+
+    let deps = fake_deps(Arc::clone(&store));
+    let settings = Settings::default();
+    let vm = ResizerVm::open(id, &deps, &settings).expect("open resizer");
+    let settings_path = dir.path().join("settings.toml");
+    (
+        ResizerFixture {
+            vm,
+            settings: Mutex::new(settings),
+            settings_path,
+        },
+        dir,
+    )
+}
+
+fn build_resizer_harness(fixture: ResizerFixture) -> Harness<'static, ResizerFixture> {
+    Harness::new_ui_state(
+        |ui, fixture: &mut ResizerFixture| {
+            resizer::ui(
+                ui,
+                &mut fixture.vm,
+                &fixture.settings,
+                &fixture.settings_path,
+            );
+        },
+        fixture,
+    )
+}
+
+/// The Resize section is enabled only with word timestamps **off**, and the
+/// Merge section only with word timestamps **on** (Buzz
+/// `resize_group_box.setEnabled(word_level_timings != 1)` /
+/// `merge_options_group_box.setEnabled(word_level_timings == 1)`).
+#[test]
+fn resize_button_disabled_with_word_timestamps() {
+    // Word timestamps ON → Resize disabled, Merge enabled.
+    let (with_wt, _dir) = resizer_fixture(true);
+    let mut harness = build_resizer_harness(with_wt);
+    harness.run();
+    assert!(
+        harness
+            .get_by_label("Resize")
+            .accesskit_node()
+            .is_disabled(),
+        "Resize must be disabled when word timestamps were enabled"
+    );
+    assert!(
+        !harness.get_by_label("Merge").accesskit_node().is_disabled(),
+        "Merge must be enabled when word timestamps were enabled"
+    );
+
+    // Word timestamps OFF → the inverse.
+    let (no_wt, _dir2) = resizer_fixture(false);
+    let mut harness2 = build_resizer_harness(no_wt);
+    harness2.run();
+    assert!(
+        !harness2
+            .get_by_label("Resize")
+            .accesskit_node()
+            .is_disabled(),
+        "Resize must be enabled when word timestamps were disabled"
+    );
+    assert!(
+        harness2
+            .get_by_label("Merge")
+            .accesskit_node()
+            .is_disabled(),
+        "Merge must be disabled when word timestamps were disabled"
+    );
+}
+
+/// A fake [`EngineFactory`] for a resizer app test that never runs a job (the
+/// seeded row is already Completed; the resize path never touches the queue).
+struct NeverCalledEngineFactory;
+impl EngineFactory for NeverCalledEngineFactory {
+    fn create(
+        &mut self,
+        _model: &ModelSpec,
+        _resolved: Option<&Path>,
+    ) -> Result<Box<dyn humm_core::boundary::TranscriptionEngine>, CoreError> {
+        unreachable!("the resizer path never enqueues a task")
+    }
+}
+
+fn resizer_test_services(store: Arc<SqliteStore>, dir: &Path) -> Services {
+    services::init_with(TestDeps {
+        store,
+        media_dir: dir.join("media"),
+        model_root: dir.join("models"),
+        settings: Settings::default(),
+        settings_path: dir.join("settings.toml"),
+        engines: Box::new(NeverCalledEngineFactory),
+        fetcher: None,
+        capabilities: Capabilities::default(),
+        artifacts: None,
+    })
+}
+
+/// End-to-end resize (create-new) driven through the app's resizer seams: the
+/// source's segments are equalized into a **new** Completed transcript, the
+/// task table gains the new row, and the originating viewer + resizer both
+/// close (Buzz `transcriptions_updated` → viewer/resizer close).
+#[test]
+fn resize_end_to_end_creates_new_completed_row() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(SqliteStore::open(&dir.path().join("humm.db")).expect("open store"));
+    let source = TranscriptionId::new();
+    let src_segs = [seg(
+        0,
+        1000,
+        "one two three four five six seven eight nine ten",
+        "",
+    )];
+    store
+        .create_task(
+            &source,
+            &spec_for_wt("/tmp/a.wav", false),
+            Source::FileImport,
+        )
+        .expect("create source");
+    store.mark_completed(&source, &src_segs).expect("complete");
+
+    let mut app = HummApp::new_for_test(resizer_test_services(Arc::clone(&store), dir.path()));
+    app.open_viewer_for_test(source);
+    app.open_resizer_for_test(source);
+    assert!(app.is_viewer_open_for_test(source));
+    assert!(app.is_resizer_open_for_test(source));
+
+    // Configure the resizer: create-new + a small target so the segment splits.
+    {
+        let resizer = app.resizer_for_test(source).expect("resizer is open");
+        let mut vm = resizer.lock().expect("lock resizer");
+        vm.create_new = true;
+        vm.target_chars = 15;
+    }
+
+    let affected = app
+        .run_resizer_action_for_test(source, ResizerAction::Resize)
+        .expect("resize returns the affected id");
+    assert_ne!(affected, source, "create-new mints a fresh id");
+
+    // The new row is Completed with exactly the equalized segments.
+    let new_row = store.get_task(&affected).expect("get").expect("row exists");
+    assert_eq!(new_row.status, Status::Completed);
+    let expected = humm_core::resize::equalize(&src_segs, 15);
+    let new_segs: Vec<Segment> = store
+        .get_segment_rows(affected)
+        .expect("segments")
+        .into_iter()
+        .map(|row| Segment {
+            start: row.start,
+            end: row.end,
+            text: row.text,
+            translation: row.translation,
+        })
+        .collect();
+    assert_eq!(
+        new_segs, expected,
+        "stored segments match equalize() output"
+    );
+    assert!(
+        new_segs.len() > 1,
+        "the target split produced multiple rows"
+    );
+
+    // The task table gained the new row; the originating viewer + resizer closed.
+    assert!(
+        app.has_task_row_for_test(affected),
+        "the new transcript row is in the task table"
+    );
+    assert!(
+        !app.is_viewer_open_for_test(source),
+        "the originating viewer closes on update"
+    );
+    assert!(
+        !app.is_resizer_open_for_test(source),
+        "the resizer closes on update"
+    );
 }

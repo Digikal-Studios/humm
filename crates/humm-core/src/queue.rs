@@ -15,6 +15,14 @@
 //!
 //! - **Single writer.** Only the runner thread touches [`TaskStore`]; it is the
 //!   sole writer of a task's status (`ARCHITECTURE.md` §5).
+//! - **Resizer-created rows are the documented exception (ADR-018 scope).**
+//!   The queue owns `status`/`progress` for tasks it *executes*. The transcript
+//!   resizer (F-086, design spec §4 "status-write boundary note") is the one
+//!   feature that writes those columns outside the queue: its
+//!   `copy_transcription` / `mark_replaced_completed` / `update_progress_direct`
+//!   store calls create and complete rows that never enter this queue at all,
+//!   so the "single writer / queue owns status transitions" invariant is scoped
+//!   to queue-executed tasks and does not conflict with them.
 //! - **Terminal status precedes the terminal event.** `mark_completed` /
 //!   `mark_failed` / `mark_canceled` is written to the store *before* the
 //!   matching `Completed`/`Failed`/`Canceled` event is emitted, so a consumer
@@ -680,6 +688,13 @@ impl Runner {
                     Err(err) => {
                         let message = CoreError::from(err).to_string();
                         log::error!("create_task failed for task {id}: {message}");
+                        // `create_task` just failed, so no row for `id` normally
+                        // exists yet: this `mark_failed` is then a harmless 0-row
+                        // UPDATE (carried ticket 6). It is kept for symmetry with
+                        // the requeue-failure arm below and so that, if a partial
+                        // `create_task` *did* leave a row behind, the store still
+                        // ends up reflecting the failure rather than a stray
+                        // half-written row.
                         if let Err(err2) = self.store.mark_failed(&id, &message) {
                             self.store_write_failed(id, "mark_failed", &err2);
                         }

@@ -10,7 +10,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use humm_core::domain::{Status, TranscriptionId};
+use humm_core::domain::{Segment, Status, TranscriptionId};
 use humm_core::queue::{QueueHandle, TaskEvent, TaskEventKind};
 use humm_core::settings::{FileTranscriberSettings, GuiSettings, ViewerGeometry};
 use humm_media::{FfmpegDecoder, FfmpegVideoStreamer, FfprobeProber};
@@ -28,6 +28,7 @@ use crate::views::main_window::{ActionState, PendingImportRequest, toolbar_enabl
 use crate::views::options_sheet::{OptionsSheet, SheetOutcome, SheetState};
 use crate::views::preferences::{self, PreferencesState};
 use crate::views::rename_notes::{self, DialogOutcome};
+use crate::views::resizer::{self, ResizerAction, ResizerVm};
 use crate::views::task_table::TableLayout;
 use crate::views::toasts::{ToastAction, ToastKind};
 use crate::views::update_notice::UpdateNoticeState;
@@ -42,15 +43,25 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// A GUI-internal event a background worker sends back to the app (design spec
 /// §1.2). Distinct from [`humm_core::queue::TaskEvent`] (the queue's own
 /// lifecycle stream): this carries viewer-side effects that must run on the UI
-/// thread. The channel exists this milestone; its only producer — the
-/// resize/merge worker — is wired in Task 12.
+/// thread. Its producer is the resize/merge feature (F-086): the merge worker
+/// thread sends it on completion (the synchronous extend/resize path applies
+/// the same effect inline via [`HummApp::apply_transcriptions_updated`]).
 #[derive(Debug, Clone)]
 pub enum AppEvent {
-    /// A transcript's segments were replaced out-of-band (resize/merge, F-086):
-    /// refresh the affected table row and close the transcript's viewer (Buzz
+    /// A resize/merge produced or replaced a transcript's segments (F-086):
+    /// refresh (or insert) the `affected` transcript's table row, then close
+    /// the `source` transcript's viewer *and* its resizer (Buzz
     /// `transcriptions_updated_signal` → viewer `close`,
-    /// `transcription_viewer_widget.py:1333`).
-    TranscriptionsUpdated(TranscriptionId),
+    /// `transcription_viewer_widget.py:1333`; humm also closes the resizer).
+    /// `affected == source` for an in-place save; `affected` is the new copy's
+    /// id for a "Create new transcript" save.
+    TranscriptionsUpdated {
+        /// The transcript whose table row must be refreshed/inserted.
+        affected: TranscriptionId,
+        /// The source transcript whose viewer + resizer opened the operation
+        /// and must now close.
+        source: TranscriptionId,
+    },
 }
 
 /// The eframe application.
@@ -95,6 +106,14 @@ pub struct HummApp {
     /// app harvests each viewer's `close_requested` flag every frame and drops
     /// the entry (which drops the VM) when it is set.
     viewers: BTreeMap<TranscriptionId, Arc<Mutex<ViewerVm>>>,
+    /// Open resizer windows (F-086), one per **source** transcript, keyed by
+    /// that source id — each a deferred egui viewport
+    /// (`Self::show_resizer_viewports`). Opened by a viewer's Resize button;
+    /// closed when the operation lands, when the user closes the window, or
+    /// when the originating viewer closes (Buzz `closeEvent` closes its
+    /// resizer). The `Arc<Mutex<_>>` is shared with both the deferred render
+    /// closure and (for merge) the worker thread.
+    resizers: BTreeMap<TranscriptionId, Arc<Mutex<ResizerVm>>>,
     /// The adapter bundle every viewer window shares (built once from the real
     /// ffmpeg/cpal/rfd adapters). Cloned into each deferred-viewport closure.
     viewer_deps: Arc<ViewerDeps>,
@@ -289,6 +308,7 @@ impl HummApp {
             pending_table_actions: Vec::new(),
             shortcuts,
             viewers: BTreeMap::new(),
+            resizers: BTreeMap::new(),
             viewer_deps,
             app_event_tx,
             app_event_rx,
@@ -1062,6 +1082,257 @@ impl HummApp {
         }
     }
 
+    /// Opens a resizer window for `source`, or focuses the existing one if this
+    /// transcript already has a resizer open (one resizer per source — the
+    /// viewer's own no-duplicate deviation #1 shape). Triggered by a viewer's
+    /// Resize button (Buzz `on_resize_button_clicked`). A store-read failure at
+    /// open is logged and opens nothing.
+    fn open_resizer(&mut self, source: TranscriptionId) {
+        if let Some(existing) = self.resizers.get(&source) {
+            existing
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .focus_requested = true;
+            return;
+        }
+        let opened = {
+            let settings = self
+                .services
+                .settings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            ResizerVm::open(source, &self.viewer_deps, &settings)
+        };
+        match opened {
+            Ok(vm) => {
+                self.resizers.insert(source, Arc::new(Mutex::new(vm)));
+            }
+            Err(err) => log::warn!("could not open transcript resizer for {source}: {err}"),
+        }
+    }
+
+    /// Executes one resizer action harvested from a resizer window (F-086).
+    /// Extend/Resize run synchronously (fast, pure) and return the affected id;
+    /// Merge starts a worker thread and returns `None` (its completion arrives
+    /// later as an [`AppEvent`]). The return value is for the test seam — the
+    /// harvest loop discards it.
+    fn apply_resizer_action(
+        &mut self,
+        source: TranscriptionId,
+        action: ResizerAction,
+        now: Instant,
+        ctx: &egui::Context,
+    ) -> Option<TranscriptionId> {
+        let (create_new, extend_amount, target_chars, algo, language) = {
+            let vm = self
+                .resizers
+                .get(&source)?
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                vm.create_new,
+                vm.extend_amount.clone(),
+                vm.target_chars,
+                vm.build_algo(),
+                vm.language.clone(),
+            )
+        };
+
+        match action {
+            ResizerAction::Extend => {
+                let segs = self.read_source_segments(source)?;
+                let out = humm_core::resize::extend_endings(
+                    &segs,
+                    resizer::parse_extend_amount(&extend_amount),
+                );
+                self.finish_sync_resize(source, create_new, &out)
+            }
+            ResizerAction::Resize => {
+                let segs = self.read_source_segments(source)?;
+                let out = humm_core::resize::equalize(&segs, target_chars as usize);
+                self.finish_sync_resize(source, create_new, &out)
+            }
+            ResizerAction::Merge => {
+                self.start_merge(source, create_new, algo, language, ctx, now);
+                None
+            }
+        }
+    }
+
+    /// Re-reads `source`'s current segments from the store (Buzz re-queries at
+    /// each button click, `get_transcription_segments`) as plain [`Segment`]s.
+    /// A read failure is logged and yields `None` — the caller aborts the
+    /// operation rather than saving over the transcript with nothing.
+    fn read_source_segments(&self, source: TranscriptionId) -> Option<Vec<Segment>> {
+        match self.services.store.get_segment_rows(source) {
+            Ok(rows) => Some(
+                rows.into_iter()
+                    .map(|row| Segment {
+                        start: row.start,
+                        end: row.end,
+                        text: row.text,
+                        translation: row.translation,
+                    })
+                    .collect(),
+            ),
+            Err(err) => {
+                log::warn!("resizer: could not read segments for {source}: {err}");
+                None
+            }
+        }
+    }
+
+    /// The synchronous save+refresh tail shared by Extend and Resize: save
+    /// `out` (create-new copy → complete, or in-place replace) and, on success,
+    /// apply the [`AppEvent::TranscriptionsUpdated`] effect inline (refresh the
+    /// table row, close the source's viewer + resizer). Returns the affected id.
+    fn finish_sync_resize(
+        &mut self,
+        source: TranscriptionId,
+        create_new: bool,
+        out: &[Segment],
+    ) -> Option<TranscriptionId> {
+        match resizer::save_segments(&self.services.store, source, create_new, out) {
+            Ok(affected) => {
+                self.apply_transcriptions_updated(affected, source);
+                Some(affected)
+            }
+            Err(err) => {
+                log::warn!("resizer: could not save resized segments for {source}: {err}");
+                None
+            }
+        }
+    }
+
+    /// Starts a merge on a background thread (Buzz `on_merge_button_clicked` +
+    /// its `TranscriptionWorker`): for "Create new transcript", copy the source
+    /// row and mark it visible at 0 % *first* (so the new row appears in the
+    /// table immediately — Buzz's first `transcriptions_updated_signal.emit`),
+    /// then hide the resizer window (`running = true`) and spawn a thread that
+    /// reads the source segments, regroups them, saves, and posts
+    /// [`AppEvent::TranscriptionsUpdated`]. A `RegroupError` (an unsupported op
+    /// via `HUMM_MERGE_REGROUP_RULE`) is surfaced on the resizer's own error
+    /// banner and re-shows the window instead.
+    fn start_merge(
+        &mut self,
+        source: TranscriptionId,
+        create_new: bool,
+        algo: String,
+        language: Option<String>,
+        ctx: &egui::Context,
+        now: Instant,
+    ) {
+        let store = Arc::clone(&self.services.store);
+        let affected = if create_new {
+            match store.copy_transcription(source) {
+                Ok(new_id) => {
+                    if let Err(err) = store.update_progress_direct(new_id, 0.0) {
+                        log::warn!("resizer: update_progress_direct failed for {new_id}: {err}");
+                    }
+                    // Make the freshly-copied row visible in the table right away
+                    // (it is inserted because it is not yet tracked).
+                    self.tasks.refresh_row(new_id, &store);
+                    new_id
+                }
+                Err(err) => {
+                    log::warn!("resizer: copy_transcription failed for {source}: {err}");
+                    self.push_error_toast(format!("{}: {err}", tr("resizer-merge-error")), now);
+                    return;
+                }
+            }
+        } else {
+            source
+        };
+
+        let Some(vm_arc) = self.resizers.get(&source) else {
+            return;
+        };
+        {
+            let mut vm = vm_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            vm.error = None;
+            vm.running = true;
+        }
+        let vm_arc = Arc::clone(vm_arc);
+        let tx = self.app_event_tx.clone();
+        let ctx = ctx.clone();
+
+        std::thread::spawn(move || {
+            let segs: Vec<Segment> = match store.get_segment_rows(source) {
+                Ok(rows) => rows
+                    .into_iter()
+                    .map(|row| Segment {
+                        start: row.start,
+                        end: row.end,
+                        text: row.text,
+                        translation: row.translation,
+                    })
+                    .collect(),
+                Err(err) => {
+                    log::warn!("resizer merge: could not read segments for {source}: {err}");
+                    let mut vm = vm_arc.lock().unwrap_or_else(|p| p.into_inner());
+                    vm.error = Some(err.to_string());
+                    vm.running = false;
+                    ctx.request_repaint();
+                    return;
+                }
+            };
+
+            match humm_core::regroup::regroup_segments(&segs, language.as_deref(), &algo) {
+                Ok(out) => {
+                    let saved = if create_new {
+                        store.mark_replaced_completed(affected, &out)
+                    } else {
+                        store.replace_segments(source, &out)
+                    };
+                    if let Err(err) = saved {
+                        log::warn!("resizer merge: could not save segments for {affected}: {err}");
+                    }
+                    let _ = tx.send(AppEvent::TranscriptionsUpdated { affected, source });
+                    ctx.request_repaint();
+                }
+                Err(err) => {
+                    // Unsupported regroup op (via HUMM_MERGE_REGROUP_RULE): show
+                    // the actionable error on the resizer and re-show its window.
+                    let mut vm = vm_arc.lock().unwrap_or_else(|p| p.into_inner());
+                    vm.error = Some(err.to_string());
+                    vm.running = false;
+                    ctx.request_repaint();
+                }
+            }
+        });
+    }
+
+    /// Applies the [`AppEvent::TranscriptionsUpdated`] effect (F-086): refresh
+    /// (or insert) the `affected` transcript's table row, then close the
+    /// `source`'s viewer and its resizer (Buzz `transcriptions_updated` →
+    /// viewer `close`). Shared by the synchronous extend/resize path and the
+    /// merge worker's drained event.
+    fn apply_transcriptions_updated(&mut self, affected: TranscriptionId, source: TranscriptionId) {
+        // `refresh_row` re-reads the row and replaces it in place, or inserts it
+        // when untracked (a create-new copy) — so one call covers both shapes.
+        self.tasks.refresh_row(affected, &self.services.store);
+        self.close_viewer(source);
+    }
+
+    /// Closes `id`'s viewer window (persisting its geometry through the shared
+    /// last-close-wins path — the watch-item fix: the dormant `AppEvent` path
+    /// previously dropped a viewer without persisting geometry) and, with it,
+    /// `id`'s resizer window (Buzz `closeEvent` closes its child resizer). A
+    /// no-op for an id with neither window open.
+    fn close_viewer(&mut self, id: TranscriptionId) {
+        if let Some(vm_arc) = self.viewers.remove(&id) {
+            let geometry = vm_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .observed_geometry;
+            self.persist_viewer_geometry_if_changed(geometry);
+        }
+        // Closing a viewer closes its resizer too (Buzz closeEvent parity).
+        self.resizers.remove(&id);
+    }
+
     /// Renders every open viewer as a deferred egui viewport
     /// (`ctx.show_viewport_deferred`, ARCHITECTURE §7 / design spec §1.1), then
     /// harvests close requests: a viewer whose render closure set
@@ -1135,6 +1406,23 @@ impl HummApp {
             );
         }
 
+        // Harvest Resize-button requests (open/focus the source's resizer)
+        // before the close harvest, so a viewer that requests a resize and is
+        // then closed the same frame still gets its resizer opened first.
+        let resize_reqs: Vec<TranscriptionId> = self
+            .viewers
+            .iter()
+            .filter_map(|(id, vm_arc)| {
+                let mut vm = vm_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                std::mem::take(&mut vm.resize_requested).then_some(*id)
+            })
+            .collect();
+        for id in resize_reqs {
+            self.open_resizer(id);
+        }
+
         let closing: Vec<TranscriptionId> = self
             .viewers
             .iter()
@@ -1147,13 +1435,96 @@ impl HummApp {
             .map(|(id, _)| *id)
             .collect();
         for id in closing {
-            if let Some(vm_arc) = self.viewers.remove(&id) {
-                let geometry = vm_arc
+            self.close_viewer(id);
+        }
+    }
+
+    /// Renders every open resizer as a deferred egui viewport (mirroring
+    /// [`Self::show_viewer_viewports`], F-086 / design spec §2.6), then harvests
+    /// each window's intents: a queued action (Extend/Resize/Merge button) is
+    /// executed via [`Self::apply_resizer_action`], and a close request drops
+    /// the window. While a merge runs (`running`), the window is hidden
+    /// (`ViewportCommand::Visible(false)`) — Buzz's `self.hide()`.
+    ///
+    /// The deferred callback captures only `Arc`-shared state (the same
+    /// `Send + Sync + 'static` constraint the viewer viewports carry); this
+    /// viewport plumbing is verifiable only in a windowed run — `resizer::ui`
+    /// itself and the action-apply seam are kittest-driven directly.
+    fn show_resizer_viewports(&mut self, ctx: &egui::Context, now: Instant) {
+        if self.resizers.is_empty() {
+            return;
+        }
+        for (source, vm_arc) in &self.resizers {
+            let title = {
+                vm_arc
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .observed_geometry;
-                self.persist_viewer_geometry_if_changed(geometry);
-            }
+                    .title
+                    .clone()
+            };
+            let builder = resizer_viewport_builder(&title);
+
+            let vm_for_cb = Arc::clone(vm_arc);
+            let settings = Arc::clone(&self.services.settings);
+            let settings_path = self.services.settings_path.clone();
+
+            ctx.show_viewport_deferred(
+                egui::ViewportId::from_hash_of(("resizer", *source)),
+                builder,
+                move |ctx, _class| {
+                    let mut vm = vm_for_cb
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    // The window hides while a merge runs and re-shows on error;
+                    // only send the command on an actual transition.
+                    let want_visible = !vm.running;
+                    if vm.window_visible != want_visible {
+                        vm.window_visible = want_visible;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(want_visible));
+                    }
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        crate::views::resizer::ui(ui, &mut vm, &settings, &settings_path);
+                    });
+                    if std::mem::take(&mut vm.focus_requested) {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                    if ctx.input(|input| input.viewport().close_requested()) {
+                        vm.close_requested = true;
+                    }
+                },
+            );
+        }
+
+        // Harvest queued actions (one at most per window per frame), then run
+        // them — collected first so executing one (which can drop a resizer)
+        // never mutates the map mid-iteration.
+        let actions: Vec<(TranscriptionId, ResizerAction)> = self
+            .resizers
+            .iter()
+            .filter_map(|(source, vm_arc)| {
+                let mut vm = vm_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                vm.pending_action.take().map(|action| (*source, action))
+            })
+            .collect();
+        for (source, action) in actions {
+            self.apply_resizer_action(source, action, now, ctx);
+        }
+
+        let closing: Vec<TranscriptionId> = self
+            .resizers
+            .iter()
+            .filter(|(_, vm_arc)| {
+                vm_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .close_requested
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in closing {
+            self.resizers.remove(&id);
         }
     }
 
@@ -1181,28 +1552,73 @@ impl HummApp {
     }
 
     /// Drains [`Self::app_event_rx`] and applies every [`AppEvent`] (design
-    /// spec §1.2). Dormant until Task 12 wires a sender; the handler already
-    /// implements the documented effect so that task only has to send.
+    /// spec §1.2): the merge worker's completion event refreshes/inserts the
+    /// affected table row and closes the source's viewer + resizer through the
+    /// geometry-persisting close path (the watch-item fix).
     fn drain_app_events(&mut self) {
         let events: Vec<AppEvent> = self.app_event_rx.try_iter().collect();
         for event in events {
             match event {
-                AppEvent::TranscriptionsUpdated(id) => {
-                    self.tasks.refresh_row(id, &self.services.store);
-                    // The source transcript's segments were replaced — its open
-                    // viewer (and, Task 12, its resizer) must close.
-                    self.viewers.remove(&id);
+                AppEvent::TranscriptionsUpdated { affected, source } => {
+                    self.apply_transcriptions_updated(affected, source);
                 }
             }
         }
     }
 
     /// A clone of the GUI-internal [`AppEvent`] sender, to hand to a background
-    /// worker (Task 12's resize/merge worker). Exposed as the seam that keeps
-    /// [`Self::app_event_tx`] a live producer endpoint even before that task
-    /// wires it.
+    /// worker (the resize/merge worker). Keeps [`Self::app_event_tx`] a live
+    /// producer endpoint that other spawn sites can reuse.
     pub fn app_event_sender(&self) -> mpsc::Sender<AppEvent> {
         self.app_event_tx.clone()
+    }
+
+    // -- Test seams (F-086 resizer) -----------------------------------------
+    // The resizer window is a deferred OS viewport an `egui_kittest` Harness
+    // cannot reach into, so these plain `pub fn`s (the `new_for_test`/
+    // `open_options_sheet_for_test` pattern) let an integration test drive the
+    // open → action → close flow directly against a shared store.
+
+    /// Opens (or focuses) a viewer for `id` — the originating window a resizer
+    /// closes on completion.
+    pub fn open_viewer_for_test(&mut self, id: TranscriptionId) {
+        self.open_viewer(id, Instant::now());
+    }
+
+    /// Opens (or focuses) a resizer window for `source`.
+    pub fn open_resizer_for_test(&mut self, source: TranscriptionId) {
+        self.open_resizer(source);
+    }
+
+    /// The live resizer view-model for `source`, so a test can set its form
+    /// fields (`create_new`, `target_chars`, …) before driving an action.
+    pub fn resizer_for_test(&self, source: TranscriptionId) -> Option<Arc<Mutex<ResizerVm>>> {
+        self.resizers.get(&source).map(Arc::clone)
+    }
+
+    /// Runs one resizer action as the harvest would, returning the affected id
+    /// for the synchronous (Extend/Resize) paths (`None` for Merge).
+    pub fn run_resizer_action_for_test(
+        &mut self,
+        source: TranscriptionId,
+        action: ResizerAction,
+    ) -> Option<TranscriptionId> {
+        self.apply_resizer_action(source, action, Instant::now(), &egui::Context::default())
+    }
+
+    /// Whether a viewer window is open for `id`.
+    pub fn is_viewer_open_for_test(&self, id: TranscriptionId) -> bool {
+        self.viewers.contains_key(&id)
+    }
+
+    /// Whether a resizer window is open for `source`.
+    pub fn is_resizer_open_for_test(&self, source: TranscriptionId) -> bool {
+        self.resizers.contains_key(&source)
+    }
+
+    /// Whether the task table's view-model currently has a row for `id`.
+    pub fn has_task_row_for_test(&self, id: TranscriptionId) -> bool {
+        self.tasks.sorted_rows().iter().any(|row| row.id == id)
     }
 }
 
@@ -1240,6 +1656,18 @@ fn viewer_viewport_builder(title: &str, geometry: Option<ViewerGeometry>) -> egu
         }
     }
     builder
+}
+
+/// The [`egui::ViewportBuilder`] for a resizer window: `title` (the source
+/// file's basename), min size 600×300 (Buzz `setMinimumWidth(600)` /
+/// `setMinimumHeight(300)`), default size 600×480. Unlike the viewer, the
+/// resizer persists no geometry (Buzz's `TranscriptionResizerWidget` has no
+/// `load_geometry`/`save_geometry`).
+fn resizer_viewport_builder(title: &str) -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_min_inner_size([600.0, 300.0])
+        .with_inner_size([600.0, 480.0])
 }
 
 /// Environment-gated smoke-test hooks (see the `smoke_hooks` field doc on
@@ -1365,6 +1793,7 @@ impl eframe::App for HummApp {
             self.show_preferences_viewport(ui.ctx());
         }
         self.show_viewer_viewports(ui.ctx());
+        self.show_resizer_viewports(ui.ctx(), now);
 
         self.persist_layout_if_changed();
     }
