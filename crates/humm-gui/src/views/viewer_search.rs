@@ -118,11 +118,39 @@ pub fn ui(ui: &mut egui::Ui, vm: &mut ViewerVm, shortcuts: &ShortcutMap) {
 
         // Plain Enter while the input has focus = next match (Buzz
         // `search_input.returnPressed.connect(self.search_next)`, which only
-        // fires while the `QLineEdit` itself holds keyboard focus).
-        if output.response.has_focus()
+        // fires while the `QLineEdit` itself holds keyboard focus). egui's
+        // singleline `TextEdit` surrenders focus *internally*, during its own
+        // `.show()`, the instant it sees its `return_key`
+        // (`Modifiers::NONE + Enter` — "End input with enter",
+        // `text_edit/builder.rs`) — so `output.response.has_focus()` is
+        // already `false` by the time we can inspect it, same frame.
+        // `lost_focus()` is egui's own documented idiom for exactly this
+        // shape (`TextEdit`'s own doctest: `lost_focus() &&
+        // key_pressed(Enter)`); review fix round 1 (probe-confirmed:
+        // `has_focus()`-gated Enter never actually fired).
+        if output.response.lost_focus()
             && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter))
         {
             vm.search_next();
+        }
+
+        // Esc while the input has focus hides the bar and clears the search
+        // (Buzz `eventFilter`'s `Key_Escape` branch → `hide_search_bar`,
+        // `transcription_viewer_widget.py:1064-1076`). Same focus-surrendered-
+        // before-we-can-see-it mechanics as Enter above, except for an
+        // *unfiltered* Escape egui surrenders focus even earlier — at the
+        // very start of the frame, before any widget renders
+        // (`Memory::Focus::begin_pass`) — so `lost_focus()` is again the only
+        // reliable transition-aware check (review fix round 1, probe-
+        // confirmed: a `has_focus()`-gated check never fired at all).
+        // Consuming the key (rather than just `key_pressed`) keeps a stray
+        // Escape from also reaching, say, an open cell editor's own Esc-
+        // commit path this same frame.
+        if output.response.lost_focus()
+            && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            vm.search.hide();
+            return;
         }
 
         let has_results = !vm.search.results.is_empty();

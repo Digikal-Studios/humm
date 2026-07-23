@@ -44,13 +44,19 @@ pub fn viewer_ui(
     settings: &Mutex<Settings>,
     settings_path: &Path,
 ) {
+    // Snapshotted before *any* call that can mutate `vm.search.visible` this
+    // frame (⌘F in `consume_shortcuts`, the toolbar toggle in `show_toolbar`,
+    // Esc-in-input in `viewer_search::ui`) — otherwise the diff-on-change
+    // persist below would compare against a value already mutated by one of
+    // those paths and silently never save (review fix round 1).
+    let find_was_visible = vm.search.visible;
+
     consume_mode_shortcuts(ui, vm, shortcuts);
     viewer_search::consume_shortcuts(ui, vm, shortcuts);
     // Nudge shortcuts act on the selected row and are consumed only inside the
     // focused viewer viewport (design spec §7).
     consume_nudge_shortcuts(ui, vm, deps, shortcuts);
 
-    let find_was_visible = vm.search.visible;
     show_toolbar(ui, vm, shortcuts);
     viewer_search::ui(ui, vm, shortcuts);
     persist_find_visibility_if_changed(vm, find_was_visible, settings, settings_path);

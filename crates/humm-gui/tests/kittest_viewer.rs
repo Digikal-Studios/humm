@@ -476,3 +476,104 @@ fn translation_matches_append_after_text_matches() {
         "text matches (row 1) come before the translation match (row 0)"
     );
 }
+
+// -- Review fix round 1 regressions --------------------------------------
+
+/// Defect 1 (critical, spec §2.3 / Buzz `eventFilter`'s `Key_Escape` branch,
+/// `transcription_viewer_widget.py:1064-1076`): Esc while the search input
+/// has focus must hide the bar *and* clear the search. Probe-confirmed
+/// broken before the fix — egui's singleline `TextEdit` surrenders focus for
+/// an unfiltered Escape *before* any widget even renders this frame
+/// (`Memory::Focus::begin_pass`), so a naive `response.has_focus()` check
+/// after `.show()` never sees it; `response.lost_focus()` is the
+/// transition-aware fix.
+#[test]
+fn esc_in_focused_input_hides_and_clears_bar() {
+    let (mut fixture, _dir) = fixture(
+        "/tmp/a.wav",
+        &[seg(0, 1000, "needle here", ""), seg(1000, 2000, "x", "")],
+    );
+    arm_search(&mut fixture, "needle");
+    let mut harness = build_harness(fixture);
+    harness.run(); // crosses the debounce, bar shows with results
+
+    harness.get(By::new().role(Role::TextInput)).focus();
+    harness.run(); // the focus request takes effect
+
+    harness.key_press(egui::Key::Escape);
+    harness.run();
+
+    assert!(
+        !harness.state().vm.search.visible,
+        "Esc in the focused input must hide the bar"
+    );
+    assert!(
+        harness.state().vm.search.query.is_empty(),
+        "Esc in the focused input must clear the query"
+    );
+}
+
+/// Companion to the Escape fix: plain Enter while the input has focus must
+/// still advance to the next match (Buzz `returnPressed.connect(search_
+/// next)`) — the identical `has_focus()`-after-`.show()` mechanics broke
+/// this path too (probe-confirmed before the fix: a real Enter keypress
+/// never advanced `current`), fixed by the same `lost_focus()` idiom.
+#[test]
+fn enter_in_focused_input_advances_to_next_match() {
+    let (mut fixture, _dir) = fixture(
+        "/tmp/a.wav",
+        &[
+            seg(0, 1000, "needle here", ""),
+            seg(1000, 2000, "needle there", ""),
+        ],
+    );
+    arm_search(&mut fixture, "needle");
+    let mut harness = build_harness(fixture);
+    harness.run();
+    assert_eq!(harness.state().vm.search.current, 0);
+
+    harness.get(By::new().role(Role::TextInput)).focus();
+    harness.run();
+
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+
+    assert_eq!(
+        harness.state().vm.search.current,
+        1,
+        "Enter in the focused input must advance to the next match"
+    );
+}
+
+/// Defect 2 (important): the find-bar visibility persist must cover the ⌘F
+/// path too, not just the toolbar-button click — `viewer_ui` must snapshot
+/// `vm.search.visible` *before* any shortcut consumption can mutate it, or
+/// the diff-on-change check compares a value against itself and never saves.
+#[test]
+fn cmd_f_toggle_persists_find_visibility() {
+    let (fixture, _dir) = fixture("/tmp/a.wav", &[seg(0, 1000, "hello", "")]);
+    assert!(
+        !fixture.vm.search.visible,
+        "find bar starts hidden by default"
+    );
+    let mut harness = build_harness(fixture);
+
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
+    harness.run();
+
+    assert!(
+        harness.state().vm.search.visible,
+        "⌘F must open the find bar"
+    );
+    let persisted = harness
+        .state()
+        .settings
+        .lock()
+        .expect("settings lock")
+        .viewer
+        .find_widget_visible;
+    assert!(
+        persisted,
+        "⌘F must persist find_widget_visible, not just the toolbar-button path"
+    );
+}
