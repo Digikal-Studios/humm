@@ -206,7 +206,6 @@ viewer-mode-text = Text
 viewer-mode-translation = Translation
 viewer-mode-timestamps = Timestamps
 viewer-export = Export
-viewer-export-pending = Export lands later this milestone
 viewer-translate = Translate
 viewer-translate-tooltip = Translation arrives with the API backend milestone
 viewer-resize = Resize
@@ -237,3 +236,15 @@ viewer-follow-audio-tooltip = Enable/disable following the current audio positio
 viewer-speed = Speed:
 viewer-scroll-to-current = Scroll to Current
 viewer-scroll-to-current-tooltip = Scroll to the currently spoken text
+
+## Export menu (views/export_menu.rs, F-084)
+##
+## viewer-export-text/viewer-export-translation are their own keys, not a
+## reuse of viewer-mode-text/viewer-mode-translation above — see
+## `export_menu::entry_label`'s doc comment.
+
+viewer-export-text = Text
+viewer-export-translation = Translation
+viewer-export-dialog-title = Save File
+viewer-export-filter = Text files
+export-written = Written to { $path }

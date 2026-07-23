@@ -169,7 +169,6 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "viewer-mode-translation",
         "viewer-mode-timestamps",
         "viewer-export",
-        "viewer-export-pending",
         "viewer-translate",
         "viewer-translate-tooltip",
         "viewer-resize",
@@ -203,6 +202,12 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "viewer-speed",
         "viewer-scroll-to-current",
         "viewer-scroll-to-current-tooltip",
+        // Export menu (views/export_menu.rs, F-084)
+        "viewer-export-text",
+        "viewer-export-translation",
+        "viewer-export-dialog-title",
+        "viewer-export-filter",
+        "export-written",
     ]
 }
 

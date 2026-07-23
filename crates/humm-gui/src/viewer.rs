@@ -571,6 +571,19 @@ pub struct ViewerVm {
     pub unsaved: bool,
     /// The transcript search bar's state (F-082).
     pub search: SearchState,
+    /// Set to `Some((now, path))` by [`crate::views::export_menu`] on a
+    /// successful export write: drives a self-clearing "written to `path`"
+    /// flash next to the autosave indicator (design spec §2.4 / UX_SPEC J-6),
+    /// the same `Instant`-timed mechanism as [`Self::saved_flash`]. Cleared by
+    /// [`crate::views::export_menu`]'s own flash renderer once its duration
+    /// elapses, or overwritten by the next successful export.
+    pub export_flash: Option<(Instant, PathBuf)>,
+    /// Set to `Some(message)` when an export's file write failed: surfaced as
+    /// an inline warning banner — the "banner, not toast" precedent
+    /// [`Self::unsaved`] set (ADR-018: the app's toast stack is unreachable
+    /// from a deferred-viewport render closure). Cleared by the next export
+    /// attempt, success or failure.
+    pub export_error: Option<String>,
 }
 
 impl ViewerVm {
@@ -632,6 +645,8 @@ impl ViewerVm {
             saved_flash: None,
             unsaved: false,
             search: SearchState::new(settings.viewer.find_widget_visible),
+            export_flash: None,
+            export_error: None,
         })
     }
 
@@ -673,9 +688,11 @@ impl ViewerVm {
     }
 
     /// The in-memory rows as plain [`Segment`]s (dropping the row id), for the
-    /// core `text_view` builders. Rebuilt on each mode switch — an infrequent,
-    /// user-initiated event, never per frame.
-    fn segments(&self) -> Vec<Segment> {
+    /// core `text_view` builders and (Task 11) `views::export_menu`'s writers
+    /// — the same in-memory mapping either way (design spec §2.4: export
+    /// reads live rows, not a fresh store query). Rebuilt on each call — an
+    /// infrequent, user-initiated event, never per frame.
+    pub(crate) fn segments(&self) -> Vec<Segment> {
         self.rows
             .iter()
             .map(|row| Segment {
@@ -1443,6 +1460,15 @@ mod tests {
             None
         }
         fn pick_folder(&self, _start_dir: Option<&Path>) -> Option<PathBuf> {
+            None
+        }
+        fn save_file(
+            &self,
+            _title: &str,
+            _default_path: &Path,
+            _filter_name: &str,
+            _extension: &str,
+        ) -> Option<PathBuf> {
             None
         }
     }

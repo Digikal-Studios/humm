@@ -126,6 +126,21 @@ pub trait FileDialogs: Send + Sync {
     /// Opens the "Select folder" dialog, starting in `start_dir` if given.
     /// `None` on cancel.
     fn pick_folder(&self, start_dir: Option<&Path>) -> Option<PathBuf>;
+
+    /// Opens a native "save file" dialog (the transcript viewer's export
+    /// menu, F-084 — Buzz `QFileDialog.getSaveFileName`,
+    /// `export_transcription_menu.py:80-85`), titled `title`, starting at
+    /// `default_path`'s directory with `default_path`'s file name pre-filled,
+    /// and filtered to `filter_name` (*.`extension`). `None` on cancel —
+    /// callers treat that as a silent no-op, matching Buzz's own
+    /// `if output_file_path == "": return`.
+    fn save_file(
+        &self,
+        title: &str,
+        default_path: &Path,
+        filter_name: &str,
+        extension: &str,
+    ) -> Option<PathBuf>;
 }
 
 /// The real, rfd-backed [`FileDialogs`] — blocking native dialogs, run on the
@@ -151,6 +166,28 @@ impl FileDialogs for RfdFileDialogs {
             dialog = dialog.set_directory(dir);
         }
         dialog.pick_folder()
+    }
+
+    fn save_file(
+        &self,
+        title: &str,
+        default_path: &Path,
+        filter_name: &str,
+        extension: &str,
+    ) -> Option<PathBuf> {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title(title)
+            .add_filter(filter_name, &[extension]);
+        if let Some(dir) = default_path
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+        {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(name) = default_path.file_name().and_then(|name| name.to_str()) {
+            dialog = dialog.set_file_name(name);
+        }
+        dialog.save_file()
     }
 }
 

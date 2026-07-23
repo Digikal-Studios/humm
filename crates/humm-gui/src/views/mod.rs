@@ -3,6 +3,7 @@
 //! services hold state, views are pure render functions of it).
 
 pub mod about;
+pub mod export_menu;
 pub mod main_window;
 pub mod options_sheet;
 pub mod playback_controls;

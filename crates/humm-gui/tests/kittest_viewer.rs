@@ -28,10 +28,11 @@ use humm_core::boundary::{
 };
 use humm_core::cancel::CancelToken;
 use humm_core::domain::{
-    Input, Millis, ModelSize, ModelSpec, OutputSpec, Segment, Source, TaskKind, TaskSpec,
-    TranscriptionId, TranscriptionOptions,
+    Input, Millis, ModelSize, ModelSpec, OutputFormat, OutputSpec, Segment, Source, TaskKind,
+    TaskSpec, TranscriptionId, TranscriptionOptions,
 };
 use humm_core::error::{AudioError, MediaError};
+use humm_core::export::{DEFAULT_PARAGRAPH_SPLIT, TextKey, write_format};
 use humm_core::settings::Settings;
 use humm_core::viewer::edit::Field;
 use humm_core::viewer::search::{RowMatch, SEARCH_DEBOUNCE_MS, results_label};
@@ -126,6 +127,40 @@ impl FileDialogs for FakeDialogs {
     }
     fn pick_folder(&self, _start_dir: Option<&Path>) -> Option<PathBuf> {
         None
+    }
+    fn save_file(
+        &self,
+        _title: &str,
+        _default_path: &Path,
+        _filter_name: &str,
+        _extension: &str,
+    ) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// A [`FileDialogs`] whose `save_file` always returns a scripted path — the
+/// F-084 export tests' fake (`export_entry_writes_file_and_toasts`): the
+/// real save dialog is never driven headlessly, so this stands in for "the
+/// user picked `path` and clicked Save".
+struct ScriptedSaveDialog {
+    path: PathBuf,
+}
+impl FileDialogs for ScriptedSaveDialog {
+    fn pick_files(&self, _start_dir: Option<&Path>) -> Option<Vec<PathBuf>> {
+        unreachable!("export tests never pick files")
+    }
+    fn pick_folder(&self, _start_dir: Option<&Path>) -> Option<PathBuf> {
+        unreachable!("export tests never pick a folder")
+    }
+    fn save_file(
+        &self,
+        _title: &str,
+        _default_path: &Path,
+        _filter_name: &str,
+        _extension: &str,
+    ) -> Option<PathBuf> {
+        Some(self.path.clone())
     }
 }
 
@@ -693,4 +728,110 @@ fn cmd_f_toggle_persists_find_visibility() {
         persisted,
         "⌘F must persist find_widget_visible, not just the toolbar-button path"
     );
+}
+
+// -- F-084 export menu (Task 11) -----------------------------------------
+
+/// The Export menu shows only the 3 `- Text` entries without translations,
+/// and all 6 `{TXT,SRT,VTT} x {Text,Translation}` entries once translations
+/// exist — Buzz `translation_action.setVisible(has_translation)`.
+#[test]
+fn translation_entries_hidden_without_translations() {
+    let (no_tr, _dir) = fixture("/tmp/a.wav", &[seg(0, 1000, "hello", "")]);
+    let mut harness = build_harness(no_tr);
+    harness.run();
+    harness.get_by_label("Export").click();
+    harness.run();
+
+    harness.get(By::new().role(Role::Button).label_contains("TXT - Text"));
+    harness.get(By::new().role(Role::Button).label_contains("SRT - Text"));
+    harness.get(By::new().role(Role::Button).label_contains("VTT - Text"));
+    assert!(
+        harness.query_by_label_contains("Translation").is_none(),
+        "Translation export entries must be hidden when the transcript has no translations"
+    );
+
+    let (with_tr, _dir2) = fixture("/tmp/b.wav", &[seg(0, 1000, "hello", "hola")]);
+    let mut harness2 = build_harness(with_tr);
+    harness2.run();
+    harness2.get_by_label("Export").click();
+    harness2.run();
+
+    harness2.get(By::new().role(Role::Button).label_contains("TXT - Text"));
+    harness2.get(By::new().role(Role::Button).label_contains("SRT - Text"));
+    harness2.get(By::new().role(Role::Button).label_contains("VTT - Text"));
+    harness2.get(
+        By::new()
+            .role(Role::Button)
+            .label_contains("TXT - Translation"),
+    );
+    harness2.get(
+        By::new()
+            .role(Role::Button)
+            .label_contains("SRT - Translation"),
+    );
+    harness2.get(
+        By::new()
+            .role(Role::Button)
+            .label_contains("VTT - Translation"),
+    );
+}
+
+/// Selecting an entry writes the chosen path via the shared writer, flashes
+/// success feedback naming the path, and persists the transcript's last
+/// export folder — driven through the [`ScriptedSaveDialog`] fake since
+/// kittest never drives a real native save dialog.
+#[test]
+fn export_entry_writes_file_and_toasts() {
+    let segs = [
+        seg(0, 1000, "Hello world", ""),
+        seg(1200, 2000, "second segment", ""),
+    ];
+    let (mut fixture, _dir) = fixture("/tmp/a.wav", &segs);
+    let id = fixture.vm.id;
+
+    let export_dir = tempfile::tempdir().expect("export tempdir");
+    let chosen_path = export_dir.path().join("a.txt");
+    fixture.deps.dialogs = Arc::new(ScriptedSaveDialog {
+        path: chosen_path.clone(),
+    });
+
+    let mut harness = build_harness(fixture);
+    harness.run();
+    harness.get_by_label("Export").click();
+    harness.run();
+    harness
+        .get(By::new().role(Role::Button).label_contains("TXT - Text"))
+        .click();
+    harness.run();
+
+    // The file exists with exactly the bytes the shared writer produces for
+    // the same segments/key.
+    let written = std::fs::read(&chosen_path).expect("exported file exists");
+    let mut expected = Vec::new();
+    write_format(
+        OutputFormat::Txt,
+        &segs,
+        TextKey::Text,
+        DEFAULT_PARAGRAPH_SPLIT,
+        &mut expected,
+    )
+    .expect("direct write_format call");
+    assert_eq!(
+        written, expected,
+        "exported bytes must match write_format directly"
+    );
+
+    // Success feedback names the written path.
+    harness.get_by_label_contains("Written to");
+    harness.get_by_label_contains("a.txt");
+
+    // The chosen folder is persisted as this transcript's last export folder.
+    let persisted = harness
+        .state()
+        .deps
+        .store
+        .last_export_folder(id)
+        .expect("read last export folder");
+    assert_eq!(persisted.as_deref(), Some(export_dir.path()));
 }

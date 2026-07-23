@@ -15,8 +15,9 @@
 //! in a vertical splitter: the audio/video player row, the playback-controls
 //! bar ([`crate::views::playback_controls`]), and the current-segment frame,
 //! all driven off the [`ViewerVm`]'s player (the audio master clock). Export
-//! and resize remain disabled buttons with tooltips until Tasks 11/12. The
-//! viewer-level nudge shortcuts (⌘←/⌘→/⌘⇧←/⌘⇧→), the playback shortcuts
+//! is a live menu ([`crate::views::export_menu`], F-084); resize remains a
+//! disabled button with a tooltip until Task 12. The viewer-level nudge
+//! shortcuts (⌘←/⌘→/⌘⇧←/⌘⇧→), the playback shortcuts
 //! (⌘P/⌘⇧P/⌘⌥P/⌘G), the "edited · saved" autosave indicator, and the
 //! unsaved-edit warning banner are wired here.
 
@@ -31,7 +32,7 @@ use humm_core::viewer::edit::{Field, NUDGE_MS};
 use crate::i18n::tr;
 use crate::shortcuts::{ShortcutAction, ShortcutMap};
 use crate::viewer::{PlayerState, ViewMode, ViewerDeps, ViewerVm, time_label};
-use crate::views::{playback_controls, viewer_search, viewer_table};
+use crate::views::{export_menu, playback_controls, viewer_search, viewer_table};
 
 /// Repaint cadence while playing (spec §2.5): ~60 Hz so the scrubber,
 /// follow-audio highlight, and video frame keep up with the master clock.
@@ -74,12 +75,13 @@ pub fn viewer_ui(
     consume_nudge_shortcuts(ui, vm, deps, shortcuts);
     consume_playback_shortcuts(ui, vm, shortcuts);
 
-    show_toolbar(ui, vm, shortcuts);
+    show_toolbar(ui, vm, deps, shortcuts);
     viewer_search::ui(ui, vm, shortcuts);
     persist_find_visibility_if_changed(vm, find_was_visible, settings, settings_path);
     persist_playback_settings_if_changed(vm, settings, settings_path);
 
     show_unsaved_banner(ui, vm);
+    export_menu::show_export_error_banner(ui, vm);
     ui.separator();
 
     if vm.rows.is_empty() {
@@ -250,12 +252,12 @@ fn consume_mode_shortcuts(ui: &egui::Ui, vm: &mut ViewerVm, shortcuts: &Shortcut
     }
 }
 
-/// The toolbar: View menu (live), Find (live, F-082) then the disabled-stub
-/// buttons. The two permanent-tooltip buttons (Translate → M6 API backend,
-/// Identify Speakers → M8) name their milestone; the two remaining
-/// this-milestone buttons (Export/Resize) get a "lands later this milestone"
-/// tooltip until their task enables them (Tasks 11/12).
-fn show_toolbar(ui: &mut egui::Ui, vm: &mut ViewerVm, shortcuts: &ShortcutMap) {
+/// The toolbar: View menu (live), Export menu (live, F-084), Find (live,
+/// F-082) then the disabled-stub buttons. The two permanent-tooltip buttons
+/// (Translate → M6 API backend, Identify Speakers → M8) name their
+/// milestone; the remaining this-milestone button (Resize) gets a "lands
+/// later this milestone" tooltip until its task enables it (Task 12).
+fn show_toolbar(ui: &mut egui::Ui, vm: &mut ViewerVm, deps: &ViewerDeps, shortcuts: &ShortcutMap) {
     ui.horizontal_wrapped(|ui| {
         ui.menu_button(tr("viewer-view"), |ui| {
             if mode_menu_entry(
@@ -291,7 +293,7 @@ fn show_toolbar(ui: &mut egui::Ui, vm: &mut ViewerVm, shortcuts: &ShortcutMap) {
             }
         });
         ui.separator();
-        disabled_button(ui, tr("viewer-export"), tr("viewer-export-pending"));
+        export_menu::toolbar_menu(ui, vm, deps);
         disabled_button(ui, tr("viewer-translate"), tr("viewer-translate-tooltip"));
         disabled_button(ui, tr("viewer-resize"), tr("viewer-resize-pending"));
         disabled_button(
@@ -301,6 +303,7 @@ fn show_toolbar(ui: &mut egui::Ui, vm: &mut ViewerVm, shortcuts: &ShortcutMap) {
         );
         viewer_search::toolbar_button(ui, vm);
         show_autosave_indicator(ui, vm);
+        export_menu::show_export_flash(ui, vm);
     });
 }
 
