@@ -271,3 +271,4 @@ resizer-merge-button = Merge
 resizer-merge-disabled-tooltip = Available only if word level timings were enabled during transcription
 resizer-merging = Merging…
 resizer-merge-error = The merge could not run:
+resizer-save-error = The changes could not be saved:

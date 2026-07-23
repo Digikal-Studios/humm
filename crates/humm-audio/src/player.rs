@@ -368,10 +368,11 @@ impl Player {
             .store(clamped.to_bits(), Ordering::Relaxed);
     }
 
-    /// Sets or clears the loop range. `Some((start, end))` makes the feeder
-    /// wrap `end → start` sample-exactly; `None` clears it. Bounds are clamped
-    /// to `[0, duration]`; a range whose start is not strictly before its end
-    /// clears the loop.
+    /// Sets or clears the loop range. `Some((start, end))` makes the `fill`
+    /// closure wrap `end → start` sample-exactly (there is no separate feeder
+    /// thread — all playback logic runs inside `fill`, on the real-time audio
+    /// callback); `None` clears it. Bounds are clamped to `[0, duration]`; a
+    /// range whose start is not strictly before its end clears the loop.
     pub fn set_loop(&self, range: Option<(Millis, Millis)>) {
         match range {
             Some((start, end)) => {

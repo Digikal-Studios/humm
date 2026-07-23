@@ -226,6 +226,7 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "resizer-merge-disabled-tooltip",
         "resizer-merging",
         "resizer-merge-error",
+        "resizer-save-error",
     ]
 }
 

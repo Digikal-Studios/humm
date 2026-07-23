@@ -1221,12 +1221,12 @@ impl HummApp {
                     &segs,
                     resizer::parse_extend_amount(&extend_amount),
                 );
-                self.finish_sync_resize(source, create_new, &out)
+                self.finish_sync_resize(source, create_new, &out, ctx)
             }
             ResizerAction::Resize => {
                 let segs = self.read_source_segments(source)?;
                 let out = humm_core::resize::equalize(&segs, target_chars as usize);
-                self.finish_sync_resize(source, create_new, &out)
+                self.finish_sync_resize(source, create_new, &out, ctx)
             }
             ResizerAction::Merge => {
                 self.start_merge(source, create_new, algo, language, ctx, now);
@@ -1261,12 +1261,18 @@ impl HummApp {
     /// The synchronous save+refresh tail shared by Extend and Resize: save
     /// `out` (create-new copy → complete, or in-place replace) and, on success,
     /// apply the [`AppEvent::TranscriptionsUpdated`] effect inline (refresh the
-    /// table row, close the source's viewer + resizer). Returns the affected id.
+    /// table row, close the source's viewer + resizer). A save failure instead
+    /// mirrors the merge worker's `RegroupError` arm (final review, F-086):
+    /// the error lands on the resizer's own banner, `running` is cleared, and
+    /// neither the viewer nor the resizer closes — a silently-dropped edit
+    /// would otherwise look identical to a saved one. Returns the affected id
+    /// on success.
     fn finish_sync_resize(
         &mut self,
         source: TranscriptionId,
         create_new: bool,
         out: &[Segment],
+        ctx: &egui::Context,
     ) -> Option<TranscriptionId> {
         match resizer::save_segments(&self.services.store, source, create_new, out) {
             Ok(affected) => {
@@ -1275,6 +1281,14 @@ impl HummApp {
             }
             Err(err) => {
                 log::warn!("resizer: could not save resized segments for {source}: {err}");
+                if let Some(vm_arc) = self.resizers.get(&source) {
+                    let mut vm = vm_arc
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    vm.error = Some(format!("{} {err}", tr("resizer-save-error")));
+                    vm.running = false;
+                }
+                ctx.request_repaint();
                 None
             }
         }
@@ -1287,8 +1301,10 @@ impl HummApp {
     /// then hide the resizer window (`running = true`) and spawn a thread that
     /// reads the source segments, regroups them, saves, and posts
     /// [`AppEvent::TranscriptionsUpdated`]. A `RegroupError` (an unsupported op
-    /// via `HUMM_MERGE_REGROUP_RULE`) is surfaced on the resizer's own error
-    /// banner and re-shows the window instead.
+    /// via `HUMM_MERGE_REGROUP_RULE`) or a save failure (final review, F-086)
+    /// is instead surfaced on the resizer's own error banner and re-shows the
+    /// window — neither ever posts `TranscriptionsUpdated`, so the viewer and
+    /// resizer stay open on any failure.
     fn start_merge(
         &mut self,
         source: TranscriptionId,
@@ -1356,7 +1372,7 @@ impl HummApp {
                 Err(err) => {
                     log::warn!("resizer merge: could not read segments for {source}: {err}");
                     let mut vm = vm_arc.lock().unwrap_or_else(|p| p.into_inner());
-                    vm.error = Some(err.to_string());
+                    vm.error = Some(format!("{} {err}", tr("resizer-merge-error")));
                     vm.running = false;
                     ctx.request_repaint();
                     return;
@@ -1370,17 +1386,40 @@ impl HummApp {
                     } else {
                         store.replace_segments(source, &out)
                     };
-                    if let Err(err) = saved {
-                        log::warn!("resizer merge: could not save segments for {affected}: {err}");
+                    match saved {
+                        Ok(()) => {
+                            let _ = tx.send(AppEvent::TranscriptionsUpdated { affected, source });
+                        }
+                        Err(err) => {
+                            // Save failed (final review, F-086): surface it on
+                            // the resizer's own banner exactly like the
+                            // RegroupError arm below rather than sending the
+                            // success-shaped `TranscriptionsUpdated` — that
+                            // would close the viewer/resizer over a merge that
+                            // never actually landed. For "Create new
+                            // transcript", the copy row (`affected`) was
+                            // already inserted and shown at 0 % before this
+                            // thread started (`self.tasks.refresh_row` above);
+                            // it is left exactly as-is (still `Queued`) rather
+                            // than refreshed again, since nothing about it
+                            // changed here — if the user never retries, the
+                            // next launch's stale-task sweep flips it to
+                            // `Canceled` (§21 semantics).
+                            log::warn!(
+                                "resizer merge: could not save segments for {affected}: {err}"
+                            );
+                            let mut vm = vm_arc.lock().unwrap_or_else(|p| p.into_inner());
+                            vm.error = Some(format!("{} {err}", tr("resizer-save-error")));
+                            vm.running = false;
+                        }
                     }
-                    let _ = tx.send(AppEvent::TranscriptionsUpdated { affected, source });
                     ctx.request_repaint();
                 }
                 Err(err) => {
                     // Unsupported regroup op (via HUMM_MERGE_REGROUP_RULE): show
                     // the actionable error on the resizer and re-show its window.
                     let mut vm = vm_arc.lock().unwrap_or_else(|p| p.into_inner());
-                    vm.error = Some(err.to_string());
+                    vm.error = Some(format!("{} {err}", tr("resizer-merge-error")));
                     vm.running = false;
                     ctx.request_repaint();
                 }

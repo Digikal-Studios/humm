@@ -1053,3 +1053,178 @@ fn resize_end_to_end_creates_new_completed_row() {
         "the resizer closes on update"
     );
 }
+
+// -- F-086 final review: resizer save-failure surfacing -------------------
+//
+// A save failure (Extend/Resize's synchronous tail, or the Merge worker's
+// background one) must land on the resizer's own error banner — not the
+// success-shaped `AppEvent::TranscriptionsUpdated`, which would refresh the
+// table and close the originating viewer + resizer over a change that never
+// actually saved.
+//
+// To provoke a real (not mocked) store failure deterministically: open the
+// viewer + resizer while the source row still exists (both reads need it),
+// then detach its `transcription_segment` rows from their parent by deleting
+// the `transcription` row through a second raw connection with
+// `PRAGMA foreign_keys=OFF` (bypassing the cascade `SqliteStore::configure`
+// would otherwise apply). The orphaned segment rows are left in place, so the
+// resizer's *read* (`get_segment_rows`) still succeeds — only the later
+// *write* (`replace_segments`/`mark_replaced_completed`, which re-INSERTs
+// against a `transcription_id` with no parent) now hits a genuine SQLite
+// foreign-key-constraint error, on the store's own connection where
+// `foreign_keys=ON` is never touched.
+
+/// Detaches `id`'s already-inserted segment rows from their parent (see the
+/// section comment above) so the *next* write against `id` fails with a real
+/// foreign-key-constraint error.
+fn orphan_transcription_row(db_path: &Path, id: TranscriptionId) {
+    let conn = rusqlite::Connection::open(db_path).expect("open raw connection");
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")
+        .expect("disable fk enforcement on this connection");
+    conn.execute(
+        "DELETE FROM transcription WHERE id = ?1",
+        rusqlite::params![id.to_string()],
+    )
+    .expect("delete the parent row without cascading to its segments");
+}
+
+/// A save failure on the synchronous Extend/Resize path: `save_segments`
+/// errors, so `finish_sync_resize` must surface it on the resizer's own
+/// banner (mirroring the merge worker's `RegroupError` arm) rather than
+/// applying `AppEvent::TranscriptionsUpdated` — the viewer and resizer both
+/// stay open, `running` clears, and the action returns no affected id.
+#[test]
+fn sync_resize_save_failure_surfaces_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("humm.db");
+    let store = Arc::new(SqliteStore::open(&db_path).expect("open store"));
+    let source = TranscriptionId::new();
+    store
+        .create_task(
+            &source,
+            &spec_for_wt("/tmp/a.wav", false),
+            Source::FileImport,
+        )
+        .expect("create source");
+    store
+        .mark_completed(&source, &[seg(0, 1000, "hello world", "")])
+        .expect("complete");
+
+    let mut app = HummApp::new_for_test(resizer_test_services(Arc::clone(&store), dir.path()));
+    app.open_viewer_for_test(source);
+    app.open_resizer_for_test(source);
+    assert!(app.is_viewer_open_for_test(source));
+    assert!(app.is_resizer_open_for_test(source));
+
+    // Both windows are open (both reads already ran); now doom the save.
+    orphan_transcription_row(&db_path, source);
+    {
+        let resizer = app.resizer_for_test(source).expect("resizer is open");
+        let mut vm = resizer.lock().expect("lock resizer");
+        vm.create_new = false;
+        vm.target_chars = 15;
+    }
+
+    let affected = app.run_resizer_action_for_test(source, ResizerAction::Resize);
+    assert_eq!(
+        affected, None,
+        "a save failure returns no affected id (nothing was actually saved)"
+    );
+
+    let resizer = app
+        .resizer_for_test(source)
+        .expect("the resizer stays open on a save failure");
+    let vm = resizer.lock().expect("lock resizer");
+    assert!(!vm.running, "running clears on a save failure");
+    let error = vm.error_for_test().expect("the save failure is recorded");
+    assert!(
+        error.contains("The changes could not be saved"),
+        "unexpected banner text: {error:?}"
+    );
+    drop(vm);
+
+    assert!(
+        app.is_viewer_open_for_test(source),
+        "the viewer stays open on a save failure"
+    );
+    assert!(
+        app.is_resizer_open_for_test(source),
+        "the resizer stays open on a save failure"
+    );
+}
+
+/// A save failure on the background Merge path: the worker's
+/// `mark_replaced_completed`/`replace_segments` call errors, so it must
+/// surface the error on the resizer's own banner instead of posting the
+/// success-shaped `AppEvent::TranscriptionsUpdated` — neither the viewer nor
+/// the resizer closes.
+#[test]
+fn merge_save_failure_surfaces_error_and_keeps_windows() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("humm.db");
+    let store = Arc::new(SqliteStore::open(&db_path).expect("open store"));
+    let source = TranscriptionId::new();
+    store
+        .create_task(
+            &source,
+            &spec_for_wt("/tmp/a.wav", true),
+            Source::FileImport,
+        )
+        .expect("create source");
+    store
+        .mark_completed(&source, &[seg(0, 1000, "hello world", "")])
+        .expect("complete");
+
+    let mut app = HummApp::new_for_test(resizer_test_services(Arc::clone(&store), dir.path()));
+    app.open_viewer_for_test(source);
+    app.open_resizer_for_test(source);
+    assert!(app.is_viewer_open_for_test(source));
+    assert!(app.is_resizer_open_for_test(source));
+
+    // Both windows are open (both reads already ran); now doom the save.
+    orphan_transcription_row(&db_path, source);
+    {
+        let resizer = app.resizer_for_test(source).expect("resizer is open");
+        let mut vm = resizer.lock().expect("lock resizer");
+        vm.create_new = false;
+    }
+
+    let affected = app.run_resizer_action_for_test(source, ResizerAction::Merge);
+    assert_eq!(affected, None, "Merge always returns None synchronously");
+
+    // The worker runs on a background thread; poll until it clears `running`
+    // (the same deadline-loop idiom `kittest_actions.rs` uses for its
+    // background-worker assertions).
+    let resizer = app
+        .resizer_for_test(source)
+        .expect("the resizer stays open on a save failure");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let running = resizer.lock().expect("lock resizer").running;
+        if !running {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "merge worker did not finish in time"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let vm = resizer.lock().expect("lock resizer");
+    let error = vm.error_for_test().expect("the save failure is recorded");
+    assert!(
+        error.contains("The changes could not be saved"),
+        "unexpected banner text: {error:?}"
+    );
+    drop(vm);
+
+    assert!(
+        app.is_viewer_open_for_test(source),
+        "the viewer stays open on a merge save failure"
+    );
+    assert!(
+        app.is_resizer_open_for_test(source),
+        "the resizer stays open on a merge save failure"
+    );
+}

@@ -97,8 +97,12 @@ pub struct ResizerVm {
     /// The source transcript's language code, captured at open (for the merge
     /// pipeline's non-space-language separator rule). `None` when unset.
     pub(crate) language: Option<String>,
-    /// A merge error to surface as an inline banner (unsupported regroup op via
-    /// `HUMM_MERGE_REGROUP_RULE`); cleared when a new operation starts.
+    /// A resizer error to surface as an inline banner: an unsupported regroup
+    /// op (via `HUMM_MERGE_REGROUP_RULE`) or a store save failure on Extend/
+    /// Resize/Merge (final review, F-086). Already the full localized message
+    /// (label + detail) — the caller that knows which failure occurred picks
+    /// the label at set time, so [`show_error_banner`] just displays it
+    /// verbatim. Cleared when a new operation starts.
     pub(crate) error: Option<String>,
     /// Set by the render closure when the OS window's close is requested; the
     /// app harvests it each frame to drop this window (and, unlike the viewer,
@@ -166,6 +170,13 @@ impl ResizerVm {
             pending_action: None,
             window_visible: true,
         })
+    }
+
+    /// The recorded error banner text (final review, F-086), for an
+    /// integration test to assert on across the crate boundary — `error`
+    /// itself is `pub(crate)` since only `app.rs`'s harvest sets it.
+    pub fn error_for_test(&self) -> Option<&str> {
+        self.error.as_deref()
     }
 
     /// Builds Buzz's regroup algorithm string from the three merge
@@ -380,16 +391,18 @@ fn merge_row(ui: &mut egui::Ui, label_key: &str, field: &mut (bool, String)) {
     });
 }
 
-/// The inline merge-error banner (a `RegroupError` from an unsupported op via
-/// `HUMM_MERGE_REGROUP_RULE`): the same "banner, not toast" shape the viewer
-/// uses (a deferred viewport cannot reach the app's toast stack). The detail
-/// is the error's own actionable `Display`.
+/// The inline error banner (a `RegroupError` from an unsupported op via
+/// `HUMM_MERGE_REGROUP_RULE`, or a store save failure on Extend/Resize/Merge,
+/// final review F-086): the same "banner, not toast" shape the viewer uses (a
+/// deferred viewport cannot reach the app's toast stack). `vm.error` is
+/// already the full localized message — set at the call site that knows which
+/// failure occurred — so this just displays it.
 fn show_error_banner(ui: &mut egui::Ui, vm: &ResizerVm) {
-    let Some(detail) = &vm.error else {
+    let Some(message) = &vm.error else {
         return;
     };
     let color = ui.visuals().warn_fg_color;
-    ui.colored_label(color, format!("{} {}", tr("resizer-merge-error"), detail));
+    ui.colored_label(color, message);
     ui.separator();
 }
 
@@ -753,7 +766,11 @@ mod tests {
         use egui_kittest::kittest::Queryable;
 
         let mut vm = vm_for_algo(true, true, true);
-        vm.error = Some("unsupported regroup op \"da\"".to_string());
+        vm.error = Some(format!(
+            "{} {}",
+            tr("resizer-merge-error"),
+            "unsupported regroup op \"da\""
+        ));
         let state = (
             vm,
             Mutex::new(Settings::default()),
