@@ -170,9 +170,11 @@ impl ResizerVm {
 
     /// Builds Buzz's regroup algorithm string from the three merge
     /// checkboxes/fields ([`default_algo`], `transcription_resizer_widget.py:
-    /// 442-459`). A thin wiring shim so the resizer's form state feeds the
-    /// core builder verbatim (the `HUMM_MERGE_REGROUP_RULE` override is applied
-    /// by the app when it runs the merge).
+    /// 442-459`) — *before* the `HUMM_MERGE_REGROUP_RULE` override. A thin
+    /// wiring shim so the resizer's form state feeds the core builder verbatim;
+    /// kept env-independent so the truth-table unit test is deterministic. The
+    /// override is applied by [`merge_algo_for`], which is what the merge worker
+    /// actually runs.
     pub fn build_algo(&self) -> String {
         default_algo(
             self.merge_by_gap.0,
@@ -182,6 +184,34 @@ impl ResizerVm {
             self.split_by_len.0,
             &self.split_by_len.1,
         )
+    }
+}
+
+/// The regroup string the merge worker actually runs (design spec §2.6 —
+/// binding): the resizer's built algorithm ([`ResizerVm::build_algo`]) with
+/// Buzz's `HUMM_MERGE_REGROUP_RULE` override applied — `os.getenv(
+/// "BUZZ_MERGE_REGROUP_RULE", regroup_string)`
+/// (`transcription_resizer_widget.py:459`, humm's env-var rename). Reads the
+/// env once and threads the value into [`merge_algo_from`], the same "override
+/// wins when set" rule core's [`humm_core::regroup::algo_from_env_or`] applies
+/// — split that way so this wiring is unit-testable without mutating process
+/// env (`humm-gui` uses no `unsafe`, and `std::env::set_var` is `unsafe` in
+/// edition 2024). Kept in lockstep with `algo_from_env_or`.
+pub fn merge_algo_for(vm: &ResizerVm) -> String {
+    merge_algo_from(
+        vm.build_algo(),
+        std::env::var("HUMM_MERGE_REGROUP_RULE").ok().as_deref(),
+    )
+}
+
+/// Value-threaded core of [`merge_algo_for`]: the `HUMM_MERGE_REGROUP_RULE`
+/// override wins whenever it is set — even to an empty string — else the
+/// `built` algorithm is used (Buzz's `os.getenv(name, default)` semantics /
+/// core's `algo_from_env_or`).
+pub(crate) fn merge_algo_from(built: String, env_override: Option<&str>) -> String {
+    match env_override {
+        Some(value) => value.to_string(),
+        None => built,
     }
 }
 
@@ -662,5 +692,83 @@ mod tests {
         assert_eq!(vm_for_algo(false, false, true).build_algo(), "sl=42");
         // Nothing checked → empty (regroup no-op).
         assert_eq!(vm_for_algo(false, false, false).build_algo(), "");
+    }
+
+    // -- HUMM_MERGE_REGROUP_RULE override wiring -----------------------------
+
+    #[test]
+    fn merge_algo_from_override_wins_when_set_even_empty() {
+        let built = "mg=0.2++42+1_sl=42".to_string();
+        // No override → the built string passes through unchanged.
+        assert_eq!(merge_algo_from(built.clone(), None), built);
+        // A set override replaces it entirely (Buzz `os.getenv(name, default)`).
+        assert_eq!(merge_algo_from(built.clone(), Some("da=1")), "da=1");
+        // An *empty* override still wins (set-but-empty is "set").
+        assert_eq!(merge_algo_from(built, Some("")), "");
+    }
+
+    #[test]
+    fn merge_algo_for_is_build_algo_without_the_env_override() {
+        // Only meaningful when the var is not set in this process — guarded by a
+        // value read (never a mutation: humm-gui uses no `unsafe`). Proves the
+        // merge-launch capture composes build_algo through the override rule
+        // (with no override → the built string), i.e. the app no longer feeds
+        // the pre-override string straight to the regrouper.
+        if std::env::var_os("HUMM_MERGE_REGROUP_RULE").is_some() {
+            return;
+        }
+        let vm = vm_for_algo(true, true, true);
+        assert_eq!(merge_algo_for(&vm), vm.build_algo());
+    }
+
+    #[test]
+    fn env_supplied_unsupported_op_surfaces_as_regroup_error() {
+        // The value-threaded drive of the merge path (spec §2.6): an override
+        // string with an unsupported op (`da`) flows through the same
+        // resolution the app uses and then errors in the regrouper — which the
+        // merge worker turns into the resizer's error banner (start_merge's Err
+        // arm sets `vm.error`).
+        let vm = vm_for_algo(true, true, true);
+        let algo = merge_algo_from(vm.build_algo(), Some("da=1"));
+        assert_eq!(algo, "da=1", "the override string reaches the merge path");
+
+        let segs = [seg(0, 1000, "hello world.", "")];
+        let result = humm_core::regroup::regroup_segments(&segs, None, &algo);
+        assert!(
+            matches!(
+                result,
+                Err(humm_core::regroup::RegroupError::UnsupportedOp { .. })
+            ),
+            "an unsupported override op surfaces as a RegroupError (→ the resizer error banner)"
+        );
+    }
+
+    /// The other half of the reachability chain: a `RegroupError` recorded on
+    /// the VM (start_merge's Err arm sets `vm.error`) renders as the inline
+    /// merge-error banner — the "banner, not toast" surfacing a deferred
+    /// viewport requires.
+    #[test]
+    fn error_banner_renders_the_recorded_merge_error() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+
+        let mut vm = vm_for_algo(true, true, true);
+        vm.error = Some("unsupported regroup op \"da\"".to_string());
+        let state = (
+            vm,
+            Mutex::new(Settings::default()),
+            PathBuf::from("/unused"),
+        );
+
+        let mut harness = Harness::new_ui_state(
+            |ui: &mut egui::Ui, state: &mut (ResizerVm, Mutex<Settings>, PathBuf)| {
+                super::ui(ui, &mut state.0, &state.1, &state.2);
+            },
+            state,
+        );
+        harness.run();
+
+        harness.get_by_label_contains("The merge could not run");
+        harness.get_by_label_contains("unsupported regroup op");
     }
 }

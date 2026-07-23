@@ -1133,7 +1133,10 @@ impl HummApp {
                 vm.create_new,
                 vm.extend_amount.clone(),
                 vm.target_chars,
-                vm.build_algo(),
+                // The regroup string with the HUMM_MERGE_REGROUP_RULE override
+                // applied (spec §2.6) — `build_algo` alone is the pre-override
+                // string.
+                resizer::merge_algo_for(&vm),
                 vm.language.clone(),
             )
         };
@@ -1222,6 +1225,14 @@ impl HummApp {
         ctx: &egui::Context,
         now: Instant,
     ) {
+        // Defensive ordering: confirm the resizer window still exists *before*
+        // any create-new copy. If it had vanished, a copy made here would leave
+        // a permanently-`queued` row nothing ever completes (the worker's
+        // completion path routes through this window).
+        if !self.resizers.contains_key(&source) {
+            return;
+        }
+
         let store = Arc::clone(&self.services.store);
         let affected = if create_new {
             match store.copy_transcription(source) {
