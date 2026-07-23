@@ -1,0 +1,32 @@
+{
+  "name": "no-overlap-chunk-dropped-when-hide-on",
+  "steps": [
+    {
+      "push": "First topic discussed at length here",
+      "hide_unconfirmed": true,
+      "texts_after": [
+        "First topic discussed at length here"
+      ],
+      "merged": "First topic discussed at length here"
+    },
+    {
+      "push": "Completely unrelated second topic begins now",
+      "hide_unconfirmed": true,
+      "texts_after": [
+        "First topic ",
+        " topic begins now"
+      ],
+      "merged": "First topic "
+    },
+    {
+      "push": "begins now and continues for a while",
+      "hide_unconfirmed": true,
+      "texts_after": [
+        "First topic ",
+        " topic begins now",
+        "begins now and continues for a while"
+      ],
+      "merged": "First topic begins now"
+    }
+  ]
+}

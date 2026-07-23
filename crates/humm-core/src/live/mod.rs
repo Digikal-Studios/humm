@@ -5,14 +5,21 @@
 //! (`humm-audio`, `humm-whisper`) and the GUI drive it.
 //!
 //! - [`chunker`] -- sample accumulation, silence-aware cut points, and the
-//!   callback-drop queue policy (F-061 logic half). Later milestone tasks add
-//!   `merge` (F-062 append-and-correct text merge), `export` (F-064 live
-//!   export/upload), and `session` (the orchestration loop, spec §3) to this
-//!   same module tree.
+//!   callback-drop queue policy (F-061 logic half).
+//! - [`merge`] -- the append-and-correct text merge (`find_common_part`,
+//!   `merge_text_no_overlap`, `MergeState`) and display-mode panel
+//!   application (`PanelText`), F-062. Later milestone tasks add `export`
+//!   (F-064 live export/upload) and `session` (the orchestration loop, spec
+//!   §3) to this same module tree.
 
 pub mod chunker;
+pub mod merge;
 
 pub use chunker::{Batch, Chunker};
+pub use merge::{
+    MergeState, PanelText, filter_text, find_common_part, merge_text_no_overlap,
+    no_space_between_sentences,
+};
 
 /// Which of Buzz's three live-transcript display strategies is in effect.
 ///

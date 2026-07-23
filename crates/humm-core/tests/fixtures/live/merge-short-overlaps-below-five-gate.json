@@ -1,0 +1,32 @@
+{
+  "name": "short-overlaps-below-five-gate",
+  "steps": [
+    {
+      "push": "alpha beta gamm",
+      "hide_unconfirmed": false,
+      "texts_after": [
+        "alpha beta gamm"
+      ],
+      "merged": "alpha beta gamm"
+    },
+    {
+      "push": "gamm delta epsi",
+      "hide_unconfirmed": false,
+      "texts_after": [
+        "alpha beta gamm",
+        "gamm delta epsi"
+      ],
+      "merged": "alpha beta gamm delta epsi"
+    },
+    {
+      "push": "epsi zeta eta theta",
+      "hide_unconfirmed": false,
+      "texts_after": [
+        "alpha beta gamm",
+        "gamm delta epsi",
+        "epsi zeta eta theta"
+      ],
+      "merged": "alpha beta gamm delta epsi zeta eta theta"
+    }
+  ]
+}

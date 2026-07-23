@@ -1,0 +1,32 @@
+{
+  "name": "cjk-unicode-sequence",
+  "steps": [
+    {
+      "push": "你好世界这是一个测试",
+      "hide_unconfirmed": false,
+      "texts_after": [
+        "你好世界这是一个测试"
+      ],
+      "merged": "你好世界这是一个测试"
+    },
+    {
+      "push": "这是一个测试用来验证程序",
+      "hide_unconfirmed": false,
+      "texts_after": [
+        "你好世界这是一个测试",
+        "这是一个测试用来验证程序"
+      ],
+      "merged": "你好世界这是一个测试用来验证程序"
+    },
+    {
+      "push": "用来验证程序是否正确运行。Next",
+      "hide_unconfirmed": false,
+      "texts_after": [
+        "你好世界这是一个测试",
+        "这是一个测试用来验证程序",
+        "用来验证程序是否正确运行。Next"
+      ],
+      "merged": "你好世界这是一个测试用来验证程序是否正确运行。 Next"
+    }
+  ]
+}

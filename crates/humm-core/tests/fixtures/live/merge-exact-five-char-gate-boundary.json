@@ -1,0 +1,22 @@
+{
+  "name": "exact-five-char-gate-boundary",
+  "steps": [
+    {
+      "push": "prefix textA",
+      "hide_unconfirmed": false,
+      "texts_after": [
+        "prefix textA"
+      ],
+      "merged": "prefix textA"
+    },
+    {
+      "push": "textA suffix",
+      "hide_unconfirmed": false,
+      "texts_after": [
+        "prefix textA",
+        "textA suffix"
+      ],
+      "merged": "prefix textA suffix"
+    }
+  ]
+}

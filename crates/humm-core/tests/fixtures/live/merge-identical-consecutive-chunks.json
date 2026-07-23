@@ -1,0 +1,22 @@
+{
+  "name": "identical-consecutive-chunks",
+  "steps": [
+    {
+      "push": "Repeated phrase exactly as before",
+      "hide_unconfirmed": false,
+      "texts_after": [
+        "Repeated phrase exactly as before"
+      ],
+      "merged": "Repeated phrase exactly as before"
+    },
+    {
+      "push": "Repeated phrase exactly as before",
+      "hide_unconfirmed": false,
+      "texts_after": [
+        "Repeated phrase exactly as before",
+        "Repeated phrase exactly as before"
+      ],
+      "merged": "Repeated phrase exactly as before"
+    }
+  ]
+}

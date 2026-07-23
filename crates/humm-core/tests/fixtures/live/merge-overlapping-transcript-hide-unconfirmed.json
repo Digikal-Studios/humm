@@ -1,0 +1,32 @@
+{
+  "name": "overlapping-transcript-hide-unconfirmed",
+  "steps": [
+    {
+      "push": "The quick brown fox jumps over the lazy",
+      "hide_unconfirmed": true,
+      "texts_after": [
+        "The quick brown fox jumps over the lazy"
+      ],
+      "merged": "The quick brown fox jumps over the lazy"
+    },
+    {
+      "push": "jumps over the lazy dog near the river",
+      "hide_unconfirmed": true,
+      "texts_after": [
+        "The quick brown fox jumps over the lazy",
+        "jumps over the lazy dog near the river"
+      ],
+      "merged": "The quick brown fox jumps over the lazy"
+    },
+    {
+      "push": "near the river bank while birds sing",
+      "hide_unconfirmed": true,
+      "texts_after": [
+        "The quick brown fox jumps over the lazy",
+        "jumps over the lazy dog near the river",
+        "near the river bank while birds sing"
+      ],
+      "merged": "The quick brown fox jumps over the lazy dog near the river"
+    }
+  ]
+}

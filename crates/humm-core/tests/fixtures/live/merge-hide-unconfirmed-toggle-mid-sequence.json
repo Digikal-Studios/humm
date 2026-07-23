@@ -1,0 +1,43 @@
+{
+  "name": "hide-unconfirmed-toggle-mid-sequence",
+  "steps": [
+    {
+      "push": "Weather today is sunny with light wind",
+      "hide_unconfirmed": false,
+      "texts_after": [
+        "Weather today is sunny with light wind"
+      ],
+      "merged": "Weather today is sunny with light wind"
+    },
+    {
+      "push": "with light wind from the northwest side",
+      "hide_unconfirmed": true,
+      "texts_after": [
+        "Weather today is sunny with light wind",
+        "with light wind from the northwest side"
+      ],
+      "merged": "Weather today is sunny with light wind"
+    },
+    {
+      "push": "from the northwest side bringing cool air",
+      "hide_unconfirmed": false,
+      "texts_after": [
+        "Weather today is sunny with light wind",
+        "with light wind from the northwest side",
+        "from the northwest side bringing cool air"
+      ],
+      "merged": "Weather today is sunny with light wind from the northwest side bringing cool air"
+    },
+    {
+      "push": "bringing cool air through the valley floor",
+      "hide_unconfirmed": true,
+      "texts_after": [
+        "Weather today is sunny with light wind",
+        "with light wind from the northwest side",
+        "from the northwest side bringing cool air",
+        "bringing cool air through the valley floor"
+      ],
+      "merged": "Weather today is sunny with light wind from the northwest side bringing cool air"
+    }
+  ]
+}

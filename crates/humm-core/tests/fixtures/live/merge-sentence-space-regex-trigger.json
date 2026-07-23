@@ -1,0 +1,32 @@
+{
+  "name": "sentence-space-regex-trigger",
+  "steps": [
+    {
+      "push": "This is the first sentence.Next",
+      "hide_unconfirmed": false,
+      "texts_after": [
+        "This is the first sentence.Next"
+      ],
+      "merged": "This is the first sentence. Next"
+    },
+    {
+      "push": "Next comes the second sentence.Final",
+      "hide_unconfirmed": false,
+      "texts_after": [
+        "This is the first sentence.",
+        " sentence.Final"
+      ],
+      "merged": "This is the first sentence. Final"
+    },
+    {
+      "push": "Final part concludes the passage",
+      "hide_unconfirmed": false,
+      "texts_after": [
+        "This is the first sentence.",
+        " sentence.Final",
+        "Final part concludes the passage"
+      ],
+      "merged": "This is the first sentence. Final part concludes the passage"
+    }
+  ]
+}
