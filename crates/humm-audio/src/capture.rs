@@ -50,6 +50,17 @@
 //! device indices are not stable across enumerations, but names are what
 //! Buzz's own combo box (`audio_devices_combo_box.py`) and this adapter's
 //! `devices()` both key on.
+//!
+//! # Meter ownership: `current_rms` only
+//!
+//! The capture adapter writes only [`MeterSnapshot::set_current_rms`], once
+//! per RT callback. It does **not** write `queue_len` (or `average_rms`):
+//! Buzz's meter "Queue" value is the *transcriber's* accumulation-queue size,
+//! emitted once per processed batch by the session/chunker loop
+//! (`recording_transcriber.py`'s `queue_size_changed`), never a raw-callback
+//! or capture-ring depth. That field belongs to the session/chunker layer (a
+//! later task) — see [`MeterSnapshot`]'s own docs for the full ownership
+//! split.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -71,7 +82,11 @@ const RESAMPLE_IN_CHUNK: usize = 1024;
 
 /// How often the capture owner thread wakes to drain the intermediate ring
 /// on the fallback path (and to notice a stop command promptly on either
-/// path). Well under the ~200 ms stop budget.
+/// path). Short enough that `stop()` acknowledges promptly — the design
+/// doc's cooperative-stop requirement (§2.1: the session thread must
+/// acknowledge a stop request without a perceptible delay) — this value is
+/// this implementation's own promptness target, not an externally documented
+/// constraint.
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// The system's audio input devices, as an [`AudioCapture`].
@@ -221,11 +236,17 @@ fn run_capture_thread(
             }
         }
     }
-    // Best-effort final flush of whatever arrived just before the stop.
+    // Drop the stream *before* the final flush: dropping stops the RT
+    // callback from firing again, so nothing new can land in the
+    // intermediate ring after this point. Only then do we drain — that
+    // guarantees the final flush empties everything that reached the ring
+    // while still capturing, with no window where a callback could race the
+    // flush and add a sample that never gets drained (drain-then-drop would
+    // leave exactly that window open).
+    drop(stream);
     if let Some(drain) = drain.as_mut() {
         drain.run();
     }
-    drop(stream);
 
     let total_dropped = dropped.load(Ordering::Relaxed);
     if total_dropped > 0 {
@@ -444,8 +465,8 @@ fn u16_to_f32(s: u16) -> f32 {
 }
 
 /// Converts one RT callback's interleaved raw samples to downmixed mono
-/// `f32`, updates `meter`'s per-callback RMS and ring depth, and pushes each
-/// mono sample into `sink`.
+/// `f32`, updates `meter`'s per-callback RMS, and pushes each mono sample
+/// into `sink`.
 ///
 /// Runs entirely on the audio thread: no allocation, no locking. `convert` is
 /// a pure per-sample conversion ([`f32_identity`] for the direct path,
@@ -453,7 +474,9 @@ fn u16_to_f32(s: u16) -> f32 {
 /// downmixing sums the frame's channels and divides by `channels`, and the
 /// RMS is accumulated as a running sum of squares rather than into a
 /// scratch buffer (see the module docs). Sink overflow increments `dropped`
-/// rather than panicking or blocking.
+/// rather than panicking or blocking. Does **not** touch `queue_len` — that
+/// field belongs to the session/chunker layer (see the module docs' "Meter
+/// ownership" section).
 fn capture_callback<S: Copy>(
     data: &[S],
     channels: usize,
@@ -481,8 +504,6 @@ fn capture_callback<S: Copy>(
         let rms = (sum_sq / frames as f64).sqrt() as f32;
         meter.set_current_rms(rms);
     }
-    let occupied = sink.buffer().capacity().saturating_sub(sink.slots());
-    meter.set_queue_len(occupied);
 }
 
 /// Fallback-path drain state: pops device-rate mono samples out of the
@@ -621,7 +642,7 @@ mod tests {
         assert!((0.999_9..1.0).contains(&v), "{v}");
     }
 
-    // -- capture_callback: downmix, RMS, queue depth, overflow --------------------
+    // -- capture_callback: downmix, RMS, overflow, queue_len non-ownership -------
 
     fn meter_and_ring(capacity: usize) -> (MeterSnapshot, Producer<f32>, Consumer<f32>) {
         let meter = MeterSnapshot::new();
@@ -683,14 +704,17 @@ mod tests {
     }
 
     #[test]
-    fn capture_callback_reports_queue_len_as_sink_occupancy() {
+    fn capture_callback_does_not_touch_queue_len() {
+        // queue_len is owned by the session/chunker layer (Buzz's
+        // transcriber queue_size_changed, once per processed batch), never
+        // the capture adapter — see MeterSnapshot's and this module's docs.
         let (meter, mut sink, _consumer) = meter_and_ring(16);
         let dropped = AtomicU64::new(0);
 
         let data = [0.1f32, 0.2, 0.3, 0.4];
         capture_callback(&data, 1, f32_identity, &mut sink, &meter, &dropped);
 
-        assert_eq!(meter.get_queue_len(), 4);
+        assert_eq!(meter.get_queue_len(), 0);
     }
 
     #[test]

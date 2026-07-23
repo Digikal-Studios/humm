@@ -4,9 +4,15 @@
 //! Construct it with a prerecorded 16 kHz mono `f32` script, [`start`] it like
 //! any real [`AudioCapture`], then call [`MockCapture::pump`] to push the
 //! next `n` scripted samples through the sink synchronously and update the
-//! meter to match — exactly the shape `CpalCapture`'s RT callback produces,
-//! but driven by hand instead of by a real capture stream. This is what
-//! core-session tests, GUI tests, and CI use in place of real hardware.
+//! meter's `current_rms` to match — exactly what `CpalCapture`'s RT callback
+//! writes per callback, but driven by hand instead of by a real capture
+//! stream. This is what core-session tests, GUI tests, and CI use in place
+//! of real hardware.
+//!
+//! Like `CpalCapture`, `pump` never touches `queue_len` (or `average_rms`):
+//! that field is owned by the session/chunker layer (Buzz's transcriber
+//! `queue_size_changed`, emitted once per processed batch — a later task),
+//! not the capture adapter.
 //!
 //! [`start`]: humm_core::boundary::AudioCapture::start
 
@@ -58,9 +64,10 @@ impl MockCapture {
 
     /// Pushes the next `n` scripted samples into the sink established by
     /// [`AudioCapture::start`] (fewer once the script is exhausted), then
-    /// updates the meter's current RMS over exactly those samples and its
-    /// queue length to the sink's resulting occupancy — the same telemetry
-    /// shape `CpalCapture`'s RT callback produces per callback.
+    /// updates the meter's current RMS over exactly those samples — the same
+    /// telemetry `CpalCapture`'s RT callback writes per callback. Does not
+    /// touch `queue_len` (owned by the session/chunker layer, see the module
+    /// docs).
     ///
     /// A push that overflows the sink is counted (see [`Self::dropped`])
     /// rather than panicking, mirroring `CpalCapture`'s overflow policy.
@@ -93,8 +100,6 @@ impl MockCapture {
             let rms = (sum_sq / batch.len() as f64).sqrt() as f32;
             meter.set_current_rms(rms);
         }
-        let occupied = sink.buffer().capacity().saturating_sub(sink.slots());
-        meter.set_queue_len(occupied);
 
         batch.len()
     }
@@ -201,7 +206,9 @@ mod tests {
     }
 
     #[test]
-    fn pump_sets_queue_len_to_sink_occupancy() {
+    fn pump_does_not_touch_queue_len() {
+        // queue_len is owned by the session/chunker layer, never the
+        // capture adapter (mock or real) — see the module docs.
         let mut capture = MockCapture::new(vec![0.1, 0.2, 0.3]);
         let meter = Arc::new(MeterSnapshot::new());
         let (producer, _consumer) = RingBuffer::<f32>::new(16);
@@ -209,7 +216,7 @@ mod tests {
 
         capture.pump(3);
 
-        assert_eq!(meter.get_queue_len(), 3);
+        assert_eq!(meter.get_queue_len(), 0);
     }
 
     #[test]

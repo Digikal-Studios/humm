@@ -67,7 +67,10 @@ fn cpal_output_opens_and_invokes_fill() {
 /// Opens the default input device, captures ~1 s, and asserts: samples
 /// arrived, the effective output rate is 16 kHz mono (sample count vs wall
 /// time within ±20%), the meter's RMS stayed finite, and `stop` (dropping the
-/// handle) returned promptly (well under the ~200 ms budget).
+/// handle) returned promptly — the design doc's cooperative-stop requirement
+/// (§2.1: the session thread must acknowledge a stop request without a
+/// perceptible delay), checked here against this implementation's own
+/// promptness target rather than any externally documented budget.
 #[test]
 #[ignore = "requires a real audio input device (CoreAudio); run with --ignored"]
 fn cpal_capture_streams_16khz_mono_and_stops_promptly() {
@@ -110,7 +113,8 @@ fn cpal_capture_streams_16khz_mono_and_stops_promptly() {
 
     assert!(
         stop_elapsed < Duration::from_millis(250),
-        "stop() took {stop_elapsed:?}, expected well under the ~200ms budget"
+        "stop() took {stop_elapsed:?}; expected well under this implementation's own \
+         promptness target (a perceptible-delay-free cooperative stop, design doc §2.1)"
     );
 
     println!(

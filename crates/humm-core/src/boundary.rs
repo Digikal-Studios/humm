@@ -217,24 +217,42 @@ pub struct AudioDevice {
     pub is_default: bool,
 }
 
-/// Snapshot of live audio capture metering data, shared between the capture
-/// adapter and the UI layer. Written atomically by the capture thread,
-/// read by the UI thread without locking.
+/// Snapshot of live audio capture metering data, shared between two
+/// different writers and the UI layer, read by the UI thread without
+/// locking.
 ///
-/// All three values use relaxed ordering because they are single-writer
-/// telemetry: the capture adapter writes them on each callback, and the
-/// meter widget reads them once per display frame. Stale reads are acceptable
-/// (a frame or two of lag in the displayed meters), and there is no shared
-/// mutable state to synchronize.
+/// The three fields have two different owners, per Buzz parity:
+/// - `current_rms` is written by the **capture adapter** (`humm-audio`'s
+///   `CpalCapture`/`MockCapture`) once per RT callback — this is the only
+///   field the capture adapter writes.
+/// - `average_rms` and `queue_len` are written by the **session/chunker
+///   layer** (a later task), once per accumulation batch — Buzz's
+///   transcriber emits `queue_size_changed`/its rolling average signal from
+///   the chunker loop, never from the raw audio callback
+///   (`recording_transcriber.py`), so the capture adapter has no business
+///   writing them.
+///
+/// All three values use relaxed ordering because each is single-writer
+/// telemetry (just two different single writers), and the meter widget reads
+/// them once per display frame. Stale reads are acceptable (a frame or two of
+/// lag in the displayed meters), and there is no shared mutable state to
+/// synchronize.
 #[derive(Debug)]
 pub struct MeterSnapshot {
     /// Current RMS level as f32 bits packed in an `AtomicU32`, updated per
-    /// capture callback. Decode with `f32::from_bits()`.
+    /// capture callback by the capture adapter. Decode with `f32::from_bits()`.
     current_rms: AtomicU32,
     /// Average RMS level as f32 bits, accumulated over 1 second in meter-only
-    /// mode or per batch while recording. Decode with `f32::from_bits()`.
+    /// mode or per batch while recording. Written by the session/chunker
+    /// layer (a later task), not the capture adapter. Decode with
+    /// `f32::from_bits()`.
     average_rms: AtomicU32,
-    /// Number of samples queued in the ring buffer at the last callback.
+    /// Number of samples queued in the session/chunker's accumulation queue
+    /// (Buzz's transcriber `queue_size_changed`, emitted once per processed
+    /// batch — `recording_transcriber.py`). Written by the session/chunker
+    /// layer (a later task); the capture adapter never writes this field —
+    /// it has no notion of the accumulation queue, only of the RT callback's
+    /// own ring.
     queue_len: AtomicUsize,
 }
 
@@ -307,7 +325,8 @@ pub trait AudioCapture: Send {
     ///
     /// The adapter resamples/downmixes as needed inside the capture callback
     /// (ADR-005) so the producer always sees 16 kHz mono f32. `meter` receives
-    /// per-callback RMS and queue depth updates.
+    /// per-callback RMS (`current_rms` only — `average_rms`/`queue_len` are
+    /// owned by the session/chunker layer, see [`MeterSnapshot`]'s docs).
     ///
     /// Returns a [`CaptureHandle`] that must be dropped to stop the stream.
     fn start(
