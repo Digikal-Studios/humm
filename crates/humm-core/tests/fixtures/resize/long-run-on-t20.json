@@ -1,0 +1,102 @@
+{
+  "input": [
+    {
+      "start": 0,
+      "end": 15000,
+      "text": "This is a very long run-on sentence, and it keeps going, and going, and going, without ever really stopping, which makes it perfect for testing, the coalesce and split behavior, of the punctuation splitter, under real conditions, and even more text to push well past the limit for good measure."
+    }
+  ],
+  "target": 20,
+  "expected": [
+    {
+      "start": 0,
+      "end": 969,
+      "text": "This is a very long"
+    },
+    {
+      "start": 969,
+      "end": 1786,
+      "text": "run-on sentence,"
+    },
+    {
+      "start": 1786,
+      "end": 2755,
+      "text": "and it keeps going,"
+    },
+    {
+      "start": 2755,
+      "end": 3827,
+      "text": "and going, and going,"
+    },
+    {
+      "start": 3827,
+      "end": 4796,
+      "text": "without ever really"
+    },
+    {
+      "start": 4796,
+      "end": 5255,
+      "text": "stopping,"
+    },
+    {
+      "start": 5255,
+      "end": 5969,
+      "text": "which makes it"
+    },
+    {
+      "start": 5969,
+      "end": 6990,
+      "text": "perfect for testing,"
+    },
+    {
+      "start": 6990,
+      "end": 7806,
+      "text": "the coalesce and"
+    },
+    {
+      "start": 7806,
+      "end": 8571,
+      "text": "split behavior,"
+    },
+    {
+      "start": 8571,
+      "end": 9490,
+      "text": "of the punctuation"
+    },
+    {
+      "start": 9490,
+      "end": 9949,
+      "text": "splitter,"
+    },
+    {
+      "start": 9949,
+      "end": 10459,
+      "text": "under real"
+    },
+    {
+      "start": 10459,
+      "end": 11020,
+      "text": "conditions,"
+    },
+    {
+      "start": 11020,
+      "end": 11939,
+      "text": "and even more text"
+    },
+    {
+      "start": 11939,
+      "end": 12806,
+      "text": "to push well past"
+    },
+    {
+      "start": 12806,
+      "end": 13724,
+      "text": "the limit for good"
+    },
+    {
+      "start": 13724,
+      "end": 15000,
+      "text": "measure."
+    }
+  ]
+}

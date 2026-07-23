@@ -1,0 +1,32 @@
+{
+  "input": [
+    {
+      "start": 0,
+      "end": 9000,
+      "text": "你好世界，这是一个测试句子。这句话包含中文标点符号！你觉得如何？这些标点、逗号和句号都不会被切分，因为它们不是英文标点。"
+    },
+    {
+      "start": 9000,
+      "end": 14000,
+      "text": "Mixed content, with an ASCII comma, that should split, alongside 中文内容和标点。"
+    }
+  ],
+  "target": 42,
+  "expected": [
+    {
+      "start": 0,
+      "end": 9000,
+      "text": "你好世界，这是一个测试句子。这句话包含中文标点符号！你觉得如何？这些标点、逗号和句号都不会被切分，因为它们不是英文标点。"
+    },
+    {
+      "start": 9000,
+      "end": 11397,
+      "text": "Mixed content, with an ASCII comma,"
+    },
+    {
+      "start": 11397,
+      "end": 14000,
+      "text": "that should split, alongside 中文内容和标点。"
+    }
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "input": [
+    {
+      "start": 0,
+      "end": 15000,
+      "text": "This is a very long run-on sentence, and it keeps going, and going, and going, without ever really stopping, which makes it perfect for testing, the coalesce and split behavior, of the punctuation splitter, under real conditions, and even more text to push well past the limit for good measure."
+    }
+  ],
+  "target": 42,
+  "expected": [
+    {
+      "start": 0,
+      "end": 1837,
+      "text": "This is a very long run-on sentence,"
+    },
+    {
+      "start": 1837,
+      "end": 3929,
+      "text": "and it keeps going, and going, and going,"
+    },
+    {
+      "start": 3929,
+      "end": 5408,
+      "text": "without ever really stopping,"
+    },
+    {
+      "start": 5408,
+      "end": 7194,
+      "text": "which makes it perfect for testing,"
+    },
+    {
+      "start": 7194,
+      "end": 8827,
+      "text": "the coalesce and split behavior,"
+    },
+    {
+      "start": 8827,
+      "end": 10255,
+      "text": "of the punctuation splitter,"
+    },
+    {
+      "start": 10255,
+      "end": 11378,
+      "text": "under real conditions,"
+    },
+    {
+      "start": 11378,
+      "end": 13418,
+      "text": "and even more text to push well past the"
+    },
+    {
+      "start": 13418,
+      "end": 15000,
+      "text": "limit for good measure."
+    }
+  ]
+}

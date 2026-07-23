@@ -1,0 +1,102 @@
+{
+  "input": [
+    {
+      "start": 0,
+      "end": 2000,
+      "text": "the quick brown fox"
+    },
+    {
+      "start": 2000,
+      "end": 4000,
+      "text": "the quick brown fox "
+    },
+    {
+      "start": 4000,
+      "end": 6000,
+      "text": "the quick brown fox j"
+    },
+    {
+      "start": 6000,
+      "end": 9000,
+      "text": "the quick brown fox jumps over the lazy d"
+    },
+    {
+      "start": 9000,
+      "end": 12000,
+      "text": "the quick brown fox jumps over the lazy do"
+    },
+    {
+      "start": 12000,
+      "end": 15000,
+      "text": "the quick brown fox jumps over the lazy dog"
+    }
+  ],
+  "target": 20,
+  "expected": [
+    {
+      "start": 0,
+      "end": 2000,
+      "text": "the quick brown fox"
+    },
+    {
+      "start": 2000,
+      "end": 4000,
+      "text": "the quick brown fox "
+    },
+    {
+      "start": 4000,
+      "end": 5810,
+      "text": "the quick brown fox"
+    },
+    {
+      "start": 5810,
+      "end": 6000,
+      "text": "j"
+    },
+    {
+      "start": 6000,
+      "end": 7390,
+      "text": "the quick brown fox"
+    },
+    {
+      "start": 7390,
+      "end": 8780,
+      "text": "jumps over the lazy"
+    },
+    {
+      "start": 8780,
+      "end": 9000,
+      "text": "d"
+    },
+    {
+      "start": 9000,
+      "end": 10357,
+      "text": "the quick brown fox"
+    },
+    {
+      "start": 10357,
+      "end": 11714,
+      "text": "jumps over the lazy"
+    },
+    {
+      "start": 11714,
+      "end": 12000,
+      "text": "do"
+    },
+    {
+      "start": 12000,
+      "end": 13326,
+      "text": "the quick brown fox"
+    },
+    {
+      "start": 13326,
+      "end": 14651,
+      "text": "jumps over the lazy"
+    },
+    {
+      "start": 14651,
+      "end": 15000,
+      "text": "dog"
+    }
+  ]
+}

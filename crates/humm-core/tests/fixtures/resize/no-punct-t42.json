@@ -1,0 +1,47 @@
+{
+  "input": [
+    {
+      "start": 0,
+      "end": 6000,
+      "text": "the quick brown fox jumps over the lazy dog while running through the forest without stopping"
+    },
+    {
+      "start": 6000,
+      "end": 11000,
+      "text": "and then it kept going and going and going until it finally reached the other side of the field"
+    }
+  ],
+  "target": 42,
+  "expected": [
+    {
+      "start": 0,
+      "end": 2516,
+      "text": "the quick brown fox jumps over the lazy"
+    },
+    {
+      "start": 2516,
+      "end": 4839,
+      "text": "dog while running through the forest"
+    },
+    {
+      "start": 4839,
+      "end": 6000,
+      "text": "without stopping"
+    },
+    {
+      "start": 6000,
+      "end": 7895,
+      "text": "and then it kept going and going and"
+    },
+    {
+      "start": 7895,
+      "end": 10000,
+      "text": "going until it finally reached the other"
+    },
+    {
+      "start": 10000,
+      "end": 11000,
+      "text": "side of the field"
+    }
+  ]
+}
