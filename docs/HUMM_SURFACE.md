@@ -114,7 +114,7 @@ warning lines only.
 | `HUMM_FORCE_CPU` | Any value other than unset or `false` forces CPU inference (disables Metal/CoreML). Mirrors Buzz's `BUZZ_FORCE_CPU`. |
 | `HUMM_WHISPER_N_THREADS` | Whisper thread-count override (else `max(1, cpus/2)`). |
 | `HUMM_DISABLE_VAD` | Any non-empty value skips VAD entirely (no cache lookup, no download; §2). VAD is default-on for real users — this is a test-only kill-switch (used by hermetic `humm-cli` tests to stay network-free). |
-| `HUMM_PARAGRAPH_SPLIT_TIME` | Millisecond gap between segments that starts a new paragraph on export (default `2000`). |
+| `HUMM_PARAGRAPH_SPLIT_TIME` | Millisecond gap between segments that starts a new paragraph (default `2000`). Read fresh at each use by **both** the TXT export writer *and* the viewer's Text-mode display + the viewer's own TXT export (F-084) — so an override can never make the on-screen text and the exported TXT disagree (Buzz `write_output` reads `BUZZ_PARAGRAPH_SPLIT_TIME` fresh too). Translation mode never paragraph-splits (Buzz quirk). |
 | `HUMM_DOWNLOAD_COOKIEFILE` | Cookie file passed to yt-dlp for authenticated URL downloads. Takes precedence over `settings.downloads.cookie_file`. |
 | `HUMM_FFMPEG` / `HUMM_FFPROBE` / `HUMM_YTDLP` | Override the ffmpeg / ffprobe / yt-dlp binary path (else looked up on `PATH`). |
 | `HUMM_BUZZ_SQLITE` | Override the one-time Buzz-import source database. Used only if the path exists — point it at a nonexistent path to disable the import (M2 addition; used by hermetic tests). |
@@ -133,7 +133,9 @@ other three from M3 Task 11 (preferences/update/telemetry wiring).
 | `HUMM_DISABLE_UPDATE_CHECK` | Any non-empty value disables the *startup* background update check (F-006, ADR-015) — read exactly where Buzz's own `BUZZ_DISABLE_UPDATE_CHECK` gate sits (`main_window.py:569`): the checker/channel is still constructed unconditionally, only the network call is skipped. Does **not** gate the About window's manual "Check for updates" (an explicit user click bypasses every startup gate, including this one). |
 | `HUMM_POSTHOG_KEY` | Build-time only (`option_env!`, not read at runtime): humm's own PostHog project key. Absent at build time compiles telemetry down to a permanent no-op — there is no way to enable it at runtime without rebuilding. |
 | `HUMM_FAVORITE_LANGUAGES` | Comma-separated language codes (Buzz: `BUZZ_FAVORITE_LANGUAGES`) shown as a separator-wrapped "favorites" block at the top of the options sheet's language combo (F-023); invalid codes are silently dropped. Unset or empty renders no favorites block at all. |
+| `HUMM_MERGE_REGROUP_RULE` | Overrides the regroup algorithm string the resizer's **Merge** builds from its checkboxes (F-086, ADR-020) — a stable-ts-style `mg`/`sp`/`sl` op string (e.g. `mg=0.2++42+1_sp=…_sl=42`). Only `mg`/`sp`/`sl` are supported; any other op yields an actionable `UnsupportedOp` error naming the op and the supported set. Timings use Buzz's decisecond quirk (`mg=0.2` ⇒ merge gaps ≤ 20 ms real). Unset ⇒ the checkbox-built string is used. |
 | `HUMM_SMOKE_OPEN_WINDOWS` / `HUMM_SMOKE_AUTO_CLOSE_FRAMES` | Test-only, unstable — smoke-test hooks, not user surface. Drive the `docs/gui-manual/M3.md` windowed multi-window/clean-shutdown smoke under a controller with no OS input-injection access (`app.rs`'s `SmokeHooks`): the first opens the About/Preferences viewports on the first frame; the second requests a normal window close after that many frames. |
+| `HUMM_SMOKE_OPEN_VIEWER` | Test-only, unstable — A/V-drift acceptance hook, not user surface (`app.rs`'s `SmokeHooks`, F-083). Set to a media-file path: on the first frame humm seeds a completed transcript row for it, opens its viewer through the normal open path, auto-starts playback once the player is ready, and requests a clean app shutdown once playback reaches end-of-media (`ViewerVm::smoke_autoplay`/`drive_smoke_playback`) — the deferred-viewport analogue of `HUMM_SMOKE_OPEN_WINDOWS`, so the windowed 10-min A/V-drift run (`docs/gui-manual/M4.md`, `docs/benchmarks/M4.md`) runs without OS input injection. Pair with `HUMM_SMOKE_AV_DRIFT_LOG` to capture the pairs. Unset or empty ⇒ inert. |
 | `HUMM_SMOKE_AV_DRIFT_LOG` | Test-only, unstable — A/V-sync acceptance instrumentation, not user surface (F-083, `viewer.rs`'s `DriftLog`). When set to a writable file path and the open transcript is video, the viewer appends one `audio_ms,frame_ts_ms` CSV line per rendered video frame (audio position = master clock vs. the displayed frame's presentation timestamp). Feeds the windowed 10-min ±50 ms p95 drift check in the Task 14 gui-manual run over a generated `testsrc2`+`sine` fixture. Unset or empty ⇒ no log. |
 
 ## 6. File locations (macOS defaults shown)
@@ -152,6 +154,39 @@ other three from M3 Task 11 (preferences/update/telemetry wiring).
 
 Linux/Windows follow the platform config/data/state conventions
 (`directories` crate); see `crates/humm-core/src/paths.rs`.
+
+### 6.1 Viewer settings (`[viewer]`) & database schema v2
+
+The transcript viewer (F-080..F-086, M4) adds a `[viewer]` table to
+`settings.toml` (all defaults = Buzz defaults; saved via the existing
+diff-on-change pattern):
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `segment_looping_enabled` | bool | `false` | Loop Segment checkbox. |
+| `playback_controls_visible` | bool | `false` | Playback-controls bar visibility. |
+| `find_widget_visible` | bool | `false` | Find bar visibility. |
+| `follow_audio_enabled` | bool | `false` | Follow Audio checkbox. |
+| `playback_rate` | f32 | `1.0` | Global playback speed (Buzz `AUDIO_PLAYBACK_RATE`); clamped `0.1..=5.0` on load. |
+| `audio_splitter_fraction` | f32 | `0.95` | Table/media split for audio media (950:50). |
+| `video_splitter_fraction` | f32 | `0.8` | Table/media split for video media (800:200). |
+| `resizer_create_new_transcript` | bool | `true` | Resizer "Create new transcript" checkbox. |
+| `geometry` | `Option<ViewerGeometry { x?, y?, w, h }>` | absent → 1000×800 (min 800×500) | One shared viewer-window geometry, last-close-wins across all open viewers. |
+
+The per-transcript **last export folder** is *not* a setting — it lives in the
+store (schema v2, below), keyed by transcript id.
+
+**Database schema v2** (`humm.sqlite`, gated by `PRAGMA user_version`):
+migration v1→v2 is forward-only and adds one column,
+`ALTER TABLE transcription ADD COLUMN last_export_folder TEXT` — the
+per-transcript directory the viewer's export dialog defaults to (F-084, UX J-6).
+A v2 binary opening a v1 database migrates it in place; a database whose
+`user_version` is **newer than 2** is refused with an actionable error rather
+than opened (forward-compat guard). Resizer-created rows
+(`copy_transcription`/`mark_replaced_completed`/`update_progress_direct`) are
+the only writers of `status`/`progress` outside the queue — those rows never
+enter the queue, so ADR-018's "queue owns status transitions" invariant (scoped
+to queue-executed tasks) is preserved.
 
 ## 7. First-run migration
 

@@ -33,14 +33,43 @@ Pure-Rust services (OpenAI API engine, translator, model downloader, telemetry) 
 /// Decode any media file to 16 kHz mono f32 PCM. Impl: ffmpeg subprocess.
 pub trait AudioDecoder: Send + Sync {
     fn decode(&self, path: &Path, cancel: &CancelToken) -> Result<Pcm, MediaError>;
-    /// Stream variant for playback/video (chunked frames).
-    fn open_stream(&self, path: &Path) -> Result<Box<dyn PcmStream>, MediaError>;
+    /// Playback decode (M4 as-built, ADR-019). The original sketch here was a
+    /// seekable, chunked `open_stream(...) -> PcmStream`; the M4 playback
+    /// engine instead decodes the WHOLE file to interleaved f32 in memory —
+    /// `PlaybackPcm { samples: Arc<[f32]>, channels, sample_rate }` at
+    /// 44.1 kHz stereo (Buzz-equal memory, ~1.27 GB/hour) — because O(1)
+    /// sample-exact seek/loop and a trivial position model matter more than
+    /// bounded memory at typical media lengths (revisit for long-file use).
+    fn decode_playback(&self, path: &Path, cancel: &CancelToken)
+        -> Result<PlaybackPcm, MediaError>;
 }
 
 /// Probe container/stream metadata. Impl: ffprobe -print_format json.
 pub trait MediaProber: Send + Sync {
-    fn probe(&self, path: &Path) -> Result<MediaInfo, MediaError>; // duration, has_audio, has_video
+    fn probe(&self, path: &Path) -> Result<MediaInfo, MediaError>; // duration, has_audio, has_video, video: Option<VideoStreamInfo>
 }
+
+/// Video frame streaming for the viewer's video pane (M4 as-built, ADR-019).
+/// Impl: ffmpeg `-f rawvideo -pix_fmt rgba` subprocess (Buzz used rgb24 +
+/// convert, ledger #10). A reader thread fills a bounded 60-frame deque; the
+/// UI picks the frame for the current AUDIO position each repaint (audio clock
+/// is master — §7). `seek` = kill + respawn at the position (Buzz parity).
+pub trait VideoStreamer: Send + Sync {
+    fn open(&self, path: &Path, start: Millis, info: &VideoStreamInfo)
+        -> Result<Box<dyn FrameStream>, MediaError>;
+}
+pub trait FrameStream: Send {
+    fn frame_for(&mut self, position: Millis) -> Option<VideoFrame>; // None = keep last
+    fn seek(&mut self, position: Millis) -> Result<(), MediaError>;
+}
+
+/// Live audio output for playback (M4 as-built, ADR-019; `humm-audio::CpalOutput`).
+/// `fill` is called on cpal's RT thread; device-rate negotiation + rubato
+/// resample-to-device live inside the adapter, never on the master-clock path.
+pub trait AudioOutput: Send {
+    fn open(&self, spec: StreamSpec, fill: FillCallback) -> Result<Box<dyn OutputStream>, AudioError>;
+}
+pub trait OutputStream: Send { fn play(&mut self) -> Result<(), AudioError>; fn pause(&mut self) -> Result<(), AudioError>; }
 
 /// Fetch remote media. Impl: yt-dlp subprocess.
 pub trait MediaFetcher: Send + Sync {
@@ -87,7 +116,7 @@ Adapter obligations (Standing Policy): startup probe (`ffmpeg -version`, `yt-dlp
 | Task queue | `TaskRunner` thread owning a FIFO (parity: one transcription at a time); commands in via `flume` channel, `TaskEvent`s out via broadcast channel | serialized execution is a feature (GPU contention); channels replace Qt signals |
 | HTTP + subprocess I/O (model downloads, yt-dlp, OpenAI API, translator, telemetry, update check) | single shared **tokio** multi-thread runtime owned by `CoreServices`; `tokio::process` for subprocess streaming | genuinely concurrent I/O; reqwest streams; kill-on-cancel |
 | Audio capture | cpal's real-time callback thread → lock-free SPSC ring buffer (`rtrb`) → chunker thread (RMS silence-cut port of Buzz's algorithm) | never allocate/lock in the audio callback |
-| Playback | cpal output stream fed from decoded PCM; position shared via atomics | sample-accurate seek/loop without a media framework |
+| Playback (M4 as-built, ADR-019) | cpal output stream whose **fill callback reads straight from the whole-file in-memory `PlaybackPcm`** (no feeder thread / no `rtrb` ring — there is no I/O-bound producer to decouple, so all playback logic runs inside the fill closure); position published via one packed `{generation, frame}` `AtomicU64` (the A/V master clock), seeks published by a single CAS so a lost seek is impossible; **varispeed by linear interpolation** over a fractional source cursor (sample-exact frame accounting the loop-wrap + A/V clock depend on — rubato's priming delay would offset the clock, so rubato is used only for device-rate conversion inside `CpalOutput`) | sample-accurate seek/loop without a media framework; pitch-shifting varispeed that actually works (Buzz's was mute) |
 | GUI | eframe event loop; subscribes to `TaskEvent` receivers; `Context::request_repaint()` on event arrival | zero idle CPU, no polling |
 | CLI | blocks on the same core APIs; renders events to stderr progress + `--json` lines | identical core path as GUI (parity by construction) |
 
@@ -139,6 +168,7 @@ Exports (`core::export`): `write_txt/srt/vtt(&[Segment], key: TextOrTranslation,
 ## 7. GUI architecture (humm-gui, egui/eframe — ADR-006)
 
 - One `App` struct owning: `CoreServices` handle, `TaskEvent` receiver, per-window view-model structs (`MainView`, `ViewerView(id)`, `RecordingView`, `PreferencesView`, `PresentationView`). Multi-window via egui **deferred viewports** (real OS windows).
+- **Viewer windows (M4 as-built):** each open transcript is a **deferred** viewport keyed `ViewportId::from_hash_of(("viewer", id))`, its state `Arc<Mutex<ViewerVm>>` (deferred viewports require `Send + Sync` per-window state — the tradeoff paid over immediate viewports because playback windows animate at up to 60 Hz and deferred viewports give per-window repaint isolation, unlike the M3 immediate About/Preferences windows). `HummApp.viewers: BTreeMap<TranscriptionId, Arc<Mutex<ViewerVm>>>`; a re-open of the same transcript *focuses* the live window rather than duplicating it (ledger #1). Resizer windows follow the same deferred-viewport shape (`resizers` map). The resizer/merge worker emits an internal `AppEvent::TranscriptionsUpdated` that closes the originating viewer + resizer through the geometry-persisting close path.
 - Immediate-mode discipline: view-models hold UI state only; domain state lives in core/store; events mutate view-models; `request_repaint` on event arrival → idle CPU ≈ 0.
 - Segment table: `egui_extras` virtualized rows (100k-segment transcripts stay 60 fps — decisive perf win over Buzz's QTableView).
 - Video: ffmpeg rawvideo stream → `egui::TextureHandle` upload per frame; audio clock is master, frames sync to it (same strategy as Buzz, minus Python overhead).

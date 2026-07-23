@@ -259,8 +259,16 @@ All 14 dormant viewer shortcuts (already defined M3, Buzz-verbatim) become live 
 | 11 | Buzz's Scroll-to-Current double-highlight Qt workaround not reproduced | mechanics |
 | 12 | Resizer-created rows get status writes outside the queue (Buzz DAO parity); ADR-018 scope note | doc note |
 | 13 | Return-to-open gated to Completed/Skipped like every other path; Buzz's Return bypasses its own gate (`transcription_tasks_table_widget.py:587-589`) | defect not ported (M3 Delete-key precedent) |
+| 14 | In-editor `+`/`-` nudge bases on the *typed buffer*; Buzz nudges its stale `_milliseconds` captured at editor-open | defect not ported (Buzz accident) |
+| 15 | Paused **video** scrub does not move the current-segment frame / follow selection; Buzz's video path does (via `QMediaPlayer` `positionChanged`-on-`setPosition`). humm's `is_playing` gate matches Buzz's own **audio** path and is kept as the better, consistent behavior | mechanics; kept better |
+| 16 | Loop re-enable while paused *outside* the range does not jump to start; Buzz jumps unconditionally, but its sounddevice-path position is stale there — the jump is ill-defined | mechanics (ill-defined in Buzz) |
+| 17 | Follow-off no longer force-scrolls to the selected row every tick | ✚ improvement |
+| 18 | Video seeks respawn ffmpeg on scrub-**release** / segment-click, not per drag-frame (audio seeks live; converges at rest) | mechanics; cheaper, outcome parity |
+| 19 | Resizer window closes after Extend/Resize; Buzz keeps it open. humm treats every resizer action as terminal | mechanics |
+| 20 | Create-new **merge** closes the originating viewer at *completion*, not at the 0%-progress event; Buzz closes early via signal-reuse | mechanics (spec chose completion) |
+| 21 | A mid-merge app quit leaves the create-new row Queued → flipped `Canceled` by the next launch's stale-flip | accepted (same class as an interrupted transcription, ADR-017/F-029) |
 
-New ADRs: **ADR-019** playback architecture (in-memory decode, cpal+rubato varispeed, audio-master A/V sync) · **ADR-020** resize/merge native port (pinned reference versions, unit quirk preservation, parser scope cut, differential-fixture strategy).
+New ADRs: **ADR-019** playback architecture (in-memory decode, cpal `AudioOutput` boundary + device-rate rubato resample, **linear-interpolation varispeed** — the adjudicated deviation — packed single-CAS seek, f32-only output, audio-master A/V sync) · **ADR-020** resize/merge native port (pinned reference versions, decisecond unit quirk preservation, `mg`/`sp`/`sl` parser scope cut, genuine-Python differential-fixture strategy).
 
 ## 10. Doc updates in-milestone
 

@@ -37,7 +37,7 @@ Empty states everywhere: fresh main table shows a drop-target hero ("Drop media 
 - ✚ Realtime-fit warning: picking a model whose measured speed < realtime on this machine shows an inline caution before recording starts (uses M1 benchmark data).
 - ✚ Upload URL moves from env-only to the live window's advanced section (env still honored).
 
-### J-6 Viewer — parity on view modes, inline editing (±500 ms nudges, overlap clamping), search, synced audio/video, loop/follow/speed, export menu. ✚ Autosave indicator ("edited · saved") since edits are instant-persisted; ✚ export remembers last folder per transcript.
+### J-6 Viewer — parity on view modes, inline editing (±500 ms nudges, overlap clamping), search, synced audio/video, loop/follow/speed, export menu. ✚ Autosave indicator ("edited · saved") since edits are instant-persisted; ✚ export remembers last folder per transcript. **Shipped M4** (F-080..F-086): both ✚s are live — every committed edit persists synchronously and flashes the "edited · saved" indicator (`ViewerVm::saved_flash`), and the viewer export menu defaults its directory to the per-transcript `last_export_folder` (schema v2 column, `HUMM_SURFACE.md` §6.1) falling back to the input file's own directory. Synced playback uses a single audio master clock (ADR-019); speed control audibly works (linear-interpolation varispeed) where Buzz's was mute (ledger #2).
 
 ### J-7 Speaker ID — same two-step flow (identify → name with play-sample), late milestone (ADR-011). Progress states with cancel; results diffable.
 
