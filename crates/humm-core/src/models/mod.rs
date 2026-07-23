@@ -8,5 +8,7 @@
 pub mod download;
 pub mod registry;
 
+// `pub(crate)` (not private) so `live::export`'s `UploadClient` tests can
+// reuse it too, alongside this module's own downloader tests.
 #[cfg(test)]
-mod test_server;
+pub(crate) mod test_server;

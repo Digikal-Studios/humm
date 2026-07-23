@@ -1,17 +1,23 @@
 //! Hand-rolled, single-threaded HTTP test server for
 //! [`super::download::ModelDownloader`]'s tests (`#[cfg(test)]` only —
 //! Global Constraint 2 forbids a new dependency, so this is plain
-//! `std::net`, not a crate like `httpmock`/`wiremock`).
+//! `std::net`, not a crate like `httpmock`/`wiremock`). Also reused by
+//! `live::export`'s `UploadClient` tests, which need `POST` bodies/headers
+//! captured — see [`RequestRecord::headers`]/[`RequestRecord::body`].
 //!
-//! Supports exactly what the downloader needs to be exercised offline: `GET`
+//! Supports exactly what its callers need to be exercised offline: `GET`
 //! requests, optional `Range: bytes=N-` resume (answered with `206` +
 //! `Content-Range`, or a forced `416`), per-path canned responses the test
 //! configures up front (and can reconfigure mid-test, e.g. for the
 //! placement-failure-then-redownload scenario), and a request log the test
-//! asserts on to pin "a fetch was attempted" (F-043 ticket a).
+//! asserts on to pin "a fetch was attempted" (F-043 ticket a) or to inspect
+//! a `POST`'s headers/JSON body (`live::export`'s `UploadClient` tests).
+//! Route matching is by path only, regardless of method — a `Canned`
+//! response answers both a `GET` and a `POST` to the same path identically,
+//! which is all any current caller needs.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,17 +25,24 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// One recorded request: enough for a test to assert "a GET for this path
-/// happened" (F-043 ticket a's pinning acceptance) and whether it carried a
-/// `Range` header (resume vs. fresh).
+/// happened" (F-043 ticket a's pinning acceptance), whether it carried a
+/// `Range` header (resume vs. fresh), and — for `POST` callers — its
+/// headers and body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestRecord {
-    /// HTTP method (`"GET"` for everything this server's callers send).
+    /// HTTP method (e.g. `"GET"`, `"POST"`).
     pub method: String,
     /// Request-target path (e.g. `/repo/resolve/main/ggml-small.bin`).
     pub path: String,
     /// The raw `Range` header value, if the request sent one (e.g.
     /// `Some("bytes=100-")`).
     pub range: Option<String>,
+    /// Every request header, lowercased-name -> raw value (e.g.
+    /// `"content-type" -> "application/json"`).
+    pub headers: HashMap<String, String>,
+    /// The request body bytes, read per the `Content-Length` header (empty
+    /// for a bodyless `GET`).
+    pub body: Vec<u8>,
 }
 
 /// A canned response for one path, configured by the test before (or
@@ -174,6 +187,8 @@ fn handle_connection(
 ) {
     let mut request_line = String::new();
     let mut range: Option<String> = None;
+    let mut headers: HashMap<String, String> = HashMap::new();
+    let mut body = Vec::new();
     {
         // Scoped so the shared borrow of `stream` ends before we write the
         // response through an exclusive one.
@@ -181,6 +196,7 @@ fn handle_connection(
         if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
             return;
         }
+        let mut content_length: usize = 0;
         loop {
             let mut line = String::new();
             if reader.read_line(&mut line).unwrap_or(0) == 0 {
@@ -190,11 +206,22 @@ fn handle_connection(
             if trimmed.is_empty() {
                 break;
             }
-            if let Some(value) = trimmed
-                .strip_prefix("Range:")
-                .or_else(|| trimmed.strip_prefix("range:"))
-            {
-                range = Some(value.trim().to_string());
+            if let Some((name, value)) = trimmed.split_once(':') {
+                let name = name.trim().to_ascii_lowercase();
+                let value = value.trim().to_string();
+                if name == "range" {
+                    range = Some(value.clone());
+                }
+                if name == "content-length" {
+                    content_length = value.parse().unwrap_or(0);
+                }
+                headers.insert(name, value);
+            }
+        }
+        if content_length > 0 {
+            body = vec![0u8; content_length];
+            if reader.read_exact(&mut body).is_err() {
+                body.clear();
             }
         }
     }
@@ -207,6 +234,8 @@ fn handle_connection(
         method,
         path: path.clone(),
         range: range.clone(),
+        headers,
+        body,
     });
 
     let canned = routes.lock().expect("routes lock").get(&path).cloned();

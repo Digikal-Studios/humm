@@ -1,21 +1,33 @@
 //! Live recording: the realtime transcription loop ported from Buzz's
 //! `recording_transcriber.py` (F-060..F-065, `docs/superpowers/specs/
-//! 2026-07-23-m5-live-recording-design.md`). This module tree is pure
+//! 2026-07-23-m5-live-recording-design.md`). This module tree holds pure
 //! `humm-core` domain logic -- no threads, no audio APIs; adapters
-//! (`humm-audio`, `humm-whisper`) and the GUI drive it.
+//! (`humm-audio`, `humm-whisper`) and the GUI drive it. [`export`] is the one
+//! exception to "no I/O": it *is* the live-export engine, so file writes and
+//! blocking HTTP POSTs are its whole job (same "services, not adapters, stay
+//! in core when the boundary is pure Rust" reasoning as `humm-core::update`'s
+//! blocking `reqwest` call) -- `chunker`/`merge` remain strictly I/O-free.
 //!
 //! - [`chunker`] -- sample accumulation, silence-aware cut points, and the
 //!   callback-drop queue policy (F-061 logic half).
 //! - [`merge`] -- the append-and-correct text merge (`find_common_part`,
 //!   `merge_text_no_overlap`, `MergeState`) and display-mode panel
-//!   application (`PanelText`), F-062. Later milestone tasks add `export`
-//!   (F-064 live export/upload) and `session` (the orchestration loop, spec
-//!   §3) to this same module tree.
+//!   application (`PanelText`), F-062.
+//! - [`export`] -- the live TXT/CSV export writers, filename templating,
+//!   retry policy, and the upload-URL client (F-064, spec §2.4). A later
+//!   milestone task adds `session` (the orchestration loop, spec §3) to this
+//!   same module tree.
 
 pub mod chunker;
+pub mod export;
 pub mod merge;
 
 pub use chunker::{Batch, Chunker};
+pub use export::{
+    ExportFileType, ExportSink, InsertMode, RealSleeper, Sleeper, UploadClient, WriteMode,
+    effective_upload_url, live_export_file_name, write_csv_export, write_to_export_file,
+    write_txt_export,
+};
 pub use merge::{
     MergeState, PanelText, filter_text, find_common_part, merge_text_no_overlap,
     no_space_between_sentences,

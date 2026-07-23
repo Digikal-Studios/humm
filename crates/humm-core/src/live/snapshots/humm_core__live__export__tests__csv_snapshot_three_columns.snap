@@ -1,0 +1,6 @@
+---
+source: crates/humm-core/src/live/export.rs
+assertion_line: 1364
+expression: strip_utf8_bom_to_string(&bytes)
+---
+"first, utterance","second ""quoted"" utterance",third utterance

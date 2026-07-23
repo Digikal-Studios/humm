@@ -21,6 +21,7 @@ toml.workspace = true
 flume.workspace = true
 fd-lock.workspace = true
 regex.workspace = true
+csv.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
