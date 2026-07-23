@@ -29,13 +29,16 @@
 //! (`transcription_viewer_widget.py:78-143,1078-1145`).
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use humm_core::boundary::{AudioDecoder, AudioOutput, MediaProber, VideoStreamer};
 use humm_core::domain::{Millis, Segment, Status, TranscriptionId};
 use humm_core::error::StoreError;
 use humm_core::settings::Settings;
 use humm_core::viewer::edit::{EditOutcome, Field, SegmentTimes, timestamp_edit};
+use humm_core::viewer::search::{
+    RowMatch, SEARCH_DEBOUNCE_MS, TextMatch, search_rows, search_text, wrap_next, wrap_prev,
+};
 use humm_core::viewer::text_view;
 use humm_core::viewer::timestamp::parse_timestamp;
 use humm_store::{SegmentRow, SqliteStore};
@@ -169,6 +172,184 @@ impl CellEditor {
     }
 }
 
+/// The active search's result set (F-082, design spec §2.3): which pass
+/// produced it determines how a match is applied. Timestamps mode searches
+/// segment rows ([`search_rows`]) → [`RowMatch`]es select+center-scroll a
+/// table row; Text/Translation mode searches the joined display text
+/// ([`search_text`]) → [`TextMatch`]es highlight a byte range and scroll to
+/// it. [`ViewerVm::run_search`] is the only place a variant is chosen (by
+/// [`ViewMode`]), so a view never needs to guess which kind is live for the
+/// current mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchResults {
+    /// Timestamps-mode matches (row index + which column matched).
+    Rows(Vec<RowMatch>),
+    /// Text/Translation-mode matches (byte ranges into
+    /// [`ViewerVm::text_body`]).
+    Text(Vec<TextMatch>),
+}
+
+impl SearchResults {
+    /// Number of matches, regardless of kind — the `total` [`humm_core::
+    /// viewer::search::results_label`] wants.
+    pub fn len(&self) -> usize {
+        match self {
+            SearchResults::Rows(rows) => rows.len(),
+            SearchResults::Text(texts) => texts.len(),
+        }
+    }
+
+    /// Whether there are no matches.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Default for SearchResults {
+    /// An empty row-kind result set — the shape before any search has run
+    /// (Timestamps is the viewer's default [`ViewMode`]).
+    fn default() -> Self {
+        SearchResults::Rows(Vec::new())
+    }
+}
+
+/// The outcome of checking a pending search debounce this frame ([`debounce_decision`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebounceDecision {
+    /// Not yet [`SEARCH_DEBOUNCE_MS`] since the last query edit — the caller
+    /// should schedule a repaint for `remaining` so the fire frame happens
+    /// even with no further input (`ctx.request_repaint_after`).
+    Pending {
+        /// Time left before the debounce is due.
+        remaining: Duration,
+    },
+    /// The debounce delay has elapsed: fire only when the trimmed query has
+    /// at least two characters *right now* — Buzz starts its timer only at
+    /// ≥2 chars but never cancels a pending timer when the query shrinks
+    /// back down before it fires (design spec §2.3, ledger #5); checking the
+    /// length here, at fire time, instead of at edit time makes that
+    /// deterministic rather than racy.
+    Ready {
+        /// Whether the search should actually run.
+        should_search: bool,
+    },
+}
+
+/// The pure debounce-gate rule behind [`DebounceDecision`]: a function of how
+/// long it has been since the last query edit and how many (trimmed)
+/// characters the query currently has — no clock, no sleeping, trivially
+/// unit-testable with constructed [`Duration`]s.
+pub fn debounce_decision(elapsed: Duration, trimmed_query_chars: usize) -> DebounceDecision {
+    let debounce = Duration::from_millis(SEARCH_DEBOUNCE_MS);
+    if elapsed < debounce {
+        DebounceDecision::Pending {
+            remaining: debounce - elapsed,
+        }
+    } else {
+        DebounceDecision::Ready {
+            should_search: trimmed_query_chars >= 2,
+        }
+    }
+}
+
+/// The transcript search bar's state (F-082, design spec §2.3). Lives on
+/// [`ViewerVm`] so the semantic state transitions (open/close, clear, run,
+/// navigate) are plain, unit-testable methods here; [`crate::views::
+/// viewer_search`] only renders it and turns egui input (keystrokes,
+/// shortcuts, frame timing) into calls against them — no matching rule lives
+/// in the GUI (`humm_core::viewer::search` owns all of that).
+///
+/// Ported from Buzz's `search_text`/`search_results`/`current_search_index`/
+/// `search_debounce_timer` instance attributes
+/// (`transcription_viewer_widget.py:123-129`).
+#[derive(Debug, Clone)]
+pub struct SearchState {
+    /// Whether the find bar is shown.
+    pub visible: bool,
+    /// The input field's live text.
+    pub query: String,
+    /// The current search's results — empty (and [`Self::searched`] false)
+    /// before any search has run.
+    pub results: SearchResults,
+    /// Index of the highlighted match into [`Self::results`] (0-based).
+    pub current: usize,
+    /// When the query last changed, for the debounce gate
+    /// ([`debounce_decision`]); `None` when no search is pending.
+    pub last_edit: Option<Instant>,
+    /// Whether [`ViewerVm::run_search`] has produced a result set since the
+    /// bar was last opened/cleared — distinguishes "never searched yet"
+    /// (blank results label) from "searched and found nothing" (Buzz's
+    /// `"No matches found"`), since both states have empty `results`.
+    pub searched: bool,
+    /// One-shot latch: true when the bar's input should grab keyboard focus
+    /// and select all its text on its next render (⌘F open, Clear button) —
+    /// transient UI state, not semantic search state (the
+    /// [`CellEditor::just_opened`] pattern).
+    pub(crate) focus_pending: bool,
+    /// One-shot latch: true when the current match changed (fresh search,
+    /// next/prev navigation) and the mode's view (table or text body) must
+    /// select/scroll to it on its next render. Cleared by whichever view
+    /// consumes it.
+    pub(crate) scroll_pending: bool,
+}
+
+impl SearchState {
+    /// A search bar seeded from the persisted
+    /// `settings.viewer.find_widget_visible` value at viewer-open time (Buzz
+    /// `restore_ui_state`).
+    pub fn new(visible: bool) -> Self {
+        SearchState {
+            visible,
+            query: String::new(),
+            results: SearchResults::default(),
+            current: 0,
+            last_edit: None,
+            searched: false,
+            focus_pending: false,
+            scroll_pending: false,
+        }
+    }
+
+    /// Opens the bar and arms the focus+select-all latch (Buzz
+    /// `show_search_bar`/`focus_search_input`'s "show" branch). The query
+    /// itself is untouched — it is already empty after any prior
+    /// [`Self::hide`], and toggling back open mid-session never happens
+    /// without a hide/clear between (Buzz parity).
+    pub fn show(&mut self) {
+        self.visible = true;
+        self.focus_pending = true;
+    }
+
+    /// Hides the bar and clears the search entirely (Buzz `hide_search_bar`,
+    /// which calls `clear_search()` before hiding). Unlike [`Self::clear`],
+    /// this does *not* re-arm the focus latch — the input is about to be
+    /// hidden, not refocused.
+    pub fn hide(&mut self) {
+        self.query.clear();
+        self.results = SearchResults::default();
+        self.current = 0;
+        self.last_edit = None;
+        self.searched = false;
+        self.visible = false;
+        self.focus_pending = false;
+        self.scroll_pending = false;
+    }
+
+    /// Clears the query/results/highlight but keeps the bar visible and
+    /// re-focuses the input (Buzz `clear_search`) — shared by the Clear
+    /// button and by the query naturally emptying while typing
+    /// (`on_search_text_changed`'s empty-text branch).
+    pub fn clear(&mut self) {
+        self.query.clear();
+        self.results = SearchResults::default();
+        self.current = 0;
+        self.last_edit = None;
+        self.searched = false;
+        self.focus_pending = true;
+        self.scroll_pending = false;
+    }
+}
+
 /// One open transcript viewer's state.
 ///
 /// Segments are loaded into [`Self::rows`] once at [`Self::open`] and every
@@ -234,6 +415,8 @@ pub struct ViewerVm {
     /// callback, so the viewer carries its own banner; see the module note).
     /// Cleared by the next successful write.
     pub unsaved: bool,
+    /// The transcript search bar's state (F-082).
+    pub search: SearchState,
 }
 
 impl ViewerVm {
@@ -280,6 +463,7 @@ impl ViewerVm {
             editing: None,
             saved_flash: None,
             unsaved: false,
+            search: SearchState::new(settings.viewer.find_widget_visible),
         })
     }
 
@@ -295,10 +479,16 @@ impl ViewerVm {
         }
         self.mode = mode;
         self.refresh_text_body();
-        // TODO(Task 9): re-run the active search here — Buzz's
-        // `on_view_mode_changed` calls `perform_search()` when `search_text`
-        // is non-empty (`transcription_viewer_widget.py:1143-1145`). No search
-        // state exists yet, so there is nothing to re-run.
+        // Buzz `on_view_mode_changed` (`transcription_viewer_widget.py:
+        // 1143-1145`): re-run the active search against the new mode's
+        // haystack whenever the query is non-empty. This runs immediately,
+        // with no debounce and no 2-char gate — those are keystroke-stream
+        // concerns (design spec §2.3); a mode switch is a single discrete
+        // action, ported from Buzz's own untamed `if self.search_text:`
+        // check (which itself has no length gate).
+        if !self.search.query.trim().is_empty() {
+            self.run_search();
+        }
     }
 
     /// Recomputes [`Self::text_body`] from the in-memory rows for the current
@@ -327,6 +517,60 @@ impl ViewerVm {
                 translation: row.translation.clone(),
             })
             .collect()
+    }
+
+    /// Re-runs [`Self::search`] against the current [`Self::mode`]'s
+    /// haystack (Buzz `perform_search`, `transcription_viewer_widget.py:
+    /// 787-797`): Timestamps mode searches the in-memory rows
+    /// ([`search_rows`]), Text/Translation mode searches the cached
+    /// [`Self::text_body`] ([`search_text`]) — both share `humm_core`'s
+    /// case-insensitive, [`humm_core::viewer::search::SEARCH_CAP`]-capped
+    /// matching, this method only picks which one applies. Resets the
+    /// highlighted match to the first result and — when there is at least
+    /// one — arms the one-shot scroll latch so the mode's view selects/
+    /// scrolls to it on its next render.
+    pub fn run_search(&mut self) {
+        let query = self.search.query.trim().to_string();
+        let results = match self.mode {
+            ViewMode::Timestamps => {
+                let rows: Vec<(String, String)> = self
+                    .rows
+                    .iter()
+                    .map(|row| (row.text.clone(), row.translation.clone()))
+                    .collect();
+                SearchResults::Rows(search_rows(&rows, self.has_translations, &query))
+            }
+            ViewMode::Text | ViewMode::Translation => {
+                SearchResults::Text(search_text(&self.text_body, &query))
+            }
+        };
+        self.search.current = 0;
+        self.search.searched = true;
+        self.search.scroll_pending = !results.is_empty();
+        self.search.results = results;
+    }
+
+    /// Advances to the next match, wrapping ([`wrap_next`]; Buzz
+    /// `search_next`/`search_next_if_results`). A no-op with no results.
+    pub fn search_next(&mut self) {
+        let total = self.search.results.len();
+        if total == 0 {
+            return;
+        }
+        self.search.current = wrap_next(self.search.current, total);
+        self.search.scroll_pending = true;
+    }
+
+    /// Retreats to the previous match, wrapping ([`wrap_prev`]; Buzz
+    /// `search_previous`/`search_previous_if_results`). A no-op with no
+    /// results.
+    pub fn search_prev(&mut self) {
+        let total = self.search.results.len();
+        if total == 0 {
+            return;
+        }
+        self.search.current = wrap_prev(self.search.current, total);
+        self.search.scroll_pending = true;
     }
 
     /// Commits a proposed new timestamp for `rows[idx]`'s `field`, running the
@@ -910,5 +1154,147 @@ mod tests {
         assert!(vm.selected.is_none());
         assert!(!vm.nudge_selected(&deps, Field::End, NUDGE_MS));
         assert_eq!(vm.rows[0].end, Millis(1000));
+    }
+
+    // -- F-082 search (Task 9) ------------------------------------------
+
+    #[test]
+    fn debounce_fires_only_after_300ms_and_2_chars() {
+        // Under the debounce window → always pending, regardless of length,
+        // and the caller must reschedule for exactly what's left.
+        assert_eq!(
+            debounce_decision(Duration::from_millis(299), 5),
+            DebounceDecision::Pending {
+                remaining: Duration::from_millis(1)
+            }
+        );
+        assert_eq!(
+            debounce_decision(Duration::from_millis(0), 5),
+            DebounceDecision::Pending {
+                remaining: Duration::from_millis(SEARCH_DEBOUNCE_MS)
+            }
+        );
+
+        // At/after the window, but under 2 trimmed chars → ready, but the
+        // deterministic length gate says don't search (ledger #5).
+        assert_eq!(
+            debounce_decision(Duration::from_millis(300), 0),
+            DebounceDecision::Ready {
+                should_search: false
+            }
+        );
+        assert_eq!(
+            debounce_decision(Duration::from_millis(500), 1),
+            DebounceDecision::Ready {
+                should_search: false
+            }
+        );
+
+        // At/after the window with ≥2 chars → ready and should search.
+        assert_eq!(
+            debounce_decision(Duration::from_millis(300), 2),
+            DebounceDecision::Ready {
+                should_search: true
+            }
+        );
+        assert_eq!(
+            debounce_decision(Duration::from_secs(5), 10),
+            DebounceDecision::Ready {
+                should_search: true
+            }
+        );
+    }
+
+    #[test]
+    fn mode_switch_reruns_search() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(
+            &store,
+            "/tmp/a.wav",
+            &[
+                seg(0, 1000, "cat sat", "gato"),
+                seg(1000, 2000, "dog ran", "perro"),
+            ],
+        );
+        let deps = deps(Arc::clone(&store));
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+
+        vm.search.query = "cat".to_string();
+        vm.run_search();
+        assert_eq!(
+            vm.search.results,
+            SearchResults::Rows(vec![RowMatch {
+                row: 0,
+                in_translation: false
+            }])
+        );
+
+        // Switching to Text mode re-runs the *same* query against the new
+        // mode's haystack ("cat sat dog ran") — same one match, but now a
+        // Text-kind (byte-range) result, not a Row-kind one.
+        vm.set_mode(ViewMode::Text);
+        assert_eq!(vm.mode, ViewMode::Text);
+        match &vm.search.results {
+            SearchResults::Text(matches) => {
+                assert_eq!(matches.len(), 1);
+                assert_eq!(&vm.text_body[matches[0].start..matches[0].end], "cat");
+            }
+            SearchResults::Rows(_) => panic!("Text mode must produce Text-kind results"),
+        }
+
+        // Switching mode with an empty query is a no-op on the search state
+        // (Buzz's `if self.search_text:` guard).
+        vm.search.query.clear();
+        vm.search.results = SearchResults::Rows(vec![]);
+        vm.set_mode(ViewMode::Timestamps);
+        assert_eq!(vm.search.results, SearchResults::Rows(vec![]));
+    }
+
+    #[test]
+    fn esc_clears_and_hides() {
+        let mut search = SearchState::new(true);
+        search.query = "needle".to_string();
+        search.results = SearchResults::Rows(vec![RowMatch {
+            row: 3,
+            in_translation: false,
+        }]);
+        search.current = 1;
+        search.searched = true;
+        search.last_edit = Some(Instant::now());
+
+        search.hide();
+
+        assert!(!search.visible, "Esc hides the bar");
+        assert!(search.query.is_empty(), "Esc clears the query");
+        assert!(search.results.is_empty(), "Esc clears the results");
+        assert_eq!(search.current, 0);
+        assert!(!search.searched);
+        assert!(search.last_edit.is_none(), "no debounce stays pending");
+        assert!(
+            !search.focus_pending,
+            "the input is being hidden, not refocused"
+        );
+    }
+
+    #[test]
+    fn clear_keeps_bar_and_focus_flag() {
+        let mut search = SearchState::new(true);
+        search.query = "needle".to_string();
+        search.results = SearchResults::Text(vec![TextMatch { start: 0, end: 6 }]);
+        search.current = 0;
+        search.searched = true;
+        search.focus_pending = false;
+
+        search.clear();
+
+        assert!(search.visible, "Clear must not hide the bar");
+        assert!(search.query.is_empty());
+        assert!(search.results.is_empty());
+        assert_eq!(search.current, 0);
+        assert!(!search.searched);
+        assert!(
+            search.focus_pending,
+            "Clear re-focuses the input (Buzz `clear_search`'s `setFocus()`)"
+        );
     }
 }

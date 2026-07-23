@@ -1093,6 +1093,7 @@ impl HummApp {
             let deps = Arc::clone(&self.viewer_deps);
             let shortcuts = Arc::clone(&self.shortcuts);
             let settings = Arc::clone(&self.services.settings);
+            let settings_path = self.services.settings_path.clone();
 
             ctx.show_viewport_deferred(
                 egui::ViewportId::from_hash_of(("viewer", *id)),
@@ -1102,7 +1103,14 @@ impl HummApp {
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        crate::views::viewer::viewer_ui(ui, &mut vm, &deps, &shortcuts, &settings);
+                        crate::views::viewer::viewer_ui(
+                            ui,
+                            &mut vm,
+                            &deps,
+                            &shortcuts,
+                            &settings,
+                            &settings_path,
+                        );
                     });
 
                     // Record the live geometry for persist-on-close, and honor

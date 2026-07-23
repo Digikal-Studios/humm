@@ -1,6 +1,7 @@
-//! The transcript-viewer window chrome (F-080): toolbar (View menu live; the
-//! rest disabled stubs this task), the per-mode central content, and the
-//! empty-state label.
+//! The transcript-viewer window chrome (F-080): toolbar (View menu + Find
+//! live; the rest disabled stubs this task), the search bar
+//! ([`crate::views::viewer_search`], F-082), the per-mode central content,
+//! and the empty-state label.
 //!
 //! A pure render function of [`ViewerVm`] — no window/viewport plumbing (that
 //! is `app.rs`'s deferred-viewport management), so an `egui_kittest` harness
@@ -10,12 +11,13 @@
 //! Ported from `transcription_viewer_widget.py` (`_setup_toolbar`,
 //! `reset_view`) and `transcription_view_mode_tool_button.py` (the View menu).
 //! Timestamps mode now embeds the real segment editor table
-//! ([`crate::views::viewer_table`], F-081); the find bar, export, and resize
-//! remain disabled buttons with tooltips until Tasks 9/11/12, and the player
-//! strip is still the Task 10 stub. The viewer-level nudge shortcuts
-//! (⌘←/⌘→/⌘⇧←/⌘⇧→), the "edited · saved" autosave indicator, and the
-//! unsaved-edit warning banner are wired here.
+//! ([`crate::views::viewer_table`], F-081); export and resize remain disabled
+//! buttons with tooltips until Tasks 11/12, and the player strip is still the
+//! Task 10 stub. The viewer-level nudge shortcuts (⌘←/⌘→/⌘⇧←/⌘⇧→), the
+//! "edited · saved" autosave indicator, and the unsaved-edit warning banner
+//! are wired here.
 
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -25,34 +27,34 @@ use humm_core::viewer::edit::{Field, NUDGE_MS};
 use crate::i18n::tr;
 use crate::shortcuts::{ShortcutAction, ShortcutMap};
 use crate::viewer::{PlayerState, ViewMode, ViewerDeps, ViewerVm};
-use crate::views::viewer_table;
+use crate::views::{viewer_search, viewer_table};
 
 /// How long the "edited · saved" autosave indicator stays visible after a
 /// successful store write (design spec §2.2: "~1.5 s").
 const SAVED_FLASH_DURATION: Duration = Duration::from_millis(1500);
 
-/// Renders one transcript viewer's chrome into `ui`.
-///
-/// `deps`/`settings` are part of the stable render signature the later M4
-/// tasks consume (playback opens streams through `deps`; splitter/rate
-/// persistence writes `settings`); this task renders neither, so they are
-/// accepted and reserved rather than read — see the `let _` below.
+/// Renders one transcript viewer's chrome into `ui`. `settings`/
+/// `settings_path` — reserved by Task 7 for splitter/rate persistence, spent
+/// for real this task on the find-bar visibility persist.
 pub fn viewer_ui(
     ui: &mut egui::Ui,
     vm: &mut ViewerVm,
     deps: &ViewerDeps,
     shortcuts: &ShortcutMap,
     settings: &Mutex<Settings>,
+    settings_path: &Path,
 ) {
-    // `settings` is reserved for the splitter/rate persistence Task 10 adds;
-    // this task persists per-edit through `deps.store`, not settings.
-    let _ = settings;
-
     consume_mode_shortcuts(ui, vm, shortcuts);
+    viewer_search::consume_shortcuts(ui, vm, shortcuts);
     // Nudge shortcuts act on the selected row and are consumed only inside the
     // focused viewer viewport (design spec §7).
     consume_nudge_shortcuts(ui, vm, deps, shortcuts);
+
+    let find_was_visible = vm.search.visible;
     show_toolbar(ui, vm, shortcuts);
+    viewer_search::ui(ui, vm, shortcuts);
+    persist_find_visibility_if_changed(vm, find_was_visible, settings, settings_path);
+
     show_unsaved_banner(ui, vm);
     ui.separator();
 
@@ -64,6 +66,32 @@ pub fn viewer_ui(
     match vm.mode {
         ViewMode::Timestamps => show_timestamps(ui, vm, deps),
         ViewMode::Text | ViewMode::Translation => show_text_body(ui, vm),
+    }
+}
+
+/// Persists `vm.search.visible` to `settings.viewer.find_widget_visible` when
+/// it changed this frame — the diff-on-change, non-fatal-on-save-failure
+/// contract shared by every other viewer setting
+/// (`app.rs::persist_viewer_geometry_if_changed`); `settings`/`settings_path`
+/// are exactly what Task 7 reserved this parameter slot for.
+fn persist_find_visibility_if_changed(
+    vm: &ViewerVm,
+    was_visible: bool,
+    settings: &Mutex<Settings>,
+    settings_path: &Path,
+) {
+    if vm.search.visible == was_visible {
+        return;
+    }
+    let mut guard = settings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.viewer.find_widget_visible == vm.search.visible {
+        return;
+    }
+    guard.viewer.find_widget_visible = vm.search.visible;
+    if let Err(err) = guard.save(settings_path) {
+        log::warn!("could not persist the find-bar visibility: {err}");
     }
 }
 
@@ -136,11 +164,11 @@ fn consume_mode_shortcuts(ui: &egui::Ui, vm: &mut ViewerVm, shortcuts: &Shortcut
     }
 }
 
-/// The toolbar: View menu (live) then the disabled-stub buttons. The two
-/// permanent-tooltip buttons (Translate → M6 API backend, Identify Speakers →
-/// M8) name their milestone; the three this-milestone buttons (Export/Resize/
-/// Find) get a "lands later this milestone" tooltip until their task enables
-/// them (Tasks 11/12/9).
+/// The toolbar: View menu (live), Find (live, F-082) then the disabled-stub
+/// buttons. The two permanent-tooltip buttons (Translate → M6 API backend,
+/// Identify Speakers → M8) name their milestone; the two remaining
+/// this-milestone buttons (Export/Resize) get a "lands later this milestone"
+/// tooltip until their task enables them (Tasks 11/12).
 fn show_toolbar(ui: &mut egui::Ui, vm: &mut ViewerVm, shortcuts: &ShortcutMap) {
     ui.horizontal_wrapped(|ui| {
         ui.menu_button(tr("viewer-view"), |ui| {
@@ -185,7 +213,7 @@ fn show_toolbar(ui: &mut egui::Ui, vm: &mut ViewerVm, shortcuts: &ShortcutMap) {
             tr("viewer-identify-speakers"),
             tr("viewer-identify-speakers-tooltip"),
         );
-        disabled_button(ui, tr("viewer-find"), tr("viewer-find-pending"));
+        viewer_search::toolbar_button(ui, vm);
         show_autosave_indicator(ui, vm);
     });
 }
@@ -275,11 +303,9 @@ fn show_player_strip(ui: &mut egui::Ui, vm: &ViewerVm) {
 }
 
 /// Text / Translation mode: the recomputed combined text in a read-only,
-/// selectable, scrollable area (Buzz's read-only `text_display_box`).
-fn show_text_body(ui: &mut egui::Ui, vm: &ViewerVm) {
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.add(egui::Label::new(&vm.text_body).selectable(true).wrap());
-        });
+/// selectable, scrollable area (Buzz's read-only `text_display_box`), with
+/// the active search match (if any) highlighted and scrolled to
+/// (`viewer_search::render_highlighted_text`, F-082).
+fn show_text_body(ui: &mut egui::Ui, vm: &mut ViewerVm) {
+    viewer_search::render_highlighted_text(ui, vm);
 }

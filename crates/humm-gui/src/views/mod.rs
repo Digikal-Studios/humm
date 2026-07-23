@@ -12,4 +12,5 @@ pub mod toasts;
 pub mod update_notice;
 pub mod url_dialog;
 pub mod viewer;
+pub mod viewer_search;
 pub mod viewer_table;

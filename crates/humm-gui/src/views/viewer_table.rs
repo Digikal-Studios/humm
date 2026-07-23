@@ -39,6 +39,7 @@ use humm_store::SegmentRow;
 
 use crate::i18n::tr;
 use crate::viewer::{CellEditor, EditCol, ViewerDeps, ViewerVm};
+use crate::views::viewer_search;
 
 /// Stable `TableBuilder::id_salt` for the (per-viewport) editor table — keeps
 /// egui_extras's internal table state distinct from the M3 task table's.
@@ -72,6 +73,11 @@ pub fn ui(ui: &mut egui::Ui, vm: &mut ViewerVm, deps: &ViewerDeps) -> Vec<EditAp
     let table_height = ui.available_height().max(row_height);
     let columns = visible_columns(vm.has_translations);
 
+    // A search match landing on this frame (fresh search or next/prev nav,
+    // F-082 design spec §2.3 `highlight_table_match`): select the row and
+    // ask the table to center-scroll to it, one-shot.
+    let search_scroll_row = viewer_search::take_pending_row_scroll(vm);
+
     // Return begins editing the selected row's Start cell when no editor is
     // open. Read before the editor is pulled out below, so a Return that
     // *commits* an open editor (handled in `render_editor`) never also opens a
@@ -101,6 +107,9 @@ pub fn ui(ui: &mut egui::Ui, vm: &mut ViewerVm, deps: &ViewerDeps) -> Vec<EditAp
         .cell_layout(egui::Layout::left_to_right(egui::Align::TOP));
     for col in &columns {
         builder = builder.column(column_spec(*col));
+    }
+    if let Some(row) = search_scroll_row {
+        builder = builder.scroll_to_row(row, Some(egui::Align::Center));
     }
 
     builder

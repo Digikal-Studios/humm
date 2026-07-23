@@ -16,6 +16,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use egui::accesskit::Role;
 use egui_kittest::Harness;
@@ -32,9 +33,10 @@ use humm_core::domain::{
 use humm_core::error::{AudioError, MediaError};
 use humm_core::settings::Settings;
 use humm_core::viewer::edit::Field;
+use humm_core::viewer::search::{RowMatch, SEARCH_DEBOUNCE_MS, results_label};
 use humm_gui::import::FileDialogs;
 use humm_gui::shortcuts::ShortcutMap;
-use humm_gui::viewer::{CellEditor, EditCol, ViewerDeps, ViewerVm};
+use humm_gui::viewer::{CellEditor, EditCol, SearchResults, ViewerDeps, ViewerVm};
 use humm_gui::views::viewer::viewer_ui;
 use humm_store::SqliteStore;
 
@@ -139,6 +141,7 @@ struct Fixture {
     deps: ViewerDeps,
     shortcuts: ShortcutMap,
     settings: Mutex<Settings>,
+    settings_path: PathBuf,
 }
 
 /// Seeds a temp-dir store with one completed transcription (`file`, `segs`) and
@@ -156,12 +159,14 @@ fn fixture(file: &str, segs: &[Segment]) -> (Fixture, tempfile::TempDir) {
     let deps = fake_deps(Arc::clone(&store));
     let settings = Settings::default();
     let vm = ViewerVm::open(id, &deps, &settings).expect("open viewer");
+    let settings_path = dir.path().join("settings.toml");
     (
         Fixture {
             vm,
             deps,
             shortcuts: ShortcutMap::from_settings(&std::collections::HashMap::new()),
             settings: Mutex::new(settings),
+            settings_path,
         },
         dir,
     )
@@ -176,6 +181,7 @@ fn build_harness(fixture: Fixture) -> Harness<'static, Fixture> {
                 &fixture.deps,
                 &fixture.shortcuts,
                 &fixture.settings,
+                &fixture.settings_path,
             );
         },
         fixture,
@@ -359,5 +365,114 @@ fn esc_commits_text_edit() {
     assert_eq!(
         persisted[0].text, "edited-by-esc",
         "the Esc-committed text persisted to the store"
+    );
+}
+
+// -- F-082 search bar (Task 9) -------------------------------------------
+
+/// Opens the find bar and arms a query so the very next `harness.run()`
+/// crosses the debounce window on real elapsed time — the "state seam"
+/// (`fixture.vm.search.query`/`last_edit` are plain `pub` fields) rather than
+/// driving simulated keystrokes or sleeping the test.
+fn arm_search(fixture: &mut Fixture, query: &str) {
+    fixture.vm.search.visible = true;
+    fixture.vm.search.query = query.to_string();
+    fixture.vm.search.last_edit =
+        Some(Instant::now() - Duration::from_millis(SEARCH_DEBOUNCE_MS + 50));
+}
+
+#[test]
+fn search_selects_matching_row_and_shows_label() {
+    let (mut fixture, _dir) = fixture(
+        "/tmp/a.wav",
+        &[
+            seg(0, 1000, "alpha", ""),
+            seg(1000, 2000, "beta needle here", ""),
+            seg(2000, 3000, "gamma", ""),
+        ],
+    );
+    arm_search(&mut fixture, "needle");
+
+    let mut harness = build_harness(fixture);
+    harness.run(); // crosses the (already past-due) debounce this frame
+
+    assert_eq!(
+        harness.state().vm.search.results,
+        SearchResults::Rows(vec![RowMatch {
+            row: 1,
+            in_translation: false
+        }])
+    );
+    assert_eq!(
+        harness.state().vm.selected,
+        Some(1),
+        "the matching row is selected"
+    );
+    let expected_label = results_label(0, 1);
+    harness.get_by_label_contains(&expected_label);
+}
+
+#[test]
+fn nav_wraps_modulo() {
+    let (mut fixture, _dir) = fixture(
+        "/tmp/a.wav",
+        &[
+            seg(0, 1000, "cat", ""),
+            seg(1000, 2000, "cat", ""),
+            seg(2000, 3000, "cat", ""),
+        ],
+    );
+    arm_search(&mut fixture, "cat");
+
+    let mut harness = build_harness(fixture);
+    harness.run();
+    assert_eq!(harness.state().vm.search.results.len(), 3);
+    assert_eq!(harness.state().vm.search.current, 0);
+
+    harness.get_by_label("\u{2193}").click(); // next
+    harness.run();
+    assert_eq!(harness.state().vm.search.current, 1);
+
+    harness.get_by_label("\u{2193}").click();
+    harness.run();
+    harness.get_by_label("\u{2193}").click();
+    harness.run();
+    assert_eq!(harness.state().vm.search.current, 0, "next wraps modulo");
+
+    harness.get_by_label("\u{2191}").click(); // prev
+    harness.run();
+    assert_eq!(harness.state().vm.search.current, 2, "prev wraps modulo");
+}
+
+#[test]
+fn translation_matches_append_after_text_matches() {
+    let (mut fixture, _dir) = fixture(
+        "/tmp/a.wav",
+        &[
+            seg(0, 1000, "no match here", "needle"),
+            seg(1000, 2000, "needle text", "no match"),
+        ],
+    );
+    arm_search(&mut fixture, "needle");
+
+    let mut harness = build_harness(fixture);
+    harness.run();
+
+    let SearchResults::Rows(matches) = &harness.state().vm.search.results else {
+        panic!("Timestamps mode must produce Row-kind results");
+    };
+    assert_eq!(
+        matches,
+        &vec![
+            RowMatch {
+                row: 1,
+                in_translation: false
+            },
+            RowMatch {
+                row: 0,
+                in_translation: true
+            },
+        ],
+        "text matches (row 1) come before the translation match (row 0)"
     );
 }
