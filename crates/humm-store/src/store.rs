@@ -179,6 +179,19 @@ fn now_iso() -> String {
         .to_string()
 }
 
+/// Placeholder [`Input`] embedded in a live session's persisted [`TaskSpec`]
+/// (`options_json`, see [`SqliteStore::insert_live_session`]). A live session
+/// has no file or URL to transcribe — its `file`/`url` *columns* are `NULL`
+/// — but [`SqliteStore::load_task_spec`] deserializes `options_json` back
+/// into a whole `TaskSpec`, so a filler `input` keeps that round-trip
+/// working like any other row's. Every current reader of a loaded `TaskSpec`
+/// (`export_menu`, the resizer's word-timestamps/language gate, the retry
+/// path) only ever reads `.options`; nothing must treat this filler as a
+/// real path.
+fn live_session_input_placeholder() -> Input {
+    Input::Path(PathBuf::new())
+}
+
 fn query_error(err: rusqlite::Error) -> StoreError {
     StoreError::Query {
         detail: err.to_string(),
@@ -312,10 +325,37 @@ impl SqliteStore {
     /// flipped. Ported from Buzz's
     /// `mark_in_progress_and_queued_transcriptions_as_canceled`
     /// (`buzz/db/helpers.py:79-89`).
+    ///
+    /// **Live-recording special case** (Q-10 ✚, `docs/superpowers/specs/
+    /// 2026-07-23-m5-live-recording-design.md` §4): a stale `in_progress`
+    /// row with `kind = "live_recording"` (see [`Self::insert_live_session`])
+    /// flips to **`completed`** instead — a killed process loses at most the
+    /// in-flight chunk, and the partial transcript already on disk is
+    /// finished work worth opening in the M4 viewer; `canceled` would lock
+    /// it behind the viewer's Completed/Skipped-only open gate. Every other
+    /// row (any `queued` row, or an `in_progress` row of any other `kind`)
+    /// keeps today's exact behavior. The live pass runs first so the
+    /// unchanged second query — matching on `status` alone — naturally
+    /// excludes the rows it already flipped to `completed`, with no `kind`
+    /// filter needed there.
     pub fn cancel_stale_tasks(&self) -> Result<usize, StoreError> {
         let now = now_iso();
         let conn = self.lock()?;
-        let affected = conn
+
+        let live_completed = conn
+            .execute(
+                "UPDATE transcription SET status = ?1, time_ended = COALESCE(time_ended, ?2) \
+                 WHERE status = ?3 AND kind = ?4",
+                params![
+                    Status::Completed.as_str(),
+                    now,
+                    Status::InProgress.as_str(),
+                    Source::LiveRecording.as_str(),
+                ],
+            )
+            .map_err(query_error)?;
+
+        let other_canceled = conn
             .execute(
                 "UPDATE transcription SET status = ?1, time_ended = ?2 \
                  WHERE status = ?3 OR status = ?4",
@@ -327,7 +367,8 @@ impl SqliteStore {
                 ],
             )
             .map_err(query_error)?;
-        Ok(affected)
+
+        Ok(live_completed + other_canceled)
     }
 
     /// `true` once [`Self::import_buzz_db`] has completed successfully at
@@ -1017,6 +1058,155 @@ impl SqliteStore {
             .map_err(query_error)?
             .flatten();
         Ok(value.map(PathBuf::from))
+    }
+
+    // -- M5 Task 7: live-session persistence (Q-10 ✚) ----------------------
+    //
+    // `docs/superpowers/specs/2026-07-23-m5-live-recording-design.md` §4:
+    // Buzz persists nothing for a live recording; this crate makes a live
+    // session a first-class row instead — insert-at-start
+    // ([`Self::insert_live_session`]), stream-segments
+    // ([`Self::append_live_segment`]), complete-at-stop
+    // ([`Self::complete_live_session`]). These three (plus the stale-flip
+    // special case in [`Self::cancel_stale_tasks`]) are called from the
+    // GUI's live-session start/stop path, **not** the task queue: per
+    // ADR-018 the queue owns `status` transitions for queue-executed tasks,
+    // but a live session never enters the queue, so this family is the
+    // row's only writer for its whole lifetime.
+
+    /// Inserts a new live-recording session row: `Source::LiveRecording`,
+    /// `Status::InProgress`, `time_queued = now`, `file`/`url` both `NULL`
+    /// (a live session has neither — its audio is never a task input file),
+    /// and `kind = "live_recording"` (the stale-flip special case in
+    /// [`Self::cancel_stale_tasks`] keys off this column). `options_json`
+    /// holds the full persisted [`TaskSpec`] — `options` cloned verbatim,
+    /// `input` a never-read-back placeholder
+    /// ([`live_session_input_placeholder`]), `output` default — so
+    /// [`Self::load_task_spec`] round-trips a live row exactly like a file
+    /// row's.
+    ///
+    /// `name` is stored **verbatim**: this method does no formatting of its
+    /// own. The spec's naming rule (`"Live recording <%d-%b-%Y %H-%M-%S>"`)
+    /// is the GUI session-start path's responsibility.
+    pub fn insert_live_session(
+        &self,
+        name: &str,
+        options: &TranscriptionOptions,
+    ) -> Result<TranscriptionId, StoreError> {
+        let id = TranscriptionId::new();
+        let now = now_iso();
+        let spec = TaskSpec {
+            input: live_session_input_placeholder(),
+            options: options.clone(),
+            output: OutputSpec::default(),
+        };
+        let options_json = serde_json::to_string(&spec).map_err(|err| StoreError::Query {
+            detail: format!("serializing live session options for {id}: {err}"),
+        })?;
+        let language = options.language.map(|lang| lang.code().to_string());
+        let model_type = if options.model.hf_repo.is_some() {
+            "Hugging Face"
+        } else {
+            "Whisper.cpp"
+        };
+
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO transcription (
+                id, file, url, language, model_type, source, status, task,
+                time_queued, whisper_model_size, hugging_face_model_id,
+                word_level_timings, extract_speech, name, options_json, kind
+            ) VALUES (
+                ?1, NULL, NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+            )",
+            params![
+                id.to_string(),
+                language,
+                model_type,
+                Source::LiveRecording.as_str(),
+                Status::InProgress.as_str(),
+                options.task.as_str(),
+                now,
+                options.model.size.as_str(),
+                options.model.hf_repo,
+                options.word_timestamps,
+                // No `TranscriptionOptions` field carries this (see
+                // `create_task`'s identical comment) — always false.
+                false,
+                name,
+                options_json,
+                Source::LiveRecording.as_str(),
+            ],
+        )
+        .map_err(query_error)?;
+        Ok(id)
+    }
+
+    /// Appends one segment row for a live session — the stream-segments
+    /// half of Q-10 ✚: called once per accepted utterance while the session
+    /// runs, so a killed process loses at most the in-flight chunk.
+    /// `translation` is always empty (live translation is M6, F-063).
+    ///
+    /// Errs if `id` doesn't exist, or if the row is already
+    /// [`Status::Completed`] ([`Self::complete_live_session`] already ran):
+    /// a correctly-behaving session never appends after completing, so this
+    /// is treated as a programming error rather than silently ignored or
+    /// silently accepted, per the pinned behavior in the M5 Task 7 brief.
+    pub fn append_live_segment(
+        &self,
+        id: TranscriptionId,
+        start: Millis,
+        end: Millis,
+        text: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.lock()?;
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM transcription WHERE id = ?1",
+                params![id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(query_error)?;
+        let Some(status) = status else {
+            return Err(StoreError::Query {
+                detail: format!("append_live_segment: no session with id {id}"),
+            });
+        };
+        if status == Status::Completed.as_str() {
+            return Err(StoreError::Query {
+                detail: format!(
+                    "append_live_segment: session {id} is already completed \
+                     (status={status}) — a live session must not append a \
+                     segment after complete_live_session has run"
+                ),
+            });
+        }
+
+        conn.execute(
+            "INSERT INTO transcription_segment \
+             (start_time, end_time, text, translation, transcription_id) \
+             VALUES (?1, ?2, ?3, '', ?4)",
+            params![start.0, end.0, text, id.to_string()],
+        )
+        .map_err(query_error)?;
+        Ok(())
+    }
+
+    /// Marks a live session `Completed` (+ `time_ended = now`) — the
+    /// complete-at-stop half of Q-10 ✚. Once this returns, the row opens in
+    /// the M4 viewer via every existing open path (F-003/F-004 gates already
+    /// admit `Completed`), and any further [`Self::append_live_segment`]
+    /// call for `id` errs (see its doc comment).
+    pub fn complete_live_session(&self, id: TranscriptionId) -> Result<(), StoreError> {
+        let now = now_iso();
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE transcription SET status = ?1, time_ended = ?2 WHERE id = ?3",
+            params![Status::Completed.as_str(), now, id.to_string()],
+        )
+        .map_err(query_error)?;
+        Ok(())
     }
 }
 
@@ -2319,6 +2509,243 @@ mod tests {
         assert_eq!(
             store.last_export_folder(id).expect("read after set"),
             Some(PathBuf::from("/exports/out"))
+        );
+    }
+
+    // -- Task 7 (M5): live-session persistence + stale-flip (Q-10, F-060) --
+
+    fn sample_live_options() -> TranscriptionOptions {
+        TranscriptionOptions {
+            language: Language::parse("en"),
+            task: TaskKind::Transcribe,
+            model: ModelSpec {
+                size: ModelSize::Small,
+                hf_repo: None,
+            },
+            word_timestamps: false,
+            initial_prompt: "hello there".to_string(),
+            temperature: DEFAULT_TEMPERATURE.to_vec(),
+        }
+    }
+
+    #[test]
+    fn insert_live_session_fills_row_per_contract_and_name_verbatim() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let options = sample_live_options();
+        let name = "Live recording 23-Jul-2026 10-00-00";
+
+        let id = store
+            .insert_live_session(name, &options)
+            .expect("insert live session");
+
+        let row = fetch_full_row(&store, &id);
+        assert_eq!(row.status.as_deref(), Some("in_progress"));
+        assert_eq!(row.source.as_deref(), Some("live_recording"));
+        assert_eq!(row.kind, "live_recording");
+        assert_eq!(row.file, None);
+        assert_eq!(row.url, None);
+        assert_eq!(row.name.as_deref(), Some(name));
+        assert!(!row.time_queued.is_empty());
+        assert_eq!(row.time_started, None);
+        assert_eq!(row.time_ended, None);
+        assert_eq!(row.progress, 0.0);
+
+        let task_row = store.get_task(&id).expect("get_task").expect("present");
+        assert_eq!(task_row.status, Status::InProgress);
+        assert_eq!(task_row.source, Some(Source::LiveRecording));
+        assert_eq!(task_row.name.as_deref(), Some(name));
+        assert_eq!(task_row.file, None);
+        assert_eq!(task_row.url, None);
+    }
+
+    #[test]
+    fn insert_live_session_options_json_survives_load_task_spec() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut options = sample_live_options();
+        options.language = Language::parse("fr");
+        options.task = TaskKind::Translate;
+        options.model.size = ModelSize::Medium;
+
+        let id = store
+            .insert_live_session("Live recording 23-Jul-2026 10-00-00", &options)
+            .expect("insert");
+
+        let loaded = store.load_task_spec(&id).expect("load").expect("present");
+        assert_eq!(loaded.options, options);
+    }
+
+    #[test]
+    fn append_live_segment_appends_ordered_and_viewer_shaped() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = store
+            .insert_live_session("Live recording", &sample_live_options())
+            .expect("insert");
+
+        store
+            .append_live_segment(id, Millis(0), Millis(1000), "hello")
+            .expect("append 1");
+        store
+            .append_live_segment(id, Millis(1000), Millis(2500), "world")
+            .expect("append 2");
+
+        let rows = store.get_segment_rows(id).expect("get_segment_rows");
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows[0].id < rows[1].id,
+            "segments come back in append order"
+        );
+        assert_eq!(rows[0].start, Millis(0));
+        assert_eq!(rows[0].end, Millis(1000));
+        assert_eq!(rows[0].text, "hello");
+        assert_eq!(rows[0].translation, "");
+        assert_eq!(rows[1].start, Millis(1000));
+        assert_eq!(rows[1].end, Millis(2500));
+        assert_eq!(rows[1].text, "world");
+        assert_eq!(rows[1].translation, "");
+    }
+
+    #[test]
+    fn append_live_segment_missing_id_errors() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let missing = TranscriptionId::new();
+
+        let err = store
+            .append_live_segment(missing, Millis(0), Millis(100), "x")
+            .expect_err("missing id must error");
+        assert!(matches!(err, StoreError::Query { .. }));
+    }
+
+    #[test]
+    fn complete_live_session_marks_completed_with_time_ended() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = store
+            .insert_live_session("Live recording", &sample_live_options())
+            .expect("insert");
+
+        store.complete_live_session(id).expect("complete");
+
+        let row = store.get_task(&id).expect("get").expect("present");
+        assert_eq!(row.status, Status::Completed);
+        assert!(row.time_ended.is_some());
+    }
+
+    #[test]
+    fn append_live_segment_after_complete_errors_actionably() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = store
+            .insert_live_session("Live recording", &sample_live_options())
+            .expect("insert");
+        store.complete_live_session(id).expect("complete");
+
+        let err = store
+            .append_live_segment(id, Millis(0), Millis(1000), "too late")
+            .expect_err("append after complete must error");
+        assert!(matches!(err, StoreError::Query { .. }));
+
+        let message = err.to_string();
+        assert!(
+            message.contains(&id.to_string()),
+            "message should name the session id: {message}"
+        );
+        assert!(
+            message.to_lowercase().contains("complet"),
+            "message should name the completed status: {message}"
+        );
+
+        assert!(
+            store.get_segments(&id).expect("segments").is_empty(),
+            "the rejected append must not have inserted a row"
+        );
+    }
+
+    #[test]
+    fn cancel_stale_tasks_flips_live_in_progress_to_completed_others_unchanged() {
+        let store = SqliteStore::open_in_memory().expect("open");
+
+        // Stale live in-progress row: must flip to Completed, not Canceled.
+        let live_id = store
+            .insert_live_session("Live recording stale", &sample_live_options())
+            .expect("insert live");
+
+        // Stale file in-progress row: today's exact behavior (Canceled).
+        let file_in_progress_id = TranscriptionId::new();
+        store
+            .create_task(
+                &file_in_progress_id,
+                &sample_task_spec(),
+                Source::FileImport,
+            )
+            .expect("create file in-progress");
+        store.mark_started(&file_in_progress_id).expect("started");
+
+        // Queued row: unaffected by the live special case, still Canceled.
+        let queued_id = TranscriptionId::new();
+        store
+            .create_task(&queued_id, &sample_task_spec(), Source::FileImport)
+            .expect("create queued");
+
+        // Terminal rows (file and live) must be left untouched either way.
+        let completed_id = TranscriptionId::new();
+        store
+            .create_task(&completed_id, &sample_task_spec(), Source::FileImport)
+            .expect("create completed");
+        store.mark_completed(&completed_id, &[]).expect("complete");
+
+        let live_completed_id = store
+            .insert_live_session("Live recording already done", &sample_live_options())
+            .expect("insert live completed");
+        store
+            .complete_live_session(live_completed_id)
+            .expect("complete live");
+        let live_completed_time_ended_before = store
+            .get_task(&live_completed_id)
+            .expect("get")
+            .expect("present")
+            .time_ended;
+
+        let flipped = store.cancel_stale_tasks().expect("cancel_stale");
+        // live_id (in_progress -> completed) + file_in_progress_id and
+        // queued_id (both -> canceled) = 3; the two terminal rows are
+        // untouched and so not counted.
+        assert_eq!(flipped, 3);
+
+        let live_row = store.get_task(&live_id).expect("get").expect("present");
+        assert_eq!(live_row.status, Status::Completed);
+        assert!(live_row.time_ended.is_some());
+
+        assert_eq!(
+            store
+                .get_task(&file_in_progress_id)
+                .expect("get")
+                .expect("present")
+                .status,
+            Status::Canceled
+        );
+        assert_eq!(
+            store
+                .get_task(&queued_id)
+                .expect("get")
+                .expect("present")
+                .status,
+            Status::Canceled
+        );
+        assert_eq!(
+            store
+                .get_task(&completed_id)
+                .expect("get")
+                .expect("present")
+                .status,
+            Status::Completed
+        );
+
+        let live_completed_row = store
+            .get_task(&live_completed_id)
+            .expect("get")
+            .expect("present");
+        assert_eq!(live_completed_row.status, Status::Completed);
+        assert_eq!(
+            live_completed_row.time_ended,
+            live_completed_time_ended_before
         );
     }
 }
