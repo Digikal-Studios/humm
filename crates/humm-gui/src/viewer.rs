@@ -560,6 +560,18 @@ pub struct ViewerVm {
     /// The env-gated A/V drift log (`HUMM_SMOKE_AV_DRIFT_LOG`), opened once the
     /// video stream is live and the env var is set.
     drift_log: Option<DriftLog>,
+    /// Test-only (`HUMM_SMOKE_OPEN_VIEWER`, `app.rs::SmokeHooks`): when set by
+    /// the smoke hook at open, the viewer auto-starts playback once the player
+    /// is [`PlayerState::Ready`] and requests a normal window close once
+    /// playback reaches end-of-media — the deferred-viewport analogue of
+    /// `HUMM_SMOKE_OPEN_WINDOWS`, driving the windowed A/V-drift acceptance run
+    /// (Task 14) without OS input injection. Never set on any production path
+    /// (both constructors default it `false`).
+    pub smoke_autoplay: bool,
+    /// One-shot guard for [`Self::smoke_autoplay`]'s play-once: `true` after
+    /// playback has been started, so the auto-close end-of-media check runs
+    /// only after playback actually began (never on the initial `pos == 0`).
+    smoke_play_started: bool,
     /// The single selected editor-table row, if any (Buzz single-row
     /// selection). The nudge shortcuts (⌘←/⌘→/⌘⇧←/⌘⇧→) act on this row.
     pub selected: Option<usize>,
@@ -651,6 +663,8 @@ impl ViewerVm {
             player_rx: None,
             decode_cancel: CancelToken::new(),
             drift_log: None,
+            smoke_autoplay: false,
+            smoke_play_started: false,
             selected: None,
             editing: None,
             saved_flash: None,
@@ -659,6 +673,70 @@ impl ViewerVm {
             export_flash: None,
             export_error: false,
         })
+    }
+
+    /// Builds a [`ViewerVm`] directly from a pre-built segment-row list, with
+    /// every UI toggle at its default and the player left in
+    /// [`PlayerState::Loading`] (no background decode is spawned — nothing
+    /// calls [`Self::ensure_player_started`]), bypassing [`Self::open`]'s
+    /// store round-trip entirely.
+    ///
+    /// **Bench-only.** Not a production constructor: it exists so
+    /// `benches/viewer_scroll.rs` can synthesize a 100 000-row editor-table
+    /// view-model cheaply (every [`SegmentRow`] field is already `pub`, so
+    /// the bench builds them directly) without paying for a 100 000-row
+    /// `replace_segments` + `get_segment_rows` store round-trip just to
+    /// populate bench data, and without duplicating this struct's private
+    /// fields in the bench target. `#[doc(hidden)]` and the `_bench` name
+    /// keep it out of the crate's normal public-API surface and obvious at
+    /// every call site that it isn't one. Mirrors
+    /// [`crate::viewmodel::TasksVm::for_bench`] (M3 `table_scroll` precedent).
+    #[doc(hidden)]
+    pub fn for_bench(rows: Vec<SegmentRow>) -> Self {
+        let has_translations = rows.iter().any(|row| !row.translation.trim().is_empty());
+        ViewerVm {
+            id: TranscriptionId::new(),
+            title: "bench".to_string(),
+            rows,
+            has_translations,
+            mode: ViewMode::Timestamps,
+            text_body: String::new(),
+            close_requested: false,
+            focus_requested: false,
+            resize_requested: false,
+            initial_geometry: None,
+            observed_geometry: None,
+            playback_controls_visible: false,
+            find_widget_visible: false,
+            segment_looping_enabled: false,
+            follow_audio_enabled: false,
+            file: None,
+            player: PlayerState::Loading,
+            video: None,
+            playback_rate: 1.0,
+            speed_text: "1.00x".to_string(),
+            loop_range: None,
+            audio_splitter_fraction: 0.95,
+            video_splitter_fraction: 0.8,
+            current_segment_text: String::new(),
+            segment_click: None,
+            playback_scroll: None,
+            was_playing: false,
+            last_synced_pos: None,
+            player_started: false,
+            player_rx: None,
+            decode_cancel: CancelToken::new(),
+            drift_log: None,
+            smoke_autoplay: false,
+            smoke_play_started: false,
+            selected: None,
+            editing: None,
+            saved_flash: None,
+            unsaved: false,
+            search: SearchState::new(false),
+            export_flash: None,
+            export_error: false,
+        }
     }
 
     /// Switches the active view mode and recomputes [`Self::text_body`] for the
@@ -1062,6 +1140,38 @@ impl ViewerVm {
     pub fn toggle_play(&mut self) {
         if let PlayerState::Ready(player) = &self.player {
             player.toggle();
+        }
+    }
+
+    /// Test-only autoplay/auto-close driver for the `HUMM_SMOKE_OPEN_VIEWER`
+    /// windowed A/V-drift acceptance run (Task 14). A no-op unless
+    /// [`Self::smoke_autoplay`] was armed by the smoke hook at open.
+    ///
+    /// Called once per rendered frame (from [`crate::views::viewer::viewer_ui`],
+    /// before the mode dispatch so it runs regardless of segment count/mode):
+    /// once the player is [`PlayerState::Ready`] it starts playback exactly as
+    /// a ⌘P press would (`Player::play`); once the position reaches
+    /// end-of-media (the player pins its position at `duration` and stops on
+    /// EOM) it sets [`Self::close_requested`], the same signal the OS window's
+    /// close button raises — the parent frame harvests it and drops the VM,
+    /// flushing the drift log via its `Drop`. Rides playback's own 16 ms
+    /// repaint cadence, so no extra repaint plumbing is needed here.
+    pub fn drive_smoke_playback(&mut self) {
+        if !self.smoke_autoplay {
+            return;
+        }
+        let (should_start, reached_end) = match &self.player {
+            PlayerState::Ready(_) if !self.smoke_play_started => (true, false),
+            PlayerState::Ready(player) => (false, player.position() >= player.duration()),
+            _ => return,
+        };
+        if should_start {
+            if let PlayerState::Ready(player) = &self.player {
+                player.play();
+            }
+            self.smoke_play_started = true;
+        } else if reached_end {
+            self.close_requested = true;
         }
     }
 

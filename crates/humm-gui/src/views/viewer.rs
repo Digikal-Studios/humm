@@ -68,6 +68,11 @@ pub fn viewer_ui(
     // failure). Both are cheap no-ops once the player is Ready/Failed.
     vm.ensure_player_started(deps, ui.ctx());
     vm.poll_player_load(deps);
+    // Test-only A/V-drift acceptance driver (`HUMM_SMOKE_OPEN_VIEWER`): starts
+    // playback once Ready and closes the window at end-of-media. A no-op on
+    // every production path (`smoke_autoplay` defaults false). Runs before the
+    // mode dispatch / empty-rows return so it fires regardless of either.
+    vm.drive_smoke_playback();
 
     consume_mode_shortcuts(ui, vm, shortcuts);
     viewer_search::consume_shortcuts(ui, vm, shortcuts);

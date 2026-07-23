@@ -10,7 +10,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use humm_core::domain::{Segment, Status, TranscriptionId};
+use humm_core::boundary::TaskStore;
+use humm_core::domain::{Segment, Source, Status, TranscriptionId};
 use humm_core::queue::{QueueHandle, TaskEvent, TaskEventKind};
 use humm_core::settings::{FileTranscriberSettings, GuiSettings, ViewerGeometry};
 use humm_media::{FfmpegDecoder, FfmpegVideoStreamer, FfprobeProber};
@@ -157,16 +158,17 @@ pub struct HummApp {
     /// from disk) each time it's opened; `None` while closed.
     preferences_state: Option<PreferencesState>,
     /// Environment-gated smoke-test hooks (`HUMM_SMOKE_OPEN_WINDOWS`/
-    /// `HUMM_SMOKE_AUTO_CLOSE_FRAMES`, see [`SmokeHooks`]) — read once from
-    /// real process env in [`Self::new`] (never in [`Self::new_for_test`],
-    /// which always passes [`SmokeHooks::default`] — final-review fix 8, so
-    /// a kittest harness can never pick one up by accident) and threaded
-    /// into [`Self::build`], never re-read per frame. Exist solely so the M3
-    /// `gui-manual` multi-window smoke (`docs/gui-manual/M3.md` item 35) can
-    /// run under a controller that cannot inject OS-level input
-    /// (Accessibility permissions unavailable in the automation
-    /// environment); not a user-facing surface — deliberately absent from
-    /// `docs/HUMM_SURFACE.md`.
+    /// `HUMM_SMOKE_AUTO_CLOSE_FRAMES`/`HUMM_SMOKE_OPEN_VIEWER`, see
+    /// [`SmokeHooks`]) — read once from real process env in [`Self::new`]
+    /// (never in [`Self::new_for_test`], which always passes
+    /// [`SmokeHooks::default`] — final-review fix 8, so a kittest harness can
+    /// never pick one up by accident) and threaded into [`Self::build`], never
+    /// re-read per frame. Exist solely so the `gui-manual` windowed smokes
+    /// (`docs/gui-manual/M3.md` item 35's multi-window smoke;
+    /// `docs/gui-manual/M4.md`'s A/V-drift run) can run under a controller that
+    /// cannot inject OS-level input (Accessibility permissions unavailable in
+    /// the automation environment); test-only, unstable, documented as such in
+    /// `docs/HUMM_SURFACE.md` §5.1.
     smoke_hooks: SmokeHooks,
     /// One-shot guard for `smoke_hooks.open_windows`'s effect — applies on
     /// the first `eframe::App::ui` call only, same once-guard shape as
@@ -176,6 +178,13 @@ pub struct HummApp {
     /// `smoke_hooks.auto_close_frames` is `Some`, to know when that many
     /// frames have elapsed and shutdown should be requested.
     smoke_frame_count: u32,
+    /// One-shot guard for `smoke_hooks.open_viewer`'s effect — seeds+opens the
+    /// smoke viewer on the first `eframe::App::ui` call only.
+    smoke_viewer_opened: bool,
+    /// The transcript id the `HUMM_SMOKE_OPEN_VIEWER` hook seeded and opened;
+    /// `Some` once armed, used to detect when its window has auto-closed at
+    /// end-of-media so the app itself can then shut down cleanly.
+    smoke_viewer_id: Option<TranscriptionId>,
 }
 
 impl HummApp {
@@ -201,6 +210,7 @@ impl HummApp {
             std::env::var("HUMM_SMOKE_AUTO_CLOSE_FRAMES")
                 .ok()
                 .as_deref(),
+            std::env::var("HUMM_SMOKE_OPEN_VIEWER").ok().as_deref(),
         );
         Self::build(services, Some(event_queue), argv_import, smoke_hooks)
     }
@@ -326,6 +336,8 @@ impl HummApp {
             smoke_hooks,
             smoke_windows_opened: false,
             smoke_frame_count: 0,
+            smoke_viewer_opened: false,
+            smoke_viewer_id: None,
         }
     }
 
@@ -881,6 +893,67 @@ impl HummApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else {
             ctx.request_repaint();
+        }
+    }
+
+    /// Applies `smoke_hooks.open_viewer`'s effect on the first `eframe::App::ui`
+    /// call only (the once-guard shape of [`Self::apply_smoke_open_windows_once`]):
+    /// seeds a **completed** transcript row for the configured media path into
+    /// the real store (`create_task` + `mark_completed`, a handful of
+    /// placeholder segments so the Timestamps table + video pane render — the
+    /// transcript text is irrelevant to an A/V-sync measurement), opens its
+    /// viewer through the exact same [`Self::open_viewer`] path a table
+    /// double-click takes, and arms [`ViewerVm::smoke_autoplay`] so the viewer
+    /// self-drives playback + auto-close (the deferred viewport owns its own
+    /// repaint cadence). Test-only; a no-op whenever the hook is unset.
+    fn apply_smoke_open_viewer_once(&mut self, now: Instant) {
+        if self.smoke_viewer_opened {
+            return;
+        }
+        self.smoke_viewer_opened = true;
+        let Some(path) = self.smoke_hooks.open_viewer.clone() else {
+            return;
+        };
+        let id = TranscriptionId::new();
+        let spec = smoke_viewer_spec(&path);
+        let seeded = self
+            .services
+            .store
+            .create_task(&id, &spec, Source::FileImport)
+            .and_then(|()| {
+                self.services
+                    .store
+                    .mark_completed(&id, &smoke_viewer_segments())
+            });
+        if let Err(err) = seeded {
+            log::warn!("HUMM_SMOKE_OPEN_VIEWER: could not seed transcript for {path:?}: {err}");
+            return;
+        }
+        self.open_viewer(id, now);
+        if let Some(vm_arc) = self.viewers.get(&id) {
+            vm_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .smoke_autoplay = true;
+            self.smoke_viewer_id = Some(id);
+            log::info!("HUMM_SMOKE_OPEN_VIEWER: opened autoplay viewer {id} for {path:?}");
+        }
+    }
+
+    /// Keeps the root frame advancing while the `HUMM_SMOKE_OPEN_VIEWER` viewer
+    /// is open (deferred viewports repaint on their own schedule, so the root
+    /// would otherwise go idle and never harvest the child's end-of-media
+    /// `close_requested`), and — once that window has auto-closed — requests a
+    /// normal app shutdown so the process exits cleanly with the drift log
+    /// flushed (`ViewerVm`'s `Drop`). A no-op whenever the hook is unset.
+    fn apply_smoke_viewer_tick(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.smoke_viewer_id else {
+            return;
+        };
+        if self.viewers.contains_key(&id) {
+            ctx.request_repaint();
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
 
@@ -1683,32 +1756,76 @@ fn resizer_viewport_builder(title: &str) -> egui::ViewportBuilder {
 
 /// Environment-gated smoke-test hooks (see the `smoke_hooks` field doc on
 /// [`HummApp`]): parsed once, at construction, from
-/// `HUMM_SMOKE_OPEN_WINDOWS`/`HUMM_SMOKE_AUTO_CLOSE_FRAMES`. Exist solely so
-/// the M3 `gui-manual` multi-window smoke (`docs/gui-manual/M3.md` item 35)
-/// can run without OS input injection — never a user-facing surface, never
-/// documented in `docs/HUMM_SURFACE.md`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// `HUMM_SMOKE_OPEN_WINDOWS`/`HUMM_SMOKE_AUTO_CLOSE_FRAMES`/
+/// `HUMM_SMOKE_OPEN_VIEWER`. Exist solely so the `gui-manual` windowed smokes
+/// (`docs/gui-manual/M3.md` item 35, `docs/gui-manual/M4.md`'s A/V-drift run)
+/// can run without OS input injection — test-only, unstable, documented as
+/// such in `docs/HUMM_SURFACE.md` §5.1.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct SmokeHooks {
     /// `HUMM_SMOKE_OPEN_WINDOWS` was set to any non-empty value.
     open_windows: bool,
     /// `HUMM_SMOKE_AUTO_CLOSE_FRAMES` parsed as a positive `u32`; `None`
     /// when the var is unset, empty, zero, or fails to parse as a `u32`.
     auto_close_frames: Option<u32>,
+    /// `HUMM_SMOKE_OPEN_VIEWER` = a media path: on the first frame, seed a
+    /// completed transcript row for it, open its viewer, arm autoplay, and
+    /// close the app once playback finishes (the A/V-drift acceptance run,
+    /// F-083). `None` when unset or empty.
+    open_viewer: Option<PathBuf>,
 }
 
-/// Pure parse of the two smoke-hook env values into a [`SmokeHooks`]. Takes
+/// Pure parse of the three smoke-hook env values into a [`SmokeHooks`]. Takes
 /// `Option<&str>` (the already-`std::env::var(..).ok()`'d value) rather than
 /// reading the environment itself, so it's directly unit-testable without
 /// mutating real process-global env state.
-fn smoke_hooks_from_env(open: Option<&str>, close: Option<&str>) -> SmokeHooks {
+fn smoke_hooks_from_env(
+    open: Option<&str>,
+    close: Option<&str>,
+    open_viewer: Option<&str>,
+) -> SmokeHooks {
     let open_windows = open.is_some_and(|value| !value.is_empty());
     let auto_close_frames = close
         .and_then(|value| value.parse::<u32>().ok())
         .filter(|&frames| frames > 0);
+    let open_viewer = open_viewer
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
     SmokeHooks {
         open_windows,
         auto_close_frames,
+        open_viewer,
     }
+}
+
+/// Builds a minimal file-import [`humm_core::domain::TaskSpec`] for the
+/// `HUMM_SMOKE_OPEN_VIEWER` media path — default options, no export formats;
+/// only the input path is load-bearing (the viewer decodes it for playback).
+/// Test-only (see [`HummApp::apply_smoke_open_viewer_once`]).
+fn smoke_viewer_spec(path: &Path) -> humm_core::domain::TaskSpec {
+    humm_core::domain::TaskSpec {
+        input: humm_core::domain::Input::Path(path.to_path_buf()),
+        options: humm_core::domain::TranscriptionOptions::default(),
+        output: humm_core::domain::OutputSpec::default(),
+    }
+}
+
+/// Placeholder segments spanning ~10 min so the `HUMM_SMOKE_OPEN_VIEWER` viewer
+/// renders a non-empty editor table (and, for video, the video pane) in
+/// Timestamps mode — the A/V-drift acceptance run measures playback sync, not
+/// transcript content, so the exact text/timings are irrelevant. Test-only.
+fn smoke_viewer_segments() -> Vec<Segment> {
+    (0..20)
+        .map(|i| {
+            let start = i * 30_000;
+            Segment {
+                start: humm_core::domain::Millis(start),
+                end: humm_core::domain::Millis(start + 29_000),
+                text: format!("smoke segment {i}"),
+                translation: String::new(),
+            }
+        })
+        .collect()
 }
 
 impl eframe::App for HummApp {
@@ -1726,7 +1843,9 @@ impl eframe::App for HummApp {
 
         self.fire_telemetry_once();
         self.apply_smoke_open_windows_once();
+        self.apply_smoke_open_viewer_once(Instant::now());
         self.apply_smoke_auto_close(ui.ctx());
+        self.apply_smoke_viewer_tick(ui.ctx());
         self.drain_pending_argv_import();
         self.drain_update_notices();
         self.drain_app_events();
@@ -1858,24 +1977,24 @@ mod tests {
 
     #[test]
     fn smoke_hooks_from_env_open_nonempty_sets_open_windows_true() {
-        assert!(smoke_hooks_from_env(Some("1"), None).open_windows);
-        assert!(smoke_hooks_from_env(Some("anything"), None).open_windows);
+        assert!(smoke_hooks_from_env(Some("1"), None, None).open_windows);
+        assert!(smoke_hooks_from_env(Some("anything"), None, None).open_windows);
     }
 
     #[test]
     fn smoke_hooks_from_env_open_empty_or_absent_leaves_open_windows_false() {
-        assert!(!smoke_hooks_from_env(None, None).open_windows);
-        assert!(!smoke_hooks_from_env(Some(""), None).open_windows);
+        assert!(!smoke_hooks_from_env(None, None, None).open_windows);
+        assert!(!smoke_hooks_from_env(Some(""), None, None).open_windows);
     }
 
     #[test]
     fn smoke_hooks_from_env_close_positive_integer_parses_to_some() {
         assert_eq!(
-            smoke_hooks_from_env(None, Some("5")).auto_close_frames,
+            smoke_hooks_from_env(None, Some("5"), None).auto_close_frames,
             Some(5)
         );
         assert_eq!(
-            smoke_hooks_from_env(None, Some("1")).auto_close_frames,
+            smoke_hooks_from_env(None, Some("1"), None).auto_close_frames,
             Some(1)
         );
     }
@@ -1883,7 +2002,7 @@ mod tests {
     #[test]
     fn smoke_hooks_from_env_close_zero_is_none() {
         assert_eq!(
-            smoke_hooks_from_env(None, Some("0")).auto_close_frames,
+            smoke_hooks_from_env(None, Some("0"), None).auto_close_frames,
             None
         );
     }
@@ -1891,15 +2010,31 @@ mod tests {
     #[test]
     fn smoke_hooks_from_env_close_garbage_is_none() {
         assert_eq!(
-            smoke_hooks_from_env(None, Some("not-a-number")).auto_close_frames,
+            smoke_hooks_from_env(None, Some("not-a-number"), None).auto_close_frames,
             None
         );
     }
 
     #[test]
     fn smoke_hooks_from_env_close_absent_or_empty_is_none() {
-        assert_eq!(smoke_hooks_from_env(None, None).auto_close_frames, None);
-        assert_eq!(smoke_hooks_from_env(None, Some("")).auto_close_frames, None);
+        assert_eq!(
+            smoke_hooks_from_env(None, None, None).auto_close_frames,
+            None
+        );
+        assert_eq!(
+            smoke_hooks_from_env(None, Some(""), None).auto_close_frames,
+            None
+        );
+    }
+
+    #[test]
+    fn smoke_hooks_from_env_open_viewer_nonempty_is_some_path_empty_is_none() {
+        assert_eq!(
+            smoke_hooks_from_env(None, None, Some("/tmp/av-drift.mp4")).open_viewer,
+            Some(PathBuf::from("/tmp/av-drift.mp4"))
+        );
+        assert_eq!(smoke_hooks_from_env(None, None, Some("")).open_viewer, None);
+        assert_eq!(smoke_hooks_from_env(None, None, None).open_viewer, None);
     }
 }
 
