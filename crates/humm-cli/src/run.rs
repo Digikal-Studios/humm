@@ -41,8 +41,8 @@ use humm_core::boundary::{
 };
 use humm_core::cancel::CancelToken;
 use humm_core::domain::{
-    DEFAULT_TEMPERATURE, Input, Millis, ModelSize, ModelSpec, OutputFormat, OutputSpec, Source,
-    TaskSpec, TranscriptionId, TranscriptionOptions,
+    DEFAULT_TEMPERATURE, Input, ModelSize, ModelSpec, OutputFormat, OutputSpec, Source, TaskSpec,
+    TranscriptionId, TranscriptionOptions,
 };
 use humm_core::env::{threads_from_env, use_gpu_from_env, vad_disabled_from_env};
 use humm_core::error::CoreError;
@@ -200,9 +200,7 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         formats,
         directory: args.output_directory.clone(),
         file_name_template: None,
-        paragraph_split: paragraph_split_from_env(
-            std::env::var("HUMM_PARAGRAPH_SPLIT_TIME").ok().as_deref(),
-        ),
+        paragraph_split: humm_core::viewer::text_view::paragraph_split_from_env(),
     };
 
     let decoder: Arc<dyn AudioDecoder> = Arc::new(FfmpegDecoder::new());
@@ -899,17 +897,10 @@ fn run_fail(message: impl std::fmt::Display) -> ExitCode {
     ExitCode::from(1)
 }
 
-fn paragraph_split_from_env(value: Option<&str>) -> Millis {
-    value
-        .and_then(|v| v.parse::<i64>().ok())
-        .map(Millis)
-        .unwrap_or(Millis(2000))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use humm_core::domain::Segment;
+    use humm_core::domain::{Millis, Segment};
     use pretty_assertions::assert_eq;
 
     // -- JSON event serialization (Step 1) ------------------------------------
@@ -1170,17 +1161,6 @@ mod tests {
             args.model_type = model_type;
             assert!(validate_add_args(&args).is_none());
         }
-    }
-
-    #[test]
-    fn paragraph_split_from_env_defaults_to_2000() {
-        assert_eq!(paragraph_split_from_env(None), Millis(2000));
-        assert_eq!(paragraph_split_from_env(Some("bogus")), Millis(2000));
-    }
-
-    #[test]
-    fn paragraph_split_from_env_parses_override() {
-        assert_eq!(paragraph_split_from_env(Some("500")), Millis(500));
     }
 
     #[test]
