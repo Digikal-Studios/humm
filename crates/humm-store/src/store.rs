@@ -1069,10 +1069,11 @@ impl SqliteStore {
     // ([`Self::append_live_segment`]), complete-at-stop
     // ([`Self::complete_live_session`]). These three (plus the stale-flip
     // special case in [`Self::cancel_stale_tasks`]) are called from the
-    // GUI's live-session start/stop path, **not** the task queue: per
-    // ADR-018 the queue owns `status` transitions for queue-executed tasks,
-    // but a live session never enters the queue, so this family is the
-    // row's only writer for its whole lifetime.
+    // GUI's live-session start/stop path, **not** the task queue:
+    // `docs/design/ARCHITECTURE.md` §5 makes the queue's status transitions
+    // the only writers of `status` for queue-executed tasks, but a live
+    // session never enters the queue, so this family is the row's only
+    // writer for its whole lifetime instead.
 
     /// Inserts a new live-recording session row: `Source::LiveRecording`,
     /// `Status::InProgress`, `time_queued = now`, `file`/`url` both `NULL`
@@ -1151,6 +1152,17 @@ impl SqliteStore {
     /// a correctly-behaving session never appends after completing, so this
     /// is treated as a programming error rather than silently ignored or
     /// silently accepted, per the pinned behavior in the M5 Task 7 brief.
+    ///
+    /// The status check and the segment insert are race-free against a
+    /// concurrent call on another thread — not by a transaction, but because
+    /// `Self::lock` holds `SqliteStore`'s single `Mutex<Connection>` guard
+    /// across both statements for the whole method body; no other
+    /// `SqliteStore` method can run against this connection in between. This
+    /// invariant depends on `SqliteStore` staying one shared connection
+    /// behind one mutex — a future move to per-call connections or a
+    /// connection pool would need to re-establish atomicity here explicitly
+    /// (e.g. an actual `BEGIN`/`COMMIT` transaction) rather than relying on
+    /// the lock.
     pub fn append_live_segment(
         &self,
         id: TranscriptionId,
