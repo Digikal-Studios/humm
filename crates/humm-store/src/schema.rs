@@ -1,16 +1,26 @@
-//! Schema v1 DDL and the migration that applies it.
+//! Schema DDL and the migration that applies it.
 //!
 //! `transcription` and `transcription_segment` reproduce Buzz's
 //! `buzz/schema.sql` verbatim (column-for-column), so a future one-time
-//! `Buzz.sqlite` import (Q-6) can map rows directly. `options_json` and
-//! `kind` are humm's own additions (`docs/design/ARCHITECTURE.md` §5).
+//! `Buzz.sqlite` import (Q-6) can map rows directly. `options_json`, `kind`,
+//! and `last_export_folder` are humm's own additions
+//! (`docs/design/ARCHITECTURE.md` §5; `last_export_folder` per M4's
+//! transcript viewer, UX_SPEC J-6).
+
+use std::path::Path;
 
 use rusqlite::Connection;
 
 use humm_core::error::StoreError;
 
-/// The schema v1 DDL, applied once when `PRAGMA user_version` is `0`.
-const SCHEMA_V1: &str = "
+/// The current schema version this build understands. Bumped whenever
+/// [`migrate`] gains a new arm.
+const CURRENT_SCHEMA_VERSION: i64 = 2;
+
+/// The schema v2 DDL, applied once (in full) when `PRAGMA user_version` is
+/// `0` — i.e. a brand-new database skips straight to v2 rather than
+/// replaying the v1-then-ALTER path a v1 database takes in [`migrate`].
+const SCHEMA_V2: &str = "
 CREATE TABLE IF NOT EXISTS transcription (
     id TEXT PRIMARY KEY, error_message TEXT, export_formats TEXT, file TEXT,
     output_folder TEXT, progress DOUBLE PRECISION DEFAULT 0.0, language TEXT,
@@ -20,7 +30,8 @@ CREATE TABLE IF NOT EXISTS transcription (
     word_level_timings BOOLEAN DEFAULT FALSE, extract_speech BOOLEAN DEFAULT FALSE,
     name TEXT, notes TEXT,
     options_json TEXT,
-    kind TEXT NOT NULL DEFAULT 'file'
+    kind TEXT NOT NULL DEFAULT 'file',
+    last_export_folder TEXT
 );
 CREATE TABLE IF NOT EXISTS transcription_segment (
     id INTEGER PRIMARY KEY, end_time INT DEFAULT 0, start_time INT DEFAULT 0,
@@ -32,14 +43,16 @@ CREATE INDEX IF NOT EXISTS idx_transcription_id ON transcription_segment(transcr
 CREATE TABLE IF NOT EXISTS humm_meta (key TEXT PRIMARY KEY, value TEXT);
 ";
 
-/// Migrates `conn` to schema v1 if needed.
+/// Migrates `conn` (the database at `path`, used only to name it in an
+/// error) to [`CURRENT_SCHEMA_VERSION`] if needed.
 ///
-/// Reads `PRAGMA user_version`: `0` (a fresh database) executes
-/// [`SCHEMA_V1`] and sets the version to `1`; `1` (already migrated) is a
-/// no-op. Any other value is rejected as [`StoreError::Corrupt`] naming the
-/// version — a forward-compat guard against an older humm binary opening a
-/// database written by a newer one.
-pub(crate) fn migrate(conn: &Connection) -> Result<(), StoreError> {
+/// Reads `PRAGMA user_version`: `0` (a fresh database) executes the full
+/// [`SCHEMA_V2`] DDL and sets the version to `2`; `1` (a pre-M4 database)
+/// adds the `last_export_folder` column via `ALTER TABLE` and sets the
+/// version to `2`; `2` (already current) is a no-op. Any higher value is
+/// rejected as [`StoreError::SchemaTooNew`] — a forward-compat guard against
+/// an older humm binary opening a database written by a newer one.
+pub(crate) fn migrate(conn: &Connection, path: &Path) -> Result<(), StoreError> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(|err| StoreError::Query {
@@ -48,19 +61,31 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), StoreError> {
 
     match version {
         0 => {
-            conn.execute_batch(SCHEMA_V1)
+            conn.execute_batch(SCHEMA_V2)
                 .map_err(|err| StoreError::Query {
-                    detail: format!("applying schema v1: {err}"),
+                    detail: format!("applying schema v2: {err}"),
                 })?;
-            conn.execute_batch("PRAGMA user_version = 1;")
-                .map_err(|err| StoreError::Query {
-                    detail: format!("setting schema version: {err}"),
-                })?;
-            Ok(())
+            set_user_version(conn, CURRENT_SCHEMA_VERSION)
         }
-        1 => Ok(()),
-        other => Err(StoreError::Corrupt {
-            detail: format!("unsupported schema version {other} (expected 0 or 1)"),
+        1 => {
+            conn.execute_batch("ALTER TABLE transcription ADD COLUMN last_export_folder TEXT;")
+                .map_err(|err| StoreError::Query {
+                    detail: format!("migrating schema v1 to v2: {err}"),
+                })?;
+            set_user_version(conn, CURRENT_SCHEMA_VERSION)
+        }
+        2 => Ok(()),
+        other => Err(StoreError::SchemaTooNew {
+            found: other,
+            supported: CURRENT_SCHEMA_VERSION,
+            path: path.to_path_buf(),
         }),
     }
+}
+
+fn set_user_version(conn: &Connection, version: i64) -> Result<(), StoreError> {
+    conn.execute_batch(&format!("PRAGMA user_version = {version};"))
+        .map_err(|err| StoreError::Query {
+            detail: format!("setting schema version: {err}"),
+        })
 }

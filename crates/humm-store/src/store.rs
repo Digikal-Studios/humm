@@ -84,6 +84,26 @@ pub struct TaskRow {
     pub notes: Option<String>,
 }
 
+/// A row from the `transcription_segment` table, id included — the viewer
+/// (M4) edits/reorders individual segments by their row id, unlike
+/// [`SqliteStore::get_segments`]'s plain [`Segment`] list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SegmentRow {
+    /// The segment's `transcription_segment.id` (its SQLite row id) — the
+    /// handle [`SqliteStore::update_segment_times`],
+    /// [`SqliteStore::update_segment_text`], and
+    /// [`SqliteStore::update_segment_translation`] address a row by.
+    pub id: i64,
+    /// Start time of the segment.
+    pub start: Millis,
+    /// End time of the segment.
+    pub end: Millis,
+    /// Recognized text.
+    pub text: String,
+    /// Translated text (English); empty unless translation was requested.
+    pub translation: String,
+}
+
 /// The raw, unparsed column values behind a [`TaskRow`] — an intermediate
 /// step so column-fetch failures (`rusqlite::Error`) and domain-parsing
 /// failures (unrecognized status/id) map through their own error paths.
@@ -254,7 +274,7 @@ impl SqliteStore {
             path: path.to_path_buf(),
             detail: err.to_string(),
         })?;
-        Self::configure(conn)
+        Self::configure(conn, path)
     }
 
     /// Opens an in-memory database (tests only). Same pragmas/migration as
@@ -262,13 +282,16 @@ impl SqliteStore {
     /// databases — callers must not assert it there.
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory().map_err(query_error)?;
-        Self::configure(conn)
+        Self::configure(conn, Path::new(":memory:"))
     }
 
-    fn configure(conn: Connection) -> Result<Self, StoreError> {
+    /// `path` is used only to name the database in a
+    /// [`StoreError::SchemaTooNew`] error message — `:memory:` databases
+    /// pass a placeholder since they have no real path.
+    fn configure(conn: Connection, path: &Path) -> Result<Self, StoreError> {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
             .map_err(query_error)?;
-        migrate(&conn)?;
+        migrate(&conn, path)?;
         Ok(SqliteStore {
             conn: Mutex::new(conn),
         })
@@ -750,6 +773,251 @@ impl SqliteStore {
         .optional()
         .map_err(query_error)
     }
+
+    // -- M4 viewer support: segment rows, replace/copy, export folder ----
+
+    /// Fetches all segments for `id` as [`SegmentRow`]s (id included), in
+    /// ascending id order — the order they were inserted in, and the order
+    /// the viewer table displays them.
+    pub fn get_segment_rows(&self, id: TranscriptionId) -> Result<Vec<SegmentRow>, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, start_time, end_time, text, translation \
+                 FROM transcription_segment WHERE transcription_id = ?1 ORDER BY id ASC",
+            )
+            .map_err(query_error)?;
+        let rows = stmt
+            .query_map(params![id.to_string()], |row| {
+                Ok(SegmentRow {
+                    id: row.get(0)?,
+                    start: Millis(row.get(1)?),
+                    end: Millis(row.get(2)?),
+                    text: row.get(3)?,
+                    translation: row.get(4)?,
+                })
+            })
+            .map_err(query_error)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(query_error)
+    }
+
+    /// Updates one segment row's `start`/`end` times in place. `seg` is a
+    /// `transcription_segment.id` (see [`SegmentRow::id`]), not a
+    /// [`TranscriptionId`]. An unknown `seg` is a silent no-op (0 rows
+    /// affected) — the viewer only ever calls this with an id it just read
+    /// via [`Self::get_segment_rows`].
+    pub fn update_segment_times(
+        &self,
+        seg: i64,
+        start: Millis,
+        end: Millis,
+    ) -> Result<(), StoreError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE transcription_segment SET start_time = ?1, end_time = ?2 WHERE id = ?3",
+            params![start.0, end.0, seg],
+        )
+        .map_err(query_error)?;
+        Ok(())
+    }
+
+    /// Updates one segment row's `text` in place. See
+    /// [`Self::update_segment_times`] for the `seg` id contract.
+    pub fn update_segment_text(&self, seg: i64, text: &str) -> Result<(), StoreError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE transcription_segment SET text = ?1 WHERE id = ?2",
+            params![text, seg],
+        )
+        .map_err(query_error)?;
+        Ok(())
+    }
+
+    /// Updates one segment row's `translation` in place. See
+    /// [`Self::update_segment_times`] for the `seg` id contract.
+    pub fn update_segment_translation(
+        &self,
+        seg: i64,
+        translation: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE transcription_segment SET translation = ?1 WHERE id = ?2",
+            params![translation, seg],
+        )
+        .map_err(query_error)?;
+        Ok(())
+    }
+
+    /// Replaces every `transcription_segment` row for `id` with `segs`, in
+    /// one transaction (`DELETE` then re-`INSERT`): the resize/merge
+    /// in-place save path (F-086). Row ids are freshly issued (the old ids
+    /// are gone), and translations are dropped — Buzz parity, since resize/
+    /// merge output never carries translations.
+    pub fn replace_segments(
+        &self,
+        id: TranscriptionId,
+        segs: &[Segment],
+    ) -> Result<(), StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction().map_err(query_error)?;
+        tx.execute(
+            "DELETE FROM transcription_segment WHERE transcription_id = ?1",
+            params![id.to_string()],
+        )
+        .map_err(query_error)?;
+        for seg in segs {
+            tx.execute(
+                "INSERT INTO transcription_segment \
+                 (start_time, end_time, text, translation, transcription_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![seg.start.0, seg.end.0, seg.text, "", id.to_string()],
+            )
+            .map_err(query_error)?;
+        }
+        tx.commit().map_err(query_error)?;
+        Ok(())
+    }
+
+    /// Copies `id`'s `transcription` row to a freshly-minted id: the
+    /// resize/merge "create new transcript" save path (F-086). Ported from
+    /// Buzz's `TranscriptionDAO.copy_transcription`
+    /// (`transcription_dao.py:107-160`): the new row gets a new
+    /// [`TranscriptionId`], `time_queued = now`, `status = queued`, and
+    /// copies every other Buzz column (`file`/`url`/`language`/`model_type`/
+    /// `source`/`task`/`whisper_model_size`/`hugging_face_model_id`/
+    /// `word_level_timings`/`extract_speech`/`name`/`notes`/
+    /// `export_formats`/`output_folder`) plus humm's `options_json`/`kind`
+    /// verbatim. `error_message`/`time_started`/`time_ended` are left at
+    /// their column defaults (`NULL`) and `progress` at its default (`0.0`,
+    /// "untouched" — a caller writes it explicitly via
+    /// [`Self::update_progress_direct`] if it wants the row visible mid-run)
+    /// — Buzz's own `INSERT` omits those columns too, so they never carry
+    /// over from the source row. `last_export_folder` is reset to `NULL`
+    /// (it's per-row state a fresh copy shouldn't inherit). No segments are
+    /// copied — `transcription_segment` rows key off the old id and are
+    /// never touched by this method.
+    ///
+    /// Errs if `id` doesn't exist (Buzz raises `"Transcription not found"`).
+    pub fn copy_transcription(&self, id: TranscriptionId) -> Result<TranscriptionId, StoreError> {
+        let new_id = TranscriptionId::new();
+        let now = now_iso();
+        let conn = self.lock()?;
+        let affected = conn
+            .execute(
+                "INSERT INTO transcription (
+                    id, export_formats, file, output_folder, language, model_type,
+                    source, status, task, time_queued, url, whisper_model_size,
+                    hugging_face_model_id, word_level_timings, extract_speech,
+                    name, notes, options_json, kind, last_export_folder
+                )
+                SELECT
+                    ?1, export_formats, file, output_folder, language, model_type,
+                    source, ?2, task, ?3, url, whisper_model_size,
+                    hugging_face_model_id, word_level_timings, extract_speech,
+                    name, notes, options_json, kind, NULL
+                FROM transcription WHERE id = ?4",
+                params![
+                    new_id.to_string(),
+                    Status::Queued.as_str(),
+                    now,
+                    id.to_string(),
+                ],
+            )
+            .map_err(query_error)?;
+        if affected == 0 {
+            return Err(StoreError::Query {
+                detail: format!("copy_transcription: no task with id {id}"),
+            });
+        }
+        Ok(new_id)
+    }
+
+    /// Marks `id` completed (status + `time_ended = now`) and inserts
+    /// `segs` — the resize/merge "create new transcript" save path's second
+    /// half, run after [`Self::copy_transcription`] on the new id (F-086).
+    /// Translations are dropped on insert (Buzz parity, matching
+    /// [`Self::replace_segments`]). One transaction.
+    pub fn mark_replaced_completed(
+        &self,
+        id: TranscriptionId,
+        segs: &[Segment],
+    ) -> Result<(), StoreError> {
+        let now = now_iso();
+        let mut conn = self.lock()?;
+        let tx = conn.transaction().map_err(query_error)?;
+        tx.execute(
+            "UPDATE transcription SET status = ?1, time_ended = ?2 WHERE id = ?3",
+            params![Status::Completed.as_str(), now, id.to_string()],
+        )
+        .map_err(query_error)?;
+        for seg in segs {
+            tx.execute(
+                "INSERT INTO transcription_segment \
+                 (start_time, end_time, text, translation, transcription_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![seg.start.0, seg.end.0, seg.text, "", id.to_string()],
+            )
+            .map_err(query_error)?;
+        }
+        tx.commit().map_err(query_error)?;
+        Ok(())
+    }
+
+    /// Writes `fraction` (clamped `0.0..=1.0`) to `id`'s `progress` column
+    /// directly, without touching `status`. Distinct from
+    /// `TaskStore::update_progress` (which also flips status to
+    /// `in_progress`, a queue-owned transition per ADR-018): this is the
+    /// resize/merge worker's "make the row visible while it runs" path for
+    /// a row that never enters the queue.
+    pub fn update_progress_direct(
+        &self,
+        id: TranscriptionId,
+        fraction: f64,
+    ) -> Result<(), StoreError> {
+        let clamped = fraction.clamp(0.0, 1.0);
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE transcription SET progress = ?1 WHERE id = ?2",
+            params![clamped, id.to_string()],
+        )
+        .map_err(query_error)?;
+        Ok(())
+    }
+
+    /// Sets `id`'s last-used export folder (UX_SPEC J-6): the export menu's
+    /// default save directory next time this transcript is exported.
+    pub fn set_last_export_folder(
+        &self,
+        id: TranscriptionId,
+        dir: &Path,
+    ) -> Result<(), StoreError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE transcription SET last_export_folder = ?1 WHERE id = ?2",
+            params![dir.display().to_string(), id.to_string()],
+        )
+        .map_err(query_error)?;
+        Ok(())
+    }
+
+    /// Reads `id`'s last-used export folder. `Ok(None)` both when `id`
+    /// doesn't exist and when no folder has been set yet — callers fall
+    /// back to the input file's directory either way.
+    pub fn last_export_folder(&self, id: TranscriptionId) -> Result<Option<PathBuf>, StoreError> {
+        let conn = self.lock()?;
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT last_export_folder FROM transcription WHERE id = ?1",
+                params![id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(query_error)?
+            .flatten();
+        Ok(value.map(PathBuf::from))
+    }
 }
 
 impl TaskStore for SqliteStore {
@@ -983,6 +1251,7 @@ mod tests {
         notes: Option<String>,
         options_json: Option<String>,
         kind: String,
+        last_export_folder: Option<String>,
     }
 
     fn fetch_full_row(store: &SqliteStore, id: &TranscriptionId) -> FullRow {
@@ -991,7 +1260,8 @@ mod tests {
             "SELECT error_message, export_formats, file, output_folder, progress, language, \
              model_type, source, status, task, time_ended, time_queued, time_started, url, \
              whisper_model_size, hugging_face_model_id, word_level_timings, extract_speech, \
-             name, notes, options_json, kind FROM transcription WHERE id = ?1",
+             name, notes, options_json, kind, last_export_folder FROM transcription \
+             WHERE id = ?1",
             params![id.to_string()],
             |row| {
                 Ok(FullRow {
@@ -1017,6 +1287,7 @@ mod tests {
                     notes: row.get(19)?,
                     options_json: row.get(20)?,
                     kind: row.get(21)?,
+                    last_export_folder: row.get(22)?,
                 })
             },
         )
@@ -1677,5 +1948,377 @@ mod tests {
         assert!(parse_loose_bool(&Value::Text("true".to_string())));
         assert!(!parse_loose_bool(&Value::Text("0".to_string())));
         assert!(!parse_loose_bool(&Value::Null));
+    }
+
+    // -- Task 1 (M4): schema v2 + segment/copy APIs (F-081, F-084, F-086) ---
+
+    #[test]
+    fn migration_v1_to_v2_adds_last_export_folder() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("humm.sqlite");
+        let sample_id = TranscriptionId::new();
+
+        // Build a v1 database exactly as a pre-M4 humm build would have left
+        // it: v1 DDL (no `last_export_folder` column), user_version = 1, one
+        // row with data that must survive the migration untouched.
+        {
+            let conn = Connection::open(&db_path).expect("open raw v1 db");
+            conn.execute_batch(
+                "CREATE TABLE transcription (
+                    id TEXT PRIMARY KEY, error_message TEXT, export_formats TEXT, file TEXT,
+                    output_folder TEXT, progress DOUBLE PRECISION DEFAULT 0.0, language TEXT,
+                    model_type TEXT, source TEXT, status TEXT, task TEXT, time_ended TIMESTAMP,
+                    time_queued TIMESTAMP NOT NULL, time_started TIMESTAMP, url TEXT,
+                    whisper_model_size TEXT, hugging_face_model_id TEXT,
+                    word_level_timings BOOLEAN DEFAULT FALSE, extract_speech BOOLEAN DEFAULT FALSE,
+                    name TEXT, notes TEXT,
+                    options_json TEXT,
+                    kind TEXT NOT NULL DEFAULT 'file'
+                );
+                CREATE TABLE transcription_segment (
+                    id INTEGER PRIMARY KEY, end_time INT DEFAULT 0, start_time INT DEFAULT 0,
+                    text TEXT NOT NULL, translation TEXT DEFAULT '',
+                    transcription_id TEXT,
+                    FOREIGN KEY (transcription_id) REFERENCES transcription(id) ON DELETE CASCADE
+                );
+                CREATE TABLE humm_meta (key TEXT PRIMARY KEY, value TEXT);
+                PRAGMA user_version = 1;",
+            )
+            .expect("apply v1 ddl");
+            conn.execute(
+                "INSERT INTO transcription (id, status, time_queued, kind, file) \
+                 VALUES (?1, 'completed', ?2, 'file', ?3)",
+                params![sample_id.to_string(), "2020-01-01T00:00:00", "/audio.wav"],
+            )
+            .expect("insert v1 row");
+        }
+
+        let store = SqliteStore::open(&db_path).expect("reopen migrates to v2");
+
+        let conn = store.conn.lock().expect("lock");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("user_version");
+        assert_eq!(version, 2);
+
+        let (file, last_export_folder): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT file, last_export_folder FROM transcription WHERE id = ?1",
+                params![sample_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row intact after migration");
+        assert_eq!(file.as_deref(), Some("/audio.wav"));
+        assert_eq!(last_export_folder, None);
+    }
+
+    #[test]
+    fn newer_schema_version_is_refused_with_actionable_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("humm.sqlite");
+        {
+            let conn = Connection::open(&db_path).expect("open raw db");
+            conn.execute_batch("PRAGMA user_version = 99;")
+                .expect("set future version");
+        }
+
+        let err = SqliteStore::open(&db_path)
+            .err()
+            .expect("newer schema must be refused");
+        let message = err.to_string();
+        assert!(
+            message.to_lowercase().contains("newer"),
+            "message should mention 'newer': {message}"
+        );
+        assert!(
+            message.contains(&db_path.display().to_string()),
+            "message should mention the db path: {message}"
+        );
+        assert!(matches!(
+            err,
+            StoreError::SchemaTooNew {
+                found: 99,
+                supported: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn segment_rows_round_trip_with_ids() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        store
+            .create_task(&id, &sample_task_spec(), Source::FileImport)
+            .expect("create");
+        let segments = vec![
+            Segment {
+                start: Millis(0),
+                end: Millis(1000),
+                text: "a".to_string(),
+                translation: "ta".to_string(),
+            },
+            Segment {
+                start: Millis(1000),
+                end: Millis(2000),
+                text: "b".to_string(),
+                translation: "tb".to_string(),
+            },
+            Segment {
+                start: Millis(2000),
+                end: Millis(3000),
+                text: "c".to_string(),
+                translation: "tc".to_string(),
+            },
+        ];
+        store.mark_completed(&id, &segments).expect("complete");
+
+        let rows = store.get_segment_rows(id).expect("get_segment_rows");
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].id < rows[1].id);
+        assert!(rows[1].id < rows[2].id);
+        for (row, seg) in rows.iter().zip(segments.iter()) {
+            assert_eq!(row.start, seg.start);
+            assert_eq!(row.end, seg.end);
+            assert_eq!(row.text, seg.text);
+            assert_eq!(row.translation, seg.translation);
+        }
+    }
+
+    #[test]
+    fn update_segment_times_text_translation_persist() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        store
+            .create_task(&id, &sample_task_spec(), Source::FileImport)
+            .expect("create");
+        let segments = vec![
+            Segment {
+                start: Millis(0),
+                end: Millis(1000),
+                text: "a".to_string(),
+                translation: "ta".to_string(),
+            },
+            Segment {
+                start: Millis(1000),
+                end: Millis(2000),
+                text: "b".to_string(),
+                translation: "tb".to_string(),
+            },
+        ];
+        store.mark_completed(&id, &segments).expect("complete");
+        let rows = store.get_segment_rows(id).expect("rows");
+        let first_id = rows[0].id;
+        let second_id = rows[1].id;
+
+        store
+            .update_segment_times(first_id, Millis(50), Millis(1200))
+            .expect("update times");
+        let rows = store.get_segment_rows(id).expect("rows after times");
+        assert_eq!(rows[0].start, Millis(50));
+        assert_eq!(rows[0].end, Millis(1200));
+        // The other row is untouched.
+        assert_eq!(rows[1].start, Millis(1000));
+        assert_eq!(rows[1].end, Millis(2000));
+
+        store
+            .update_segment_text(first_id, "a-edited")
+            .expect("update text");
+        let rows = store.get_segment_rows(id).expect("rows after text");
+        assert_eq!(rows[0].text, "a-edited");
+        assert_eq!(rows[1].text, "b");
+
+        store
+            .update_segment_translation(second_id, "tb-edited")
+            .expect("update translation");
+        let rows = store.get_segment_rows(id).expect("rows after translation");
+        assert_eq!(rows[1].translation, "tb-edited");
+        // First row's translation untouched by the second row's edit.
+        assert_eq!(rows[0].translation, "ta");
+    }
+
+    #[test]
+    fn replace_segments_swaps_all_rows_in_one_txn() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        store
+            .create_task(&id, &sample_task_spec(), Source::FileImport)
+            .expect("create");
+        let original = vec![Segment {
+            start: Millis(0),
+            end: Millis(1000),
+            text: "a".to_string(),
+            translation: "ta".to_string(),
+        }];
+        store.mark_completed(&id, &original).expect("complete");
+        let old_ids: Vec<i64> = store
+            .get_segment_rows(id)
+            .expect("rows")
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+
+        // A decoy transcription's segment, inserted *after* the one above,
+        // keeps `transcription_segment`'s max rowid above `old_ids` across
+        // the delete below — otherwise SQLite's default rowid allocation
+        // (one more than the table's current max) would hand the very next
+        // insert the same id the delete just freed, making a freshly-issued
+        // id collide with an old one by coincidence rather than by a real
+        // bug.
+        let decoy_id = TranscriptionId::new();
+        store
+            .create_task(&decoy_id, &sample_task_spec(), Source::FileImport)
+            .expect("create decoy");
+        store
+            .mark_completed(
+                &decoy_id,
+                &[Segment {
+                    start: Millis(0),
+                    end: Millis(1000),
+                    text: "decoy".to_string(),
+                    translation: String::new(),
+                }],
+            )
+            .expect("complete decoy");
+
+        let replacement = vec![
+            Segment {
+                start: Millis(0),
+                end: Millis(500),
+                text: "x".to_string(),
+                translation: "should-drop".to_string(),
+            },
+            Segment {
+                start: Millis(500),
+                end: Millis(900),
+                text: "y".to_string(),
+                translation: "should-drop-2".to_string(),
+            },
+        ];
+        store.replace_segments(id, &replacement).expect("replace");
+
+        let rows = store.get_segment_rows(id).expect("rows after replace");
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert!(!old_ids.contains(&row.id), "row id must be freshly issued");
+            assert_eq!(row.translation, "", "translations are dropped on replace");
+        }
+        assert_eq!(rows[0].text, "x");
+        assert_eq!(rows[0].start, Millis(0));
+        assert_eq!(rows[0].end, Millis(500));
+        assert_eq!(rows[1].text, "y");
+        assert_eq!(rows[1].start, Millis(500));
+        assert_eq!(rows[1].end, Millis(900));
+    }
+
+    #[test]
+    fn copy_transcription_copies_row_with_new_id_queued_now() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        let spec = sample_task_spec();
+        store
+            .create_task(&id, &spec, Source::FileImport)
+            .expect("create");
+        store.set_task_name(&id, "My Recording").expect("name");
+        store.set_task_notes(&id, "notes here").expect("notes");
+        store.mark_started(&id).expect("start");
+        store
+            .mark_completed(
+                &id,
+                &[Segment {
+                    start: Millis(0),
+                    end: Millis(1000),
+                    text: "hi".to_string(),
+                    translation: String::new(),
+                }],
+            )
+            .expect("complete");
+
+        let new_id = store.copy_transcription(id).expect("copy");
+        assert_ne!(new_id, id);
+
+        let new_row = store.get_task(&new_id).expect("get new").expect("present");
+        assert_eq!(new_row.status, Status::Queued);
+        assert_eq!(new_row.name.as_deref(), Some("My Recording"));
+        assert_eq!(new_row.notes.as_deref(), Some("notes here"));
+        assert!(new_row.time_started.is_none());
+        assert!(new_row.time_ended.is_none());
+        assert_eq!(new_row.progress, 0.0);
+        assert!(!new_row.time_queued.is_empty());
+
+        let original_full = fetch_full_row(&store, &id);
+        let new_full = fetch_full_row(&store, &new_id);
+        assert_eq!(new_full.file, original_full.file);
+        assert_eq!(new_full.options_json, original_full.options_json);
+        assert_eq!(new_full.kind, original_full.kind);
+        assert_eq!(new_full.last_export_folder, None);
+
+        assert!(
+            store.get_segments(&new_id).expect("segments").is_empty(),
+            "copy_transcription must not copy segments"
+        );
+    }
+
+    #[test]
+    fn mark_replaced_completed_sets_status_and_inserts() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        store
+            .create_task(&id, &sample_task_spec(), Source::FileImport)
+            .expect("create");
+
+        let segments = vec![Segment {
+            start: Millis(0),
+            end: Millis(500),
+            text: "one".to_string(),
+            translation: "should-drop".to_string(),
+        }];
+        store
+            .mark_replaced_completed(id, &segments)
+            .expect("mark replaced completed");
+
+        let row = store.get_task(&id).expect("get").expect("present");
+        assert_eq!(row.status, Status::Completed);
+        assert!(row.time_ended.is_some());
+
+        let stored = store.get_segments(&id).expect("segments");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].text, "one");
+        assert_eq!(stored[0].translation, "", "translations are dropped");
+    }
+
+    #[test]
+    fn update_progress_direct_writes_progress() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        store
+            .create_task(&id, &sample_task_spec(), Source::FileImport)
+            .expect("create");
+
+        store.update_progress_direct(id, 0.42).expect("progress");
+        let row = store.get_task(&id).expect("get").expect("present");
+        assert_eq!(row.progress, 0.42);
+        // Unlike `TaskStore::update_progress`, this does not touch status —
+        // it's the resizer-visible-row path, not a queue transition.
+        assert_eq!(row.status, Status::Queued);
+    }
+
+    #[test]
+    fn last_export_folder_round_trip_and_default_none() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        store
+            .create_task(&id, &sample_task_spec(), Source::FileImport)
+            .expect("create");
+
+        assert_eq!(store.last_export_folder(id).expect("read default"), None);
+
+        store
+            .set_last_export_folder(id, Path::new("/exports/out"))
+            .expect("set");
+        assert_eq!(
+            store.last_export_folder(id).expect("read after set"),
+            Some(PathBuf::from("/exports/out"))
+        );
     }
 }

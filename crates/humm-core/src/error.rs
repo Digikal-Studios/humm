@@ -149,13 +149,28 @@ pub enum StoreError {
         /// Diagnostic detail.
         detail: String,
     },
-    /// The database's schema is at an unrecognized or unsupported version, or
-    /// otherwise contains data that cannot be interpreted (e.g. malformed
-    /// persisted JSON).
+    /// The database's schema contains data that cannot be interpreted (e.g.
+    /// malformed persisted JSON).
     #[error("corrupt or unsupported database: {detail}")]
     Corrupt {
         /// Diagnostic detail.
         detail: String,
+    },
+    /// The database's `PRAGMA user_version` is higher than this build knows
+    /// how to migrate — it was written by a newer humm. Distinct from
+    /// [`StoreError::Corrupt`] so callers/tests can match it precisely.
+    #[error(
+        "database was written by a newer humm — upgrade humm or move {} \
+         (schema version {found}, this build supports up to {supported})",
+        path.display()
+    )]
+    SchemaTooNew {
+        /// The schema version found in the database.
+        found: i64,
+        /// The highest schema version this build supports.
+        supported: i64,
+        /// Path to the database file.
+        path: PathBuf,
     },
     /// Underlying I/O error (e.g. creating the database's parent directory).
     #[error(transparent)]
