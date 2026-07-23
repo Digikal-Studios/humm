@@ -870,14 +870,12 @@ impl ViewerVm {
         self.record_save(ok);
     }
 
-    /// Task 10 (playback) hook — spec §2.2 `on_timestamp_being_edited`: while a
-    /// Start/End cell editor is open, an active loop range follows the value in
-    /// the editor buffer *live* (before commit). Returns the edited row, its
-    /// [`Field`], and the buffer's current parse (floored at zero), or `None`
-    /// when no timestamp cell is being edited. The player does not exist until
-    /// Task 10, so nothing consumes this yet — it is the documented seam the
-    /// loop-range live-follow wires into, kept as real (public) API rather than
-    /// dead code.
+    /// Playback hook — spec §2.2 `on_timestamp_being_edited`: while a Start/End
+    /// cell editor is open, an active loop range follows the value in the editor
+    /// buffer *live* (before commit). Returns the edited row, its [`Field`], and
+    /// the buffer's current parse (floored at zero), or `None` when no timestamp
+    /// cell is being edited. Consumed by [`Self::refresh_loop_range`], which
+    /// applies this live buffer value to the armed loop bound each frame.
     pub fn editing_timestamp_preview(&self) -> Option<(usize, Field, Millis)> {
         let editor = self.editing.as_ref()?;
         let field = editor.col.as_time_field()?;
@@ -1183,7 +1181,8 @@ impl ViewerVm {
         if !self.follow_audio_enabled {
             // Follow off: keep the selected row highlighted (no forced scroll —
             // Buzz re-scrolls to the selected row every tick, which fights a
-            // user's own scrolling; not ported, spec-ledger mechanics class).
+            // user's own scrolling; not ported — deviation recorded in the M4
+            // milestone ledger sweep, Task 14).
             return;
         }
         // Follow on: select+scroll the playhead's segment, unless looping pins
@@ -1230,13 +1229,19 @@ impl ViewerVm {
         }
     }
 
-    /// Keeps the player's loop range following the selected segment while
-    /// looping — both after a committed timestamp edit and *live* while a
-    /// Start/End cell of the looped segment is being edited (Buzz
+    /// Keeps the player's loop range *following* the selected segment while a
+    /// loop is **already armed** — after a committed timestamp edit and *live*
+    /// while a Start/End cell of the looped segment is being edited (Buzz
     /// `on_timestamp_being_edited` + the `_adjust_segment_timestamp` loop-range
-    /// refresh). Cheap enough to run every frame (two atomic stores).
+    /// refresh). This is a maintenance pass, **never** an arming path: arming is
+    /// owned by [`Self::on_segment_selected`] / [`Self::set_loop_enabled`], and
+    /// disarming by [`Self::scrub_release`] / disabling the loop. Gating on
+    /// `loop_range.is_some()` is what lets a scrub-release escape survive — the
+    /// cleared range is not silently re-armed one frame later. Cheap enough to
+    /// run every frame (two atomic stores).
     pub fn refresh_loop_range(&mut self) {
-        if !self.segment_looping_enabled {
+        // Only follow an armed range; do not arm a cleared one.
+        if !self.segment_looping_enabled || self.loop_range.is_none() {
             return;
         }
         let Some(idx) = self.selected else {
@@ -1263,9 +1268,10 @@ impl ViewerVm {
     }
 
     /// Auto-shows the playback-controls bar the first frame playback starts in
-    /// Timestamps mode (Buzz `on_audio_playback_state_changed`). Returns whether
-    /// the bar was just auto-shown (so the caller persists the flag).
-    pub fn update_controls_autoshow(&mut self) -> bool {
+    /// Timestamps mode (Buzz `on_audio_playback_state_changed`). The newly-set
+    /// `playback_controls_visible` is persisted by the frame's diff-on-change
+    /// `persist_playback_settings_if_changed`, not by this call.
+    pub fn update_controls_autoshow(&mut self) {
         let playing = self.is_playing();
         let just_shown = playing
             && !self.was_playing
@@ -1275,7 +1281,6 @@ impl ViewerVm {
             self.playback_controls_visible = true;
         }
         self.was_playing = playing;
-        just_shown
     }
 
     /// Records one `audio_ms,frame_ts_ms` drift-log line for the frame just
@@ -2160,5 +2165,59 @@ mod tests {
         assert_eq!(vm.current_segment_text, "c");
         assert_eq!(vm.player_position(), Some(Millis(2000)));
         assert_eq!(vm.loop_range, Some((Millis(2000), Millis(3000))));
+    }
+
+    #[test]
+    fn scrub_release_escape_survives_frame_maintenance() {
+        // Review fix round 1 (F-1): the per-frame `refresh_loop_range`
+        // maintenance pass must only FOLLOW an armed loop, never re-arm one that
+        // `scrub_release` cleared — otherwise a release far outside the range is
+        // undone one frame later and the playhead snaps back into the loop.
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(
+            &store,
+            "/tmp/a.wav",
+            &[
+                seg(0, 1000, "a", ""),
+                seg(1000, 2000, "b", ""),
+                seg(2000, 3000, "c", ""),
+            ],
+        );
+        let deps = deps(Arc::clone(&store));
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+        let (player, mut fill) = ready_player(6000);
+        vm.player = PlayerState::Ready(player);
+
+        // Arm a loop on segment 1 ([1000, 2000]).
+        vm.selected = Some(1);
+        vm.set_loop_enabled(true);
+        assert_eq!(vm.loop_range, Some((Millis(1000), Millis(2000))));
+
+        // Release the scrubber far outside the range (> 2000 ms past the end):
+        // the loop clears.
+        vm.scrub_release(Millis(5000));
+        assert_eq!(vm.loop_range, None, "release far outside clears the loop");
+
+        // The frame-maintenance pass must NOT re-arm the cleared loop.
+        vm.refresh_loop_range();
+        assert_eq!(
+            vm.loop_range, None,
+            "frame maintenance must not re-arm a cleared loop"
+        );
+
+        // The player's own loop is cleared too: playing across the old end runs
+        // straight through without wrapping back to the old start.
+        if let PlayerState::Ready(player) = &vm.player {
+            player.seek(Millis(1900));
+            player.play();
+        }
+        let mut buf = vec![0.0f32; 400];
+        fill(&mut buf);
+        assert!(
+            vm.player_position().expect("ready").0 >= 2200,
+            "the playhead ran past the old loop end without wrapping (player \
+             loop cleared); position was {:?}",
+            vm.player_position()
+        );
     }
 }
