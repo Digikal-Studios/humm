@@ -18,5 +18,6 @@ pub mod logging;
 pub mod models_ui;
 pub mod services;
 pub mod shortcuts;
+pub mod viewer;
 pub mod viewmodel;
 pub mod views;

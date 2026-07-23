@@ -113,7 +113,11 @@ pub fn scan_folder(root: &Path) -> Vec<PathBuf> {
 /// (rfd-backed) implementation — that only happens at manual acceptance —
 /// but the seam exists so a future test *can* inject one without touching
 /// call sites.
-pub trait FileDialogs {
+/// `Send + Sync` so an `Arc<dyn FileDialogs>` can be captured by the viewer's
+/// deferred-viewport render closure (`app.rs`), which egui requires to be
+/// `Send + Sync + 'static` — [`RfdFileDialogs`] is a unit struct, so this
+/// costs nothing, and any test fake is trivially `Send + Sync` too.
+pub trait FileDialogs: Send + Sync {
     /// Opens the "Select audio file" dialog with Buzz's four filter groups
     /// (Media/Audio/Video/All), starting in `start_dir` if given. `None` on
     /// cancel.

@@ -39,7 +39,7 @@ toolbar-record-tooltip = Live recording arrives in a later release
 toolbar-new-file = New File Transcription
 toolbar-new-url = New URL Transcription
 toolbar-open-transcript = Open Transcript
-toolbar-open-transcript-tooltip = The transcript viewer arrives in the next milestone
+toolbar-open-transcript-tooltip = Select one or more completed transcriptions to open
 toolbar-cancel = Cancel Transcription
 toolbar-clear = Clear History
 
@@ -198,3 +198,23 @@ models-delete-confirm-title = Delete Model
 models-delete-confirm-body = Are you sure you want to delete the selected model?
 models-download-error-title = Error
 models-download-failed = Download failed
+
+## Transcript viewer window (views/viewer.rs, F-080)
+
+viewer-view = View
+viewer-mode-text = Text
+viewer-mode-translation = Translation
+viewer-mode-timestamps = Timestamps
+viewer-export = Export
+viewer-export-pending = Export lands later this milestone
+viewer-translate = Translate
+viewer-translate-tooltip = Translation arrives with the API backend milestone
+viewer-resize = Resize
+viewer-resize-pending = Resize lands later this milestone
+viewer-identify-speakers = Identify Speakers
+viewer-identify-speakers-tooltip = Speaker identification arrives in a later release
+viewer-find = Find
+viewer-find-pending = Find lands later this milestone
+viewer-empty = No segments — the input may be silence-only
+viewer-player-pending = Playback controls arrive with the player
+viewer-open-error = Could not open the transcript

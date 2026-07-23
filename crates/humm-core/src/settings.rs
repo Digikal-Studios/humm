@@ -38,6 +38,9 @@ pub struct Settings {
     pub file_transcriber: FileTranscriberSettings,
     /// Telemetry opt-out and anonymous identifier.
     pub privacy: PrivacySettings,
+    /// Transcript-viewer window state (F-080): persisted toggles, playback
+    /// rate, splitter fractions, and shared window geometry.
+    pub viewer: ViewerSettings,
 }
 
 /// Settings governing model selection (`buzz/model_loader.py` custom-model
@@ -205,6 +208,122 @@ fn default_true() -> bool {
     true
 }
 
+/// Transcript-viewer window state (F-080, design spec §6), ported from Buzz's
+/// `transcription_viewer/*` `QSettings` group (`transcription_viewer_widget.py`
+/// `_load_segments_and_settings`/`load_geometry`/`load_splitter_sizes`, and the
+/// global `AUDIO_PLAYBACK_RATE` key). Every field defaults to Buzz's own
+/// default, so a first run (or a partial/hand-edited file) matches Buzz.
+///
+/// `#[derive(Default)]` is deliberately not used: several fields have non-zero
+/// defaults (`resizer_create_new_transcript = true`, `playback_rate = 1.0`,
+/// the two splitter fractions) that the derived all-zero `Default` would get
+/// wrong. The manual [`Default`] impl below is the single source of truth for
+/// those defaults; the container-level `#[serde(default)]` fills any missing
+/// field from it, and the per-field `#[serde(default = "…")]` attributes make
+/// the "section present, key absent" case explicit too (same belt-and-braces
+/// pattern as [`UpdateSettings`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ViewerSettings {
+    /// Whether loop-the-selected-segment playback is enabled.
+    pub segment_looping_enabled: bool,
+    /// Whether the playback-controls bar is shown (it also auto-shows when
+    /// playback starts in Timestamps mode).
+    pub playback_controls_visible: bool,
+    /// Whether the find bar is shown.
+    pub find_widget_visible: bool,
+    /// Whether follow-audio (auto-select the segment at the playhead) is on.
+    pub follow_audio_enabled: bool,
+    /// Global playback speed multiplier (Buzz `AUDIO_PLAYBACK_RATE`). Clamped
+    /// to `0.1..=5.0` when the settings file is loaded
+    /// ([`ViewerSettings::clamp_playback_rate`]); a non-finite stored value
+    /// resets to [`ViewerSettings::DEFAULT_PLAYBACK_RATE`].
+    #[serde(default = "default_playback_rate")]
+    pub playback_rate: f32,
+    /// Vertical-splitter fraction given to the editor table (vs. the player)
+    /// for **audio** media — Buzz's 950:50 default.
+    #[serde(default = "default_audio_splitter_fraction")]
+    pub audio_splitter_fraction: f32,
+    /// Vertical-splitter fraction given to the editor table (vs. the player)
+    /// for **video** media — Buzz's 800:200 default.
+    #[serde(default = "default_video_splitter_fraction")]
+    pub video_splitter_fraction: f32,
+    /// Whether the resize/merge window creates a new transcript (vs. editing
+    /// in place). Buzz default: `true`.
+    #[serde(default = "default_true")]
+    pub resizer_create_new_transcript: bool,
+    /// Shared viewer-window geometry (Buzz stores a single
+    /// `transcription_viewer/geometry`): absent until the first viewer window
+    /// closes, then last-close-wins across all open viewers.
+    pub geometry: Option<ViewerGeometry>,
+}
+
+impl ViewerSettings {
+    /// Lower bound on [`ViewerSettings::playback_rate`] (Buzz's speed clamp,
+    /// `transcription_viewer_widget.py` speed-combo validation).
+    pub const MIN_PLAYBACK_RATE: f32 = 0.1;
+    /// Upper bound on [`ViewerSettings::playback_rate`].
+    pub const MAX_PLAYBACK_RATE: f32 = 5.0;
+    /// The default (and reset) playback rate.
+    pub const DEFAULT_PLAYBACK_RATE: f32 = 1.0;
+
+    /// Clamps a stored playback rate into `[MIN, MAX]`, resetting a non-finite
+    /// value (`NaN`/`±inf` from a hand-edited file) to the default rather than
+    /// propagating it. Applied by [`Settings::load`] so downstream readers
+    /// never see an out-of-range or non-finite rate.
+    pub fn clamp_playback_rate(rate: f32) -> f32 {
+        if rate.is_finite() {
+            rate.clamp(Self::MIN_PLAYBACK_RATE, Self::MAX_PLAYBACK_RATE)
+        } else {
+            Self::DEFAULT_PLAYBACK_RATE
+        }
+    }
+}
+
+impl Default for ViewerSettings {
+    fn default() -> Self {
+        ViewerSettings {
+            segment_looping_enabled: false,
+            playback_controls_visible: false,
+            find_widget_visible: false,
+            follow_audio_enabled: false,
+            playback_rate: Self::DEFAULT_PLAYBACK_RATE,
+            audio_splitter_fraction: 0.95,
+            video_splitter_fraction: 0.8,
+            resizer_create_new_transcript: true,
+            geometry: None,
+        }
+    }
+}
+
+fn default_playback_rate() -> f32 {
+    ViewerSettings::DEFAULT_PLAYBACK_RATE
+}
+
+fn default_audio_splitter_fraction() -> f32 {
+    0.95
+}
+
+fn default_video_splitter_fraction() -> f32 {
+    0.8
+}
+
+/// Shared viewer-window geometry (design spec §6): optional saved position
+/// (`x`/`y` may be absent even when a size is known — e.g. a compositor that
+/// doesn't report window position) and a size. Default size is 1000×800 with a
+/// min of 800×500, applied by the GUI when this is `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ViewerGeometry {
+    /// Window x position in points, if known.
+    pub x: Option<f32>,
+    /// Window y position in points, if known.
+    pub y: Option<f32>,
+    /// Window width in points.
+    pub w: f32,
+    /// Window height in points.
+    pub h: f32,
+}
+
 impl Settings {
     /// Loads settings from `path`.
     ///
@@ -226,10 +345,17 @@ impl Settings {
                 });
             }
         };
-        toml::from_str(&content).map_err(|error| SettingsError::Parse {
-            path: path.to_path_buf(),
-            detail: error.to_string(),
-        })
+        let mut settings: Settings =
+            toml::from_str(&content).map_err(|error| SettingsError::Parse {
+                path: path.to_path_buf(),
+                detail: error.to_string(),
+            })?;
+        // Normalize the persisted playback rate into its valid range on load
+        // (design spec §6): a hand-edited or corrupt file must never hand the
+        // player an out-of-range or non-finite speed.
+        settings.viewer.playback_rate =
+            ViewerSettings::clamp_playback_rate(settings.viewer.playback_rate);
+        Ok(settings)
     }
 
     /// Saves settings to `path`, creating parent directories if needed.
@@ -299,7 +425,7 @@ pub enum SettingsError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, SettingsError};
+    use super::{Settings, SettingsError, ViewerGeometry, ViewerSettings};
     use std::path::Path;
 
     #[test]
@@ -340,10 +466,87 @@ mod tests {
         settings.file_transcriber.export_formats = Some(vec!["srt".to_string(), "vtt".to_string()]);
         settings.privacy.telemetry_enabled = false;
         settings.privacy.user_identifier = Some("11111111-2222-3333-4444-555555555555".to_string());
+        settings.viewer.segment_looping_enabled = true;
+        settings.viewer.playback_controls_visible = true;
+        settings.viewer.find_widget_visible = true;
+        settings.viewer.follow_audio_enabled = true;
+        // In-range so load-time clamping leaves it untouched (the clamp path is
+        // exercised separately in `playback_rate_clamped_on_load`).
+        settings.viewer.playback_rate = 1.5;
+        settings.viewer.audio_splitter_fraction = 0.9;
+        settings.viewer.video_splitter_fraction = 0.75;
+        settings.viewer.resizer_create_new_transcript = false;
+        settings.viewer.geometry = Some(ViewerGeometry {
+            x: Some(100.0),
+            y: Some(50.0),
+            w: 1100.0,
+            h: 850.0,
+        });
 
         settings.save(&path).expect("save");
         let loaded = Settings::load(&path).expect("load");
         assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn viewer_settings_defaults_match_buzz() {
+        // Buzz defaults (design spec §6): every toggle off, rate 1.0, splitters
+        // 0.95 (audio 950:50) / 0.8 (video 800:200), create-new on, no geometry.
+        let viewer = ViewerSettings::default();
+        assert!(!viewer.segment_looping_enabled);
+        assert!(!viewer.playback_controls_visible);
+        assert!(!viewer.find_widget_visible);
+        assert!(!viewer.follow_audio_enabled);
+        assert_eq!(viewer.playback_rate, 1.0);
+        assert_eq!(viewer.audio_splitter_fraction, 0.95);
+        assert_eq!(viewer.video_splitter_fraction, 0.8);
+        assert!(viewer.resizer_create_new_transcript);
+        assert_eq!(viewer.geometry, None);
+        // Missing `[viewer]` section entirely also yields exactly these.
+        assert_eq!(Settings::default().viewer, viewer);
+    }
+
+    #[test]
+    fn viewer_defaults_apply_when_section_present_but_partial() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        // Only one key set — every other viewer field must still take its Buzz
+        // default, not the type's zero value (create-new true, rate 1.0, …).
+        std::fs::write(&path, "[viewer]\nfind_widget_visible = true\n").expect("write file");
+
+        let loaded = Settings::load(&path).expect("load");
+        assert!(loaded.viewer.find_widget_visible);
+        assert!(loaded.viewer.resizer_create_new_transcript);
+        assert_eq!(loaded.viewer.playback_rate, 1.0);
+        assert_eq!(loaded.viewer.audio_splitter_fraction, 0.95);
+        assert_eq!(loaded.viewer.video_splitter_fraction, 0.8);
+    }
+
+    #[test]
+    fn playback_rate_clamped_on_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+
+        // Above the max → clamped down to 5.0.
+        std::fs::write(&path, "[viewer]\nplayback_rate = 10.0\n").expect("write file");
+        assert_eq!(
+            Settings::load(&path).expect("load").viewer.playback_rate,
+            5.0
+        );
+
+        // Below the min → clamped up to 0.1.
+        std::fs::write(&path, "[viewer]\nplayback_rate = 0.01\n").expect("write file");
+        assert_eq!(
+            Settings::load(&path).expect("load").viewer.playback_rate,
+            0.1
+        );
+
+        // Non-finite → reset to the default 1.0.
+        std::fs::write(&path, "[viewer]\nplayback_rate = nan\n").expect("write file");
+        assert_eq!(
+            Settings::load(&path).expect("load").viewer.playback_rate,
+            1.0
+        );
     }
 
     #[test]

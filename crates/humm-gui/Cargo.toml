@@ -14,6 +14,7 @@ humm-core.workspace = true
 humm-media = { path = "../humm-media", version = "0.1.0" }
 humm-store = { path = "../humm-store", version = "0.1.0" }
 humm-whisper = { path = "../humm-whisper", version = "0.1.0" }
+humm-audio = { path = "../humm-audio", version = "0.1.0" }
 egui = { workspace = true }
 eframe = { workspace = true }
 egui_extras = { workspace = true }

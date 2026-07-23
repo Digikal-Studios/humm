@@ -343,9 +343,10 @@ pub fn ui(
             // double-click dispatch) — checked against the Notes column's
             // *own* response, not the row-wide union, so double-clicking
             // some other cell doesn't also open Notes.
-            if let Some(notes_response) = &notes_cell_response
-                && notes_response.double_clicked()
-            {
+            let notes_double_clicked = notes_cell_response
+                .as_ref()
+                .is_some_and(egui::Response::double_clicked);
+            if notes_double_clicked {
                 actions.push(TableAction::Notes(row_id));
             }
 
@@ -354,6 +355,17 @@ pub fn ui(
             };
             if response.clicked() {
                 apply_row_click(vm, layout, idx, row_id, modifiers);
+            }
+            // Double-click on any non-Notes cell opens that row in the
+            // transcript viewer (Buzz `on_table_double_clicked`,
+            // `main_window.py:396-400`). Selecting just this row first makes
+            // the shared `OpenSelected` handler's all-selected `can_open` gate
+            // reduce to a per-row gate on exactly this row (design spec §2.1:
+            // double-click gates per-row). A non-openable row is a silent
+            // no-op in that handler.
+            if response.double_clicked() && !notes_double_clicked {
+                vm.select_only(row_id);
+                actions.push(TableAction::OpenSelected);
             }
             response.context_menu(|ui| {
                 if matches!(

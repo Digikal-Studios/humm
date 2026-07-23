@@ -4,20 +4,23 @@
 //! toast/banner state, rendering the main window every frame (design spec
 //! §1/§4).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use humm_core::domain::{Status, TranscriptionId};
 use humm_core::queue::{QueueHandle, TaskEvent, TaskEventKind};
-use humm_core::settings::{FileTranscriberSettings, GuiSettings};
+use humm_core::settings::{FileTranscriberSettings, GuiSettings, ViewerGeometry};
+use humm_media::{FfmpegDecoder, FfmpegVideoStreamer, FfprobeProber};
 
 use crate::events::{self, SharedEventQueue};
 use crate::i18n::tr;
 use crate::import::{FileDialogs, ImportRequest, RfdFileDialogs, scan_folder};
 use crate::services::{self, Services, UpdateNotice};
 use crate::shortcuts::ShortcutMap;
+use crate::viewer::{ViewerDeps, ViewerVm};
 use crate::viewmodel::{TableAction, TasksVm};
 use crate::views;
 use crate::views::about::{self, AboutCheckResult, AboutState};
@@ -35,6 +38,20 @@ use crate::views::url_dialog::UrlDialog;
 /// own `Cargo.toml` version at build time, the same value `services.rs`
 /// feeds [`humm_core::update::check_for_update`] as `current_version`.
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// A GUI-internal event a background worker sends back to the app (design spec
+/// §1.2). Distinct from [`humm_core::queue::TaskEvent`] (the queue's own
+/// lifecycle stream): this carries viewer-side effects that must run on the UI
+/// thread. The channel exists this milestone; its only producer — the
+/// resize/merge worker — is wired in Task 12.
+#[derive(Debug, Clone)]
+pub enum AppEvent {
+    /// A transcript's segments were replaced out-of-band (resize/merge, F-086):
+    /// refresh the affected table row and close the transcript's viewer (Buzz
+    /// `transcriptions_updated_signal` → viewer `close`,
+    /// `transcription_viewer_widget.py:1333`).
+    TranscriptionsUpdated(TranscriptionId),
+}
 
 /// The eframe application.
 pub struct HummApp {
@@ -68,8 +85,25 @@ pub struct HummApp {
     /// The resolved keyboard-shortcut bindings (F-005 defaults; `[shortcuts]`
     /// settings overrides aren't wired yet — that's the shortcut-editor UI,
     /// M7 — so this is always `ShortcutMap::from_settings(&HashMap::new())`,
-    /// i.e. Buzz's defaults unmodified).
-    shortcuts: ShortcutMap,
+    /// i.e. Buzz's defaults unmodified). `Arc` so it can be cloned into each
+    /// viewer's deferred-viewport render closure (which egui requires be
+    /// `Send + Sync + 'static`).
+    shortcuts: Arc<ShortcutMap>,
+    /// Open transcript viewers (F-080), one per transcript, keyed by id — each
+    /// a deferred egui viewport (`Self::show_viewer_viewports`). The `Arc<
+    /// Mutex<_>>` is the shared handle the deferred render closure locks; the
+    /// app harvests each viewer's `close_requested` flag every frame and drops
+    /// the entry (which drops the VM) when it is set.
+    viewers: BTreeMap<TranscriptionId, Arc<Mutex<ViewerVm>>>,
+    /// The adapter bundle every viewer window shares (built once from the real
+    /// ffmpeg/cpal/rfd adapters). Cloned into each deferred-viewport closure.
+    viewer_deps: Arc<ViewerDeps>,
+    /// GUI-internal event channel (design spec §1.2): resize/merge workers
+    /// (Task 12) send [`AppEvent`]s that the app drains each frame. The sender
+    /// is clonable into those workers; dormant until Task 12 wires a sender.
+    app_event_tx: mpsc::Sender<AppEvent>,
+    /// The receiving end of [`Self::app_event_tx`], drained each frame.
+    app_event_rx: mpsc::Receiver<AppEvent>,
     /// Toolbar/menu/dialog/toast/banner state (F-004/F-026): see
     /// [`ActionState`]'s own field docs.
     action_state: ActionState,
@@ -205,7 +239,23 @@ impl HummApp {
         // No `[shortcuts]` settings section exists yet (the override-editor
         // UI is M7); an empty overrides map resolves every action to its
         // Buzz default (`ShortcutMap::from_settings`'s own contract).
-        let shortcuts = ShortcutMap::from_settings(&HashMap::new());
+        let shortcuts = Arc::new(ShortcutMap::from_settings(&HashMap::new()));
+
+        // The viewer adapter bundle (F-080): all real adapters are stateless
+        // handles that resolve their OS resources lazily (cpal at stream
+        // open, ffmpeg per subprocess), so constructing them here — including
+        // in the kittest path — touches no device or binary until a viewer
+        // actually plays/decodes something (which no test does; the viewer
+        // kittest drives `viewer_ui` with fakes directly).
+        let viewer_deps = Arc::new(ViewerDeps {
+            store: Arc::clone(&services.store),
+            decoder: Arc::new(FfmpegDecoder::new()),
+            prober: Arc::new(FfprobeProber::new()),
+            streamer: Arc::new(FfmpegVideoStreamer::new()),
+            audio_output: Arc::new(humm_audio::CpalOutput::new()),
+            dialogs: Arc::new(RfdFileDialogs),
+        });
+        let (app_event_tx, app_event_rx) = mpsc::channel();
 
         // Chip persistence across sessions (binding decision, Buzz-equivalent):
         // a stale-but-still-newer `available_version` from a previous
@@ -238,6 +288,10 @@ impl HummApp {
             last_saved_gui_settings,
             pending_table_actions: Vec::new(),
             shortcuts,
+            viewers: BTreeMap::new(),
+            viewer_deps,
+            app_event_tx,
+            app_event_rx,
             action_state: ActionState {
                 update_notice,
                 ..ActionState::default()
@@ -636,11 +690,7 @@ impl HummApp {
         for action in actions {
             match action {
                 TableAction::ClearSelected => self.handle_clear_selected(),
-                TableAction::OpenSelected => {
-                    // The transcript viewer is M4; nothing to open yet
-                    // (toolbar's Open Transcript button is disabled this
-                    // milestone, but Return's shortcut still reaches here).
-                }
+                TableAction::OpenSelected => self.handle_open_selected(now),
                 TableAction::Retry(id) => self.handle_retry(id, now),
                 TableAction::Rename(id) => self.open_rename_dialog(id),
                 TableAction::Notes(id) => self.open_notes_dialog(id),
@@ -961,6 +1011,191 @@ impl HummApp {
             self.preferences_state = None;
         }
     }
+
+    /// Toolbar "Open Transcript" / Return / double-click →
+    /// [`TableAction::OpenSelected`]: opens (or focuses) a viewer for every
+    /// selected row, gated to a non-empty, all-openable selection — the same
+    /// [`toolbar_enablement`]`.open` rule the toolbar button enables on, so
+    /// Return mirrors the toolbar and double-click (which first collapsed the
+    /// selection to its one row) reduces to a per-row gate (design spec §2.1,
+    /// ledger #13). A selection that fails the gate is a silent no-op on every
+    /// path — Buzz's Return-key bypass of its own gate is deliberately not
+    /// ported.
+    fn handle_open_selected(&mut self, now: Instant) {
+        if !toolbar_enablement(&self.tasks.selected_statuses()).open {
+            return;
+        }
+        let ids: Vec<TranscriptionId> = self.tasks.selection().iter().copied().collect();
+        for id in ids {
+            self.open_viewer(id, now);
+        }
+    }
+
+    /// Opens a transcript viewer for `id`, or focuses the existing window if
+    /// one is already open (deviation #1: no duplicate editors). A store read
+    /// failure surfaces an error toast and opens nothing — the row is left
+    /// exactly as it was.
+    fn open_viewer(&mut self, id: TranscriptionId, now: Instant) {
+        if let Some(existing) = self.viewers.get(&id) {
+            existing
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .focus_requested = true;
+            return;
+        }
+        let opened = {
+            let settings = self
+                .services
+                .settings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            ViewerVm::open(id, &self.viewer_deps, &settings)
+        };
+        match opened {
+            Ok(vm) => {
+                self.viewers.insert(id, Arc::new(Mutex::new(vm)));
+            }
+            Err(err) => {
+                log::warn!("could not open transcript viewer for {id}: {err}");
+                self.push_error_toast(format!("{}: {err}", tr("viewer-open-error")), now);
+            }
+        }
+    }
+
+    /// Renders every open viewer as a deferred egui viewport
+    /// (`ctx.show_viewport_deferred`, ARCHITECTURE §7 / design spec §1.1), then
+    /// harvests close requests: a viewer whose render closure set
+    /// `close_requested` this frame has its geometry persisted (shared,
+    /// last-close-wins) and its entry dropped — dropping the VM (and, from
+    /// Task 10 on, stopping its playback via `Drop`). Re-opening the same
+    /// transcript focuses the live window instead of duplicating it.
+    ///
+    /// The deferred callback must be `Send + Sync + 'static`, so it captures
+    /// only `Arc`-shared state; per-window state lives behind the viewer's
+    /// `Arc<Mutex<ViewerVm>>`. This viewport plumbing is verifiable only in a
+    /// windowed run (an `egui_kittest` `Harness` sees only its own root
+    /// viewport) — the same constraint the About/Preferences immediate
+    /// viewports carry; `viewer_ui` itself is kittest-driven directly.
+    fn show_viewer_viewports(&mut self, ctx: &egui::Context) {
+        if self.viewers.is_empty() {
+            return;
+        }
+        for (id, vm_arc) in &self.viewers {
+            let (title, geometry) = {
+                let vm = vm_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                (vm.title.clone(), vm.initial_geometry)
+            };
+            let builder = viewer_viewport_builder(&title, geometry);
+
+            let vm_for_cb = Arc::clone(vm_arc);
+            let deps = Arc::clone(&self.viewer_deps);
+            let shortcuts = Arc::clone(&self.shortcuts);
+            let settings = Arc::clone(&self.services.settings);
+
+            ctx.show_viewport_deferred(
+                egui::ViewportId::from_hash_of(("viewer", *id)),
+                builder,
+                move |ctx, _class| {
+                    let mut vm = vm_for_cb
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        crate::views::viewer::viewer_ui(ui, &mut vm, &deps, &shortcuts, &settings);
+                    });
+
+                    // Record the live geometry for persist-on-close, and honor
+                    // a pending focus / close request.
+                    let (outer, inner) = ctx
+                        .input(|input| (input.viewport().outer_rect, input.viewport().inner_rect));
+                    if let Some(inner) = inner {
+                        vm.observed_geometry = Some(ViewerGeometry {
+                            x: outer.map(|rect| rect.min.x),
+                            y: outer.map(|rect| rect.min.y),
+                            w: inner.width(),
+                            h: inner.height(),
+                        });
+                    }
+                    if std::mem::take(&mut vm.focus_requested) {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                    if ctx.input(|input| input.viewport().close_requested()) {
+                        vm.close_requested = true;
+                    }
+                },
+            );
+        }
+
+        let closing: Vec<TranscriptionId> = self
+            .viewers
+            .iter()
+            .filter(|(_, vm_arc)| {
+                vm_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .close_requested
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in closing {
+            if let Some(vm_arc) = self.viewers.remove(&id) {
+                let geometry = vm_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .observed_geometry;
+                self.persist_viewer_geometry_if_changed(geometry);
+            }
+        }
+    }
+
+    /// Persists `geometry` as the shared viewer geometry
+    /// (`settings.viewer.geometry`) if it differs from what is stored — the
+    /// same diff-on-change, non-fatal-on-save-failure contract as
+    /// [`Self::persist_layout_if_changed`]. `None` (the closure never observed
+    /// a geometry) is a no-op.
+    fn persist_viewer_geometry_if_changed(&mut self, geometry: Option<ViewerGeometry>) {
+        let Some(geometry) = geometry else {
+            return;
+        };
+        let mut settings = self
+            .services
+            .settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if settings.viewer.geometry == Some(geometry) {
+            return;
+        }
+        settings.viewer.geometry = Some(geometry);
+        if let Err(err) = settings.save(&self.services.settings_path) {
+            log::warn!("could not persist viewer geometry: {err}");
+        }
+    }
+
+    /// Drains [`Self::app_event_rx`] and applies every [`AppEvent`] (design
+    /// spec §1.2). Dormant until Task 12 wires a sender; the handler already
+    /// implements the documented effect so that task only has to send.
+    fn drain_app_events(&mut self) {
+        let events: Vec<AppEvent> = self.app_event_rx.try_iter().collect();
+        for event in events {
+            match event {
+                AppEvent::TranscriptionsUpdated(id) => {
+                    self.tasks.refresh_row(id, &self.services.store);
+                    // The source transcript's segments were replaced — its open
+                    // viewer (and, Task 12, its resizer) must close.
+                    self.viewers.remove(&id);
+                }
+            }
+        }
+    }
+
+    /// A clone of the GUI-internal [`AppEvent`] sender, to hand to a background
+    /// worker (Task 12's resize/merge worker). Exposed as the seam that keeps
+    /// [`Self::app_event_tx`] a live producer endpoint even before that task
+    /// wires it.
+    pub fn app_event_sender(&self) -> mpsc::Sender<AppEvent> {
+        self.app_event_tx.clone()
+    }
 }
 
 /// Buzz's Restart gate (`transcription_tasks_table_widget.py:696-725`):
@@ -970,6 +1205,33 @@ impl HummApp {
 /// [`HummApp::handle_retry`]'s store/queue plumbing.
 fn retry_allowed(status: Status) -> bool {
     matches!(status, Status::Failed | Status::Canceled | Status::Skipped)
+}
+
+/// The [`egui::ViewportBuilder`] for a viewer window: `title`, min size
+/// 800×500, and either the captured shared geometry (`geometry`, position
+/// applied only when both coordinates are known) or the 1000×800 default
+/// (design spec §1.1/§6, `transcription_viewer_widget.py:92-93,1522-1531`).
+///
+/// `geometry` is the per-VM value captured at open ([`ViewerVm::initial_geometry`]),
+/// not a live settings read: a constant-per-window builder means egui only
+/// sizes the window once, so a *later* viewer closing (which rewrites the
+/// shared geometry) never re-snaps this already-open window.
+fn viewer_viewport_builder(title: &str, geometry: Option<ViewerGeometry>) -> egui::ViewportBuilder {
+    let mut builder = egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_min_inner_size([800.0, 500.0]);
+    match geometry {
+        Some(geometry) => {
+            builder = builder.with_inner_size([geometry.w, geometry.h]);
+            if let (Some(x), Some(y)) = (geometry.x, geometry.y) {
+                builder = builder.with_position([x, y]);
+            }
+        }
+        None => {
+            builder = builder.with_inner_size([1000.0, 800.0]);
+        }
+    }
+    builder
 }
 
 /// Environment-gated smoke-test hooks (see the `smoke_hooks` field doc on
@@ -1020,6 +1282,7 @@ impl eframe::App for HummApp {
         self.apply_smoke_auto_close(ui.ctx());
         self.drain_pending_argv_import();
         self.drain_update_notices();
+        self.drain_app_events();
 
         let now = Instant::now();
         if let Some(event_queue) = &self.event_queue {
@@ -1093,6 +1356,7 @@ impl eframe::App for HummApp {
         if self.preferences_open {
             self.show_preferences_viewport(ui.ctx());
         }
+        self.show_viewer_viewports(ui.ctx());
 
         self.persist_layout_if_changed();
     }

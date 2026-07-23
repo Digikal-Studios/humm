@@ -175,6 +175,11 @@ pub struct ToolbarEnablement {
     /// Clear History: enabled iff every selected row is in a terminal
     /// status (completed/failed/canceled/skipped).
     pub clear: bool,
+    /// Open Transcript: enabled iff the selection is non-empty and every
+    /// selected row can be opened (completed/skipped — `can_open`,
+    /// `main_window.py:350-364`). Return mirrors this same all-selected rule
+    /// (design spec §2.1); double-click gates its single row separately.
+    pub open: bool,
 }
 
 /// Computes [`ToolbarEnablement`] from the current selection's statuses.
@@ -192,6 +197,7 @@ pub fn toolbar_enablement(statuses: &[Status]) -> ToolbarEnablement {
                     Status::Completed | Status::Failed | Status::Canceled | Status::Skipped
                 )
             }),
+        open: non_empty && statuses.iter().all(|s| crate::viewer::can_open(*s)),
     }
 }
 
@@ -420,9 +426,11 @@ fn show_menu_bar(
 }
 
 /// The toolbar (design spec §3.3): Record (disabled) · New File
-/// Transcription · New URL Transcription · Open Transcript (disabled) ·
-/// Cancel Transcription · Clear History · Update Available chip (F-006,
-/// hidden while `state.update_notice.info` is `None`).
+/// Transcription · New URL Transcription · Open Transcript (enabled when the
+/// selection is non-empty and every selected row is completed/skipped — F-004,
+/// emits [`TableAction::OpenSelected`]) · Cancel Transcription · Clear History
+/// · Update Available chip (F-006, hidden while `state.update_notice.info` is
+/// `None`).
 ///
 /// "New URL Transcription" is disabled with a tooltip when
 /// `yt_dlp_available` is `false` (Policy rule 6).
@@ -448,8 +456,17 @@ fn show_toolbar(
         } else if new_url_response.clicked() {
             state.pending_import = PendingImportRequest::Url;
         }
-        ui.add_enabled(false, egui::Button::new(tr("toolbar-open-transcript")))
-            .on_disabled_hover_text(tr("toolbar-open-transcript-tooltip"));
+        let open_response = ui.add_enabled(
+            enablement.open,
+            egui::Button::new(tr("toolbar-open-transcript")),
+        );
+        if enablement.open {
+            if open_response.clicked() {
+                actions.push(TableAction::OpenSelected);
+            }
+        } else {
+            open_response.on_disabled_hover_text(tr("toolbar-open-transcript-tooltip"));
+        }
         if ui
             .add_enabled(enablement.cancel, egui::Button::new(tr("toolbar-cancel")))
             .clicked()
@@ -573,6 +590,21 @@ mod tests {
     fn single_completed_row_enables_clear() {
         let enablement = toolbar_enablement(&[Status::Completed]);
         assert!(enablement.clear);
+    }
+
+    #[test]
+    fn all_completed_or_skipped_enables_open() {
+        let enablement = toolbar_enablement(&[Status::Completed, Status::Skipped]);
+        assert!(enablement.open);
+    }
+
+    #[test]
+    fn open_disabled_when_any_selected_row_is_not_openable() {
+        // Buzz `should_enable_open_transcript_action`: all-or-nothing over the
+        // selection — one non-completed/skipped row disables Open.
+        assert!(!toolbar_enablement(&[Status::Completed, Status::Queued]).open);
+        assert!(!toolbar_enablement(&[Status::Failed]).open);
+        assert!(!toolbar_enablement(&[]).open);
     }
 
     // -- StoreHealthBanner --------------------------------------------------

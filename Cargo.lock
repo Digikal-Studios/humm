@@ -2326,6 +2326,7 @@ dependencies = [
  "egui_kittest",
  "fluent",
  "flume",
+ "humm-audio",
  "humm-core",
  "humm-media",
  "humm-store",

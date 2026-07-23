@@ -163,6 +163,24 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "models-delete-confirm-body",
         "models-download-error-title",
         "models-download-failed",
+        // Transcript viewer window (views/viewer.rs, F-080)
+        "viewer-view",
+        "viewer-mode-text",
+        "viewer-mode-translation",
+        "viewer-mode-timestamps",
+        "viewer-export",
+        "viewer-export-pending",
+        "viewer-translate",
+        "viewer-translate-tooltip",
+        "viewer-resize",
+        "viewer-resize-pending",
+        "viewer-identify-speakers",
+        "viewer-identify-speakers-tooltip",
+        "viewer-find",
+        "viewer-find-pending",
+        "viewer-empty",
+        "viewer-player-pending",
+        "viewer-open-error",
     ]
 }
 

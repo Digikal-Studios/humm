@@ -11,3 +11,4 @@ pub mod task_table;
 pub mod toasts;
 pub mod update_notice;
 pub mod url_dialog;
+pub mod viewer;
