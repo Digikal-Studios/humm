@@ -1,0 +1,29 @@
+{
+  "name": "sp-newline",
+  "language": null,
+  "algo": "sp=, +0+1",
+  "input": [
+    {
+      "start": 0,
+      "end": 60,
+      "text": "one,"
+    },
+    {
+      "start": 60,
+      "end": 120,
+      "text": "two,"
+    },
+    {
+      "start": 120,
+      "end": 200,
+      "text": "three."
+    }
+  ],
+  "expected": [
+    {
+      "start": 0,
+      "end": 200,
+      "text": "one, \ntwo, \nthree. "
+    }
+  ]
+}

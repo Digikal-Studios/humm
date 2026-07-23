@@ -1,0 +1,59 @@
+{
+  "name": "mg-sl-no-sp",
+  "language": null,
+  "algo": "mg=0.2++42+1_sl=42",
+  "input": [
+    {
+      "start": 0,
+      "end": 50,
+      "text": "Alpha"
+    },
+    {
+      "start": 50,
+      "end": 110,
+      "text": "beta."
+    },
+    {
+      "start": 120,
+      "end": 170,
+      "text": "Gamma"
+    },
+    {
+      "start": 170,
+      "end": 220,
+      "text": "delta"
+    },
+    {
+      "start": 220,
+      "end": 300,
+      "text": "epsilon"
+    },
+    {
+      "start": 300,
+      "end": 360,
+      "text": "zeta."
+    },
+    {
+      "start": 5000,
+      "end": 5050,
+      "text": "Eta"
+    },
+    {
+      "start": 5050,
+      "end": 5120,
+      "text": "theta."
+    }
+  ],
+  "expected": [
+    {
+      "start": 0,
+      "end": 360,
+      "text": "Alpha beta. Gamma delta epsilon zeta. "
+    },
+    {
+      "start": 5000,
+      "end": 5120,
+      "text": "Eta theta. "
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "name": "interior-dot-grouping",
+  "language": null,
+  "algo": "sp=.* ",
+  "input": [
+    {
+      "start": 0,
+      "end": 40,
+      "text": "Pi"
+    },
+    {
+      "start": 40,
+      "end": 80,
+      "text": "is"
+    },
+    {
+      "start": 80,
+      "end": 140,
+      "text": "3.14"
+    },
+    {
+      "start": 140,
+      "end": 180,
+      "text": "or"
+    },
+    {
+      "start": 180,
+      "end": 240,
+      "text": "so."
+    },
+    {
+      "start": 240,
+      "end": 300,
+      "text": "Right"
+    },
+    {
+      "start": 300,
+      "end": 360,
+      "text": "then."
+    }
+  ],
+  "expected": [
+    {
+      "start": 0,
+      "end": 140,
+      "text": "Pi is 3.14 "
+    },
+    {
+      "start": 140,
+      "end": 240,
+      "text": "or so. "
+    },
+    {
+      "start": 240,
+      "end": 360,
+      "text": "Right then. "
+    }
+  ]
+}

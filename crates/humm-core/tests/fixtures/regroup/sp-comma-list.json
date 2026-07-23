@@ -1,0 +1,49 @@
+{
+  "name": "sp-comma-list",
+  "language": null,
+  "algo": "sp=,/, ",
+  "input": [
+    {
+      "start": 0,
+      "end": 60,
+      "text": "First,"
+    },
+    {
+      "start": 60,
+      "end": 100,
+      "text": "then"
+    },
+    {
+      "start": 100,
+      "end": 160,
+      "text": "second,"
+    },
+    {
+      "start": 160,
+      "end": 200,
+      "text": "and"
+    },
+    {
+      "start": 200,
+      "end": 280,
+      "text": "third."
+    }
+  ],
+  "expected": [
+    {
+      "start": 0,
+      "end": 60,
+      "text": "First, "
+    },
+    {
+      "start": 60,
+      "end": 160,
+      "text": "then second, "
+    },
+    {
+      "start": 160,
+      "end": 280,
+      "text": "and third. "
+    }
+  ]
+}

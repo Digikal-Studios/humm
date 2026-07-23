@@ -1,0 +1,69 @@
+{
+  "name": "no-sentence-punct",
+  "language": null,
+  "algo": "mg=0.2++42+1_sp=.* /./. /。/?/? /？/!/! /！/,/, _sl=42",
+  "input": [
+    {
+      "start": 0,
+      "end": 40,
+      "text": "just"
+    },
+    {
+      "start": 40,
+      "end": 60,
+      "text": "a"
+    },
+    {
+      "start": 60,
+      "end": 120,
+      "text": "stream"
+    },
+    {
+      "start": 120,
+      "end": 150,
+      "text": "of"
+    },
+    {
+      "start": 150,
+      "end": 210,
+      "text": "words"
+    },
+    {
+      "start": 210,
+      "end": 250,
+      "text": "with"
+    },
+    {
+      "start": 250,
+      "end": 280,
+      "text": "no"
+    },
+    {
+      "start": 280,
+      "end": 360,
+      "text": "terminal"
+    },
+    {
+      "start": 360,
+      "end": 460,
+      "text": "punctuation"
+    },
+    {
+      "start": 460,
+      "end": 540,
+      "text": "anywhere"
+    }
+  ],
+  "expected": [
+    {
+      "start": 0,
+      "end": 280,
+      "text": "just a stream of words with no "
+    },
+    {
+      "start": 280,
+      "end": 540,
+      "text": "terminal punctuation anywhere "
+    }
+  ]
+}

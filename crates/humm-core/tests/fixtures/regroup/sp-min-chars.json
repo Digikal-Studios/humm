@@ -1,0 +1,79 @@
+{
+  "name": "sp-min-chars",
+  "language": null,
+  "algo": "sp=, +0+0+0+30",
+  "input": [
+    {
+      "start": 0,
+      "end": 40,
+      "text": "Hi,"
+    },
+    {
+      "start": 40,
+      "end": 90,
+      "text": "yes."
+    },
+    {
+      "start": 100,
+      "end": 140,
+      "text": "This"
+    },
+    {
+      "start": 140,
+      "end": 220,
+      "text": "sentence,"
+    },
+    {
+      "start": 220,
+      "end": 260,
+      "text": "with"
+    },
+    {
+      "start": 260,
+      "end": 340,
+      "text": "several,"
+    },
+    {
+      "start": 340,
+      "end": 420,
+      "text": "commas,"
+    },
+    {
+      "start": 420,
+      "end": 450,
+      "text": "is"
+    },
+    {
+      "start": 450,
+      "end": 520,
+      "text": "long."
+    }
+  ],
+  "expected": [
+    {
+      "start": 0,
+      "end": 90,
+      "text": "Hi, yes. "
+    },
+    {
+      "start": 100,
+      "end": 220,
+      "text": "This sentence, "
+    },
+    {
+      "start": 220,
+      "end": 340,
+      "text": "with several, "
+    },
+    {
+      "start": 340,
+      "end": 420,
+      "text": "commas, "
+    },
+    {
+      "start": 420,
+      "end": 520,
+      "text": "is long. "
+    }
+  ]
+}

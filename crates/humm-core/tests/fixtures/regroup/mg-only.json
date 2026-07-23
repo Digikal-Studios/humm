@@ -1,0 +1,49 @@
+{
+  "name": "mg-only",
+  "language": null,
+  "algo": "mg=0.2",
+  "input": [
+    {
+      "start": 0,
+      "end": 50,
+      "text": "First"
+    },
+    {
+      "start": 50,
+      "end": 120,
+      "text": "sentence."
+    },
+    {
+      "start": 130,
+      "end": 190,
+      "text": "Second"
+    },
+    {
+      "start": 190,
+      "end": 260,
+      "text": "one."
+    },
+    {
+      "start": 5000,
+      "end": 5060,
+      "text": "Later"
+    },
+    {
+      "start": 5060,
+      "end": 5200,
+      "text": "sentence."
+    }
+  ],
+  "expected": [
+    {
+      "start": 0,
+      "end": 260,
+      "text": "First sentence. Second one. "
+    },
+    {
+      "start": 5000,
+      "end": 5200,
+      "text": "Later sentence. "
+    }
+  ]
+}

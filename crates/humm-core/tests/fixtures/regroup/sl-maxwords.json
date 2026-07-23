@@ -1,0 +1,69 @@
+{
+  "name": "sl-maxwords",
+  "language": null,
+  "algo": "sl=42+3",
+  "input": [
+    {
+      "start": 0,
+      "end": 30,
+      "text": "a"
+    },
+    {
+      "start": 30,
+      "end": 60,
+      "text": "bb"
+    },
+    {
+      "start": 60,
+      "end": 90,
+      "text": "cc"
+    },
+    {
+      "start": 90,
+      "end": 120,
+      "text": "dd"
+    },
+    {
+      "start": 120,
+      "end": 150,
+      "text": "ee"
+    },
+    {
+      "start": 150,
+      "end": 180,
+      "text": "ff"
+    },
+    {
+      "start": 180,
+      "end": 210,
+      "text": "gg"
+    },
+    {
+      "start": 210,
+      "end": 240,
+      "text": "hh"
+    },
+    {
+      "start": 240,
+      "end": 300,
+      "text": "ii."
+    }
+  ],
+  "expected": [
+    {
+      "start": 0,
+      "end": 90,
+      "text": "a bb cc "
+    },
+    {
+      "start": 90,
+      "end": 180,
+      "text": "dd ee ff "
+    },
+    {
+      "start": 180,
+      "end": 300,
+      "text": "gg hh ii. "
+    }
+  ]
+}

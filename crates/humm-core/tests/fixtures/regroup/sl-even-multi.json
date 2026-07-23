@@ -1,0 +1,59 @@
+{
+  "name": "sl-even-multi",
+  "language": null,
+  "algo": "sl=42",
+  "input": [
+    {
+      "start": 0,
+      "end": 200,
+      "text": "Supercalifragilistic"
+    },
+    {
+      "start": 200,
+      "end": 360,
+      "text": "expialidocious"
+    },
+    {
+      "start": 360,
+      "end": 560,
+      "text": "pneumonoultramicroscopic"
+    },
+    {
+      "start": 560,
+      "end": 760,
+      "text": "silicovolcanoconiosis"
+    },
+    {
+      "start": 760,
+      "end": 1000,
+      "text": "antidisestablishmentarianism"
+    },
+    {
+      "start": 1000,
+      "end": 1240,
+      "text": "floccinaucinihilipilification."
+    }
+  ],
+  "expected": [
+    {
+      "start": 0,
+      "end": 360,
+      "text": "Supercalifragilistic expialidocious "
+    },
+    {
+      "start": 360,
+      "end": 560,
+      "text": "pneumonoultramicroscopic "
+    },
+    {
+      "start": 560,
+      "end": 1000,
+      "text": "silicovolcanoconiosis antidisestablishmentarianism "
+    },
+    {
+      "start": 1000,
+      "end": 1240,
+      "text": "floccinaucinihilipilification. "
+    }
+  ]
+}

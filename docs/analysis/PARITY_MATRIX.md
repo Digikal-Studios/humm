@@ -51,7 +51,7 @@ Verification method legend:
 | F-083 | Synced audio/video playback (loop, follow, speed) | gui-manual | not-started |
 | F-084 | Export from viewer (format × text/translation) | snapshot + gui-manual | not-started |
 | F-085 | Post-hoc Translate | unit (mock) + gui-manual | not-started |
-| F-086 | Resize/merge transcript (line-length fit, regroup rules) | unit + diff | not-started |
+| F-086 | Resize/merge transcript (line-length fit, regroup rules) | unit + diff | in-progress (both native ports done, differential-green; GUI resizer window + DB save-semantics + end-to-end wiring pending, later M4 tasks. **Resize half**: `humm-core::resize` — srt_equalizer 0.1.10 port + extend-endings; **Merge half**: `humm-core::regroup` (M4 Task 4) — stable-ts 2.19.1 `mg`/`sp`/`sl` subset (`parse_regroup_algo`/`str_to_valid_type` grammar + `merge_by_gap`/`split_by_punctuation`/`split_by_length` incl. lock/newline/min-gate/even-split machinery), full Buzz `get_transcript` sentence-grouping + fake-seconds (`ms/100`) unit quirk incl. the lossy `int(x*100)` output truncation. `regroup_segments`/`default_algo`/`algo_from_env_or` (`HUMM_MERGE_REGROUP_RULE`); unsupported ops → `RegroupError::UnsupportedOp` naming op + `mg`/`sp`/`sl`. 30 unit tests + a 16-fixture differential test against the **genuine** pinned stable-ts 2.19.1 (harness `validation/m4-differential/gen_regroup_fixtures.py` imports the real `result.py` via a synthetic-package/torch-stub bypass; numpy+tqdm are real). Buzz's full default UI string exercised end-to-end) |
 | F-087 | Speaker identification — strategy Q-3 | contract + diff | not-started |
 | F-100 | Preferences: General tab | gui-manual | not-started |
 | F-101 | Preferences: Models/Shortcuts/Folder-Watch tabs | gui-manual | not-started |

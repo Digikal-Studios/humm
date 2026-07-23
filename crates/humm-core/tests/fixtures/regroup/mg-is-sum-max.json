@@ -1,0 +1,69 @@
+{
+  "name": "mg-is-sum-max",
+  "language": null,
+  "algo": "mg=0.2++42+1",
+  "input": [
+    {
+      "start": 0,
+      "end": 40,
+      "text": "Hi."
+    },
+    {
+      "start": 45,
+      "end": 80,
+      "text": "Yo."
+    },
+    {
+      "start": 85,
+      "end": 130,
+      "text": "This"
+    },
+    {
+      "start": 130,
+      "end": 160,
+      "text": "is"
+    },
+    {
+      "start": 160,
+      "end": 180,
+      "text": "a"
+    },
+    {
+      "start": 180,
+      "end": 230,
+      "text": "much"
+    },
+    {
+      "start": 230,
+      "end": 300,
+      "text": "longer"
+    },
+    {
+      "start": 300,
+      "end": 380,
+      "text": "sentence"
+    },
+    {
+      "start": 380,
+      "end": 440,
+      "text": "here."
+    },
+    {
+      "start": 445,
+      "end": 500,
+      "text": "End."
+    }
+  ],
+  "expected": [
+    {
+      "start": 0,
+      "end": 80,
+      "text": "Hi. Yo. "
+    },
+    {
+      "start": 85,
+      "end": 500,
+      "text": "This is a much longer sentence here. End. "
+    }
+  ]
+}

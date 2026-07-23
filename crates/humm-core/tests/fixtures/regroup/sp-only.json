@@ -1,0 +1,64 @@
+{
+  "name": "sp-only",
+  "language": null,
+  "algo": "sp=.* /./. /。/?/? /？/!/! /！/,/, ",
+  "input": [
+    {
+      "start": 0,
+      "end": 60,
+      "text": "Well,"
+    },
+    {
+      "start": 60,
+      "end": 100,
+      "text": "you"
+    },
+    {
+      "start": 100,
+      "end": 160,
+      "text": "know,"
+    },
+    {
+      "start": 160,
+      "end": 200,
+      "text": "I"
+    },
+    {
+      "start": 200,
+      "end": 260,
+      "text": "think"
+    },
+    {
+      "start": 260,
+      "end": 320,
+      "text": "so,"
+    },
+    {
+      "start": 320,
+      "end": 400,
+      "text": "maybe."
+    }
+  ],
+  "expected": [
+    {
+      "start": 0,
+      "end": 60,
+      "text": "Well, "
+    },
+    {
+      "start": 60,
+      "end": 160,
+      "text": "you know, "
+    },
+    {
+      "start": 160,
+      "end": 320,
+      "text": "I think so, "
+    },
+    {
+      "start": 320,
+      "end": 400,
+      "text": "maybe. "
+    }
+  ]
+}

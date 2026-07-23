@@ -17,6 +17,7 @@ pub mod models;
 pub mod paths;
 pub mod pipeline;
 pub mod queue;
+pub mod regroup;
 pub mod resize;
 pub mod settings;
 pub mod telemetry;

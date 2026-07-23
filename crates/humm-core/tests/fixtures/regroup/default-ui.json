@@ -1,0 +1,89 @@
+{
+  "name": "default-ui",
+  "language": null,
+  "algo": "mg=0.2++42+1_sp=.* /./. /。/?/? /？/!/! /！/,/, _sl=42",
+  "input": [
+    {
+      "start": 0,
+      "end": 40,
+      "text": "Hello"
+    },
+    {
+      "start": 40,
+      "end": 90,
+      "text": "there."
+    },
+    {
+      "start": 100,
+      "end": 140,
+      "text": "How"
+    },
+    {
+      "start": 140,
+      "end": 180,
+      "text": "are"
+    },
+    {
+      "start": 180,
+      "end": 220,
+      "text": "you"
+    },
+    {
+      "start": 220,
+      "end": 300,
+      "text": "doing"
+    },
+    {
+      "start": 300,
+      "end": 360,
+      "text": "today?"
+    },
+    {
+      "start": 900,
+      "end": 950,
+      "text": "I"
+    },
+    {
+      "start": 950,
+      "end": 1000,
+      "text": "am"
+    },
+    {
+      "start": 1000,
+      "end": 1200,
+      "text": "absolutely"
+    },
+    {
+      "start": 1200,
+      "end": 1500,
+      "text": "wonderful"
+    },
+    {
+      "start": 1500,
+      "end": 1560,
+      "text": "and"
+    },
+    {
+      "start": 1560,
+      "end": 1800,
+      "text": "thriving."
+    }
+  ],
+  "expected": [
+    {
+      "start": 0,
+      "end": 90,
+      "text": "Hello there. "
+    },
+    {
+      "start": 100,
+      "end": 360,
+      "text": "How are you doing today? "
+    },
+    {
+      "start": 900,
+      "end": 1800,
+      "text": "I am absolutely wonderful and thriving. "
+    }
+  ]
+}

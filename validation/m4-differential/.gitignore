@@ -1,0 +1,4 @@
+# Byte-compiled Python from running the differential fixture harnesses
+# (gen_regroup_fixtures.py imports the stub modules under stubs/).
+__pycache__/
+*.pyc

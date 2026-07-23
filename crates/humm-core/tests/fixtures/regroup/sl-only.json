@@ -1,0 +1,69 @@
+{
+  "name": "sl-only",
+  "language": null,
+  "algo": "sl=42",
+  "input": [
+    {
+      "start": 0,
+      "end": 40,
+      "text": "The"
+    },
+    {
+      "start": 40,
+      "end": 90,
+      "text": "quick"
+    },
+    {
+      "start": 90,
+      "end": 140,
+      "text": "brown"
+    },
+    {
+      "start": 140,
+      "end": 180,
+      "text": "fox"
+    },
+    {
+      "start": 180,
+      "end": 240,
+      "text": "jumps"
+    },
+    {
+      "start": 240,
+      "end": 290,
+      "text": "over"
+    },
+    {
+      "start": 290,
+      "end": 320,
+      "text": "the"
+    },
+    {
+      "start": 320,
+      "end": 370,
+      "text": "lazy"
+    },
+    {
+      "start": 370,
+      "end": 440,
+      "text": "sleeping"
+    },
+    {
+      "start": 440,
+      "end": 500,
+      "text": "dog."
+    }
+  ],
+  "expected": [
+    {
+      "start": 0,
+      "end": 240,
+      "text": "The quick brown fox jumps "
+    },
+    {
+      "start": 240,
+      "end": 500,
+      "text": "over the lazy sleeping dog. "
+    }
+  ]
+}
