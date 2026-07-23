@@ -13,6 +13,7 @@ pub mod export;
 pub mod format;
 pub mod instance;
 pub mod language;
+pub mod live;
 pub mod models;
 pub mod paths;
 pub mod pipeline;
