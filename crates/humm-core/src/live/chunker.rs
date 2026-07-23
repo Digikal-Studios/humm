@@ -2,7 +2,7 @@
 //! machine, ported verbatim from Buzz's `RecordingTranscriber`
 //! (`buzz/transcriber/recording_transcriber.py`):
 //!
-//! - Batch sizing: lines 63-71 (`__init__`).
+//! - Batch sizing: lines 65-71 (`__init__`).
 //! - Loop / cut / advance: lines 108-134 (`start`, the `while self.is_running`
 //!   body).
 //! - Callback drop policy: lines 388-397 (`stream_callback`).
@@ -76,7 +76,7 @@ pub struct Chunker {
 
 impl Chunker {
     /// Builds a chunker for `mode`, sized per Buzz's `__init__`
-    /// (`recording_transcriber.py:63-71`):
+    /// (`recording_transcriber.py:65-71`):
     ///
     /// - `AppendBelow`/`AppendAbove`: `n_batch_samples = 5s * SAMPLE_RATE`,
     ///   `keep_samples = 0.15s * SAMPLE_RATE`. `transcription_step` is
@@ -88,10 +88,11 @@ impl Chunker {
     /// queueing if more than 3 batches behind").
     pub fn new(mode: RecordingMode, transcription_step: f64) -> Self {
         let rate = f64::from(SAMPLE_RATE);
-        let (n_batch_samples, keep_sample_seconds) = if mode == RecordingMode::AppendAndCorrect {
-            ((transcription_step * rate) as usize, 1.5)
-        } else {
-            ((5.0 * rate) as usize, 0.15)
+        let (n_batch_samples, keep_sample_seconds) = match mode {
+            RecordingMode::AppendAndCorrect => ((transcription_step * rate) as usize, 1.5),
+            RecordingMode::AppendBelow | RecordingMode::AppendAbove => {
+                ((5.0 * rate) as usize, 0.15)
+            }
         };
         let keep_samples = (keep_sample_seconds * rate) as usize;
         let max_queue_size = 3 * n_batch_samples;
@@ -159,28 +160,35 @@ impl Chunker {
     /// 1. `cut = find_silence_cut_point(queue[..n_batch_samples], rate)`.
     /// 2. `samples = queue[..cut]` becomes the batch.
     /// 3. The **queue** (this chunker's internal buffer) drains by `cut` in
-    ///    `AppendBelow`/`AppendAbove`, or by `cut - keep_samples` in
-    ///    `AppendAndCorrect` (Buzz: `self.queue = self.queue[cut -
-    ///    keep_samples:]` -- the keep-back overlap later tasks feed to the
-    ///    append-and-correct text merge). `cut < keep_samples` is clamped to
-    ///    a zero drain rather than underflowing (Buzz's own Python would
-    ///    slice with a negative index here, reading from the *end* of
-    ///    whatever the queue happens to hold at that instant -- a
-    ///    timing-dependent, undocumented corner even in Buzz; this chunker
-    ///    defines it as "keep everything" instead of replicating that
-    ///    ambiguity).
+    ///    `AppendBelow`/`AppendAbove`. In `AppendAndCorrect`, it is a
+    ///    faithful port of Buzz's `self.queue = self.queue[cut -
+    ///    keep_samples:]` (the keep-back overlap later tasks feed to the
+    ///    append-and-correct text merge) -- including its behavior when
+    ///    `cut < keep_samples`, where Python's negative-index slice is
+    ///    fully defined, not undefined: `arr[i:]` with `i < 0` means `arr[
+    ///    max(0, len(arr) + i):]`, i.e. it retains the **last**
+    ///    `keep_samples - cut` elements of the *pre-drain* queue (which may
+    ///    hold more than `n_batch_samples` samples), clamped to the whole
+    ///    queue when it is shorter than that. This chunker computes the
+    ///    same signed arithmetic rather than clamping the drain to zero.
     /// 4. The **timeline** (`start_ms`/`end_ms`) advances by `cut` in every
-    ///    mode, never by `cut - keep_samples`: batch *N*'s `[start_ms,
-    ///    end_ms)` covers exactly `cut` samples' worth of time, and batch
-    ///    *N+1*'s `start_ms` equals batch *N*'s `end_ms` -- even though, in
-    ///    `AppendAndCorrect` mode, batch *N+1*'s `samples` physically
-    ///    re-include the `keep_samples`-long tail of batch *N*. This is
-    ///    deliberate: the keep-back overlap exists to feed the text-level
-    ///    merge (`find_common_part`, a later task), which trims the
-    ///    duplicated *text* back out; double-counting that overlap on the
-    ///    *timeline* as well (used for `docs/OPEN_QUESTIONS.md` Q-10's
+    ///    mode, never by whatever the queue actually drained: batch *N*'s
+    ///    `[start_ms, end_ms)` covers exactly `cut` samples' worth of time,
+    ///    and batch *N+1*'s `start_ms` equals batch *N*'s `end_ms` -- even
+    ///    though, in `AppendAndCorrect` mode, batch *N+1*'s `samples`
+    ///    physically re-include the `keep_samples`-long tail of batch *N*.
+    ///    This is deliberate: the keep-back overlap exists to feed the
+    ///    text-level merge (`find_common_part`, a later task), which trims
+    ///    the duplicated *text* back out; double-counting that overlap on
+    ///    the *timeline* as well (used for `docs/OPEN_QUESTIONS.md` Q-10's
     ///    persisted-segment timeline) would make adjacent stored segments
-    ///    overlap in time, which nothing downstream expects.
+    ///    overlap in time, which nothing downstream expects. In the rare
+    ///    `cut < keep_samples` corner this makes the timeline an
+    ///    approximation relative to the *retained* content (the queue's
+    ///    retained tail can reach further back than `position_samples`'s
+    ///    advance-by-`cut` bookkeeping implies) -- a documented corner of
+    ///    the persisted-segment timeline model, not a parity break: the
+    ///    retained audio and its transcribed text are unaffected.
     pub fn next_batch(&mut self) -> Option<Batch> {
         if self.queue.len() < self.n_batch_samples {
             return None;
@@ -189,10 +197,19 @@ impl Chunker {
         let cut = find_silence_cut_point(&self.queue[..self.n_batch_samples], SAMPLE_RATE);
         let samples = self.queue[..cut].to_vec();
 
-        let drained = if self.mode == RecordingMode::AppendAndCorrect {
-            cut.saturating_sub(self.keep_samples)
-        } else {
-            cut
+        let drained = match self.mode {
+            RecordingMode::AppendAndCorrect => {
+                // Buzz: `self.queue = self.queue[cut - keep_samples:]`.
+                // Python slice semantics for a possibly-negative start:
+                // `arr[i:]` == `arr[max(0, len(arr) + i):]`.
+                let start = cut as i64 - self.keep_samples as i64;
+                if start >= 0 {
+                    start as usize
+                } else {
+                    (self.queue.len() as i64 + start).max(0) as usize
+                }
+            }
+            RecordingMode::AppendBelow | RecordingMode::AppendAbove => cut,
         };
         self.queue.drain(..drained);
 
@@ -231,10 +248,16 @@ fn millis_from_samples(n: u64) -> Millis {
 /// exactly; RMS is computed in `f64` from the `f32` input (see
 /// `validation/m5-differential/gen_chunker_fixtures.py`'s numeric-parity
 /// note -- Buzz's own `np.mean`/`np.sqrt` on a `float32` array stay
-/// `float32`-precision internally, a ~1e-7-relative difference from `f64`
-/// that is immaterial to which window is selected given the threshold's 2x
-/// margin, and which the differential fixture harness reproduces by
-/// generating its reference values in `float64` throughout).
+/// `float32`-precision internally, rather than auto-promoting to `f64`).
+/// This is not claimed to be bit-exact with Buzz's literal float32
+/// arithmetic (summation order and intermediate precision differ), only
+/// close enough to be immaterial to which window is selected, given the
+/// threshold's 2x margin against the differential fixtures' amplitude
+/// ratios (100-500x between loud/quiet blocks, not ~1e-6-1e-7). The
+/// differential fixture harness feeds the exact `float32` dtype Buzz's own
+/// runtime uses, so the fixtures are a genuine check of this function
+/// against Buzz's true runtime precision, not an idealized `float64` rerun
+/// of its formulas.
 pub fn find_silence_cut_point(samples: &[f32], sample_rate: u32) -> usize {
     let rate = f64::from(sample_rate);
     let window = (WINDOW_SECONDS * rate) as usize;
@@ -500,7 +523,13 @@ mod tests {
     }
 
     #[test]
-    fn append_and_correct_clamps_drain_to_zero_when_cut_is_smaller_than_keep_samples() {
+    fn append_and_correct_negative_slice_retains_tail_of_length_keep_minus_cut_when_queue_is_long()
+    {
+        // Python parity case where the queue is long enough that the
+        // negative-index slice does *not* need to clamp: retained length is
+        // exactly `keep_samples - cut`, taken from the *end* of the
+        // pre-drain queue (not `queue.len() - cut` as the non-correct
+        // modes would compute).
         let mut c = Chunker::new(RecordingMode::AppendAndCorrect, 2.0);
         assert_eq!(c.n_batch_samples(), 32_000);
         assert_eq!(c.keep_samples(), 24_000);
@@ -519,17 +548,44 @@ mod tests {
         let b = c.next_batch().expect("batch");
         assert_eq!(b.samples.len(), 8_160);
 
-        // Drain clamps to zero rather than underflowing (Buzz's own Python
-        // would slice with a negative index here -- see next_batch's doc
-        // comment): the whole queue is retained, not partially consumed.
-        assert_eq!(b.queue_len_after, 32_000);
-        assert_eq!(c.queue_len(), 32_000);
+        // Python: `queue[8_160 - 24_000:]` == `queue[-15_840:]` == the last
+        // 15_840 elements of the 32_000-long pre-drain queue (i.e. drains
+        // the first 32_000 - 15_840 = 16_160), *not* a zero drain.
+        assert_eq!(c.queue_len(), 15_840);
+        assert_eq!(b.queue_len_after, 15_840);
 
-        // The timeline still advances by `cut` alone, per the
-        // non-double-counting rule, independent of how much (if anything)
-        // was drained from the queue.
+        // The timeline advances by `cut` alone, per the non-double-counting
+        // rule, independent of how much the queue itself drained.
         assert_eq!(b.start_ms, Millis(0));
         assert_eq!(b.end_ms, Millis(510)); // 8_160 samples @ 16kHz
+    }
+
+    #[test]
+    fn append_and_correct_negative_slice_retains_whole_queue_when_shorter_than_keep_minus_cut() {
+        // Python parity case where `keep_samples - cut` exceeds the
+        // pre-drain queue's length: the negative-index slice clamps to
+        // `arr[0:]`, i.e. the whole queue survives.
+        //
+        // A tiny transcription_step keeps n_batch_samples far below the
+        // fixed 1.5s keep_samples (24_000), and a uniform (loud) signal
+        // forces find_silence_cut_point's full-batch fallback, so cut ==
+        // n_batch_samples exactly.
+        let mut c = Chunker::new(RecordingMode::AppendAndCorrect, 0.1);
+        assert_eq!(c.n_batch_samples(), 1_600);
+        assert_eq!(c.keep_samples(), 24_000);
+
+        c.push(&vec![0.5f32; 1_600]);
+        let b = c.next_batch().expect("batch");
+        assert_eq!(b.samples.len(), 1_600); // fallback: cut == n_batch_samples
+
+        // Python: `queue[1_600 - 24_000:]` == `queue[-22_400:]`, but the
+        // queue only has 1_600 elements -- `arr[-22_400:]` on a
+        // shorter-than-22_400 array clamps to `arr[0:]`, the whole array.
+        assert_eq!(c.queue_len(), 1_600);
+        assert_eq!(b.queue_len_after, 1_600);
+
+        assert_eq!(b.start_ms, Millis(0));
+        assert_eq!(b.end_ms, Millis(100)); // 1_600 samples @ 16kHz
     }
 
     // -- differential fixtures (real numpy 1.21.5, copied verbatim math) --
@@ -547,7 +603,8 @@ mod tests {
     /// m5-differential/gen_chunker_fixtures.py`) over Buzz's
     /// `find_silence_cut_point`/`amplitude` static methods, copied verbatim
     /// from `recording_transcriber.py:399-433`, against deterministic
-    /// closed-form synthetic vectors.
+    /// closed-form synthetic vectors converted to `float32` before use --
+    /// Buzz's own runtime dtype (see the harness's numeric-parity note).
     const FIXTURES: &[(&str, &str)] = &[
         (
             "loud-then-quiet-tail",
@@ -583,11 +640,11 @@ mod tests {
             let fixture: ChunkerFixture =
                 serde_json::from_str(json).unwrap_or_else(|e| panic!("fixture {name} JSON: {e}"));
 
-            // Fixture values are Python float64; cast to f32 to simulate the
-            // real audio-sample representation `find_silence_cut_point`/
-            // `rms` actually receive (see this module's numeric-parity
-            // note for why this f32-rounding is immaterial to the outcome
-            // given the fixtures' amplitude margins).
+            // Fixture values are already Buzz's real float32-rounded
+            // samples (the harness converts to `np.float32` before calling
+            // the copied functions), carried as JSON numbers at 9
+            // significant digits -- enough to round-trip the exact float32
+            // value; casting to `f32` here recovers it exactly.
             let samples: Vec<f32> = fixture.samples.iter().map(|&s| s as f32).collect();
 
             let actual_cut = find_silence_cut_point(&samples, fixture.sample_rate);
@@ -596,6 +653,10 @@ mod tests {
                 "fixture {name}: cut point mismatch"
             );
 
+            // RMS is not claimed bit-exact against numpy's float32-internal
+            // accumulation (this port widens to f64 before summing -- see
+            // find_silence_cut_point's doc comment); asserted within a
+            // tolerance instead.
             let actual_rms = rms(&samples);
             approx_eq(actual_rms, fixture.expected_rms, 1e-6);
         }

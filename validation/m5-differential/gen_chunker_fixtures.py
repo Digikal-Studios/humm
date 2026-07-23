@@ -9,28 +9,33 @@ workspace, see root `Cargo.toml`).
 The two functions below are copied **verbatim** (logic unchanged, only
 `self` dropped since these are `@staticmethod`s in Buzz) from
 `buzz/transcriber/recording_transcriber.py:399-433`
-(`RecordingTranscriber.find_silence_cut_point`, lines 399-424, and
-`RecordingTranscriber.amplitude`, lines 426-427). This is ground truth for
+(`RecordingTranscriber.find_silence_cut_point`, lines 399-429, and
+`RecordingTranscriber.amplitude`, lines 431-433). This is ground truth for
 `crates/humm-core/src/live/chunker.rs`'s `find_silence_cut_point`/`rms`; the
 Rust unit test `chunker_matches_python_reference_fixtures` asserts exact
 equality (cut index) / near-exact equality (RMS, see the numeric-parity note
 below) against every fixture this script writes.
 
-Numeric-parity note: Buzz's queue is a `float32` numpy array end to end, so
-its real `np.mean`/`np.sqrt` calls run at `float32` precision internally
-(confirmed empirically: `np.mean(np.float32([...])**2).dtype` is `float32`,
-*not* auto-promoted to `float64`, contrary to a casual read of the numpy
-docs). `crates/humm-core`'s Rust port deliberately computes RMS in `f64`
-from `f32` samples instead (see `chunker.rs`'s doc comments) -- a ~1e-7
-relative difference from Buzz's literal float32 arithmetic that is immaterial
-to *which window* gets selected as the cut point, given the 2x margin the
-0.5x-of-mean threshold provides against the synthetic vectors below (loud
-vs. quiet blocks differ by 100-500x in amplitude, not 1e-7). To keep the
-fixtures a genuine differential check of the Rust port rather than of numpy's
-dtype-promotion quirk, this harness feeds the copied functions **float64**
-arrays throughout (`np.asarray(samples, dtype=np.float64)`) -- i.e. it
-reproduces Buzz's cut-point/RMS *math*, not its incidental float32-precision
-loss.
+Numeric-parity note: Buzz's queue is a `float32` numpy array end to end
+(`np.ndarray([], dtype=np.float32)`, appended to from a `dtype="float32"`
+sounddevice `InputStream`), so its real `np.mean`/`np.sqrt` calls run at
+`float32` precision internally (confirmed empirically:
+`np.mean(np.float32([...])**2).dtype` is `float32`, *not* auto-promoted to
+`float64`, contrary to a casual read of the numpy docs). This harness
+therefore converts every synthetic vector to `np.float32` before calling the
+copied functions below -- matching the exact dtype Buzz's own runtime feeds
+them, not an idealized float64 rerun of its formulas.
+
+`crates/humm-core`'s Rust port computes RMS by widening each `f32` sample to
+`f64` before squaring/summing (see `chunker.rs`'s doc comments), rather than
+numpy's float32-throughout internal accumulation -- so the two pipelines are
+**not** claimed to be bit-exact on RMS (their summation order and
+intermediate precision differ); only close to numpy's float32 result, well
+within the fixtures' amplitude margins (loud vs. quiet blocks differ by
+100-500x, not by the ~1e-6-1e-7 relative precision gap between the two
+pipelines). The cut-point index -- integer, and robust to this
+micro-difference given those margins -- *is* asserted exactly by the Rust
+test; RMS is asserted within a documented tolerance instead.
 
 Usage:
     python3 gen_chunker_fixtures.py [--out-dir DIR]
@@ -101,8 +106,24 @@ def amplitude(arr: np.ndarray):
 # ---------------------------------------------------------------------------
 
 
+def _compact_float32_list(arr: np.ndarray) -> list[float]:
+    """Renders a float32 array as JSON-ready floats using 9 significant
+    digits -- the minimum decimal precision IEEE-754 guarantees round-trips
+    any float32 value exactly (verified empirically: `np.float32(float(f"
+    {x:.9g}")) == x` for every value used below). Python's default float
+    repr picks the shortest string that round-trips the *float64* it was
+    upconverted to, which for a float32 value like `np.float32(0.0001)` is a
+    17-significant-digit float64 tail (`9.999999747378752e-05`) -- more than
+    triple the digits actually needed, which matters here since several
+    fixtures run to tens of thousands of samples.
+    """
+    return [float(f"{float(x):.9g}") for x in arr]
+
+
 def _blocks(*pieces: tuple[float, int]) -> np.ndarray:
-    """Concatenates `(amplitude, count)` pieces into one float64 array."""
+    """Concatenates `(amplitude, count)` pieces into one array (closed-form
+    construction happens in float64 for convenience; `generate` converts the
+    result to `float32` -- Buzz's real runtime dtype -- before use)."""
     return np.concatenate([np.full(count, value, dtype=np.float64) for value, count in pieces])
 
 
@@ -163,7 +184,11 @@ def generate(out_dir: Path) -> None:
 
     for name, spec in FIXTURES.items():
         rate = spec["sample_rate"]
-        samples: np.ndarray = spec["samples"]
+        # Buzz's queue is dtype=float32 end to end -- feed the copied
+        # functions float32, not the float64 the closed-form construction
+        # above used for convenience, so the fixtures exercise Buzz's true
+        # runtime precision (see the numeric-parity note above).
+        samples: np.ndarray = spec["samples"].astype(np.float32)
 
         cut = find_silence_cut_point(samples, rate)
         rms_value = amplitude(samples)
@@ -171,7 +196,12 @@ def generate(out_dir: Path) -> None:
         payload = {
             "name": name,
             "sample_rate": rate,
-            "samples": samples.tolist(),
+            # The float32-rounded values, at 9-significant-digit precision
+            # (see _compact_float32_list) so the Rust test reads back the
+            # identical sample values Buzz's own float32 pipeline would have
+            # produced, without ballooning file size on float64's full
+            # shortest-round-trip tail.
+            "samples": _compact_float32_list(samples),
             "expected_cut": int(cut),
             "expected_rms": rms_value,
         }
