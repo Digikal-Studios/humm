@@ -207,6 +207,7 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "viewer-export-translation",
         "viewer-export-dialog-title",
         "viewer-export-filter",
+        "viewer-export-failed",
         "export-written",
     ]
 }

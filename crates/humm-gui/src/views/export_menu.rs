@@ -6,9 +6,9 @@
 //! folder else the input file's directory), opens the native save dialog
 //! through the `FileDialogs` seam (`crate::import`), and writes the
 //! in-memory rows through the **exact same** `humm_core::export::write_format`
-//! the queue's own export uses (`humm_core::pipeline::run_job`) — the whole
-//! point of F-084 is that the viewer and the queue share one writer, never a
-//! second implementation.
+//! the queue's own export uses (`humm_core::pipeline::run_file_job`) — the
+//! whole point of F-084 is that the viewer and the queue share one writer,
+//! never a second implementation.
 //!
 //! Ported from Buzz's `ExportTranscriptionMenu`
 //! (`buzz/widgets/transcription_viewer/export_transcription_menu.py`) and
@@ -19,8 +19,9 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use humm_core::domain::{OutputFormat, Segment, TranscriptionId, TranscriptionOptions};
-use humm_core::export::{DEFAULT_PARAGRAPH_SPLIT, TextKey, output_file_path, write_format};
+use humm_core::domain::{Millis, OutputFormat, Segment, TranscriptionId, TranscriptionOptions};
+use humm_core::export::{TextKey, output_file_path, write_format};
+use humm_core::viewer::text_view::paragraph_split_from_env;
 use humm_store::SqliteStore;
 
 use crate::i18n::{tr, tr_args};
@@ -103,17 +104,20 @@ pub fn show_export_flash(ui: &mut egui::Ui, vm: &mut ViewerVm) {
         .request_repaint_after(EXPORT_FLASH_DURATION - elapsed);
 }
 
-/// The inline export-error warning banner — the same shape as `views::
-/// viewer::show_unsaved_banner` (ADR-018's "banner, not toast" precedent:
-/// the app's toast stack is unreachable from a deferred-viewport render
-/// closure), carrying the write failure's message.
+/// The inline export-error warning banner — the exact same shape as `views::
+/// viewer::show_unsaved_banner` (ADR-018's "banner, not toast" precedent: the
+/// app's toast stack is unreachable from a deferred-viewport render closure):
+/// a fixed, i18n'd message, not the raw path/`io::Error` text — that detail
+/// is logged (`log::warn!`) at the failure site in [`export_entry`] instead,
+/// the same "banner shows a stable sentence, the log carries the diagnostic"
+/// split `show_unsaved_banner`'s fixed `viewer-unsaved-warning` string uses.
 pub fn show_export_error_banner(ui: &mut egui::Ui, vm: &ViewerVm) {
-    let Some(message) = &vm.export_error else {
+    if !vm.export_error {
         return;
-    };
+    }
     let color = ui.visuals().warn_fg_color;
     ui.horizontal(|ui| {
-        ui.colored_label(color, message);
+        ui.colored_label(color, tr("viewer-export-failed"));
     });
 }
 
@@ -151,7 +155,13 @@ fn export_entry(vm: &mut ViewerVm, deps: &ViewerDeps, format: OutputFormat, key:
     };
 
     let segments = vm.segments();
-    match write_export_file(&chosen, format, key, &segments) {
+    // Read fresh per export, exactly like Buzz's `write_output`
+    // (`file_transcriber.py:203`, the function `on_menu_triggered` calls)
+    // reads `BUZZ_PARAGRAPH_SPLIT_TIME` fresh per export — see
+    // `write_export_file`'s doc comment for why this must not be a
+    // hardcoded constant.
+    let paragraph_split = paragraph_split_from_env();
+    match write_export_file(&chosen, format, key, &segments, paragraph_split) {
         Ok(()) => {
             if let Some(parent) = chosen.parent()
                 && let Err(err) = deps.store.set_last_export_folder(vm.id, parent)
@@ -161,29 +171,41 @@ fn export_entry(vm: &mut ViewerVm, deps: &ViewerDeps, format: OutputFormat, key:
                     vm.id
                 );
             }
-            vm.export_error = None;
+            vm.export_error = false;
             vm.export_flash = Some((Instant::now(), chosen));
         }
         Err(err) => {
+            log::warn!("viewer export: could not write {}: {err}", chosen.display());
             vm.export_flash = None;
-            vm.export_error = Some(format!("{}: {err}", chosen.display()));
+            vm.export_error = true;
         }
     }
 }
 
 /// Creates (or overwrites) `path` and writes `segments` through the shared
-/// `write_format` — the exact function `humm_core::pipeline::run_job` calls
-/// for queue exports, at the Buzz-parity default paragraph-split gap
-/// (`export::DEFAULT_PARAGRAPH_SPLIT`, since the viewer has no per-export
-/// `OutputSpec` to read a custom one from).
+/// `write_format` — the exact function `humm_core::pipeline::run_file_job`
+/// calls for queue exports.
+///
+/// `paragraph_split` is a caller-supplied value, not a hardcoded constant:
+/// Buzz's `write_output` (`file_transcriber.py:203`, the very function
+/// `ExportTranscriptionMenu.on_menu_triggered` calls) reads
+/// `BUZZ_PARAGRAPH_SPLIT_TIME` **fresh on every export**, and humm's own
+/// Text-mode display (`ViewerVm::refresh_text_body`) reads
+/// `text_view::paragraph_split_from_env()` the same way — [`export_entry`]
+/// (this function's only caller) passes that very value through, so a
+/// transcript's on-screen Text-mode paragraphing and its TXT export always
+/// agree, `HUMM_PARAGRAPH_SPLIT_TIME` override or not. SRT/VTT ignore the
+/// parameter entirely ([`write_format`]'s own dispatch), so this is a no-op
+/// for those two formats regardless of value.
 fn write_export_file(
     path: &Path,
     format: OutputFormat,
     key: TextKey,
     segments: &[Segment],
+    paragraph_split: Millis,
 ) -> std::io::Result<()> {
     let mut file = std::fs::File::create(path)?;
-    write_format(format, segments, key, DEFAULT_PARAGRAPH_SPLIT, &mut file)
+    write_format(format, segments, key, paragraph_split, &mut file)
 }
 
 /// Resolves task `id`'s persisted [`TranscriptionOptions`] for filename
@@ -230,8 +252,8 @@ fn default_export_directory(store: &SqliteStore, id: TranscriptionId) -> Option<
 /// Builds the default save path for one export entry: [`export_options`]'s
 /// task/language/model feed the shared template engine
 /// (`output_file_path`, `template = None` → `DEFAULT_EXPORT_TEMPLATE`, the
-/// same resolution the queue's own export (`pipeline::run_job`) uses — this
-/// milestone has no settings-level template override to thread through
+/// same resolution the queue's own export (`pipeline::run_file_job`) uses —
+/// this milestone has no settings-level template override to thread through
 /// either path), with [`default_export_directory`] substituted for the
 /// input file's own directory when a valid last-export folder exists.
 fn default_export_path(
@@ -260,8 +282,9 @@ mod tests {
     use super::*;
     use humm_core::boundary::TaskStore;
     use humm_core::domain::{
-        Input, Millis, ModelSize, ModelSpec, OutputSpec, Segment, Source, TaskKind, TaskSpec,
+        Input, ModelSize, ModelSpec, OutputSpec, Segment, Source, TaskKind, TaskSpec,
     };
+    use humm_core::export::DEFAULT_PARAGRAPH_SPLIT;
     use humm_core::language::Language;
     use pretty_assertions::assert_eq;
 
@@ -367,7 +390,8 @@ mod tests {
                 let dir = tempfile::tempdir().expect("tempdir");
                 let path = dir.path().join(format!("out.{}", format.extension()));
 
-                write_export_file(&path, format, key, &segments).expect("write via export_menu");
+                write_export_file(&path, format, key, &segments, DEFAULT_PARAGRAPH_SPLIT)
+                    .expect("write via export_menu");
                 let via_menu = std::fs::read(&path).expect("read written file");
 
                 let mut expected = Vec::new();
@@ -394,8 +418,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("out.srt");
 
-        write_export_file(&path, OutputFormat::Srt, TextKey::Translation, &segments)
-            .expect("write");
+        write_export_file(
+            &path,
+            OutputFormat::Srt,
+            TextKey::Translation,
+            &segments,
+            DEFAULT_PARAGRAPH_SPLIT,
+        )
+        .expect("write");
         let written = std::fs::read_to_string(&path).expect("read");
 
         assert!(
@@ -405,6 +435,77 @@ mod tests {
         assert!(
             !written.contains("Hello world"),
             "translation-key export must not contain the recognized text"
+        );
+    }
+
+    /// Review fix round 1 (Important): `write_export_file` must not hardcode
+    /// [`DEFAULT_PARAGRAPH_SPLIT`] — Buzz's `write_output`
+    /// (`file_transcriber.py:203`, the exact function
+    /// `ExportTranscriptionMenu.on_menu_triggered` calls) reads
+    /// `BUZZ_PARAGRAPH_SPLIT_TIME` fresh per export, and humm's own Text-mode
+    /// display reads `text_view::paragraph_split_from_env()`; a hardcoded
+    /// constant here would let a `HUMM_PARAGRAPH_SPLIT_TIME` override make the
+    /// on-screen text and the exported TXT disagree. `export_entry` now
+    /// resolves the split via `paragraph_split_from_env()` and threads it
+    /// through as a plain argument (proven below); this test proves the
+    /// *value itself* actually reaches the writer for both the menu's write
+    /// path and a direct `write_format` call, rather than mutating the real
+    /// process `HUMM_PARAGRAPH_SPLIT_TIME` env var — this crate's lib tests
+    /// run in parallel and several *other* tests
+    /// (`viewer::tests::mode_switch_reruns_search` and friends) call
+    /// `paragraph_split_from_env()` too, so a real `std::env::set_var` here
+    /// would be a genuine flaky-test hazard. Matches the codebase's own
+    /// established convention for env-configurable behavior (`humm_core::
+    /// paths`'s "Global Constraint 9" doc comment; `text_view`'s own tests
+    /// exercise `paragraph_split_from_env_value`, never the real env, for the
+    /// identical reason).
+    #[test]
+    fn export_txt_honors_paragraph_split_env() {
+        // A 500 ms gap: below the default 2000 ms split (no paragraph break)
+        // but at the boundary of a 500 ms override (a break) — proves the
+        // supplied value, not the default, decides the outcome.
+        let segments = vec![seg(0, 500, "first", ""), seg(1000, 1500, "second", "")];
+        let overridden = Millis(500);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("out.txt");
+        write_export_file(
+            &path,
+            OutputFormat::Txt,
+            TextKey::Text,
+            &segments,
+            overridden,
+        )
+        .expect("write via export_menu");
+        let via_menu = std::fs::read(&path).expect("read written file");
+
+        let mut expected = Vec::new();
+        write_format(
+            OutputFormat::Txt,
+            &segments,
+            TextKey::Text,
+            overridden,
+            &mut expected,
+        )
+        .expect("write via direct write_format call");
+        assert_eq!(
+            via_menu, expected,
+            "the menu path and a direct write_format call must agree for a non-default split"
+        );
+
+        let mut at_default = Vec::new();
+        write_format(
+            OutputFormat::Txt,
+            &segments,
+            TextKey::Text,
+            DEFAULT_PARAGRAPH_SPLIT,
+            &mut at_default,
+        )
+        .expect("write via direct write_format call at the default split");
+        assert_ne!(
+            via_menu, at_default,
+            "a non-default paragraph split must actually change the TXT export, \
+             proving write_export_file does not silently ignore its argument"
         );
     }
 

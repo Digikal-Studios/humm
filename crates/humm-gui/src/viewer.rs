@@ -578,12 +578,15 @@ pub struct ViewerVm {
     /// [`crate::views::export_menu`]'s own flash renderer once its duration
     /// elapses, or overwritten by the next successful export.
     pub export_flash: Option<(Instant, PathBuf)>,
-    /// Set to `Some(message)` when an export's file write failed: surfaced as
-    /// an inline warning banner — the "banner, not toast" precedent
-    /// [`Self::unsaved`] set (ADR-018: the app's toast stack is unreachable
-    /// from a deferred-viewport render closure). Cleared by the next export
-    /// attempt, success or failure.
-    pub export_error: Option<String>,
+    /// Set `true` when an export's file write failed: surfaced as a fixed,
+    /// i18n'd (`viewer-export-failed`) inline warning banner — the exact same
+    /// "banner, not toast" precedent [`Self::unsaved`] set (ADR-018: the
+    /// app's toast stack is unreachable from a deferred-viewport render
+    /// closure), and the same "the stored flag is a plain bool, the actual
+    /// path/`io::Error` diagnostic is `log::warn!`-ed at the failure site,
+    /// never rendered verbatim" shape `Self::unsaved` uses. Cleared by the
+    /// next export attempt, success or failure.
+    pub export_error: bool,
 }
 
 impl ViewerVm {
@@ -646,7 +649,7 @@ impl ViewerVm {
             unsaved: false,
             search: SearchState::new(settings.viewer.find_widget_visible),
             export_flash: None,
-            export_error: None,
+            export_error: false,
         })
     }
 

@@ -247,4 +247,5 @@ viewer-export-text = Text
 viewer-export-translation = Translation
 viewer-export-dialog-title = Save File
 viewer-export-filter = Text files
+viewer-export-failed = The export could not be written — see the log for details
 export-written = Written to { $path }
