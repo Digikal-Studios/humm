@@ -138,8 +138,8 @@ impl WhisperEngine {
     /// (`buzz/transcriber/recording_transcriber.py:306-362`) reproduced
     /// in-process instead of over the whisper-server subprocess Buzz spawned:
     /// the same request shape (rolling `prompt`, no timestamps) and the same
-    /// response shape (segment texts joined, see [`join_segment_texts`]), but
-    /// via [`WhisperState::full`] directly rather than an HTTP call.
+    /// response shape (segment texts joined, see `join_segment_texts`), but
+    /// via `WhisperState::full` directly rather than an HTTP call.
     ///
     /// `prompt` is the caller's rolling context — the previous call's
     /// returned text, or the session's configured initial prompt on the first
