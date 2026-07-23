@@ -1080,10 +1080,9 @@ impl SqliteStore {
     /// and `kind = "live_recording"` (the stale-flip special case in
     /// [`Self::cancel_stale_tasks`] keys off this column). `options_json`
     /// holds the full persisted [`TaskSpec`] — `options` cloned verbatim,
-    /// `input` a never-read-back placeholder
-    /// ([`live_session_input_placeholder`]), `output` default — so
-    /// [`Self::load_task_spec`] round-trips a live row exactly like a file
-    /// row's.
+    /// `input` a never-read-back placeholder (`live_session_input_placeholder`),
+    /// `output` default — so [`Self::load_task_spec`] round-trips a live row
+    /// exactly like a file row's.
     ///
     /// `name` is stored **verbatim**: this method does no formatting of its
     /// own. The spec's naming rule (`"Live recording <%d-%b-%Y %H-%M-%S>"`)
