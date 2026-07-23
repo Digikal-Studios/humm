@@ -6,6 +6,9 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+pub use rtrb;
 
 use crate::cancel::CancelToken;
 use crate::domain::{Millis, Segment, Source, TaskKind, TaskSpec, TranscriptionId};
@@ -201,6 +204,125 @@ pub trait OutputStream: Send {
     fn play(&mut self) -> Result<(), AudioError>;
     /// Pauses the stream: the `fill` callback stops being invoked.
     fn pause(&mut self) -> Result<(), AudioError>;
+}
+
+/// An audio input device available for live recording.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioDevice {
+    /// Stable device identifier (name-based, as exposed by the adapter like cpal).
+    pub id: String,
+    /// User-friendly device name.
+    pub name: String,
+    /// Whether this is the system's default input device.
+    pub is_default: bool,
+}
+
+/// Snapshot of live audio capture metering data, shared between the capture
+/// adapter and the UI layer. Written atomically by the capture thread,
+/// read by the UI thread without locking.
+///
+/// All three values use relaxed ordering because they are single-writer
+/// telemetry: the capture adapter writes them on each callback, and the
+/// meter widget reads them once per display frame. Stale reads are acceptable
+/// (a frame or two of lag in the displayed meters), and there is no shared
+/// mutable state to synchronize.
+#[derive(Debug)]
+pub struct MeterSnapshot {
+    /// Current RMS level as f32 bits packed in an `AtomicU32`, updated per
+    /// capture callback. Decode with `f32::from_bits()`.
+    current_rms: AtomicU32,
+    /// Average RMS level as f32 bits, accumulated over 1 second in meter-only
+    /// mode or per batch while recording. Decode with `f32::from_bits()`.
+    average_rms: AtomicU32,
+    /// Number of samples queued in the ring buffer at the last callback.
+    queue_len: AtomicUsize,
+}
+
+impl MeterSnapshot {
+    /// Creates a new snapshot, initialized to all zeros.
+    pub fn new() -> Self {
+        MeterSnapshot {
+            current_rms: AtomicU32::new(0),
+            average_rms: AtomicU32::new(0),
+            queue_len: AtomicUsize::new(0),
+        }
+    }
+
+    /// Sets the current RMS level (f32 encoded as bits).
+    pub fn set_current_rms(&self, rms: f32) {
+        self.current_rms.store(rms.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Gets the current RMS level (f32 decoded from bits).
+    pub fn get_current_rms(&self) -> f32 {
+        f32::from_bits(self.current_rms.load(Ordering::Relaxed))
+    }
+
+    /// Sets the average RMS level (f32 encoded as bits).
+    pub fn set_average_rms(&self, rms: f32) {
+        self.average_rms.store(rms.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Gets the average RMS level (f32 decoded from bits).
+    pub fn get_average_rms(&self) -> f32 {
+        f32::from_bits(self.average_rms.load(Ordering::Relaxed))
+    }
+
+    /// Sets the queue length in samples.
+    pub fn set_queue_len(&self, len: usize) {
+        self.queue_len.store(len, Ordering::Relaxed);
+    }
+
+    /// Gets the queue length in samples.
+    pub fn get_queue_len(&self) -> usize {
+        self.queue_len.load(Ordering::Relaxed)
+    }
+
+    /// Resets all metering values to zero.
+    pub fn reset(&self) {
+        self.current_rms.store(0, Ordering::Relaxed);
+        self.average_rms.store(0, Ordering::Relaxed);
+        self.queue_len.store(0, Ordering::Relaxed);
+    }
+}
+
+impl Default for MeterSnapshot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Captures live audio from a system input device.
+///
+/// Implemented by `humm-audio`'s `CpalCapture` adapter; unit tests substitute
+/// a mock. The stream produces 16 kHz mono f32 samples at the producer end of
+/// an `rtrb` SPSC ring buffer (resample/downmix happen inside the adapter per
+/// ADR-005).
+pub trait AudioCapture: Send {
+    /// Lists all available audio input devices.
+    fn devices(&self) -> Result<Vec<AudioDevice>, AudioError>;
+
+    /// Starts capturing audio from the specified device (or the default if
+    /// `device_id` is `None`). Delivers 16 kHz mono f32 samples to `sink`.
+    ///
+    /// The adapter resamples/downmixes as needed inside the capture callback
+    /// (ADR-005) so the producer always sees 16 kHz mono f32. `meter` receives
+    /// per-callback RMS and queue depth updates.
+    ///
+    /// Returns a [`CaptureHandle`] that must be dropped to stop the stream.
+    fn start(
+        &mut self,
+        device_id: Option<&str>,
+        sink: rtrb::Producer<f32>,
+        meter: Arc<MeterSnapshot>,
+    ) -> Result<Box<dyn CaptureHandle>, AudioError>;
+}
+
+/// A handle to an open audio capture stream. Dropping it stops the stream.
+pub trait CaptureHandle: Send {
+    /// Stops the capture stream (called when the handle is dropped or
+    /// explicitly stopped).
+    fn stop(self: Box<Self>);
 }
 
 /// Parameters for a single transcription run, translated from
@@ -434,5 +556,106 @@ mod tests {
         let pcm = Pcm::new(vec![0.1, 0.2, 0.3]);
         assert_eq!(pcm.len(), 3);
         assert_eq!(pcm.samples(), &[0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn meter_snapshot_set_get_current_rms() {
+        let meter = MeterSnapshot::new();
+        let rms = 0.5_f32;
+        meter.set_current_rms(rms);
+        assert_eq!(meter.get_current_rms(), rms);
+    }
+
+    #[test]
+    fn meter_snapshot_set_get_average_rms() {
+        let meter = MeterSnapshot::new();
+        let rms = 0.75_f32;
+        meter.set_average_rms(rms);
+        assert_eq!(meter.get_average_rms(), rms);
+    }
+
+    #[test]
+    fn meter_snapshot_set_get_queue_len() {
+        let meter = MeterSnapshot::new();
+        let len = 1024_usize;
+        meter.set_queue_len(len);
+        assert_eq!(meter.get_queue_len(), len);
+    }
+
+    #[test]
+    fn meter_snapshot_f32_bit_exactness() {
+        let meter = MeterSnapshot::new();
+        let special_values = [
+            0.0_f32,
+            -0.0_f32,
+            1.0_f32,
+            -1.0_f32,
+            0.5_f32,
+            f32::MIN_POSITIVE,
+            f32::MAX,
+            f32::NAN,
+        ];
+        for val in &special_values {
+            meter.set_current_rms(*val);
+            let retrieved = meter.get_current_rms();
+            // NaN != NaN by definition, so check bits instead
+            if val.is_nan() {
+                assert!(retrieved.is_nan());
+            } else {
+                assert_eq!(retrieved.to_bits(), val.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn meter_snapshot_reset() {
+        let meter = MeterSnapshot::new();
+        meter.set_current_rms(0.5);
+        meter.set_average_rms(0.75);
+        meter.set_queue_len(1024);
+
+        meter.reset();
+
+        assert_eq!(meter.get_current_rms(), 0.0);
+        assert_eq!(meter.get_average_rms(), 0.0);
+        assert_eq!(meter.get_queue_len(), 0);
+    }
+
+    #[test]
+    fn meter_snapshot_default() {
+        let meter = MeterSnapshot::default();
+        assert_eq!(meter.get_current_rms(), 0.0);
+        assert_eq!(meter.get_average_rms(), 0.0);
+        assert_eq!(meter.get_queue_len(), 0);
+    }
+
+    #[test]
+    fn audio_capture_trait_object_safety() {
+        // No-op fake implementations to verify object-safety.
+        struct FakeCapture;
+
+        impl AudioCapture for FakeCapture {
+            fn devices(&self) -> Result<Vec<AudioDevice>, AudioError> {
+                Ok(vec![])
+            }
+
+            fn start(
+                &mut self,
+                _device_id: Option<&str>,
+                _sink: rtrb::Producer<f32>,
+                _meter: Arc<MeterSnapshot>,
+            ) -> Result<Box<dyn CaptureHandle>, AudioError> {
+                Ok(Box::new(FakeHandle))
+            }
+        }
+
+        struct FakeHandle;
+
+        impl CaptureHandle for FakeHandle {
+            fn stop(self: Box<Self>) {}
+        }
+
+        // Should compile: trait is object-safe.
+        let _capture: Box<dyn AudioCapture> = Box::new(FakeCapture);
     }
 }
