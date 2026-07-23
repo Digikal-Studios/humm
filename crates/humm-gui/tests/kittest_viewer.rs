@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 
 use egui::accesskit::Role;
 use egui_kittest::Harness;
-use egui_kittest::kittest::{By, Queryable};
+use egui_kittest::kittest::{By, NodeT, Queryable};
+use humm_audio::Player;
 use humm_core::boundary::{
     AudioDecoder, AudioOutput, FillCallback, FrameStream, MediaInfo, MediaProber, OutputStream,
     Pcm, PlaybackPcm, StreamSpec, TaskStore, VideoStreamInfo, VideoStreamer,
@@ -36,31 +37,43 @@ use humm_core::viewer::edit::Field;
 use humm_core::viewer::search::{RowMatch, SEARCH_DEBOUNCE_MS, results_label};
 use humm_gui::import::FileDialogs;
 use humm_gui::shortcuts::ShortcutMap;
-use humm_gui::viewer::{CellEditor, EditCol, SearchResults, ViewerDeps, ViewerVm};
+use humm_gui::viewer::{CellEditor, EditCol, PlayerState, SearchResults, ViewerDeps, ViewerVm};
+use humm_gui::views::playback_controls;
 use humm_gui::views::viewer::viewer_ui;
 use humm_store::SqliteStore;
 
-// -- fakes: viewer_ui never invokes any adapter this task, so these only need
-//    to satisfy the type bounds. --------------------------------------------
+// -- fakes: the viewer now decodes for playback on a background thread at open
+//    (Task 10). The fake decoder returns 1 s of stereo silence and the fake
+//    output captures the fill closure and hands back a null stream, so the
+//    background player build succeeds headlessly without a real audio device.
+//    The .wav fixtures are never video, so the prober/streamer stay inert. ---
 
 struct FakeDecoder;
 impl AudioDecoder for FakeDecoder {
     fn decode(&self, _path: &Path, _cancel: &CancelToken) -> Result<Pcm, MediaError> {
-        unreachable!("viewer_ui never decodes")
+        unreachable!("viewer_ui never runs the transcription decode")
     }
     fn decode_playback(
         &self,
         _path: &Path,
         _cancel: &CancelToken,
     ) -> Result<PlaybackPcm, MediaError> {
-        unreachable!("viewer_ui never decodes")
+        // 1 s of stereo silence at 44.1 kHz.
+        Ok(PlaybackPcm::new(vec![0.0; 44_100 * 2], 2, 44_100))
     }
 }
 
 struct FakeProber;
 impl MediaProber for FakeProber {
     fn probe(&self, _path: &Path) -> Result<MediaInfo, MediaError> {
-        unreachable!("viewer_ui never probes")
+        // Audio-only: the .wav fixtures are never video, so this is never
+        // reached, but stays benign rather than panicking.
+        Ok(MediaInfo {
+            duration: Some(Millis(1000)),
+            has_audio: true,
+            has_video: false,
+            video: None,
+        })
     }
 }
 
@@ -72,19 +85,38 @@ impl VideoStreamer for FakeStreamer {
         _start: Millis,
         _info: &VideoStreamInfo,
     ) -> Result<Box<dyn FrameStream>, MediaError> {
-        unreachable!("viewer_ui never streams video")
+        unreachable!("viewer_ui never streams video for an audio fixture")
     }
 }
 
+/// Captures the `fill` closure so a real audio device is never opened.
 struct FakeOutput;
+struct NullStream;
+impl OutputStream for NullStream {
+    fn play(&mut self) -> Result<(), AudioError> {
+        Ok(())
+    }
+    fn pause(&mut self) -> Result<(), AudioError> {
+        Ok(())
+    }
+}
 impl AudioOutput for FakeOutput {
     fn open(
         &self,
         _spec: StreamSpec,
         _fill: FillCallback,
     ) -> Result<Box<dyn OutputStream>, AudioError> {
-        unreachable!("viewer_ui never opens audio")
+        Ok(Box::new(NullStream))
     }
+}
+
+/// Builds a ready [`Player`] over 1 s of stereo silence via [`FakeOutput`].
+fn ready_player() -> Player {
+    Player::new(
+        PlaybackPcm::new(vec![0.0; 44_100 * 2], 2, 44_100),
+        Arc::new(FakeOutput),
+    )
+    .expect("player opens over the fake output")
 }
 
 struct FakeDialogs;
@@ -543,6 +575,91 @@ fn enter_in_focused_input_advances_to_next_match() {
         1,
         "Enter in the focused input must advance to the next match"
     );
+}
+
+// -- F-083 synced playback (Task 10) -------------------------------------
+//
+// The player state is seeded directly on the VM before the harness runs
+// (`ViewerVm::player` is a public field, and `ensure_player_started` leaves a
+// pre-resolved player untouched), so these exercise the render/echo paths
+// deterministically without the background decode thread or a real audio
+// device — the M3 precedent for state-seam-driven kittests where the pointer
+// path is timing-fragile.
+
+/// The degraded player: a `Failed` decode renders disabled controls whose
+/// tooltip names the cause (spec §2.1 unhappy path).
+#[test]
+fn player_failed_state_disables_controls_with_tooltip() {
+    let (mut fixture, _dir) = fixture("/tmp/missing.wav", &[seg(0, 1000, "a", "")]);
+    fixture.vm.player = PlayerState::Failed("file not found".to_string());
+    let mut harness = build_harness(fixture);
+    harness.run();
+
+    // The disabled play button carries the cause in its disabled-hover tooltip.
+    let play = harness.get_by_label("\u{25b6}");
+    assert!(
+        play.accesskit_node().is_disabled(),
+        "the play control must be disabled when playback failed"
+    );
+    // And the "Playback unavailable" label renders (only in the Failed arm).
+    harness.get_by_label_contains("Playback unavailable");
+}
+
+/// The controls bar is hidden by default and auto-shows the frame playback
+/// starts in Timestamps mode (spec §2.1, Buzz `on_audio_playback_state_changed`).
+#[test]
+fn controls_bar_appears_on_play_in_timestamps_mode() {
+    let (mut fixture, _dir) = fixture(
+        "/tmp/a.wav",
+        &[seg(0, 1000, "a", ""), seg(1000, 2000, "b", "")],
+    );
+    assert!(
+        !fixture.vm.playback_controls_visible,
+        "the controls bar is hidden by default"
+    );
+    let player = ready_player();
+    player.play();
+    fixture.vm.player = PlayerState::Ready(player);
+
+    let mut harness = build_harness(fixture);
+    // A playing player requests a ~60 Hz repaint every frame, so `run()` (which
+    // loops until the UI stops repainting) would hit its step cap — one `step`
+    // is enough for the auto-show transition.
+    harness.step();
+
+    assert!(
+        harness.state().vm.playback_controls_visible,
+        "the controls bar auto-shows when playback starts in Timestamps mode"
+    );
+    harness.get_by_label_contains("Playback Controls");
+}
+
+/// The editable speed combo echoes the parsed+clamped value (spec §2.1). Driven
+/// through the commit seam (`playback_controls::commit_speed_text`) rather than
+/// simulated typing, which is timing-fragile in kittest.
+#[test]
+fn speed_combo_echoes_clamped_value() {
+    let (mut fixture, _dir) = fixture("/tmp/a.wav", &[seg(0, 1000, "a", "")]);
+    fixture.vm.player = PlayerState::Ready(ready_player());
+    fixture.vm.playback_controls_visible = true;
+
+    // An over-max value without a trailing 'x' echoes as the clamped "5.00x".
+    fixture.vm.speed_text = "9".to_string();
+    playback_controls::commit_speed_text(&mut fixture.vm);
+    assert_eq!(fixture.vm.speed_text, "5.00x");
+    assert!((fixture.vm.playback_rate - 5.0).abs() < f32::EPSILON);
+
+    // A trailing-'x' value is kept verbatim while its parse still applies.
+    fixture.vm.speed_text = "1.5x".to_string();
+    playback_controls::commit_speed_text(&mut fixture.vm);
+    assert_eq!(fixture.vm.speed_text, "1.5x");
+    assert!((fixture.vm.playback_rate - 1.5).abs() < f32::EPSILON);
+
+    // Garbage reverts the buffer to the current rate's "%.2fx" form.
+    fixture.vm.speed_text = "not-a-speed".to_string();
+    playback_controls::commit_speed_text(&mut fixture.vm);
+    assert_eq!(fixture.vm.speed_text, "1.50x");
+    assert!((fixture.vm.playback_rate - 1.5).abs() < f32::EPSILON);
 }
 
 /// Defect 2 (important): the find-bar visibility persist must cover the ⌘F

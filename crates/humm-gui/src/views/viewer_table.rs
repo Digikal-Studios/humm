@@ -73,10 +73,12 @@ pub fn ui(ui: &mut egui::Ui, vm: &mut ViewerVm, deps: &ViewerDeps) -> Vec<EditAp
     let table_height = ui.available_height().max(row_height);
     let columns = visible_columns(vm.has_translations);
 
-    // A search match landing on this frame (fresh search or next/prev nav,
-    // F-082 design spec §2.3 `highlight_table_match`): select the row and
-    // ask the table to center-scroll to it, one-shot.
-    let search_scroll_row = viewer_search::take_pending_row_scroll(vm);
+    // A one-shot center-scroll requested this frame: a search match (F-082,
+    // `highlight_table_match`) or a playback scroll (follow-audio /
+    // scroll-to-current / loop re-enable, F-083). Search takes precedence when
+    // both are pending (a search action is always the more recent intent).
+    let search_scroll_row =
+        viewer_search::take_pending_row_scroll(vm).or_else(|| vm.playback_scroll.take());
 
     // Return begins editing the selected row's Start cell when no editor is
     // open. Read before the editor is pulled out below, so a Return that
@@ -167,6 +169,10 @@ pub fn ui(ui: &mut egui::Ui, vm: &mut ViewerVm, deps: &ViewerDeps) -> Vec<EditAp
     }
     if let Some(idx) = click_select {
         vm.selected = Some(idx);
+        // Record the genuine pointer selection for the player's segment-click
+        // logic (seek-if-outside + loop range). Search/follow selection sets
+        // `vm.selected` through other paths, so it never triggers a seek.
+        vm.segment_click = Some(idx);
     }
     if let Some((idx, col)) = begin_edit
         && vm.editing.is_none()

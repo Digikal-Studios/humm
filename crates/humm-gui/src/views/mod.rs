@@ -5,6 +5,7 @@
 pub mod about;
 pub mod main_window;
 pub mod options_sheet;
+pub mod playback_controls;
 pub mod preferences;
 pub mod rename_notes;
 pub mod task_table;

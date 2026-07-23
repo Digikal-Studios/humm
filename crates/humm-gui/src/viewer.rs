@@ -9,12 +9,18 @@
 //! once (real adapters in `app.rs`, fakes in the kittest harness) and shared
 //! across every open viewer.
 //!
-//! This module is pure state + store I/O — no egui. The window chrome lives in
-//! [`crate::views::viewer`] and the editor table in
-//! [`crate::views::viewer_table`]. Playback/search state land in later M4 tasks
-//! (9-12); Task 8 adds the segment-editing state ([`CellEditor`],
-//! [`ViewerVm::selected`]/[`ViewerVm::editing`]) and the store-backed commit
-//! rules ([`ViewerVm::apply_timestamp_edit`]/[`ViewerVm::apply_text_edit`]).
+//! This module is state + store I/O and the playback view-model. It is almost
+//! entirely egui-free; the one exception is [`VideoState::texture`] — a live
+//! [`egui::TextureHandle`] that must persist on the VM across frames so the
+//! video pane reuses one GPU allocation (Task 10, spec §2.5). The window chrome
+//! lives in [`crate::views::viewer`], the editor table in
+//! [`crate::views::viewer_table`], and the playback-controls bar in
+//! [`crate::views::playback_controls`]. Task 8 adds the segment-editing state
+//! ([`CellEditor`], [`ViewerVm::selected`]/[`ViewerVm::editing`]) and the
+//! store-backed commit rules
+//! ([`ViewerVm::apply_timestamp_edit`]/[`ViewerVm::apply_text_edit`]); Task 10
+//! adds the synced-playback state ([`PlayerState`], [`VideoState`], loop/follow/
+//! speed) whose master clock is [`humm_audio::Player::position`].
 //!
 //! **Store-failure surfacing (ADR-018):** the app's toast stack lives on
 //! `HummApp` and is unreachable from a viewer's deferred-viewport render
@@ -28,10 +34,18 @@
 //! `_load_segments_and_settings`/`reset_view`
 //! (`transcription_viewer_widget.py:78-143,1078-1145`).
 
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use humm_core::boundary::{AudioDecoder, AudioOutput, MediaProber, VideoStreamer};
+use humm_audio::Player;
+use humm_core::boundary::{
+    AudioDecoder, AudioOutput, FrameStream, MediaProber, PlaybackPcm, VideoStreamInfo,
+    VideoStreamer,
+};
+use humm_core::cancel::CancelToken;
 use humm_core::domain::{Millis, Segment, Status, TranscriptionId};
 use humm_core::error::StoreError;
 use humm_core::settings::Settings;
@@ -85,15 +99,101 @@ pub enum ViewMode {
     Translation,
 }
 
-/// Placeholder playback state for this task. The audio/video player engine and
-/// its real states (loading, ready, playing, degraded) land in Task 10; the
-/// window skeleton renders an inert player strip until then.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// The audio/video player's lifecycle (F-083, spec §2.5). The media is decoded
+/// on a background thread at viewer open ([`ViewerVm::ensure_player_started`]);
+/// the row renders a disabled "loading" affordance until the [`Player`] is
+/// built ([`Self::Ready`]) or the decode fails ([`Self::Failed`], whose reason
+/// names the cause — file missing / decode error — in the disabled-controls
+/// tooltip). Everything else (table/edit/search/export) works regardless of
+/// which state this is in.
 pub enum PlayerState {
-    /// No player engine wired yet (this task) or the media could not be
-    /// decoded (Task 10's degraded path).
-    #[default]
-    Unavailable,
+    /// Decode is in flight on the background thread; controls are disabled.
+    Loading,
+    /// The playback engine is live — its [`Player::position`] is the A/V
+    /// master clock the scrubber, follow-audio, and video pane all read.
+    Ready(Player),
+    /// Decode (or output-stream open) failed; the string names the cause for
+    /// the disabled-controls tooltip.
+    Failed(String),
+}
+
+/// Live video-pane state (spec §2.5): the frame stream (audio-clock-driven),
+/// the reused GPU texture, and the timestamp of the last frame uploaded (for
+/// the drift log and the "keep last frame on a gap" rule). Present only for
+/// video media whose stream opened successfully; audio-only transcripts leave
+/// [`ViewerVm::video`] `None`.
+pub struct VideoState {
+    /// The open frame stream; `frame_for(audio position)` picks the frame to
+    /// show each repaint, `seek` respawns it on a scrub/jump.
+    pub stream: Box<dyn FrameStream>,
+    /// The GPU texture the pane draws — reused across frames via
+    /// [`egui::TextureHandle::set`] so a steady 25–60 fps upload never
+    /// reallocates. `None` until the first frame is uploaded.
+    pub texture: Option<egui::TextureHandle>,
+    /// Presentation timestamp of the frame currently in [`Self::texture`];
+    /// `None` before the first upload. Recorded against the audio position in
+    /// the A/V drift log.
+    pub last_frame_ts: Option<Millis>,
+}
+
+/// The result the background decode thread sends back: the decoded playback
+/// PCM (or a stringified decode error) plus, for video media, the probed
+/// stream dimensions used to open the frame stream on the UI thread.
+struct PlaybackLoad {
+    /// Decoded whole-file playback PCM, or the decode error's message.
+    pcm: Result<PlaybackPcm, String>,
+    /// Probed video-stream dimensions, `Some` only when the file is video and
+    /// probing succeeded; the UI thread opens the [`FrameStream`] from it.
+    video_info: Option<VideoStreamInfo>,
+}
+
+/// The env-gated A/V drift log (`HUMM_SMOKE_AV_DRIFT_LOG`, spec §2.5 acceptance
+/// instrumentation): appends one `audio_ms,frame_ts_ms` line per rendered video
+/// frame so the windowed 10-min ±50 ms p95 check (Task 14) has ground-truth
+/// pairs. A buffered writer flushed on drop; absent unless the env var points
+/// at a writable path and the media is video.
+pub(crate) struct DriftLog {
+    writer: BufWriter<std::fs::File>,
+}
+
+impl DriftLog {
+    /// Opens (create-or-append) a drift log at `path`, or `None` if it cannot
+    /// be opened. Factored from [`Self::from_env`] so tests exercise the
+    /// write/format/flush path against a temp file without mutating the
+    /// process environment (the `paragraph_split_from_env_value` convention —
+    /// `std::env::set_var` is `unsafe` in edition 2024).
+    pub(crate) fn open(path: &Path) -> Option<Self> {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+            .map(|file| DriftLog {
+                writer: BufWriter::new(file),
+            })
+    }
+
+    /// Opens the drift log named by `HUMM_SMOKE_AV_DRIFT_LOG`, or `None` when
+    /// the env var is unset/empty or the path cannot be opened.
+    fn from_env() -> Option<Self> {
+        let path = std::env::var_os("HUMM_SMOKE_AV_DRIFT_LOG")?;
+        if path.is_empty() {
+            return None;
+        }
+        Self::open(Path::new(&path))
+    }
+
+    /// Appends one `audio_ms,frame_ts_ms` line (best-effort; a write error is
+    /// dropped rather than crashing playback — this is test-only instrumentation).
+    pub(crate) fn record(&mut self, audio_ms: i64, frame_ts_ms: i64) {
+        let _ = writeln!(self.writer, "{audio_ms},{frame_ts_ms}");
+    }
+}
+
+impl Drop for DriftLog {
+    fn drop(&mut self) {
+        let _ = self.writer.flush();
+    }
 }
 
 /// Which of the four editor columns a cell editor targets (design spec §2.2:
@@ -395,10 +495,64 @@ pub struct ViewerVm {
     pub playback_controls_visible: bool,
     /// Persisted-at-open find-bar visibility; rendered by Task 9.
     pub find_widget_visible: bool,
-    /// Persisted-at-open loop-selected-segment toggle; wired by Task 10.
+    /// Persisted-at-open loop-selected-segment toggle (Loop Segment checkbox).
     pub segment_looping_enabled: bool,
-    /// Placeholder playback state (Task 10 replaces this with the real player).
+    /// Persisted-at-open follow-audio toggle (Follow Audio checkbox): when on,
+    /// the playhead's segment is selected+centered as playback advances.
+    pub follow_audio_enabled: bool,
+    /// The input media file (from the task row), decoded for playback and, for
+    /// video, probed + streamed. `None` for a since-deleted / URL-only row
+    /// (defensive — the open gate only fires for a Completed/Skipped row, which
+    /// has a file).
+    pub file: Option<PathBuf>,
+    /// The audio/video player's lifecycle state (F-083).
     pub player: PlayerState,
+    /// Live video-pane state, `Some` only for playable video media (spec §2.5).
+    pub video: Option<VideoState>,
+    /// Current speed multiplier (Buzz `AUDIO_PLAYBACK_RATE`, persisted global),
+    /// applied live to the player; seeded from `settings.viewer.playback_rate`.
+    pub playback_rate: f32,
+    /// The speed combo's editable-text buffer, seeded `"%.2fx"` from
+    /// [`Self::playback_rate`] (Buzz `initialize_speed_control`).
+    pub speed_text: String,
+    /// The active loop range (segment `[start, end]`) when looping is engaged,
+    /// mirrored into the player; the scrub-release ±2000 ms clear rule and the
+    /// re-enable/jump logic read it (Buzz `range_ms`).
+    pub loop_range: Option<(Millis, Millis)>,
+    /// Persisted-at-open table/media splitter fraction for audio media (table's
+    /// share of the vertical space; Buzz `audio_splitter_fraction`).
+    pub audio_splitter_fraction: f32,
+    /// Persisted-at-open table/media splitter fraction for video media.
+    pub video_splitter_fraction: f32,
+    /// Text of the segment under the playhead (or the selected segment), shown
+    /// in the bottom current-segment frame; empty hides the frame.
+    pub current_segment_text: String,
+    /// One-shot: set to a row index when a genuine pointer click selected a
+    /// table row this frame, consumed by the player's `on_segment_selected`
+    /// (seek-if-outside + loop-range) logic so search/follow programmatic
+    /// selection never triggers a seek.
+    pub(crate) segment_click: Option<usize>,
+    /// One-shot: a row the table should center-scroll to next frame, set by
+    /// follow-audio / scroll-to-current / loop re-enable (the playback analogue
+    /// of the search scroll latch).
+    pub(crate) playback_scroll: Option<usize>,
+    /// Whether the player was playing on the previous frame — drives the
+    /// auto-show-controls-on-play transition (Buzz `on_audio_playback_state_changed`).
+    was_playing: bool,
+    /// The last position [`Self::sync_playback_position`] ran against, so the
+    /// follow/frame update only runs when the playhead actually moved (Buzz's
+    /// `positionChanged` signal semantics).
+    last_synced_pos: Option<Millis>,
+    /// Whether the background decode thread has been spawned (once per viewer).
+    player_started: bool,
+    /// Receiver for the background decode thread's [`PlaybackLoad`]; `Some`
+    /// while [`PlayerState::Loading`].
+    player_rx: Option<Receiver<PlaybackLoad>>,
+    /// Cancels the background decode if the viewer closes mid-decode.
+    decode_cancel: CancelToken,
+    /// The env-gated A/V drift log (`HUMM_SMOKE_AV_DRIFT_LOG`), opened once the
+    /// video stream is live and the env var is set.
+    drift_log: Option<DriftLog>,
     /// The single selected editor-table row, if any (Buzz single-row
     /// selection). The nudge shortcuts (⌘←/⌘→/⌘⇧←/⌘⇧→) act on this row.
     pub selected: Option<usize>,
@@ -437,13 +591,10 @@ impl ViewerVm {
         settings: &Settings,
     ) -> Result<Self, StoreError> {
         let rows = deps.store.get_segment_rows(id)?;
-        let title = deps
-            .store
-            .get_task(&id)?
-            .and_then(|task| task.file)
-            .map(|file| file_basename(&file))
-            .unwrap_or_default();
+        let file = deps.store.get_task(&id)?.and_then(|task| task.file);
+        let title = file.as_deref().map(file_basename).unwrap_or_default();
         let has_translations = rows.iter().any(|row| !row.translation.trim().is_empty());
+        let playback_rate = settings.viewer.playback_rate;
         Ok(ViewerVm {
             id,
             title,
@@ -458,7 +609,24 @@ impl ViewerVm {
             playback_controls_visible: settings.viewer.playback_controls_visible,
             find_widget_visible: settings.viewer.find_widget_visible,
             segment_looping_enabled: settings.viewer.segment_looping_enabled,
-            player: PlayerState::Unavailable,
+            follow_audio_enabled: settings.viewer.follow_audio_enabled,
+            file,
+            player: PlayerState::Loading,
+            video: None,
+            playback_rate,
+            speed_text: format!("{playback_rate:.2}x"),
+            loop_range: None,
+            audio_splitter_fraction: settings.viewer.audio_splitter_fraction,
+            video_splitter_fraction: settings.viewer.video_splitter_fraction,
+            current_segment_text: String::new(),
+            segment_click: None,
+            playback_scroll: None,
+            was_playing: false,
+            last_synced_pos: None,
+            player_started: false,
+            player_rx: None,
+            decode_cancel: CancelToken::new(),
+            drift_log: None,
             selected: None,
             editing: None,
             saved_flash: None,
@@ -745,6 +913,389 @@ impl ViewerVm {
             self.unsaved = true;
         }
     }
+
+    // -- Playback (F-083, spec §2.5) --------------------------------------
+
+    /// Spawns the background decode (once) the first time the viewer renders —
+    /// Buzz builds the media player at viewer open. Runs `decode_playback` (and,
+    /// for video, `probe`) off the UI thread and sends the result back through
+    /// [`Self::player_rx`]; [`Self::poll_player_load`] finishes the build on the
+    /// UI thread. A `None` file (no media) fails the player immediately.
+    pub fn ensure_player_started(&mut self, deps: &ViewerDeps, ctx: &egui::Context) {
+        if self.player_started {
+            return;
+        }
+        self.player_started = true;
+        // Only the initial `Loading` state triggers a decode; a player already
+        // resolved before the first render (a future retry path, or a test
+        // seam that sets `player` directly) is left untouched.
+        if !matches!(self.player, PlayerState::Loading) {
+            return;
+        }
+
+        let Some(path) = self.file.clone() else {
+            self.player = PlayerState::Failed("no media file for this transcript".to_string());
+            return;
+        };
+
+        let decoder = Arc::clone(&deps.decoder);
+        let prober = Arc::clone(&deps.prober);
+        let cancel = self.decode_cancel.clone();
+        let want_video = is_video(&path);
+        let ctx = ctx.clone();
+        let (tx, rx) = mpsc::channel();
+        self.player_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let pcm = decoder
+                .decode_playback(&path, &cancel)
+                .map_err(|err| err.to_string());
+            // Video info is best-effort — a probe failure degrades to
+            // audio-only playback rather than failing the whole player.
+            let video_info = if want_video {
+                prober.probe(&path).ok().and_then(|info| info.video)
+            } else {
+                None
+            };
+            // The receiver may be gone if the viewer closed mid-decode; that is
+            // fine (the send simply fails). Request a repaint so the load is
+            // picked up promptly.
+            let _ = tx.send(PlaybackLoad { pcm, video_info });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Polls the background decode: on completion, builds the [`Player`] (and,
+    /// for video, opens the frame stream + drift log) or records the failure.
+    /// A no-op while still decoding.
+    pub fn poll_player_load(&mut self, deps: &ViewerDeps) {
+        let Some(rx) = &self.player_rx else {
+            return;
+        };
+        let load = match rx.try_recv() {
+            Ok(load) => load,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                self.player_rx = None;
+                self.player = PlayerState::Failed("decode thread ended unexpectedly".to_string());
+                return;
+            }
+        };
+        self.player_rx = None;
+
+        let pcm = match load.pcm {
+            Ok(pcm) => pcm,
+            Err(msg) => {
+                self.player = PlayerState::Failed(msg);
+                return;
+            }
+        };
+        let player = match Player::new(pcm, Arc::clone(&deps.audio_output)) {
+            Ok(player) => player,
+            Err(err) => {
+                self.player = PlayerState::Failed(err.to_string());
+                return;
+            }
+        };
+        player.set_speed(self.playback_rate);
+
+        // Open the video frame stream from the probed info, if any. A stream
+        // open error degrades to audio-only (no crash), matching the
+        // graceful-degradation rule.
+        if let (Some(info), Some(path)) = (load.video_info, self.file.clone()) {
+            match deps.streamer.open(&path, Millis(0), &info) {
+                Ok(stream) => {
+                    self.video = Some(VideoState {
+                        stream,
+                        texture: None,
+                        last_frame_ts: None,
+                    });
+                    self.drift_log = DriftLog::from_env();
+                }
+                Err(err) => log::warn!("viewer: could not open video stream: {err}"),
+            }
+        }
+
+        self.player = PlayerState::Ready(player);
+    }
+
+    /// The player's current position, or `None` when it is not [`Ready`](PlayerState::Ready).
+    pub fn player_position(&self) -> Option<Millis> {
+        match &self.player {
+            PlayerState::Ready(player) => Some(player.position()),
+            _ => None,
+        }
+    }
+
+    /// Whether the player is [`Ready`](PlayerState::Ready) and playing.
+    pub fn is_playing(&self) -> bool {
+        matches!(&self.player, PlayerState::Ready(player) if player.is_playing())
+    }
+
+    /// Toggles play/pause (⌘P). A no-op unless the player is ready.
+    pub fn toggle_play(&mut self) {
+        if let PlayerState::Ready(player) = &self.player {
+            player.toggle();
+        }
+    }
+
+    /// Seeks only the audio master clock (no video respawn). Used for the
+    /// live-drag scrubber path, where seeking the video stream every frame would
+    /// kill+respawn the ffmpeg subprocess dozens of times a second; the video
+    /// stream is resynced once on drag release via [`Self::seek_playback`].
+    pub fn seek_audio(&self, pos: Millis) {
+        if let PlayerState::Ready(player) = &self.player {
+            player.seek(pos);
+        }
+    }
+
+    /// Seeks audio (the master clock) and respawns the video stream at `pos`
+    /// (Buzz's kill+restart seek). A no-op on the player when not ready; the
+    /// video stream still follows so a scrub before decode completes is a
+    /// no-op rather than a desync.
+    pub fn seek_playback(&mut self, pos: Millis) {
+        self.seek_audio(pos);
+        if let Some(video) = &mut self.video
+            && let Err(err) = video.stream.seek(pos)
+        {
+            log::warn!("viewer: video seek failed: {err}");
+        }
+    }
+
+    /// Pushes a loop range (or clears it) onto the player. A no-op when not ready.
+    fn set_player_loop(&self, range: Option<(Millis, Millis)>) {
+        if let PlayerState::Ready(player) = &self.player {
+            player.set_loop(range);
+        }
+    }
+
+    /// On scrubber release, clears the loop range when the release landed more
+    /// than 2000 ms outside it (Buzz `on_slider_moved`, [`scrub_release_clears_loop`]).
+    pub fn scrub_release(&mut self, pos: Millis) {
+        if let Some(range) = self.loop_range
+            && scrub_release_clears_loop(pos, range)
+        {
+            self.loop_range = None;
+            self.set_player_loop(None);
+        }
+    }
+
+    /// Replays the selected segment (⌘⇧P, Buzz `replay_current_segment`): seek
+    /// to its start and play if paused. A no-op with nothing selected.
+    pub fn replay_current_segment(&mut self) {
+        let Some(idx) = self.selected else {
+            return;
+        };
+        if idx >= self.rows.len() {
+            return;
+        }
+        let start = self.rows[idx].start;
+        self.seek_playback(start);
+        if let PlayerState::Ready(player) = &self.player
+            && !player.is_playing()
+        {
+            player.play();
+        }
+    }
+
+    /// Applies a Loop Segment toggle (Buzz `on_loop_toggle_changed`): enabling
+    /// with a selected segment sets the loop to it, re-highlights it, and — if
+    /// playing outside the range — jumps to its start; disabling clears the
+    /// loop.
+    pub fn set_loop_enabled(&mut self, enabled: bool) {
+        self.segment_looping_enabled = enabled;
+        if !enabled {
+            self.loop_range = None;
+            self.set_player_loop(None);
+            return;
+        }
+        let Some(idx) = self.selected else {
+            return;
+        };
+        if idx >= self.rows.len() {
+            return;
+        }
+        let (start, end) = (self.rows[idx].start, self.rows[idx].end);
+        self.loop_range = Some((start, end));
+        self.playback_scroll = Some(idx);
+        self.set_player_loop(Some((start, end)));
+        // If playing and outside the freshly-set range, jump to its start.
+        if self.is_playing()
+            && let Some(pos) = self.player_position()
+            && (pos < start || pos > end)
+        {
+            self.seek_playback(start);
+        }
+    }
+
+    /// Handles a genuine segment-row click (Buzz `on_segment_selected`): shows
+    /// its text in the frame; seeks to its start if the playhead is outside
+    /// `[start, end]`; sets the loop range when looping, else arms a scroll to
+    /// the row.
+    fn on_segment_selected(&mut self, idx: usize) {
+        if idx >= self.rows.len() {
+            return;
+        }
+        let (start, end) = (self.rows[idx].start, self.rows[idx].end);
+        self.selected = Some(idx);
+        self.current_segment_text = self.rows[idx].text.clone();
+
+        if let Some(pos) = self.player_position()
+            && (pos < start || pos > end)
+        {
+            self.seek_playback(start);
+        }
+        if self.segment_looping_enabled {
+            self.loop_range = Some((start, end));
+            self.set_player_loop(Some((start, end)));
+        } else {
+            self.playback_scroll = Some(idx);
+        }
+    }
+
+    /// Consumes a pending pointer-click segment selection (set by the editor
+    /// table) and runs the [`Self::on_segment_selected`] side effects. Called
+    /// after the table renders so the click's selection is already applied.
+    pub fn take_segment_click(&mut self) {
+        if let Some(idx) = self.segment_click.take() {
+            self.on_segment_selected(idx);
+        }
+    }
+
+    /// Position-driven per-frame update (Buzz `on_audio_player_position_ms_changed`):
+    /// refreshes the current-segment frame text and, when following audio,
+    /// selects+scrolls the playhead's segment (unless looping pins the selection
+    /// to the looped segment). Only runs when the position actually moved.
+    pub fn sync_playback_position(&mut self, pos: Millis) {
+        if self.last_synced_pos == Some(pos) {
+            return;
+        }
+        self.last_synced_pos = Some(pos);
+
+        let Some(idx) = segment_at(&self.rows, pos) else {
+            return;
+        };
+        let text = &self.rows[idx].text;
+        if self.current_segment_text != *text {
+            self.current_segment_text = text.clone();
+        }
+
+        if !self.follow_audio_enabled {
+            // Follow off: keep the selected row highlighted (no forced scroll —
+            // Buzz re-scrolls to the selected row every tick, which fights a
+            // user's own scrolling; not ported, spec-ledger mechanics class).
+            return;
+        }
+        // Follow on: select+scroll the playhead's segment, unless looping pins
+        // the selection to the looped segment and the playhead is still inside it.
+        let pinned =
+            self.segment_looping_enabled && self.selected.is_some() && self.selected == Some(idx);
+        if !pinned {
+            self.selected = Some(idx);
+            self.playback_scroll = Some(idx);
+        }
+    }
+
+    /// Scroll-to-current (⌘G / button, Buzz `on_scroll_to_current_button_clicked`,
+    /// simplified per spec ledger #11): select+scroll the segment containing the
+    /// playhead, else row 0. A no-op when the player is not ready.
+    pub fn scroll_to_current(&mut self) {
+        let Some(pos) = self.player_position() else {
+            return;
+        };
+        if self.rows.is_empty() {
+            return;
+        }
+        let idx = segment_at(&self.rows, pos).unwrap_or(0);
+        self.selected = Some(idx);
+        self.playback_scroll = Some(idx);
+        self.current_segment_text = self.rows[idx].text.clone();
+    }
+
+    /// Sets the playback speed live and persists it (caller writes settings):
+    /// clamps to `0.1..=5.0`, applies it to the player, and stores the value +
+    /// its `"%.2fx"` echo in [`Self::speed_text`] when `echo` is set (the
+    /// `−`/`+` button path always echoes; the combo path echoes only when the
+    /// typed text lacked a trailing `x`).
+    pub fn set_speed(&mut self, speed: f32, display: String) {
+        let clamped = if speed.is_finite() {
+            speed.clamp(0.1, 5.0)
+        } else {
+            self.playback_rate
+        };
+        self.playback_rate = clamped;
+        self.speed_text = display;
+        if let PlayerState::Ready(player) = &self.player {
+            player.set_speed(clamped);
+        }
+    }
+
+    /// Keeps the player's loop range following the selected segment while
+    /// looping — both after a committed timestamp edit and *live* while a
+    /// Start/End cell of the looped segment is being edited (Buzz
+    /// `on_timestamp_being_edited` + the `_adjust_segment_timestamp` loop-range
+    /// refresh). Cheap enough to run every frame (two atomic stores).
+    pub fn refresh_loop_range(&mut self) {
+        if !self.segment_looping_enabled {
+            return;
+        }
+        let Some(idx) = self.selected else {
+            return;
+        };
+        if idx >= self.rows.len() {
+            return;
+        }
+        let (mut start, mut end) = (self.rows[idx].start, self.rows[idx].end);
+        // Live-follow the in-editor buffer before commit, if the open editor is
+        // a timestamp cell of the selected (looped) segment.
+        if let Some((row, field, ms)) = self.editing_timestamp_preview()
+            && row == idx
+        {
+            match field {
+                Field::Start => start = ms,
+                Field::End => end = ms,
+            }
+        }
+        if start < end {
+            self.loop_range = Some((start, end));
+            self.set_player_loop(Some((start, end)));
+        }
+    }
+
+    /// Auto-shows the playback-controls bar the first frame playback starts in
+    /// Timestamps mode (Buzz `on_audio_playback_state_changed`). Returns whether
+    /// the bar was just auto-shown (so the caller persists the flag).
+    pub fn update_controls_autoshow(&mut self) -> bool {
+        let playing = self.is_playing();
+        let just_shown = playing
+            && !self.was_playing
+            && self.mode == ViewMode::Timestamps
+            && !self.playback_controls_visible;
+        if just_shown {
+            self.playback_controls_visible = true;
+        }
+        self.was_playing = playing;
+        just_shown
+    }
+
+    /// Records one `audio_ms,frame_ts_ms` drift-log line for the frame just
+    /// rendered, when the env-gated log is open and a video frame is showing.
+    pub fn record_drift(&mut self, audio_ms: Millis) {
+        if let (Some(log), Some(video)) = (&mut self.drift_log, &self.video)
+            && let Some(ts) = video.last_frame_ts
+        {
+            log.record(audio_ms.0, ts.0);
+        }
+    }
+}
+
+impl Drop for ViewerVm {
+    fn drop(&mut self) {
+        // Stop an in-flight background decode (the thread will find the token
+        // canceled or its send target gone); the `Player`/`FrameStream`/
+        // `DriftLog` each stop/flush via their own `Drop`.
+        self.decode_cancel.cancel();
+    }
 }
 
 /// Whether a transcript in `status` can be opened in the viewer: Buzz's gate
@@ -768,6 +1319,54 @@ fn file_basename(path: &std::path::Path) -> String {
 /// formatter with the editor.
 pub fn display_timestamp(ms: Millis) -> String {
     humm_core::export::to_timestamp(ms, '.')
+}
+
+/// The video-extension set that puts the viewer in video mode (spec §2.5,
+/// Buzz `is_video_file` / `file_transcriber.py:242`): case-insensitive match on
+/// `{mp4 mov mkv avi m4v webm ogm wmv}`.
+pub fn is_video(path: &Path) -> bool {
+    const VIDEO_EXTS: [&str; 8] = ["mp4", "mov", "mkv", "avi", "m4v", "webm", "ogm", "wmv"];
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|ext| VIDEO_EXTS.contains(&ext.as_str()))
+}
+
+/// The player row's time label — `HH:MM:SS / HH:MM:SS` (Buzz `update_time_label`:
+/// `QTime(0,0).addMSecs(...).toString()`). Negative inputs floor at zero.
+pub fn time_label(pos: Millis, dur: Millis) -> String {
+    format!("{} / {}", hms(pos), hms(dur))
+}
+
+/// Formats a millisecond value as `HH:MM:SS` (zero-padded, floored at zero).
+fn hms(ms: Millis) -> String {
+    let total_secs = ms.0.max(0) / 1000;
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+/// Binary-searches `rows` (ascending start order) for the segment containing
+/// `pos` under half-open `[start, end)` semantics (Buzz `find_segment_index_at`),
+/// or `None` when `pos` falls in no segment (a gap, or past the last end).
+pub fn segment_at(rows: &[SegmentRow], pos: Millis) -> Option<usize> {
+    // The number of rows whose start is `<= pos`; the candidate is the last of
+    // them (the greatest start not after `pos`).
+    let count = rows.partition_point(|row| row.start <= pos);
+    if count == 0 {
+        return None;
+    }
+    let idx = count - 1;
+    (pos < rows[idx].end).then_some(idx)
+}
+
+/// Whether releasing the scrubber at `pos` should clear the loop `range` — when
+/// the release lands more than 2000 ms outside `[start, end]` (Buzz
+/// `on_slider_moved`: `pos < start-2000 || pos > end+2000`).
+pub fn scrub_release_clears_loop(pos: Millis, range: (Millis, Millis)) -> bool {
+    let (start, end) = range;
+    pos.0 < start.0 - 2000 || pos.0 > end.0 + 2000
 }
 
 #[cfg(test)]
@@ -1296,5 +1895,270 @@ mod tests {
             search.focus_pending,
             "Clear re-focuses the input (Buzz `clear_search`'s `setFocus()`)"
         );
+    }
+
+    // -- F-083 playback: pure helpers ------------------------------------
+
+    fn seg_row(start: i64, end: i64, text: &str) -> SegmentRow {
+        SegmentRow {
+            id: 0,
+            start: Millis(start),
+            end: Millis(end),
+            text: text.into(),
+            translation: String::new(),
+        }
+    }
+
+    #[test]
+    fn time_label_formats_hh_mm_ss_and_floors_negatives() {
+        assert_eq!(time_label(Millis(0), Millis(0)), "00:00:00 / 00:00:00");
+        // 1h 1m 1s / 2h 2m 2s.
+        assert_eq!(
+            time_label(Millis(3_661_000), Millis(7_322_000)),
+            "01:01:01 / 02:02:02"
+        );
+        assert_eq!(time_label(Millis(-5), Millis(1000)), "00:00:00 / 00:00:01");
+    }
+
+    #[test]
+    fn segment_at_binary_search_half_open_intervals() {
+        let rows = vec![
+            seg_row(0, 1000, "a"),
+            seg_row(1000, 2000, "b"),
+            seg_row(2000, 3000, "c"),
+        ];
+        assert_eq!(segment_at(&rows, Millis(0)), Some(0));
+        assert_eq!(segment_at(&rows, Millis(999)), Some(0));
+        // Half-open: 1000 belongs to the next segment, not the previous.
+        assert_eq!(segment_at(&rows, Millis(1000)), Some(1));
+        assert_eq!(segment_at(&rows, Millis(1500)), Some(1));
+        assert_eq!(segment_at(&rows, Millis(2999)), Some(2));
+        // Past the last end → no segment.
+        assert_eq!(segment_at(&rows, Millis(3000)), None);
+    }
+
+    #[test]
+    fn segment_at_returns_none_in_a_gap_or_empty() {
+        let gapped = vec![seg_row(0, 1000, "a"), seg_row(2000, 3000, "c")];
+        assert_eq!(segment_at(&gapped, Millis(1500)), None);
+        assert_eq!(segment_at(&[], Millis(0)), None);
+    }
+
+    #[test]
+    fn scrub_release_clears_loop_only_more_than_2000ms_outside() {
+        let range = (Millis(5000), Millis(7000));
+        assert!(!scrub_release_clears_loop(Millis(6000), range), "inside");
+        assert!(
+            !scrub_release_clears_loop(Millis(3000), range),
+            "exactly -2000"
+        );
+        assert!(
+            scrub_release_clears_loop(Millis(2999), range),
+            "more than 2000 below"
+        );
+        assert!(
+            !scrub_release_clears_loop(Millis(9000), range),
+            "exactly +2000"
+        );
+        assert!(
+            scrub_release_clears_loop(Millis(9001), range),
+            "more than 2000 above"
+        );
+    }
+
+    #[test]
+    fn is_video_matches_the_extension_set_case_insensitively() {
+        for ext in ["mp4", "mov", "mkv", "avi", "m4v", "webm", "ogm", "wmv"] {
+            assert!(is_video(Path::new(&format!("clip.{ext}"))), "{ext}");
+            assert!(
+                is_video(Path::new(&format!("clip.{}", ext.to_uppercase()))),
+                "{ext} uppercase"
+            );
+        }
+        for ext in ["wav", "mp3", "m4a", "flac", "ogg"] {
+            assert!(!is_video(Path::new(&format!("song.{ext}"))), "{ext}");
+        }
+        assert!(!is_video(Path::new("no-extension")));
+    }
+
+    #[test]
+    fn drift_log_writes_pairs_when_env_set() {
+        // Exercises the write/format/flush path against a temp file — the
+        // `paragraph_split_from_env_value` convention of injecting the value
+        // rather than mutating the (edition-2024-`unsafe`) process env.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("drift.csv");
+        {
+            let mut log = DriftLog::open(&path).expect("open drift log");
+            log.record(10, 5);
+            log.record(1234, 1200);
+        } // drop flushes the buffered writer
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "10,5\n1234,1200\n"
+        );
+    }
+
+    // -- F-083 playback: state machine (MockOutput-backed Player) ---------
+
+    /// A test [`AudioOutput`] that captures the `fill` closure so the test can
+    /// pull buffers synchronously and advance the master clock — the gui-side
+    /// analogue of humm-audio's test-internal `MockOutput`.
+    struct CapturingOutput {
+        slot: Arc<std::sync::Mutex<Option<humm_core::boundary::FillCallback>>>,
+    }
+    struct NullStream;
+    impl humm_core::boundary::OutputStream for NullStream {
+        fn play(&mut self) -> Result<(), humm_core::error::AudioError> {
+            Ok(())
+        }
+        fn pause(&mut self) -> Result<(), humm_core::error::AudioError> {
+            Ok(())
+        }
+    }
+    impl AudioOutput for CapturingOutput {
+        fn open(
+            &self,
+            _spec: humm_core::boundary::StreamSpec,
+            fill: humm_core::boundary::FillCallback,
+        ) -> Result<Box<dyn humm_core::boundary::OutputStream>, humm_core::error::AudioError>
+        {
+            *self.slot.lock().unwrap() = Some(fill);
+            Ok(Box::new(NullStream))
+        }
+    }
+
+    /// Builds a ready [`Player`] over a `frames`-ms ramp (mono, 1 kHz → 1 frame
+    /// = 1 ms) and returns it with its captured `fill` closure.
+    fn ready_player(frames: usize) -> (Player, humm_core::boundary::FillCallback) {
+        let samples: Vec<f32> = (0..frames).map(|i| i as f32).collect();
+        let pcm = PlaybackPcm::new(samples, 1, 1000);
+        let slot = Arc::new(std::sync::Mutex::new(None));
+        let output = CapturingOutput {
+            slot: Arc::clone(&slot),
+        };
+        let player = Player::new(pcm, Arc::new(output)).expect("player opens");
+        let fill = slot.lock().unwrap().take().expect("fill captured");
+        (player, fill)
+    }
+
+    #[test]
+    fn loop_toggle_reenable_jumps_when_playing_outside_range() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(
+            &store,
+            "/tmp/a.wav",
+            &[
+                seg(0, 1000, "a", ""),
+                seg(1000, 2000, "b", ""),
+                seg(2000, 3000, "c", ""),
+            ],
+        );
+        let deps = deps(Arc::clone(&store));
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+
+        let (player, mut fill) = ready_player(5000);
+        player.play();
+        // Advance the playhead well past the future loop's end (2000 ms).
+        let mut buf = vec![0.0f32; 3000];
+        fill(&mut buf);
+        vm.player = PlayerState::Ready(player);
+        vm.selected = Some(1); // segment [1000, 2000]
+        assert!(
+            vm.player_position().expect("ready").0 >= 2000,
+            "playhead must be outside the loop range before re-enable"
+        );
+
+        // Re-enable looping: the range is set and, since we're playing outside
+        // it, the playhead jumps to the loop start.
+        vm.set_loop_enabled(true);
+        assert_eq!(vm.loop_range, Some((Millis(1000), Millis(2000))));
+        assert_eq!(
+            vm.player_position(),
+            Some(Millis(1000)),
+            "re-enabling the loop while playing outside it jumps to the start"
+        );
+        assert_eq!(vm.playback_scroll, Some(1));
+    }
+
+    #[test]
+    fn follow_audio_highlights_containing_segment() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(
+            &store,
+            "/tmp/a.wav",
+            &[
+                seg(0, 1000, "a", ""),
+                seg(1000, 2000, "b", ""),
+                seg(2000, 3000, "c", ""),
+            ],
+        );
+        let deps = deps(Arc::clone(&store));
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+
+        let (player, _fill) = ready_player(5000);
+        vm.player = PlayerState::Ready(player);
+        vm.follow_audio_enabled = true;
+        vm.segment_looping_enabled = false;
+
+        // A position inside the middle segment selects+scrolls that row and
+        // updates the current-segment frame text.
+        vm.sync_playback_position(Millis(1500));
+        assert_eq!(vm.selected, Some(1));
+        assert_eq!(vm.playback_scroll, Some(1));
+        assert_eq!(vm.current_segment_text, "b");
+
+        // Advancing into the last segment follows the playhead there.
+        vm.sync_playback_position(Millis(2500));
+        assert_eq!(vm.selected, Some(2));
+        assert_eq!(vm.current_segment_text, "c");
+    }
+
+    #[test]
+    fn follow_audio_off_keeps_selection() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(
+            &store,
+            "/tmp/a.wav",
+            &[seg(0, 1000, "a", ""), seg(1000, 2000, "b", "")],
+        );
+        let deps = deps(Arc::clone(&store));
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+        let (player, _fill) = ready_player(5000);
+        vm.player = PlayerState::Ready(player);
+        vm.follow_audio_enabled = false;
+        vm.selected = Some(0);
+
+        // Position moves into segment 1, but follow is off → selection unchanged.
+        vm.sync_playback_position(Millis(1500));
+        assert_eq!(vm.selected, Some(0), "follow off keeps the selected row");
+        assert!(vm.playback_scroll.is_none());
+        // The current-segment frame text still tracks the playhead (Buzz updates
+        // it regardless of follow).
+        assert_eq!(vm.current_segment_text, "b");
+    }
+
+    #[test]
+    fn segment_click_seeks_when_playhead_outside_and_sets_loop() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(
+            &store,
+            "/tmp/a.wav",
+            &[seg(0, 1000, "a", ""), seg(2000, 3000, "c", "")],
+        );
+        let deps = deps(Arc::clone(&store));
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+        let (player, _fill) = ready_player(5000);
+        vm.player = PlayerState::Ready(player);
+        vm.segment_looping_enabled = true;
+
+        // Playhead at 0 (inside segment 0); clicking segment 1 ([2000,3000])
+        // is outside → seek to its start, and looping → set the loop range.
+        vm.segment_click = Some(1);
+        vm.take_segment_click();
+        assert_eq!(vm.selected, Some(1));
+        assert_eq!(vm.current_segment_text, "c");
+        assert_eq!(vm.player_position(), Some(Millis(2000)));
+        assert_eq!(vm.loop_range, Some((Millis(2000), Millis(3000))));
     }
 }

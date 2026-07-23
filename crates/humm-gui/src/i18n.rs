@@ -183,7 +183,6 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "viewer-find-prev-tooltip",
         "viewer-find-next-tooltip",
         "viewer-empty",
-        "viewer-player-pending",
         "viewer-open-error",
         // Transcript segment editor table (views/viewer_table.rs, F-081)
         "viewer-col-start",
@@ -192,6 +191,18 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "viewer-col-translation",
         "viewer-saved",
         "viewer-unsaved-warning",
+        // Synced playback: player row + controls bar (F-083, views/viewer.rs,
+        // views/playback_controls.rs)
+        "viewer-player-loading",
+        "viewer-player-failed",
+        "viewer-playback-controls",
+        "viewer-loop-segment",
+        "viewer-loop-segment-tooltip",
+        "viewer-follow-audio",
+        "viewer-follow-audio-tooltip",
+        "viewer-speed",
+        "viewer-scroll-to-current",
+        "viewer-scroll-to-current-tooltip",
     ]
 }
 
