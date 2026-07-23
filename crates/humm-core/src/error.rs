@@ -79,12 +79,14 @@ pub enum EngineError {
     Canceled,
 }
 
-/// Errors from the audio output boundary (the cpal device/stream — ADR-005).
+/// Errors from the audio device boundary (cpal input capture and output
+/// playback — ADR-005).
 ///
-/// Implemented against by `humm-audio`'s `CpalOutput`; the varispeed `Player`
-/// surfaces these when opening or controlling its output stream. A missing or
-/// unusable output device degrades the viewer's player rather than crashing
-/// (`docs/superpowers/specs/2026-07-23-m4-transcript-viewer-design.md` §2.1).
+/// Implemented against by `humm-audio`'s `CpalCapture` (live recording) and
+/// `CpalOutput` (playback); the varispeed `Player` surfaces these when opening
+/// or controlling its output stream, and live recording surfaces them when
+/// opening or controlling input. A missing or unusable device degrades
+/// gracefully rather than crashing.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AudioError {

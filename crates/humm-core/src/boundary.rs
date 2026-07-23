@@ -598,12 +598,7 @@ mod tests {
         for val in &special_values {
             meter.set_current_rms(*val);
             let retrieved = meter.get_current_rms();
-            // NaN != NaN by definition, so check bits instead
-            if val.is_nan() {
-                assert!(retrieved.is_nan());
-            } else {
-                assert_eq!(retrieved.to_bits(), val.to_bits());
-            }
+            assert_eq!(retrieved.to_bits(), val.to_bits());
         }
     }
 
