@@ -742,6 +742,82 @@ fn openaiapi_with_token_transcribes_against_mock() {
     );
 }
 
+// The M6 acceptance's "one recorded real-API run" (F-041): end to end through
+// the real binary against a REAL OpenAI-compatible server — no mock, no canned
+// response; the transcript text comes from genuine model inference. Gated on
+// `HUMM_OPENAI_TEST_BASE` (e.g. `http://127.0.0.1:18080/v1`), with
+// `HUMM_OPENAI_TEST_KEY` optional (local servers ignore auth; defaults to a
+// placeholder). The recorded acceptance run used the stock whisper.cpp
+// `whisper-server` behind the path-rewriting shim in
+// `validation/m6-real-api/oai_shim.py` (see its module doc for why the shim
+// exists and what it does NOT touch) — the same server class Buzz's
+// `is_whisper_cpp` response branch exists for.
+#[test]
+#[ignore = "requires a real OpenAI-compatible server (set HUMM_OPENAI_TEST_BASE)"]
+fn real_api_transcription_end_to_end() {
+    let base = match std::env::var("HUMM_OPENAI_TEST_BASE") {
+        Ok(v) if !v.is_empty() => v,
+        _ => panic!(
+            "HUMM_OPENAI_TEST_BASE is not set — point it at a real \
+             OpenAI-compatible server (see validation/m6-real-api/oai_shim.py)"
+        ),
+    };
+    let key =
+        std::env::var("HUMM_OPENAI_TEST_KEY").unwrap_or_else(|_| "sk-local-unused".to_string());
+
+    let env = Env::new();
+    let audio = testdata_dir().join("whisper-french.mp3");
+    assert!(audio.is_file(), "missing testdata: {}", audio.display());
+    let out = tempfile::tempdir().unwrap();
+
+    fs::write(
+        env.config.path().join("settings.toml"),
+        format!("[openai]\nbase_url = \"{base}\"\n"),
+    )
+    .expect("write settings.toml");
+
+    let output = env
+        .cmd()
+        .arg("add")
+        .arg(&audio)
+        .arg("-m")
+        .arg("openaiapi")
+        .arg("--openai-token")
+        .arg(&key)
+        .arg("--txt")
+        .arg("--json")
+        .arg("-d")
+        .arg(out.path())
+        .assert()
+        .code(0);
+
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    let mut saw_completed = false;
+    for line in stdout.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).expect("valid JSON line");
+        assert_ne!(
+            value["event"], "model_download_progress",
+            "the API backend must skip model resolution entirely: {stdout}"
+        );
+        if value["event"] == "completed" {
+            saw_completed = true;
+        }
+    }
+    assert!(saw_completed, "expected a completed event in: {stdout}");
+
+    let txt: Vec<_> = fs::read_dir(out.path())
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("txt"))
+        .collect();
+    assert_eq!(txt.len(), 1, "expected one txt export in {:?}", out.path());
+    let txt_contents = fs::read_to_string(&txt[0]).unwrap();
+    assert!(
+        !txt_contents.trim().is_empty(),
+        "real-API transcription produced an empty transcript"
+    );
+}
+
 /// Single-connection mock for the OpenAI-compatible `/audio/transcriptions`
 /// endpoint: accepts exactly one connection, drains the request body per its
 /// `Content-Length` header (a multipart mp3 upload — never parsed, just
