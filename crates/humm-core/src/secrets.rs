@@ -143,6 +143,48 @@ impl SecretStore for MemorySecretStore {
     }
 }
 
+/// A [`SecretStore`] test double whose [`SecretStore::set`] always fails
+/// with [`SecretError::Backend`] — the counterpart to [`MemorySecretStore`]
+/// for exercising a commit path's keyring-failure branch (e.g. the options
+/// sheet's Api Key row keyring-save-failure modal,
+/// `humm-gui/src/views/options_sheet.rs`), which no existing double could
+/// trigger.
+///
+/// Deliberately **not** `#[cfg(test)]`-gated, same rationale as
+/// [`MemorySecretStore`]: other crates' test suites (`humm-gui`'s kittest
+/// harness) construct this directly, so it must be visible outside this
+/// crate's own `#[cfg(test)]` build.
+///
+/// [`SecretStore::get`] always returns `Ok(None)` (never seeds a value —
+/// there's nothing to seed since nothing can ever be [`set`](SecretStore::set)
+/// successfully) and [`SecretStore::delete`] always returns `Ok(())` (Buzz
+/// parity: deleting is never the failure this double exists to simulate).
+#[derive(Debug, Default)]
+pub struct FailingSecretStore;
+
+impl FailingSecretStore {
+    /// Creates a store whose every [`SecretStore::set`] call fails.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl SecretStore for FailingSecretStore {
+    fn get(&self, _key: SecretKey) -> Result<Option<String>, SecretError> {
+        Ok(None)
+    }
+
+    fn set(&self, _key: SecretKey, _value: &str) -> Result<(), SecretError> {
+        Err(SecretError::Backend {
+            detail: "scripted failure".to_string(),
+        })
+    }
+
+    fn delete(&self, _key: SecretKey) -> Result<(), SecretError> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,5 +250,23 @@ mod tests {
         // Sanity check the impl still reports something useful.
         assert!(debug_output.contains("MemorySecretStore"));
         assert!(debug_output.contains("entry_count"));
+    }
+
+    // -- FailingSecretStore -----------------------------------------------------
+
+    #[test]
+    fn set_always_fails_with_a_backend_error() {
+        let store = FailingSecretStore::new();
+        let err = store
+            .set(SecretKey::OpenAiApiKey, "sk-anything")
+            .unwrap_err();
+        assert!(matches!(err, SecretError::Backend { .. }));
+    }
+
+    #[test]
+    fn get_and_delete_are_ok_despite_set_always_failing() {
+        let store = FailingSecretStore::new();
+        assert_eq!(store.get(SecretKey::OpenAiApiKey).unwrap(), None);
+        assert!(store.delete(SecretKey::OpenAiApiKey).is_ok());
     }
 }

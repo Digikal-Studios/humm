@@ -89,15 +89,6 @@ pub fn stub_validate_fn() -> ValidateFn {
     })
 }
 
-// -- Charset check (Buzz `BASE64_PATTERN`, `:32`) ----------------------------
-
-/// Whether `s` matches Buzz's base64-charset check — re-exported from
-/// [`secret_field`] (moved there, Task 14) so existing callers/tests of this
-/// module don't need to change their import path.
-pub fn is_base64_charset(s: &str) -> bool {
-    secret_field::is_base64_charset(s)
-}
-
 // -- Pure field-commit helpers ------------------------------------------------
 
 /// `s` wrapped in `Some`, or `None` if `s` is empty — the base-URL field's
@@ -162,9 +153,10 @@ fn persist_openai(
 /// fire from the same commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GeneralModal {
-    /// The key field's committed value failed [`is_base64_charset`] — Buzz's
-    /// "Invalid API key" warning (`:261-267`). Warn-only: the value is saved
-    /// regardless (Buzz saves too).
+    /// The key field's committed value failed
+    /// [`secret_field::is_base64_charset`] — Buzz's "Invalid API key"
+    /// warning (`:261-267`). Warn-only: the value is saved regardless (Buzz
+    /// saves too).
     InvalidKeyCharset,
     /// [`SecretStore::set`] failed while committing the key field — Buzz's
     /// `main_window.on_openai_access_token_changed` error dialog (`:323-331`).
@@ -449,33 +441,6 @@ mod tests {
     use super::*;
     use humm_core::secrets::MemorySecretStore;
     use pretty_assertions::assert_eq;
-
-    // -- is_base64_charset ----------------------------------------------------
-
-    #[test]
-    fn charset_accepts_a_realistic_key() {
-        assert!(is_base64_charset("sk-Abc123+/=_-XYZ0123456789abcdefghij"));
-    }
-
-    #[test]
-    fn charset_accepts_the_empty_string() {
-        assert!(is_base64_charset(""));
-    }
-
-    #[test]
-    fn charset_rejects_a_space() {
-        assert!(!is_base64_charset("sk-abc 123"));
-    }
-
-    #[test]
-    fn charset_rejects_a_hash() {
-        assert!(!is_base64_charset("sk-abc#123"));
-    }
-
-    #[test]
-    fn charset_rejects_non_ascii() {
-        assert!(!is_base64_charset("sk-café"));
-    }
 
     // -- empty_to_none ----------------------------------------------------------
 

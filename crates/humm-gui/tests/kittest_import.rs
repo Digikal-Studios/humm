@@ -21,7 +21,7 @@ use humm_core::domain::{
     Backend, DEFAULT_TEMPERATURE, ModelSize, ModelSpec, OutputFormat, TaskKind,
 };
 use humm_core::error::{CoreError, EngineError};
-use humm_core::secrets::{MemorySecretStore, SecretKey, SecretStore};
+use humm_core::secrets::{FailingSecretStore, MemorySecretStore, SecretKey, SecretStore};
 use humm_gui::app::HummApp;
 use humm_gui::import::ImportRequest;
 use humm_gui::services::{self, Capabilities, Services, TestDeps};
@@ -406,12 +406,13 @@ fn run_with_llm_enabled_persists_llm_options_and_never_the_key() {
         .expect("load_task_spec")
         .expect("a Run-enqueued task always has a persisted options_json");
 
-    // Re-serialize exactly what `SqliteStore::insert_task` persists as
-    // `options_json` (`serde_json::to_string(&spec)`, `store.rs:1113`) and
-    // prove the key material never made it in -- `LlmTranslationOptions` has
-    // structurally no key field, so this also guards against a future field
-    // addition accidentally carrying one.
-    let options_json = serde_json::to_string(&spec.options).expect("options serialize");
+    // Re-serialize exactly what `SqliteStore::create_task` persists as
+    // `options_json` (`serde_json::to_string(spec)` over the *whole* spec,
+    // not just `spec.options`; `store.rs:1264`) and prove the key material
+    // never made it in -- `LlmTranslationOptions` has structurally no key
+    // field, so this also guards against a future field addition
+    // accidentally carrying one.
+    let options_json = serde_json::to_string(&spec).expect("spec serialize");
 
     let llm = spec.options.llm.expect("LLM translation was enabled");
     assert!(!llm.model.is_empty());
@@ -424,6 +425,57 @@ fn run_with_llm_enabled_persists_llm_options_and_never_the_key() {
         !options_json.contains(TEST_KEY),
         "the API key must never appear in persisted options_json: {options_json}"
     );
+}
+
+/// Committing the Api Key row against a [`SecretStore`] whose `set` always
+/// fails must surface the keyring-save-failure modal
+/// (`options_sheet::SheetModal::KeyringSaveFailed`, a nested `egui::Modal`
+/// stacked over the sheet's own) with Buzz's exact error body. No existing
+/// double could exercise this branch -- [`MemorySecretStore::set`] never
+/// errs -- hence [`FailingSecretStore`], whose every `set` call fails.
+///
+/// Drives the real Api Key `TextEdit` (focus, type, then Tab away) rather
+/// than a state seam, since the commit only fires on the widget's own
+/// `lost_focus()` (`options_sheet::render_api_key_row`) -- the same
+/// focus/type/Tab-away idiom `kittest_prefs.rs`'s
+/// `custom_url_field_persists_on_lost_focus_not_per_keystroke` uses, safe
+/// here for the same reason: with the backend switched to `OpenAiApi` and
+/// Advanced left collapsed, the Api Key field is the sheet's only visible
+/// text field, so `get_by_role` resolves unambiguously. Its role is
+/// `PasswordInput`, not `TextInput` -- `masked_field_row` renders it masked
+/// (`.password(!*visible)`) by default, since `state.api_key_visible` starts
+/// `false`.
+#[test]
+fn api_key_commit_shows_the_keyring_failure_modal_when_the_secret_store_errors() {
+    let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
+    let secrets: Arc<dyn SecretStore> = Arc::new(FailingSecretStore::new());
+    let (mut harness, _dir) = harness_with_secrets(store, Capabilities::default(), secrets);
+    harness.run();
+
+    harness
+        .state_mut()
+        .open_options_sheet_for_test(ImportRequest::Files(vec![PathBuf::from("/no/such/a.wav")]));
+    harness.run();
+
+    harness
+        .state_mut()
+        .options_sheet_state_mut_for_test()
+        .expect("sheet is open")
+        .backend = Backend::OpenAiApi;
+    harness.run();
+
+    harness
+        .get_by_role(egui::accesskit::Role::PasswordInput)
+        .focus();
+    harness.run();
+    harness
+        .get_by_role(egui::accesskit::Role::PasswordInput)
+        .type_text("sk-will-fail-to-save");
+    harness.run();
+    harness.key_press(egui::Key::Tab);
+    harness.run();
+
+    harness.get_by_label_contains("Unable to save OpenAI API key to keyring");
 }
 
 // -- URL dialog: invalid input stays open with the exact Buzz message --------

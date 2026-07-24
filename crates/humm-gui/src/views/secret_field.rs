@@ -139,6 +139,11 @@ mod tests {
     }
 
     #[test]
+    fn charset_rejects_a_hash() {
+        assert!(!is_base64_charset("sk-abc#123"));
+    }
+
+    #[test]
     fn charset_rejects_non_ascii() {
         assert!(!is_base64_charset("sk-café"));
     }
