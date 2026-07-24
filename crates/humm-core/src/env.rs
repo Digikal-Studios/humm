@@ -23,6 +23,17 @@ pub fn vad_disabled_from_env(value: Option<&str>) -> bool {
     value.is_some_and(|v| !v.is_empty())
 }
 
+/// `HUMM_DISABLE_KEYRING` semantics (M6 Task 11, F-002/F-041): unset or empty
+/// leaves the real OS keyring in play (the default for real users); any
+/// non-empty value makes the CLI's OpenAI-token keyring lookup report "no
+/// entry" without ever opening a `keyring::Entry` — a test-only kill-switch,
+/// same shape as [`vad_disabled_from_env`], so hermetic `humm-cli` tests
+/// never touch the real OS keychain when exercising `-m openaiapi`'s
+/// token-resolution failure path.
+pub fn keyring_disabled_from_env(value: Option<&str>) -> bool {
+    value.is_some_and(|v| !v.is_empty())
+}
+
 /// Thread-count override; `None` on absence or an unparseable value (the
 /// adapter's own default then applies).
 pub fn threads_from_env(value: Option<&str>) -> Option<u32> {
@@ -62,6 +73,19 @@ mod tests {
         assert!(vad_disabled_from_env(Some("1")));
         assert!(vad_disabled_from_env(Some("true")));
         assert!(vad_disabled_from_env(Some("false")));
+    }
+
+    #[test]
+    fn keyring_disabled_from_env_unset_or_empty_leaves_keyring_on() {
+        assert!(!keyring_disabled_from_env(None));
+        assert!(!keyring_disabled_from_env(Some("")));
+    }
+
+    #[test]
+    fn keyring_disabled_from_env_any_non_empty_value_disables_keyring() {
+        assert!(keyring_disabled_from_env(Some("1")));
+        assert!(keyring_disabled_from_env(Some("true")));
+        assert!(keyring_disabled_from_env(Some("false")));
     }
 
     #[test]

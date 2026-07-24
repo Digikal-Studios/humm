@@ -2,21 +2,27 @@
 //! `assert_cmd` against the real built binary.
 //!
 //! Three tiers:
-//! - **Grammar/validation** (tests 1–18): no store, model, or network — a
-//!   usage/parse error is reached before any runtime work.
-//! - **Wired cli-int** (`add_*` below): a hermetic temp `HUMM_DATA_DIR`/
-//!   `HUMM_CONFIG_DIR`/`HUMM_MODEL_ROOT` seeded with the Buzz stub `ggml-tiny`
-//!   (loads under CPU, transcribes to zero segments — Global Constraint 4), so
-//!   the full store + queue path runs network-free. Buzz import is disabled
-//!   (`HUMM_BUZZ_SQLITE` → a nonexistent path), GPU is forced off
-//!   (`HUMM_FORCE_CPU`), and VAD is disabled (`HUMM_DISABLE_VAD`) so they run
-//!   under the sandbox with no network at all.
+//! - **Grammar/validation** (tests 1–18, except 11 — moved to the wired tier
+//!   now that `-m openaiapi` is real, Task 11/F-002/F-041): no store, model,
+//!   or network — a usage/parse error is reached before any runtime work.
+//! - **Wired cli-int** (`add_*` below, plus the `openaiapi_*` tests): a
+//!   hermetic temp `HUMM_DATA_DIR`/`HUMM_CONFIG_DIR`/`HUMM_MODEL_ROOT` seeded
+//!   with the Buzz stub `ggml-tiny` (loads under CPU, transcribes to zero
+//!   segments — Global Constraint 4), so the full store + queue path runs
+//!   network-free. Buzz import is disabled (`HUMM_BUZZ_SQLITE` → a
+//!   nonexistent path), GPU is forced off (`HUMM_FORCE_CPU`), and VAD is
+//!   disabled (`HUMM_DISABLE_VAD`) so they run under the sandbox with no
+//!   network at all. `openaiapi_with_token_transcribes_against_mock` is the
+//!   one exception: it binds a local TCP mock server, so — like humm-core's
+//!   own `openai::engine`/`models::test_server` mock-server tests — it fails
+//!   under the sandbox (`Operation not permitted` on `bind`) and is meant to
+//!   be run with it lifted.
 //! - **Acceptance** (`acceptance_*`, all `#[ignore]`): real tiny model + real
 //!   audio, process signals, and a local HTTP server. Run sandbox-lifted with
 //!   `cargo test -p humm-cli -- --ignored`.
 
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as StdCommand, Stdio};
@@ -181,26 +187,10 @@ fn extract_speech_not_yet_available() {
         ));
 }
 
-// 11. `-m openaiapi` -> exit 1, exact not-yet-available message.
-#[test]
-fn openaiapi_model_type_not_yet_available() {
-    let log_dir = tempfile::tempdir().unwrap();
-    let input_dir = tempfile::tempdir().unwrap();
-    let input = dummy_input(input_dir.path(), "dummy.mp3");
-
-    humm_cmd()
-        .env("HUMM_LOG_DIR", log_dir.path())
-        .arg("add")
-        .arg("-m")
-        .arg("openaiapi")
-        .arg(&input)
-        .assert()
-        .code(1)
-        .stderr(predicate::str::contains(
-            "the OpenAI API backend is not yet available in humm — it arrives with cloud \
-             support; use a local model type meanwhile",
-        ));
-}
+// 11 moved to the wired tier below (`openaiapi_without_token_or_keyring_fails_actionably`
+// et al.) — `-m openaiapi` is real now (Task 11, F-002/F-041 completion), so
+// exercising it needs the hermetic `Env` (settings/store), not the bare
+// `humm_cmd()` this grammar section uses.
 
 // 12. `-m huggingface` without `--hfid` -> exit 1, cli.py:147 verbatim.
 #[test]
@@ -652,6 +642,150 @@ fn json_and_quiet_flags_wire_to_json_output() {
         }
     }
     assert!(saw_failed, "expected a failed event in: {stdout}");
+}
+
+// --- OpenAI API backend (Task 11, F-002/F-041 completion) -------------------
+
+// 11 (repurposed): `-m openaiapi` with no `--openai-token` and the keyring
+// lookup short-circuited via `HUMM_DISABLE_KEYRING` (this test never touches
+// the real OS keychain) fails actionably before any model/VAD work with
+// Buzz's exact message (`cli.py:235`), exit 1, and — a config error, not a
+// usage error — no `--help` hint. Network-free.
+#[test]
+fn openaiapi_without_token_or_keyring_fails_actionably() {
+    let env = Env::new();
+    let input = dummy_input(env.data.path(), "dummy.mp3");
+
+    env.cmd()
+        .env("HUMM_DISABLE_KEYRING", "1")
+        .arg("add")
+        .arg("-m")
+        .arg("openaiapi")
+        .arg(&input)
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains("No OpenAI access token found")
+                .and(predicate::str::contains("Run `humm add --help`").not()),
+        );
+}
+
+// `-m openaiapi --openai-token sk-test` against a local mock server (its URL
+// lands in a `settings.toml` written into the hermetic `HUMM_CONFIG_DIR`)
+// transcribes end to end: exit 0, a `completed` event, the TXT export
+// written with the mocked segment text, and — the API backend has no local
+// model — zero `model_download_progress` events anywhere in the stream.
+//
+// TCP-BINDING: this test binds a local `TcpListener` and will fail under the
+// sandbox (`Operation not permitted` on `bind`), joining humm-core's
+// existing sandbox-blocked TCP test set (documented growth — see this
+// task's report — not a regression; run sandbox-lifted to exercise it).
+#[test]
+fn openaiapi_with_token_transcribes_against_mock() {
+    let env = Env::new();
+    let wav = testdata_dir().join("whisper-latvian.wav");
+    assert!(wav.is_file(), "missing testdata: {}", wav.display());
+    let out = tempfile::tempdir().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local mock server");
+    let port = listener.local_addr().unwrap().port();
+    let response_body =
+        br#"{"segments":[{"start":0.0,"end":1.0,"text":"hello from mock"}]}"#.to_vec();
+    thread::spawn(move || serve_openai_mock(listener, response_body));
+
+    fs::write(
+        env.config.path().join("settings.toml"),
+        format!("[openai]\nbase_url = \"http://127.0.0.1:{port}/v1\"\n"),
+    )
+    .expect("write settings.toml");
+
+    let output = env
+        .cmd()
+        .arg("add")
+        .arg(&wav)
+        .arg("-m")
+        .arg("openaiapi")
+        .arg("--openai-token")
+        .arg("sk-test")
+        .arg("--txt")
+        .arg("--json")
+        .arg("-d")
+        .arg(out.path())
+        .assert()
+        .code(0);
+
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    assert!(!stdout.trim().is_empty(), "expected JSON events on stdout");
+    let mut saw_completed = false;
+    for line in stdout.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).expect("valid JSON line");
+        assert_ne!(
+            value["event"], "model_download_progress",
+            "the API backend must skip model resolution entirely: {stdout}"
+        );
+        if value["event"] == "completed" {
+            saw_completed = true;
+        }
+    }
+    assert!(saw_completed, "expected a completed event in: {stdout}");
+
+    let txt: Vec<_> = fs::read_dir(out.path())
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("txt"))
+        .collect();
+    assert_eq!(txt.len(), 1, "expected one txt export in {:?}", out.path());
+    let txt_contents = fs::read_to_string(&txt[0]).unwrap();
+    assert!(
+        txt_contents.contains("hello from mock"),
+        "txt export should contain the mocked segment text: {txt_contents:?}"
+    );
+}
+
+/// Single-connection mock for the OpenAI-compatible `/audio/transcriptions`
+/// endpoint: accepts exactly one connection, drains the request body per its
+/// `Content-Length` header (a multipart mp3 upload — never parsed, just
+/// consumed so the client's write completes), and replies with a canned
+/// `200 application/json` body. The CLI's one small-file (`< MAX_CHUNK_SIZE`)
+/// request lands as this listener's single accepted connection.
+fn serve_openai_mock(listener: TcpListener, response_body: Vec<u8>) {
+    let Ok((mut stream, _)) = listener.accept() else {
+        return;
+    };
+    {
+        let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+        let mut request_line = String::new();
+        let _ = reader.read_line(&mut request_line);
+        let mut content_length: usize = 0;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
+            if line == "\r\n" || line == "\n" {
+                break;
+            }
+            if let Some(value) = line
+                .to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .map(|v| v.trim().to_string())
+            {
+                content_length = value.parse().unwrap_or(0);
+            }
+        }
+        if content_length > 0 {
+            let mut body = vec![0u8; content_length];
+            let _ = reader.read_exact(&mut body);
+        }
+    }
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n",
+        response_body.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(&response_body);
+    let _ = stream.flush();
 }
 
 // --- Acceptance (`#[ignore]`): real model + real audio + signals ------------

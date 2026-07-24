@@ -9,8 +9,10 @@
 //! (ADR-007, `docs/design/UX_SPEC.md` §5).
 //!
 //! `run.rs::run_add` validates the semantics clap's grammar can't express
-//! (hfid-required-for-huggingface, not-yet-available backends, etc. —
-//! `buzz/cli.py:146-147`, `docs/analysis/EXTERNAL_SURFACE.md` §2/§8).
+//! (hfid-required-for-huggingface, the still-not-yet-available `-e` —
+//! `buzz/cli.py:146-147`, `docs/analysis/EXTERNAL_SURFACE.md` §2/§8) and, for
+//! `-m openaiapi`, resolves the OpenAI access token before any model/VAD work
+//! (F-002/F-041, M6 Task 11).
 //!
 //! Default model size is `small`, not Buzz's `tiny`
 //! (`docs/design/UX_SPEC.md` §6, an approved deviation).
@@ -43,9 +45,10 @@ pub enum Command {
 }
 
 /// Model backend, `buzz/cli.py:31-36` (`CommandLineModelType`) — CLI-local:
-/// humm-core's `ModelSpec` has no backend field (ADR-008 maps `whisper`,
-/// `whispercpp`, and `fasterwhisper` all onto the one local whisper-rs
-/// backend).
+/// `whisper`/`whispercpp`/`fasterwhisper` all map onto
+/// [`humm_core::domain::Backend::Whisper`] (ADR-008), the one local
+/// whisper-rs backend; `openaiapi` maps onto
+/// [`humm_core::domain::Backend::OpenAiApi`] (F-041, `run.rs::execute`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ModelTypeArg {
     /// Local whisper-rs backend (openai-whisper-compatible ggml models).
@@ -60,7 +63,9 @@ pub enum ModelTypeArg {
     /// Local whisper-rs backend (faster-whisper is not ported — ADR-008).
     #[value(name = "fasterwhisper")]
     FasterWhisper,
-    /// OpenAI's hosted Whisper API.
+    /// OpenAI's hosted, OpenAI-compatible transcription API
+    /// ([`humm_core::openai::OpenAiEngine`], F-041). Needs an access token —
+    /// `--openai-token`, else the OS keyring (`run.rs::resolve_openai_token`).
     #[value(name = "openaiapi")]
     OpenAiApi,
 }
@@ -115,7 +120,9 @@ pub struct AddArgs {
     #[arg(short = 'e', long = "extract-speech")]
     pub extract_speech: bool,
 
-    /// OpenAI access token. Use only when --model-type is openaiapi.
+    /// OpenAI access token. Used only when --model-type is openaiapi; else
+    /// accepted and ignored (Buzz parity). Empty/absent falls back to the OS
+    /// keyring, else the run fails with "No OpenAI access token found".
     #[arg(long = "openai-token", value_name = "token")]
     pub openai_token: Option<String>,
 

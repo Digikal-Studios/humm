@@ -16,14 +16,14 @@ files or URLs.
 | Flag | Value | Default | Meaning |
 |------|-------|---------|---------|
 | `-t`, `--task` | `transcribe` \| `translate` | `transcribe` | Transcribe in-language, or translate to English. |
-| `-m`, `--model-type` | `whisper` \| `whispercpp` \| `huggingface` \| `fasterwhisper` \| `openaiapi` | `whisper` | Backend selector. `whisper`/`whispercpp`/`fasterwhisper` all map to the one local whisper-rs backend (ADR-008). `huggingface` resolves `--hfid`. `openaiapi` is not yet available (exit 1). |
+| `-m`, `--model-type` | `whisper` \| `whispercpp` \| `huggingface` \| `fasterwhisper` \| `openaiapi` | `whisper` | Backend selector. `whisper`/`whispercpp`/`fasterwhisper` all map to the one local whisper-rs backend (ADR-008). `huggingface` resolves `--hfid`. `openaiapi` runs `humm_core::openai::OpenAiEngine` (F-041, M6 Task 11) — no local model/VAD resolution, no `model_download_progress` events. Access token: `--openai-token` if non-empty, else the OS keyring (`SecretKey::OpenAiApiKey`, §6), else exit 1 with Buzz's exact `"No OpenAI access token found"` (`cli.py:235`) before any other work runs — a config error, not a usage error (no `--help` hint). Base URL and API model come from `settings.toml`'s `[openai]` section (`base_url`, default `https://api.openai.com/v1`; `api_model`, default `"whisper-1"`), read fresh at task-engine-construction time. |
 | `-s`, `--model-size` | `tiny`, `tiny.en`, `base`, `base.en`, `small`, `small.en`, `medium`, `medium.en`, `large`, `large-v2`, `large-v3`, `large-v3-turbo`, `custom`, `lumii` | `small` | Model size. `custom` requires `models.custom_model_url` in settings. (Default is `small`, not Buzz's `tiny` — UX_SPEC §6.) |
 | `--hfid` | `<id>` | — | Hugging Face repo id. Required with `-m huggingface`; ignored otherwise. |
 | `-l`, `--language` | `<code>` | `""` (auto-detect) | ISO language code, or empty to auto-detect. |
 | `-p`, `--prompt` | `<text>` | `""` | Initial prompt passed to the model. |
 | `-w`, `--word-timestamps` | flag | off | Emit word-level timestamps. |
 | `-e`, `--extract-speech` | flag | off | Not yet available (exit 1). |
-| `--openai-token` | `<token>` | — | Accepted; used only with `-m openaiapi` (not yet available). |
+| `--openai-token` | `<token>` | — | The OpenAI access token, used only with `-m openaiapi` (see above for the full resolution order). Accepted-and-ignored with any other `-m` value (Buzz parity). |
 | `--srt` | flag | off | Write an SRT export. |
 | `--vtt` | flag | off | Write a VTT export. |
 | `--txt` | flag | off | Write a TXT export. |
@@ -114,6 +114,9 @@ warning lines only.
 | `HUMM_FORCE_CPU` | Any value other than unset or `false` forces CPU inference (disables Metal/CoreML). Mirrors Buzz's `BUZZ_FORCE_CPU`. |
 | `HUMM_WHISPER_N_THREADS` | Whisper thread-count override (else `max(1, cpus/2)`). |
 | `HUMM_DISABLE_VAD` | Any non-empty value skips VAD entirely (no cache lookup, no download; §2). VAD is default-on for real users — this is a test-only kill-switch (used by hermetic `humm-cli` tests to stay network-free). |
+| `HUMM_DISABLE_KEYRING` | Any non-empty value makes the `-m openaiapi` token-resolution keyring lookup report "no entry" without ever opening a real `keyring::Entry` (M6 Task 11, F-002/F-041). The real OS keyring is in play for real users — this is a test-only kill-switch, same shape as `HUMM_DISABLE_VAD` (used by hermetic `humm-cli` tests so they never touch the real OS keychain). |
+| `HUMM_TRANSLATION_API_BASE_URL` | Overrides the LLM-translation endpoint's base URL, taking precedence over `settings.openai.base_url` (F-031, design spec §4.3). Buzz's equivalent is `BUZZ_TRANSLATION_API_BASE_URl` — note the trailing lowercase `l`: that typo is upstream Buzz's own (`translator.py:44`), not a porting error. humm spells it correctly (`URL`) since the `BUZZ_`→`HUMM_` prefix rename already breaks exact-name migration; documented here so a user grepping either spelling finds the mapping. |
+| `HUMM_TRANSLATION_API_KEY` | Overrides the LLM-translation endpoint's API key, taking precedence over the OS-keyring value (F-031, design spec §4.3). Buzz's equivalent is `BUZZ_TRANSLATION_API_KEY` (`translator.py:47`, no typo). |
 | `HUMM_PARAGRAPH_SPLIT_TIME` | Millisecond gap between segments that starts a new paragraph (default `2000`), resolved everywhere through the one shared helper, `text_view::paragraph_split_from_env()`. `humm-cli`'s `run.rs` and the GUI's queue path (`options_sheet::build_specs`, the spec a Run click enqueues) both call it once at spec-build time, into `OutputSpec.paragraph_split`; the **viewer's** Text-mode display and its own TXT export (F-084) call it fresh on every use instead, since those redraw/re-export live rather than building a spec up front. One helper, four call sites — an override can never make a queue-enqueued task's auto-written TXT, the on-screen Text-mode view, and a later manual TXT export of the same transcript disagree (Buzz `write_output` reads `BUZZ_PARAGRAPH_SPLIT_TIME` fresh too). Translation mode never paragraph-splits (Buzz quirk). |
 | `HUMM_DOWNLOAD_COOKIEFILE` | Cookie file passed to yt-dlp for authenticated URL downloads. Takes precedence over `settings.downloads.cookie_file`. |
 | `HUMM_FFMPEG` / `HUMM_FFPROBE` / `HUMM_YTDLP` | Override the ffmpeg / ffprobe / yt-dlp binary path (else looked up on `PATH`). |
@@ -159,6 +162,7 @@ upload, F-064).
 | Single-instance stale-flip lock | `~/Library/Application Support/humm/instance.lock` | `HUMM_DATA_DIR` (§7) |
 | GUI exclusivity lock (`humm-gui` only) | `~/Library/Application Support/humm/gui.lock` | `HUMM_DATA_DIR` (§7) |
 | Presentation-window CSS override (`humm-gui` only, F-065, M5 Task 12) | `~/Library/Application Support/humm/presentation_style.css` (optional — absent by default) | `HUMM_CONFIG_DIR` |
+| OpenAI API key (F-041/F-031, ADR-012) | OS keyring/credential store (macOS Keychain / Windows Credential Manager / *nix Secret Service), service `"humm"`, entry `"OpenAI API key"` — never `settings.toml`, the DB, or logs (`crates/humm-store/src/secrets.rs`'s `KeyringSecretStore`). Deliberately its own service string, distinct from Buzz's `"Buzz"`: a fresh humm setup never reads a key Buzz already stored. | Not overridable by env for real use; `-m openaiapi`'s hermetic cli-int tests use `HUMM_DISABLE_KEYRING` (§5) instead of touching this store at all. |
 
 The presentation-window CSS override is a **subset-parser mechanism deviation**
 from Buzz (spec §2.6, `views/presentation.rs::parse_presentation_css`): Buzz's

@@ -12,19 +12,27 @@
 //!    prior run leaves stale `queued`/`in_progress` rows — F-029; but a
 //!    *second, still-running* humm process must never have its live row
 //!    flipped by this one — `docs/HUMM_SURFACE.md` §7).
-//! 4. Resolve the model synchronously, streaming download progress.
-//! 5. Ensure the VAD model (F-045): use the cached copy if present, else fetch
-//!    it once. Buzz ships `ggml-silero-v6.2.0.bin` next to whisper-cli at build
-//!    time (FEATURE_INVENTORY F-045), so every Buzz user has VAD by default;
-//!    humm ships no file and downloads it on first run to match that outcome.
-//!    A fetch failure degrades to no-VAD (`whisper_cpp.py:380`'s absent-model
-//!    case) — the *failure* mode, never the default — and never fails the run.
-//!    `HUMM_DISABLE_VAD` (test-only) skips this step outright.
-//! 6. Spawn the task runner; enqueue one [`TaskSpec`] per input.
-//! 7. Install a Ctrl-C handler: first signal cancels every task, second exits.
-//! 8. Drain [`TaskEvent`]s, rendering progress/ETA (human) or one JSON object
+//! 4. `-m openaiapi` only (F-002/F-041 completion): resolve the OpenAI access
+//!    token before any model/VAD work — `--openai-token` if non-empty, else a
+//!    keyring lookup (Buzz `cli.py:231-235`), else fail actionably: exit 1,
+//!    no usage hint (a config error, not a usage error — `run_fail`).
+//! 5. Local backends only: resolve the model synchronously, streaming
+//!    download progress. The API backend has no local model to resolve, so
+//!    this step — and the VAD ensure, next — is skipped entirely for it: no
+//!    `model_download_progress` events either (design spec §2.1).
+//! 6. Local backends only: ensure the VAD model (F-045): use the cached copy
+//!    if present, else fetch it once. Buzz ships `ggml-silero-v6.2.0.bin` next
+//!    to whisper-cli at build time (FEATURE_INVENTORY F-045), so every Buzz
+//!    user has VAD by default; humm ships no file and downloads it on first
+//!    run to match that outcome. A fetch failure degrades to no-VAD
+//!    (`whisper_cpp.py:380`'s absent-model case) — the *failure* mode, never
+//!    the default — and never fails the run. `HUMM_DISABLE_VAD` (test-only)
+//!    skips this step outright.
+//! 7. Spawn the task runner; enqueue one [`TaskSpec`] per input.
+//! 8. Install a Ctrl-C handler: first signal cancels every task, second exits.
+//! 9. Drain [`TaskEvent`]s, rendering progress/ETA (human) or one JSON object
 //!    per line (`--json`); print written paths to stdout, errors to stderr.
-//! 9. Exit code: any canceled → 130; else any failed → 2; else 0 (ADR-007).
+//! 10. Exit code: any canceled → 130; else any failed → 2; else 0 (ADR-007).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{IsTerminal, Write};
@@ -37,28 +45,32 @@ use std::time::Instant;
 use serde::Serialize;
 
 use humm_core::boundary::{
-    AudioDecoder, MediaFetcher, MediaProber, TaskStore, TranscriptionEngine,
+    AudioDecoder, AudioEncoder, MediaFetcher, MediaProber, TaskStore, TranscriptionEngine,
 };
 use humm_core::cancel::CancelToken;
 use humm_core::domain::{
     Backend, DEFAULT_TEMPERATURE, Input, ModelSize, ModelSpec, OutputFormat, OutputSpec, Source,
     TaskSpec, TranscriptionId, TranscriptionOptions,
 };
-use humm_core::env::{threads_from_env, use_gpu_from_env, vad_disabled_from_env};
+use humm_core::env::{
+    keyring_disabled_from_env, threads_from_env, use_gpu_from_env, vad_disabled_from_env,
+};
 use humm_core::error::CoreError;
 use humm_core::format::format_eta;
 use humm_core::instance::{self, InstanceGuard};
 use humm_core::language::Language;
 use humm_core::models::download::{DownloadProgress, ModelDownloader};
 use humm_core::models::registry::local_vad_model_path;
+use humm_core::openai::{OpenAiAuth, OpenAiEngine, OpenAiEngineConfig};
 use humm_core::paths;
 use humm_core::pipeline::EngineTuning;
 use humm_core::queue::{
     EngineFactory, QueueHandle, RunnerDeps, TaskEvent, TaskEventKind, spawn_task_runner,
 };
-use humm_core::settings::Settings;
+use humm_core::secrets::{SecretKey, SecretStore};
+use humm_core::settings::{OpenAiSettings, Settings};
 use humm_media::{FfmpegDecoder, FfprobeProber, YtDlpFetcher, probe_binaries};
-use humm_store::SqliteStore;
+use humm_store::{KeyringSecretStore, SqliteStore};
 use humm_whisper::WhisperEngine;
 
 use crate::args::{AddArgs, ModelTypeArg};
@@ -101,13 +113,6 @@ fn validate_add_args(args: &AddArgs) -> Option<ExitCode> {
         ));
     }
 
-    if args.model_type == ModelTypeArg::OpenAiApi {
-        return Some(usage_fail(
-            "the OpenAI API backend is not yet available in humm — it arrives with cloud \
-             support; use a local model type meanwhile",
-        ));
-    }
-
     if args.model_type == ModelTypeArg::HuggingFace && args.hfid.is_none() {
         // cli.py:146-147, verbatim.
         return Some(usage_fail(
@@ -116,9 +121,11 @@ fn validate_add_args(args: &AddArgs) -> Option<ExitCode> {
     }
 
     // `-m whisper|whispercpp|fasterwhisper` all run the local whisper-rs
-    // backend (ADR-008); `--hfid` with a non-huggingface type and
-    // `--openai-token` without `-m openaiapi` are both accepted-and-ignored
-    // exactly as Buzz does — neither needs code here.
+    // backend (ADR-008); `-m openaiapi` is real (F-041, `execute`'s token
+    // resolution + `CliEngineFactory`'s API arm); `--hfid` with a
+    // non-huggingface type and `--openai-token` without `-m openaiapi` are
+    // both accepted-and-ignored exactly as Buzz does — neither needs code
+    // here.
     None
 }
 
@@ -156,24 +163,48 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         log::info!("another humm process is running — skipping stale-task recovery");
     }
 
+    // `-m openaiapi` token resolution (F-002/F-041 completion, Buzz
+    // `cli.py:231-235`) runs before any model/VAD work — a missing token is a
+    // config error, reported before the CLI plans any network I/O.
+    let is_api_backend = args.model_type == ModelTypeArg::OpenAiApi;
+    let openai_token = if is_api_backend {
+        match resolve_openai_token(args) {
+            Ok(token) => Some(token),
+            Err(exit_code) => return exit_code,
+        }
+    } else {
+        None
+    };
+
     let model_root = paths::model_root();
     // The model download is cancellable in principle; the Ctrl-C handler is
-    // installed later (brief step 7), so a SIGINT during a long model download
+    // installed later (brief step 8), so a SIGINT during a long model download
     // is the default terminate, matching Buzz.
     let download_cancel = CancelToken::new();
-    let resolved = match resolve_model(args, &settings, &model_root, &download_cancel) {
-        Ok(resolved) => resolved,
-        Err(exit_code) => return exit_code,
-    };
-    if resolved.coreml_degraded && !args.json {
-        eprintln!(
-            "Note: the CoreML encoder could not be downloaded (network issue); using the local \
-             model without CoreML acceleration. It will be retried on the next run."
-        );
-    }
-
     let use_gpu = use_gpu_from_env(std::env::var("HUMM_FORCE_CPU").ok().as_deref());
-    let vad_model = ensure_vad(&model_root, args.json, args.quiet, &download_cancel);
+
+    // The API backend has no local model or VAD model to resolve (design
+    // spec §2.1): both the synchronous model-download phase and the VAD
+    // ensure are skipped entirely for it — no `model_download_progress`
+    // events, no `custom_model_url`/HF/size network touch. Local backends
+    // keep today's exact behavior.
+    let (model_path, hf_repo, vad_model) = if is_api_backend {
+        (PathBuf::new(), None, None)
+    } else {
+        let resolved = match resolve_model(args, &settings, &model_root, &download_cancel) {
+            Ok(resolved) => resolved,
+            Err(exit_code) => return exit_code,
+        };
+        if resolved.coreml_degraded && !args.json {
+            eprintln!(
+                "Note: the CoreML encoder could not be downloaded (network issue); using the \
+                 local model without CoreML acceleration. It will be retried on the next run."
+            );
+        }
+        let vad_model = ensure_vad(&model_root, args.json, args.quiet, &download_cancel);
+        (resolved.path, resolved.hf_repo, vad_model)
+    };
+
     let tuning = EngineTuning {
         vad_model,
         use_gpu,
@@ -189,12 +220,13 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         language,
         task: args.task,
         model: ModelSpec {
-            // `validate_add_args` still rejects `-m openaiapi` (F-041 CLI
-            // wiring is a later M6 task), so every task the CLI enqueues
-            // today is local whisper.cpp.
-            backend: Backend::Whisper,
+            backend: if is_api_backend {
+                Backend::OpenAiApi
+            } else {
+                Backend::Whisper
+            },
             size: args.model_size,
-            hf_repo: resolved.hf_repo.clone(),
+            hf_repo,
         },
         word_timestamps: args.word_timestamps,
         initial_prompt: args.prompt.clone(),
@@ -221,8 +253,10 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         prober,
         fetcher,
         engines: Box::new(CliEngineFactory {
-            model_path: resolved.path,
+            model_path,
             use_gpu,
+            openai_token,
+            openai_settings: settings.openai.clone(),
         }),
         tuning,
         media_dir: paths::media_dir(),
@@ -471,28 +505,97 @@ fn build_fetcher(settings: &Settings) -> Option<Arc<dyn MediaFetcher>> {
     Some(Arc::new(YtDlpFetcher::new(cookie_file)))
 }
 
-/// The [`EngineFactory`] the runner uses: loads a [`WhisperEngine`] from the
-/// pre-resolved model path. The runner caches per equal [`ModelSpec`], and one
-/// CLI run has one spec, so `create` runs once.
+/// Resolves the OpenAI access token for `-m openaiapi` (F-002/F-041
+/// completion, Buzz `cli.py:231-235`, exact): `--openai-token` wins if
+/// non-empty; else a keyring lookup (`SecretKey::OpenAiApiKey`, ADR-012);
+/// both empty (or the lookup itself fails — Buzz's own `get_password`
+/// swallows every backend error into `""`, `keyring_store.py:216-218`, so
+/// humm's own backend failure collapses to the same outcome) fails with
+/// Buzz's exact message, config-error style (`run_fail`: the actionable
+/// cause alone, no `--help` hint, exit 1) — called from `execute` before any
+/// model-resolution/VAD/queue work runs, so a missing token is reported
+/// before the CLI plans any network I/O.
+///
+/// `HUMM_DISABLE_KEYRING` (test-only, any non-empty value) skips the keyring
+/// lookup entirely, reporting "no entry" without ever opening a real
+/// `keyring::Entry` — hermetic `humm-cli` tests would otherwise reach the
+/// real OS keychain on every `-m openaiapi` invocation with no
+/// `--openai-token`.
+fn resolve_openai_token(args: &AddArgs) -> Result<String, ExitCode> {
+    const NOT_FOUND: &str = "No OpenAI access token found";
+
+    if let Some(token) = args.openai_token.as_deref()
+        && !token.is_empty()
+    {
+        return Ok(token.to_string());
+    }
+
+    if keyring_disabled_from_env(std::env::var("HUMM_DISABLE_KEYRING").ok().as_deref()) {
+        return Err(run_fail(NOT_FOUND));
+    }
+
+    match KeyringSecretStore::new().get(SecretKey::OpenAiApiKey) {
+        Ok(Some(token)) if !token.is_empty() => Ok(token),
+        Ok(_) => Err(run_fail(NOT_FOUND)),
+        Err(err) => {
+            log::warn!("keyring lookup failed ({err}); treating as no stored token");
+            Err(run_fail(NOT_FOUND))
+        }
+    }
+}
+
+/// The [`EngineFactory`] the runner uses: routes on [`Backend`]. `Whisper`
+/// loads a [`WhisperEngine`] from the pre-resolved model path; `OpenAiApi`
+/// builds an [`OpenAiEngine`] from the resolved token + `[openai]` settings.
+/// The runner caches per equal [`ModelSpec`], and one CLI run has one spec,
+/// so `create` runs once.
 struct CliEngineFactory {
+    /// The pre-resolved local model path (`Whisper` only; unused —
+    /// `PathBuf::new()` — for `OpenAiApi`, which has no local model).
     model_path: PathBuf,
     use_gpu: bool,
+    /// The resolved OpenAI access token (`resolve_openai_token`). `Some` iff
+    /// `-m openaiapi` was requested — `execute` never builds an `OpenAiApi`
+    /// [`ModelSpec`] without a successfully resolved token, so the `create`
+    /// arm below only reaches its `unwrap_or_default` fallback in the
+    /// otherwise-unreachable case of a caller wiring this factory directly.
+    openai_token: Option<String>,
+    /// `settings.openai` (base URL + API model), read once at `execute` time
+    /// — Buzz reads its equivalent `QSettings` at transcriber construction
+    /// too (`openai_whisper_api_file_transcriber.py:41-53`).
+    openai_settings: OpenAiSettings,
 }
 
 impl EngineFactory for CliEngineFactory {
     fn create(
         &mut self,
-        _model: &ModelSpec,
+        model: &ModelSpec,
         _resolved: Option<&Path>,
     ) -> Result<Box<dyn TranscriptionEngine>, CoreError> {
-        // `_resolved` is ignored: the CLI already resolved the model
-        // synchronously before enqueueing (`resolve_model`, above) and
-        // carries the path itself in `self.model_path` — no ArtifactEnsurer
-        // is ever configured for the CLI (`RunnerDeps.artifacts: None`), so
-        // this is always `None` in practice anyway.
-        WhisperEngine::load(&self.model_path, self.use_gpu)
-            .map(|engine| Box::new(engine) as Box<dyn TranscriptionEngine>)
-            .map_err(CoreError::from)
+        // `_resolved` is ignored for both arms: the CLI already resolved
+        // whatever a backend needs before enqueueing (`resolve_model`/
+        // `resolve_openai_token`, above) — no ArtifactEnsurer is ever
+        // configured for the CLI (`RunnerDeps.artifacts: None`), so this is
+        // always `None` in practice anyway.
+        match model.backend {
+            Backend::Whisper => WhisperEngine::load(&self.model_path, self.use_gpu)
+                .map(|engine| Box::new(engine) as Box<dyn TranscriptionEngine>)
+                .map_err(CoreError::from),
+            Backend::OpenAiApi => {
+                let encoder: Arc<dyn AudioEncoder> = Arc::new(FfmpegDecoder::new());
+                let engine = OpenAiEngine::new(
+                    OpenAiEngineConfig {
+                        auth: OpenAiAuth {
+                            base_url: self.openai_settings.base_url.clone(),
+                            api_key: self.openai_token.clone().unwrap_or_default(),
+                        },
+                        api_model: self.openai_settings.api_model.clone(),
+                    },
+                    encoder,
+                );
+                Ok(Box::new(engine) as Box<dyn TranscriptionEngine>)
+            }
+        }
     }
 }
 
@@ -1113,12 +1216,30 @@ mod tests {
         assert!(validate_add_args(&args).is_some());
     }
 
+    // `resolve_openai_token`'s no-flag branches fall through to a real
+    // `KeyringSecretStore` lookup (guarded only by `HUMM_DISABLE_KEYRING`,
+    // an env var this in-process unit test must never set — that would
+    // mutate global process state shared with every other test in this
+    // binary). Only the flag-wins branch is safe to exercise here; the
+    // keyring-fallback and both-empty branches are cli-int tested instead
+    // (`crates/humm-cli/tests/cli.rs`, which sets `HUMM_DISABLE_KEYRING` in
+    // an isolated subprocess).
     #[test]
-    fn validate_add_args_rejects_openaiapi_model_type() {
+    fn resolve_openai_token_uses_the_flag_when_non_empty() {
+        let mut args = base_add_args();
+        args.openai_token = Some("sk-test-token".to_string());
+        assert_eq!(resolve_openai_token(&args).unwrap(), "sk-test-token");
+    }
+
+    #[test]
+    fn validate_add_args_accepts_openaiapi_model_type() {
+        // `-m openaiapi` is real now (Task 11, F-002/F-041 completion):
+        // grammar validation accepts it unconditionally — token resolution
+        // happens later, in `execute`, not here.
         let mut args = base_add_args();
         args.files = vec!["dummy.mp3".to_string()];
         args.model_type = ModelTypeArg::OpenAiApi;
-        assert!(validate_add_args(&args).is_some());
+        assert!(validate_add_args(&args).is_none());
     }
 
     #[test]
