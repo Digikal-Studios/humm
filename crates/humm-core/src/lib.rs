@@ -20,6 +20,7 @@ pub mod pipeline;
 pub mod queue;
 pub mod regroup;
 pub mod resize;
+pub mod secrets;
 pub mod settings;
 pub mod telemetry;
 pub mod update;

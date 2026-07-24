@@ -12,6 +12,8 @@
 #![forbid(unsafe_code)]
 
 mod schema;
+mod secrets;
 mod store;
 
+pub use secrets::KeyringSecretStore;
 pub use store::{BuzzImportOutcome, ModelDisplayColumns, SegmentRow, SqliteStore, TaskRow};

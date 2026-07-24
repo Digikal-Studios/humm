@@ -10,6 +10,7 @@ humm-core.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+keyring.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
