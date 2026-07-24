@@ -1894,6 +1894,16 @@ impl HummApp {
     /// module doc): reading/toggling OS fullscreen state
     /// (`ViewportCommand::Fullscreen`) and Esc-exits-fullscreen-only
     /// (Buzz `keyPressEvent`, `presentation_window.py:172-179`).
+    ///
+    /// The CSS override is **not** reloaded from disk every frame (review
+    /// finding — this closure runs at the presentation window's own repaint
+    /// rate, up to ~30/frame/s while recording, and `load_css_override` is an
+    /// `exists`+`read`+`parse` syscall round-trip): it's cached on
+    /// `vm.presentation.css_override` and only recomputed when
+    /// `vm.presentation.css_dirty` is set — that field's own doc lists the
+    /// exact trigger set (window open, theme change, debounced text-size/color
+    /// save), matching every point Buzz's own `PresentationWindow.load_settings()`
+    /// (which re-reads the CSS file as a side effect) is called from.
     fn show_presentation_viewport(&mut self, ctx: &egui::Context) {
         let Some(vm_arc) = &self.recording else {
             return;
@@ -1917,10 +1927,12 @@ impl HummApp {
                 let mut vm = vm_for_cb
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let css_override = crate::views::presentation::load_css_override();
+                if std::mem::take(&mut vm.presentation.css_dirty) {
+                    vm.presentation.css_override = crate::views::presentation::load_css_override();
+                }
                 let style = crate::views::presentation::effective_style(
                     &vm.presentation,
-                    css_override.as_ref(),
+                    vm.presentation.css_override.as_ref(),
                 );
                 let text = vm.panel_text.clone();
                 crate::views::presentation::window_ui(ctx, &text, &style);

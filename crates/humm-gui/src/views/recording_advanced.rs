@@ -37,16 +37,26 @@ use crate::recording::RecordingOptions;
 // -- Separator escape/unescape (Buzz `repr()[1:-1]` / `unicode_escape`) ------
 
 /// Escapes `literal` the way Buzz's `repr(text)[1:-1]` displays it
-/// (`advanced_settings_dialog.py:149`): backslash, newline, CR, and tab
-/// become their two-character escapes; other C0 control characters (and
-/// DEL) become `\xHH` (lowercase hex, matching CPython's own `repr`); every
-/// other character — including quote characters, which Python's `repr`
-/// picks a delimiter to avoid escaping in the common case — passes through
-/// unchanged. This covers every practical line-separator value (whitespace
-/// runs); a string containing *both* `'` and `"` is the one input where
-/// CPython's real `repr` would escape one of them and this function would
-/// not — never a realistic separator, so left undone rather than chasing
-/// `repr`'s full delimiter-selection algorithm here.
+/// (`advanced_settings_dialog.py:149`) for realistic line-separator inputs —
+/// whitespace runs and plain text, which is all this field is ever actually
+/// set to in practice: backslash, newline, CR, and tab become their
+/// two-character escapes; other C0 control characters (and DEL) become
+/// `\xHH` (lowercase hex, matching CPython's own `repr`); every other
+/// character passes through unchanged. This is a deliberately partial port
+/// of CPython's full `repr` escaping, not a complete one — two known,
+/// accepted divergences for inputs a line separator would never realistically
+/// contain: (1) a string containing *both* `'` and `"` is one case where
+/// CPython's real `repr` would escape one of them (it picks a quote
+/// delimiter to avoid escaping in the common case) and this function would
+/// not; (2) CPython's `repr` also escapes C1 control characters and other
+/// non-printable Unicode code points outside the C0/DEL range (e.g. U+00A0
+/// NBSP → `\xa0`, U+2028 → ` `, per `str.isprintable()`), which this
+/// function leaves as literal, unescaped characters instead. Neither
+/// divergence breaks round-tripping: [`unescape_separator`] passes through
+/// any character this function left unescaped exactly as given, so
+/// `unescape_separator(escape_separator(x)) == x` still holds for every
+/// input — the only effect is that the *displayed* escaped form for an
+/// exotic separator won't byte-match what Buzz's dialog would show.
 pub fn escape_separator(literal: &str) -> String {
     let mut out = String::with_capacity(literal.len());
     for ch in literal.chars() {
@@ -545,6 +555,23 @@ mod tests {
     #[test]
     fn escape_passes_through_plain_text_unchanged() {
         assert_eq!(escape_separator("---"), "---");
+    }
+
+    #[test]
+    fn escape_leaves_non_c0_non_printables_unescaped_but_still_round_trips() {
+        // Divergence from CPython's real `repr` (doc comment): U+00A0 (NBSP)
+        // and U+2028 are non-printable and would be `\xa0`/` `-escaped
+        // by `repr`, but this function leaves them as literal characters.
+        // The round trip through `unescape_separator` must still hold.
+        for exotic in ["\u{a0}", "\u{2028}", "caf\u{e9}"] {
+            let escaped = escape_separator(exotic);
+            assert_eq!(escaped, exotic, "left unescaped, per the doc comment");
+            assert_eq!(
+                unescape_separator(&escaped).as_deref(),
+                Some(exotic),
+                "escape+unescape must round-trip even for characters `repr` would escape"
+            );
+        }
     }
 
     #[test]

@@ -390,10 +390,14 @@ pub struct RecordingVm {
     /// most recent [`crate::live_session::SessionMessage::PanelText`] (a
     /// whole-panel replace), applied verbatim.
     pub panel_text: String,
-    /// Presentation-bar placeholder visibility (Buzz
-    /// `presentation_options_bar` — real controls are Task 12's).
+    /// Whether the presentation options bar (`views::presentation::bar_ui`
+    /// — show-window button, text-size/theme/color controls, fullscreen
+    /// button) is shown: visible only while recording (Buzz
+    /// `presentation_options_bar`).
     pub presentation_bar_visible: bool,
-    /// Copy-bar placeholder visibility (Buzz `copy_actions_bar`).
+    /// Whether the copy bar (`views::recording`'s copy-bar render, the
+    /// "Copy"/"Copied!"/"Nothing to copy!" button) is shown: visible once a
+    /// recording has stopped (Buzz `copy_actions_bar`).
     pub copy_bar_visible: bool,
     /// The Record/Stop transition the click just made, for `app.rs`'s
     /// harvest (`app.rs::harvest_recording_intent` starts/signals the real
@@ -522,7 +526,7 @@ impl RecordingVm {
     /// meter (Buzz `audio_meter_widget.reset_amplitude()`, called *before*
     /// the transcriber starts), clears the panel/any stale error dialog,
     /// disables the options/device controls (via `status`, which the render
-    /// fn reads), and shows the presentation-bar placeholder. Latches
+    /// fn reads), and shows the presentation options bar. Latches
     /// [`Self::pending_intent`] so `app.rs`'s harvest starts the real
     /// session (`crate::live_session::spawn_live_session`).
     ///

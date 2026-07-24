@@ -331,9 +331,35 @@ pub struct PresentationVm {
     pub text_color: String,
     /// The stored custom background color (ditto).
     pub background_color: String,
-    /// When the text-size spinbox was last edited, for the 100 ms debounced
-    /// save ([`drive_text_size_debounce`]); `None` while no save is pending.
-    pub text_size_last_edit: Option<Instant>,
+    /// When any of `text_size`/`text_color`/`background_color` was last
+    /// edited, for the shared ~100 ms debounced save
+    /// ([`drive_pending_save_debounce`]); `None` while no save is pending.
+    /// One shared timestamp for all three (rather than one per field) is
+    /// deliberate — `color_edit_button_srgb`'s popup fires `.changed()`
+    /// continuously while a slider inside it is being dragged, so without
+    /// debouncing a single drag would flood dozens of synchronous disk
+    /// writes on the UI thread; a shared timer collapses any burst of edits
+    /// across all three fields into one write, same as Buzz's own
+    /// `QTimer.singleShot`-per-field debounce converges to one final value.
+    pub pending_save_last_edit: Option<Instant>,
+    /// Cached result of the last [`load_css_override`] call — read every
+    /// frame by `app.rs::show_presentation_viewport`, but only
+    /// *(re)computed* when [`Self::css_dirty`] is set (see that field's own
+    /// doc for the trigger set). Avoids an `exists`+`read`+`parse` disk
+    /// round-trip on every presentation-viewport frame (~30/s while
+    /// recording).
+    pub css_override: Option<CssOverride>,
+    /// Whether [`Self::css_override`] needs recomputing before this frame's
+    /// render — the Buzz-equivalent triggers for `PresentationWindow.load_settings()`
+    /// (which re-reads the CSS file as a side effect of `apply_styling`,
+    /// `presentation_window.py:81`): the window opening for the first time
+    /// ([`Self::from_settings`]'s own initial `true`, and `bar_ui`'s Show-click
+    /// open transition), a theme change, and the debounced text-size/color
+    /// save firing ([`drive_pending_save_debounce`]) — i.e. every point that
+    /// persists a `settings.presentation` field. `app.rs`'s viewport closure
+    /// consumes this (reload + clear) once per dirty frame; every other
+    /// frame reuses [`Self::css_override`] unchanged.
+    pub css_dirty: bool,
 }
 
 impl PresentationVm {
@@ -344,7 +370,10 @@ impl PresentationVm {
     /// once the window is actually shown) — humm folds both into this one
     /// snapshot since the bar and the window always agree on these values by
     /// construction (`bar_ui` is the only writer, and it always persists
-    /// through to `settings.presentation` on every change).
+    /// through to `settings.presentation` on every change). `css_dirty`
+    /// starts `true` so the presentation viewport's first render loads the
+    /// CSS override at least once, matching Buzz's own first-`load_settings`
+    /// call in `PresentationWindow.__init__`.
     pub fn from_settings(ps: &PresentationSettings) -> Self {
         PresentationVm {
             open: false,
@@ -354,7 +383,9 @@ impl PresentationVm {
             theme: PresentationTheme::parse_setting(&ps.theme),
             text_color: ps.text_color.clone(),
             background_color: ps.background_color.clone(),
-            text_size_last_edit: None,
+            pending_save_last_edit: None,
+            css_override: None,
+            css_dirty: true,
         }
     }
 }
@@ -384,42 +415,59 @@ fn theme_label(theme: PresentationTheme) -> String {
     }
 }
 
-/// The text-size debounce window (Buzz `QTimer.singleShot(100, ...)`,
-/// `:417-425`) — a real single-fire debounce here (only the *last* edit
-/// within the window is saved), rather than Buzz's fire-every-timer
-/// behavior, which converges to the same final persisted value with fewer
-/// writes (documented — not a behavior bug, an equivalent, more idiomatic
-/// port of "debounced").
-const TEXT_SIZE_DEBOUNCE_MS: u64 = 100;
+/// The shared save-debounce window for text size and both custom colors
+/// (Buzz `QTimer.singleShot(100, ...)`, text size only, `:417-425` — colors
+/// save on `QColorDialog` OK with no debounce at all in Buzz, since a modal
+/// color-picker dialog can't fire continuous `.changed()` events the way
+/// egui's inline `color_edit_button_srgb` popup does; debouncing colors too
+/// is this port's own necessary addition, review finding). A real
+/// single-fire debounce (only the *last* edit within the window is saved),
+/// rather than Buzz's own fire-every-timer behavior for text size, which
+/// converges to the same final persisted value with fewer writes
+/// (documented — not a behavior bug, an equivalent, more idiomatic port of
+/// "debounced").
+const PENDING_SAVE_DEBOUNCE_MS: u64 = 100;
 
-/// Whether `elapsed` since the last text-size edit has crossed the debounce
-/// window — the pure decision [`drive_text_size_debounce`] wraps with a real
-/// clock (mirrors `viewer.rs`'s `debounce_decision`).
-pub fn text_size_debounce_ready(elapsed: Duration) -> bool {
-    elapsed >= Duration::from_millis(TEXT_SIZE_DEBOUNCE_MS)
+/// Whether `elapsed` since the last text-size/color edit has crossed the
+/// debounce window — the pure decision [`drive_pending_save_debounce`]
+/// wraps with a real clock (mirrors `viewer.rs`'s `debounce_decision`).
+pub fn pending_save_debounce_ready(elapsed: Duration) -> bool {
+    elapsed >= Duration::from_millis(PENDING_SAVE_DEBOUNCE_MS)
 }
 
-/// Checks the pending text-size debounce every frame the bar renders:
-/// reschedules a repaint while waiting, persists once the window has
-/// elapsed.
-fn drive_text_size_debounce(
+/// Checks the pending text-size/color debounce every frame the bar renders:
+/// reschedules a repaint while waiting, and once the window has elapsed,
+/// persists `text_size`/`text_color`/`background_color` together in one
+/// write (whichever changed — writing all three unconditionally is harmless
+/// idempotent overhead, and avoids tracking per-field dirtiness for what is,
+/// in practice, always a single in-flight edit) and marks
+/// [`PresentationVm::css_dirty`] (a settings save is one of the CSS-reload
+/// triggers that field's own doc lists).
+fn drive_pending_save_debounce(
     ui: &egui::Ui,
     vm: &mut PresentationVm,
     settings: &Mutex<Settings>,
     settings_path: &Path,
 ) {
-    let Some(last_edit) = vm.text_size_last_edit else {
+    let Some(last_edit) = vm.pending_save_last_edit else {
         return;
     };
     let elapsed = Instant::now().saturating_duration_since(last_edit);
-    if !text_size_debounce_ready(elapsed) {
-        let remaining = Duration::from_millis(TEXT_SIZE_DEBOUNCE_MS).saturating_sub(elapsed);
+    if !pending_save_debounce_ready(elapsed) {
+        let remaining = Duration::from_millis(PENDING_SAVE_DEBOUNCE_MS).saturating_sub(elapsed);
         ui.ctx().request_repaint_after(remaining);
         return;
     }
-    vm.text_size_last_edit = None;
-    let size = vm.text_size;
-    persist_presentation(settings, settings_path, |p| p.text_size = size);
+    vm.pending_save_last_edit = None;
+    let text_size = vm.text_size;
+    let text_color = vm.text_color.clone();
+    let background_color = vm.background_color.clone();
+    persist_presentation(settings, settings_path, |p| {
+        p.text_size = text_size;
+        p.text_color = text_color;
+        p.background_color = background_color;
+    });
+    vm.css_dirty = true;
 }
 
 // -- Render: the recording window's embedded bar -----------------------------
@@ -443,6 +491,8 @@ pub fn bar_ui(
                 vm.focus_requested = true;
             } else {
                 vm.open = true;
+                // Window-opening trigger for the CSS-reload cache (field doc).
+                vm.css_dirty = true;
             }
         }
 
@@ -457,7 +507,7 @@ pub fn bar_ui(
             .changed()
         {
             vm.text_size = size;
-            vm.text_size_last_edit = Some(Instant::now());
+            vm.pending_save_last_edit = Some(Instant::now());
         }
 
         ui.label(tr("presentation-theme-label"));
@@ -477,9 +527,20 @@ pub fn bar_ui(
             vm.theme = theme;
             let theme_str = theme.as_str().to_string();
             persist_presentation(settings, settings_path, |p| p.theme = theme_str);
+            // Theme-change trigger for the CSS-reload cache (field doc) —
+            // matches Buzz's own `load_settings()` call in `on_theme_changed`.
+            vm.css_dirty = true;
         }
 
         if vm.theme == PresentationTheme::Custom {
+            // Both color pickers only *stage* the edit (update the live VM
+            // field + arm the shared debounce timer) rather than persisting
+            // synchronously — `color_edit_button_srgb`'s popup fires
+            // `.changed()` continuously while its internal slider is
+            // dragged, so a direct `persist_presentation` call here would
+            // flood the UI thread with disk writes for the duration of one
+            // drag (review finding). `drive_pending_save_debounce` below
+            // performs the actual, debounced write.
             ui.label(tr("presentation-text-color-label"));
             let mut rgb = parse_hex_color(&vm.text_color).unwrap_or([0, 0, 0]);
             if ui
@@ -487,9 +548,8 @@ pub fn bar_ui(
                 .on_hover_text(tr("presentation-text-color-label"))
                 .changed()
             {
-                let hex = hex_from_rgb(rgb);
-                vm.text_color = hex.clone();
-                persist_presentation(settings, settings_path, |p| p.text_color = hex);
+                vm.text_color = hex_from_rgb(rgb);
+                vm.pending_save_last_edit = Some(Instant::now());
             }
 
             ui.label(tr("presentation-background-color-label"));
@@ -499,9 +559,8 @@ pub fn bar_ui(
                 .on_hover_text(tr("presentation-background-color-label"))
                 .changed()
             {
-                let hex = hex_from_rgb(bg_rgb);
-                vm.background_color = hex.clone();
-                persist_presentation(settings, settings_path, |p| p.background_color = hex);
+                vm.background_color = hex_from_rgb(bg_rgb);
+                vm.pending_save_last_edit = Some(Instant::now());
             }
         }
 
@@ -517,7 +576,7 @@ pub fn bar_ui(
         }
     });
 
-    drive_text_size_debounce(ui, vm, settings, settings_path);
+    drive_pending_save_debounce(ui, vm, settings, settings_path);
 }
 
 // -- Render: the presentation viewport's own content --------------------------
@@ -740,17 +799,17 @@ mod tests {
         assert_eq!(style.font_size_pt, 40, "overridden");
     }
 
-    // -- text-size debounce -------------------------------------------------------
+    // -- text-size/color save debounce --------------------------------------------
 
     #[test]
     fn debounce_not_ready_before_100ms() {
-        assert!(!text_size_debounce_ready(Duration::from_millis(99)));
+        assert!(!pending_save_debounce_ready(Duration::from_millis(99)));
     }
 
     #[test]
     fn debounce_ready_at_or_after_100ms() {
-        assert!(text_size_debounce_ready(Duration::from_millis(100)));
-        assert!(text_size_debounce_ready(Duration::from_millis(500)));
+        assert!(pending_save_debounce_ready(Duration::from_millis(100)));
+        assert!(pending_save_debounce_ready(Duration::from_millis(500)));
     }
 
     // -- PresentationVm::from_settings ---------------------------------------------
@@ -769,6 +828,11 @@ mod tests {
         assert_eq!(vm.theme, PresentationTheme::Dark);
         assert_eq!(vm.text_color, "#111111");
         assert_eq!(vm.background_color, "#222222");
-        assert_eq!(vm.text_size_last_edit, None);
+        assert_eq!(vm.pending_save_last_edit, None);
+        assert_eq!(vm.css_override, None);
+        assert!(
+            vm.css_dirty,
+            "the first presentation-viewport render must load the CSS override once"
+        );
     }
 }
