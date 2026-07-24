@@ -15,6 +15,7 @@ pub mod instance;
 pub mod language;
 pub mod live;
 pub mod models;
+pub mod openai;
 pub mod paths;
 pub mod pipeline;
 pub mod queue;
