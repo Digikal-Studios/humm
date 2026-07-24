@@ -93,10 +93,15 @@ pub trait SegmentSink {
 /// Live audio capture (M5 as-built, ADR-005/ADR-021; `humm-audio::CpalCapture`).
 /// `device_id` (not a whole `&AudioDevice`, the original sketch's shape) is
 /// the stable name-based id `AudioCapture::devices()` itself returns —
-/// `None` requests the system default. The adapter resamples/downmixes
-/// inside the capture callback so `sink` always sees 16 kHz mono f32
-/// regardless of the device's native config (ADR-005's fallback path).
-/// `meter` is the shared [`MeterSnapshot`] the caller reads from every
+/// `None` requests the system default. The adapter guarantees `sink` always
+/// sees 16 kHz mono f32 regardless of the device's native config (ADR-005's
+/// fallback path), but the two operations split across two places: the RT
+/// callback itself only **converts + downmixes** (never resamples — no
+/// allocation/locking there); when the device's native rate isn't already
+/// 16 kHz, that converted-but-still-device-rate audio lands in a
+/// preallocated intermediate ring, and a **separate drain loop on the same
+/// owner thread** (not the RT callback) pulls it through rubato to produce
+/// the 16 kHz the sink sees. `meter` is the shared [`MeterSnapshot`] the caller reads from every
 /// repaint; ownership of its three fields is split by writer, not shared:
 /// the capture adapter writes only `current_rms` per RT callback, while
 /// `average_rms`/`queue_len` are the session/chunker layer's own fields
