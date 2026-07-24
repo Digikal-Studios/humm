@@ -707,6 +707,76 @@ pub trait LlmEndpointSource: Send + Sync {
 mod tests {
     use super::*;
 
+    // ------------------------------------------------- real-API contract (gated)
+
+    // The translation twin of humm-cli's `real_api_transcription_end_to_end`:
+    // a single+batch round trip through the REAL worker against a REAL
+    // OpenAI-compatible `/chat/completions` server — no mock. Gated on
+    // `HUMM_LLM_TEST_BASE` (+ optional `HUMM_LLM_TEST_KEY`, and
+    // `HUMM_LLM_TEST_MODEL`, default `gpt-4o-mini`) because unlike the
+    // transcription side (where a stock whisper.cpp `whisper-server` serves as
+    // a genuine local target, `validation/m6-real-api/`) there is no
+    // LLM-inference server installed on the reference machine — the M6
+    // acceptance records this as env-gated rather than executed. Any
+    // OpenAI-compatible chat endpoint (ollama, LM Studio, llama.cpp server,
+    // cloud OpenAI) satisfies it. Asserts liveness/shape, not translation
+    // quality: every enqueued item must produce a non-empty result.
+    #[test]
+    #[ignore = "requires a real OpenAI-compatible chat server (set HUMM_LLM_TEST_BASE)"]
+    fn real_chat_api_single_and_batch_round_trip() {
+        let base = match std::env::var("HUMM_LLM_TEST_BASE") {
+            Ok(v) if !v.is_empty() => v,
+            _ => panic!(
+                "HUMM_LLM_TEST_BASE is not set — point it at a real \
+                 OpenAI-compatible chat server (any of ollama / LM Studio / \
+                 llama.cpp server / cloud OpenAI)"
+            ),
+        };
+        let key = std::env::var("HUMM_LLM_TEST_KEY").unwrap_or_else(|_| "sk-local-unused".into());
+        let model = std::env::var("HUMM_LLM_TEST_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
+
+        let cfg = TranslatorConfig {
+            auth: crate::openai::OpenAiAuth {
+                base_url: Some(base),
+                api_key: key,
+            },
+            model,
+            prompt: "Translate each text sent to you to French. Reply with the \
+                     translation only."
+                .into(),
+        };
+        let (results_tx, results_rx) = std::sync::mpsc::channel::<(String, Option<i64>)>();
+        let handle = TranslatorHandle::spawn(
+            cfg,
+            Box::new(move |text, id| {
+                let _ = results_tx.send((text, id));
+            }),
+        );
+        // Two items enqueued back-to-back: depending on worker timing they go
+        // out as one numbered batch or two single-form requests — both are
+        // real-server paths worth exercising, and both must yield exactly one
+        // non-empty result per id.
+        handle.enqueue("Good morning, everyone.".into(), Some(1));
+        handle.enqueue("The weather is nice today.".into(), Some(2));
+        handle.stop();
+
+        let mut seen = std::collections::BTreeMap::new();
+        while let Ok((text, id)) = results_rx.try_recv() {
+            seen.insert(id, text);
+        }
+        assert_eq!(
+            seen.len(),
+            2,
+            "expected exactly one result per enqueued item"
+        );
+        for (id, text) in seen {
+            assert!(
+                !text.trim().is_empty(),
+                "real chat API returned an empty translation for id {id:?}"
+            );
+        }
+    }
+
     // ---------------------------------------------------------- combine_numbered
 
     #[test]
