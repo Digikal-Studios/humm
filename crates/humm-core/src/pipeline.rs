@@ -247,8 +247,17 @@ pub fn run_file_job(
     }
 
     // Drain and merge LLM translations (if a translator ran). `stop()` joins
-    // the worker; the wait is bounded by the worker's own per-request 60 s
-    // timeouts (design spec §4.2/§6).
+    // the worker, which drains a FIFO queue in batches of at most
+    // `BATCH_SIZE` (10) items, each dispatched as one request bounded by
+    // `REQUEST_TIMEOUT` (60 s) — so the worst-case join is ceil(N/10) x 60 s
+    // for N items already queued when `stop()` is called, not a flat 60 s.
+    // This is accepted rather than hardened because the backlog at stop-time
+    // is normally at most one batch (batches are dispatched concurrently
+    // with the transcription that keeps enqueuing them, so the queue rarely
+    // grows past a single in-flight batch by the time transcription
+    // finishes and this drain runs); a poll-and-check-cancel join loop
+    // instead of a single blocking join is an M7 hardening candidate if that
+    // assumption ever proves wrong (design spec §4.2/§6).
     if let Some(handle) = translator {
         // A cancel that has *already* landed is honored without waiting on the
         // drain at all: detach the worker and bail (design spec §6 / ADR-022's

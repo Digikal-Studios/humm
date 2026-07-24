@@ -588,9 +588,10 @@ Recorded as a full ADR in DECISIONS.md; decision summary:
   transcriber's `stop()` is `pass`).
 - **Belt-and-braces for app exit:** `QueueHandle::finish_within(timeout)` —
   used by GUI shutdown after `cancel_all()` (and by the CLI's
-  second-SIGINT path) — joins with a hard deadline; on expiry it logs,
-  leaks the runner thread deliberately, and returns, so no engine bug can
-  ever wedge process exit. Default GUI shutdown timeout: 5 s.
+  second-SIGINT path) [as-built: GUI shutdown only; the CLI's second-SIGINT
+  remains immediate exit(130) — ADR-022] — joins with a hard deadline; on
+  expiry it logs, leaks the runner thread deliberately, and returns, so no
+  engine bug can ever wedge process exit. Default GUI shutdown timeout: 5 s.
 
 ## 9. Settings, env, surface-doc updates
 

@@ -91,7 +91,7 @@ pub(crate) const DEFAULT_LLM_PROMPT: &str = "You are a professional translator. 
 /// both render the form and (via [`build_specs`]) produce the
 /// [`TaskSpec`]s a Run click enqueues. Deliberately plain data (no `egui`
 /// types) so it's unit-testable without a UI context.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct SheetState {
     /// Which engine runs this batch (F-041): local whisper.cpp, or the
     /// OpenAI-compatible HTTP API. Gates the size-combo/Api-Key-row/hf-repo
@@ -228,6 +228,26 @@ impl SheetState {
         settings.enable_llm_translation = self.enable_llm_translation;
         settings.llm_model = Some(self.llm_model.clone());
         settings.llm_prompt = Some(self.llm_prompt.clone());
+    }
+}
+
+impl std::fmt::Debug for SheetState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SheetState")
+            .field("backend", &self.backend)
+            .field("model_size", &self.model_size)
+            .field("api_key", &"«redacted»")
+            .field("api_key_visible", &self.api_key_visible)
+            .field("task", &self.task)
+            .field("language", &self.language)
+            .field("word_timestamps", &self.word_timestamps)
+            .field("initial_prompt", &self.initial_prompt)
+            .field("hf_repo", &self.hf_repo)
+            .field("formats", &self.formats)
+            .field("enable_llm_translation", &self.enable_llm_translation)
+            .field("llm_model", &self.llm_model)
+            .field("llm_prompt", &self.llm_prompt)
+            .finish()
     }
 }
 
@@ -1463,6 +1483,29 @@ mod tests {
             secrets.get(SecretKey::OpenAiApiKey).unwrap(),
             Some("sk-bad key!".to_string()),
             "an invalid-charset key must still be saved (Buzz parity)"
+        );
+    }
+
+    // -- SheetState Debug redaction (key hygiene, final-review fix wave) ------
+
+    #[test]
+    fn sheet_state_debug_redacts_the_api_key() {
+        let mut state = base_state();
+        state.api_key = "sk-super-secret-value".to_string();
+
+        let debug_output = format!("{state:?}");
+
+        assert!(
+            !debug_output.contains("sk-super-secret-value"),
+            "the API key must never appear verbatim in Debug output"
+        );
+        assert!(
+            debug_output.contains("«redacted»"),
+            "the api_key field must be redacted"
+        );
+        assert!(
+            debug_output.contains("SheetState"),
+            "the Debug output must still identify the struct"
         );
     }
 }
