@@ -680,6 +680,29 @@ pub fn resolve_endpoint(
     })
 }
 
+/// A source of the resolved LLM-translation [`LlmEndpoint`] for one task,
+/// queried by the file-transcription pipeline at task start (F-031, design
+/// spec §6).
+///
+/// The pipeline holds this behind a trait object so core stays free of the
+/// concrete env/settings/keyring wiring: the GUI's implementation resolves
+/// the endpoint via [`resolve_endpoint`] (env → settings → keyring) each time
+/// a task begins (Buzz reads its endpoint at translator construction); tests
+/// inject a fixed endpoint pointed at a mock server; the CLI supplies no
+/// source at all in M6 (`None` → translation is simply never attempted,
+/// Buzz's CLI having no LLM-translation path either).
+///
+/// [`Self::resolve`] returns `None` when no key is available anywhere (there
+/// is nothing an [`LlmEndpoint`] built from it could authenticate with) — the
+/// pipeline then skips translation entirely rather than firing requests
+/// doomed to fail auth (design spec §6's "endpoint unresolvable"
+/// degradation).
+pub trait LlmEndpointSource: Send + Sync {
+    /// Resolves the endpoint for a task about to run, or `None` when no key
+    /// is available from any source.
+    fn resolve(&self) -> Option<LlmEndpoint>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

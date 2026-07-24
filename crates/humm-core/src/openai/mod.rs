@@ -22,7 +22,8 @@ pub use client::{ApiFailure, DEFAULT_BASE_URL, OpenAiAuth, cancelable, effective
 pub use engine::{MAX_CHUNK_SIZE, OpenAiEngine, OpenAiEngineConfig, chunk_plan};
 pub use parse::{parse_response, response_format_for};
 pub use translate::{
-    BATCH_SIZE, ENV_BASE, ENV_KEY, LlmEndpoint, TranslatorConfig, TranslatorHandle,
-    batch_system_prompt, combine_numbered, parse_batch_response, resolve_endpoint,
+    BATCH_SIZE, ENV_BASE, ENV_KEY, LlmEndpoint, LlmEndpointSource, TranslatorConfig,
+    TranslatorHandle, batch_system_prompt, combine_numbered, parse_batch_response,
+    resolve_endpoint,
 };
 pub use validate::{ValidateOutcome, validate_key};

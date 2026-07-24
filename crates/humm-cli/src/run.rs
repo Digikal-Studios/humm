@@ -229,6 +229,9 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         // The CLI resolves the model synchronously before enqueueing (Buzz
         // parity, `cli.py:219-221`) — no ArtifactEnsurer is ever configured.
         artifacts: None,
+        // No CLI flag enables LLM translation in M6 (Buzz's CLI has none
+        // either, design spec §6) — the file path's translation stays inert.
+        llm: None,
     };
 
     let handle = spawn_task_runner(deps);

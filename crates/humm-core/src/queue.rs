@@ -65,9 +65,10 @@ use crate::boundary::{
     TranscriptionEngine,
 };
 use crate::cancel::CancelToken;
-use crate::domain::{Input, ModelSpec, Segment, Source, TaskSpec, TranscriptionId};
+use crate::domain::{Backend, Input, ModelSpec, Segment, Source, TaskSpec, TranscriptionId};
 use crate::error::{CoreError, EngineError, MediaError, ModelError, StoreError};
 use crate::models::download::DownloadProgress;
+use crate::openai::LlmEndpointSource;
 use crate::pipeline::{EngineTuning, JobOutcome, run_file_job};
 
 /// The message emitted to yt-dlp-less URL tasks: exactly this string is
@@ -245,6 +246,18 @@ pub struct RunnerDeps {
     /// enqueueing — `run_job` then skips artifact-ensure entirely and
     /// behaves byte-for-byte as it did before this field existed.
     pub artifacts: Option<Arc<dyn ArtifactEnsurer>>,
+    /// Resolves the per-task LLM-translation endpoint at run time (F-031,
+    /// design spec §6), threaded into [`run_file_job`]. `None` (the CLI, and
+    /// any caller not wiring translation) means the file path's "Enable AI
+    /// translation" option is inert — no endpoint is ever resolved and no
+    /// translator is spawned, exactly as before this field existed.
+    ///
+    /// There is deliberately **no** `encoder` field alongside this: the
+    /// OpenAI transcription engine's [`crate::boundary::AudioEncoder`] is held
+    /// by the binaries' own [`EngineFactory`] impls, which construct the
+    /// engine — the queue never builds an engine itself, so it never needs
+    /// the encoder (design spec §3, Task 9 brief deliverable B).
+    pub llm: Option<Arc<dyn LlmEndpointSource>>,
 }
 
 /// Shared registry of live subscriber senders.
@@ -620,6 +633,10 @@ struct Runner {
     /// Ensures model/VAD artifacts per job when configured (GUI). `None`
     /// (CLI) skips artifact-ensure entirely — see [`RunnerDeps::artifacts`].
     artifacts: Option<Arc<dyn ArtifactEnsurer>>,
+    /// Resolves the per-task LLM-translation endpoint (F-031), threaded into
+    /// [`run_file_job`]. `None` disables translation entirely — see
+    /// [`RunnerDeps::llm`].
+    llm: Option<Arc<dyn LlmEndpointSource>>,
     /// Tasks accepted but not yet run (FIFO).
     pending: VecDeque<PendingTask>,
     /// Ids canceled but not yet dequeued (Buzz's canceled-set). *Consumed*: a
@@ -909,9 +926,17 @@ impl Runner {
         // the freshly-resolved VAD path; otherwise (CLI) behavior is
         // byte-for-byte unchanged — `self.tuning` is borrowed directly, no
         // clone, `resolved_path` stays `None`.
+        //
+        // The `Backend::OpenAiApi` backend has no local model or VAD model to
+        // resolve (design spec §2.1): the whole ArtifactEnsurer phase is
+        // skipped for it — no `ModelDownloadProgress` events, `resolved_path`
+        // stays `None`, and the engine factory routes on `spec.backend`. Local
+        // (`Whisper`) backend behavior is entirely unchanged.
         let mut ensured_tuning: Option<EngineTuning> = None;
         let mut resolved_path: Option<PathBuf> = None;
-        if let Some(ensurer) = self.artifacts.clone() {
+        if model.backend != Backend::OpenAiApi
+            && let Some(ensurer) = self.artifacts.clone()
+        {
             match self.ensure_artifacts(id, ensurer.as_ref(), &model, token) {
                 Ok((path, tuning)) => {
                     resolved_path = Some(path);
@@ -950,6 +975,7 @@ impl Runner {
             engine.as_mut(),
             &mut sink,
             token,
+            self.llm.as_deref(),
         );
 
         self.engine_cache = Some((model, engine));
@@ -1085,6 +1111,7 @@ pub fn spawn_task_runner(deps: RunnerDeps) -> QueueHandle {
         tuning: deps.tuning,
         media_dir: deps.media_dir,
         artifacts: deps.artifacts,
+        llm: deps.llm,
         pending: VecDeque::new(),
         canceled: HashSet::new(),
         finishing: false,
@@ -1105,8 +1132,12 @@ pub fn spawn_task_runner(deps: RunnerDeps) -> QueueHandle {
 mod tests {
     use super::*;
     use crate::boundary::{EngineCaps, EngineOptions, MediaInfo, Pcm, PlaybackPcm};
-    use crate::domain::{Backend, Millis, ModelSize, OutputSpec, TranscriptionOptions};
+    use crate::domain::{
+        Backend, LlmTranslationOptions, Millis, ModelSize, OutputSpec, TranscriptionOptions,
+    };
     use crate::error::{ModelError, StoreError};
+    use crate::models::test_server::{Canned, TestServer};
+    use crate::openai::{LlmEndpoint, OpenAiAuth};
     use pretty_assertions::assert_eq;
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1317,6 +1348,13 @@ mod tests {
         /// `catch_unwind` containment.
         Panic,
         Block(Gate),
+        /// Emits `segments`, then trips the shared cancel token as its final
+        /// act and returns `Ok` — lands a cancel *between* transcription
+        /// finishing and the F-031 translation drain, deterministically
+        /// (`cancel_during_translation_drain_yields_canceled`).
+        EmitThenCancel {
+            segments: Vec<Segment>,
+        },
     }
 
     struct FakeEngine {
@@ -1365,6 +1403,16 @@ mod tests {
                     } else {
                         Ok(())
                     }
+                }
+                Some(EngineScript::EmitThenCancel { segments }) => {
+                    for s in segments {
+                        sink.on_segment(s);
+                    }
+                    // Trip the token as the engine's last act: transcription
+                    // reports success, but the cancel is now set for the
+                    // pipeline's post-transcription translation-drain check.
+                    cancel.cancel();
+                    Ok(())
                 }
                 None => Ok(()),
             };
@@ -1575,6 +1623,7 @@ mod tests {
         fetch_steps: Vec<FetchProgress>,
         fetch_panics: bool,
         ensurer: Option<Arc<dyn ArtifactEnsurer>>,
+        llm: Option<Arc<dyn LlmEndpointSource>>,
     }
 
     fn build(cfg: Cfg) -> (QueueHandle, Harness) {
@@ -1626,6 +1675,7 @@ mod tests {
             tuning: EngineTuning::default(),
             media_dir: tmp.path().join("media"),
             artifacts: cfg.ensurer,
+            llm: cfg.llm,
         };
 
         let handle = spawn_task_runner(deps);
@@ -3312,5 +3362,281 @@ mod tests {
                 .iter()
                 .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
         );
+    }
+
+    // -- F-031: per-task LLM translation through the queue -------------------
+    //
+    // Two of these five bind TCP (they drive the real translator worker
+    // against a `TestServer`) and so join this task's documented
+    // sandbox-blocked set — named in the task report. The other three are
+    // network-free and pass under the sandbox.
+
+    /// A test [`LlmEndpointSource`] that hands back a fixed endpoint, or
+    /// `None` (modeling "no key available anywhere").
+    struct FixedEndpoint {
+        auth: Option<OpenAiAuth>,
+    }
+
+    impl LlmEndpointSource for FixedEndpoint {
+        fn resolve(&self) -> Option<LlmEndpoint> {
+            self.auth.clone().map(|auth| LlmEndpoint { auth })
+        }
+    }
+
+    /// A canned `{"choices":[{"message":{"content": "..."}}]}` chat-completion
+    /// body (mirrors `openai::translate`'s worker-test helper of the same
+    /// name).
+    fn choice_response(content: &str) -> Vec<u8> {
+        serde_json::json!({ "choices": [ { "message": { "content": content } } ] })
+            .to_string()
+            .into_bytes()
+    }
+
+    /// A file [`TaskSpec`] whose options opt into LLM translation (F-031).
+    fn llm_task_spec(input: PathBuf) -> TaskSpec {
+        TaskSpec {
+            input: Input::Path(input),
+            options: TranscriptionOptions {
+                llm: Some(LlmTranslationOptions {
+                    model: "gpt-4o-mini".to_string(),
+                    prompt: "Translate.".to_string(),
+                }),
+                ..TranscriptionOptions::default()
+            },
+            output: OutputSpec::default(),
+        }
+    }
+
+    /// Pulls the segments handed to `mark_completed` for `id` out of the
+    /// recorded store calls. The queue's `FakeStore` records exactly what the
+    /// real store's `mark_completed` would persist — the `translation` column
+    /// included (see the store's own `mark_completed_persists_segment_translations`).
+    fn completed_segments(h: &Harness, id: TranscriptionId) -> Vec<Segment> {
+        h.store_calls()
+            .into_iter()
+            .find_map(|c| match c {
+                StoreCall::Completed(x, segs) if x == id => Some(segs),
+                _ => None,
+            })
+            .expect("task completed")
+    }
+
+    /// TCP (`TestServer::start`) — sandbox-blocked; run with the sandbox
+    /// lifted. End-to-end through the runner: a scripted engine emits two
+    /// segments, the translator resolves against a `TestServer` returning a
+    /// numbered-batch body, and the persisted segments carry the per-segment
+    /// translations.
+    #[test]
+    fn file_task_with_llm_stores_per_segment_translations() {
+        let server = TestServer::start();
+        server.set_route_for_method(
+            "POST",
+            "/chat/completions",
+            Canned::ok(choice_response("[1] uno\n[2] dos")),
+        );
+        let source: Arc<dyn LlmEndpointSource> = Arc::new(FixedEndpoint {
+            auth: Some(OpenAiAuth {
+                base_url: Some(server.base_url()),
+                api_key: "sk-test".to_string(),
+            }),
+        });
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("one"), seg("two")],
+            }],
+            llm: Some(source),
+            ..Cfg::default()
+        });
+        let a = TranscriptionId::new();
+        q.enqueue(a, llm_task_spec(h.input_file("a.mp3")), Source::FileImport);
+        q.finish().expect("finish");
+
+        // Both segments are translated and persisted per-segment. The
+        // translator's internal batch composition (both segments in one
+        // numbered request vs. two single-item requests) is timing-dependent
+        // by design — the worker is already parked in `recv()` when the first
+        // segment is enqueued — so this asserts each segment carries its own
+        // marker's translation via `contains`, which holds under either
+        // composition: batched, the results are exactly "uno"/"dos"; split,
+        // each single-item response is the verbatim "[1] uno\n[2] dos", which
+        // contains both markers' text.
+        let segments = completed_segments(&h, a);
+        assert_eq!(segments.len(), 2);
+        assert!(
+            segments[0].translation.contains("uno"),
+            "seg0 translation: {:?}",
+            segments[0].translation
+        );
+        assert!(
+            segments[1].translation.contains("dos"),
+            "seg1 translation: {:?}",
+            segments[1].translation
+        );
+    }
+
+    /// TCP (`TestServer::start`) — sandbox-blocked; run with the sandbox
+    /// lifted. Every `/chat/completions` returns 500: every item degrades to
+    /// "" (Buzz parity) and the task still Completes.
+    #[test]
+    fn llm_batch_error_yields_empty_translations_and_completed_task() {
+        let server = TestServer::start();
+        server.set_route_for_method("POST", "/chat/completions", Canned::status(500));
+        let source: Arc<dyn LlmEndpointSource> = Arc::new(FixedEndpoint {
+            auth: Some(OpenAiAuth {
+                base_url: Some(server.base_url()),
+                api_key: "sk-test".to_string(),
+            }),
+        });
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("one"), seg("two")],
+            }],
+            llm: Some(source),
+            ..Cfg::default()
+        });
+        let a = TranscriptionId::new();
+        q.enqueue(a, llm_task_spec(h.input_file("a.mp3")), Source::FileImport);
+        q.finish().expect("finish");
+
+        let segments = completed_segments(&h, a);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].translation, "");
+        assert_eq!(segments[1].translation, "");
+    }
+
+    /// Network-free (passes sandboxed): `resolve()` returns `None`, so no
+    /// translator is spawned; the task completes untranslated (a warning is
+    /// logged) rather than being gated on translation.
+    #[test]
+    fn no_key_resolves_none_task_completes_untranslated_with_warning() {
+        let source: Arc<dyn LlmEndpointSource> = Arc::new(FixedEndpoint { auth: None });
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("one"), seg("two")],
+            }],
+            llm: Some(source),
+            ..Cfg::default()
+        });
+        let a = TranscriptionId::new();
+        q.enqueue(a, llm_task_spec(h.input_file("a.mp3")), Source::FileImport);
+        q.finish().expect("finish");
+
+        let segments = completed_segments(&h, a);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].translation, "");
+        assert_eq!(segments[1].translation, "");
+    }
+
+    /// Network-free (passes sandboxed): a translator IS spawned (the endpoint
+    /// resolves), but the engine trips the cancel token as its last act, so
+    /// the pipeline observes the cancel *before* the drain and takes the
+    /// `stop_detached` + return `Canceled` path (design spec §6) — never
+    /// merging or persisting any translation. Deterministic; the endpoint
+    /// points at a dead loopback port so the detached worker's lone request
+    /// can never reach a real service, and the test never waits on that
+    /// worker.
+    #[test]
+    fn cancel_during_translation_drain_yields_canceled() {
+        let source: Arc<dyn LlmEndpointSource> = Arc::new(FixedEndpoint {
+            auth: Some(OpenAiAuth {
+                base_url: Some("http://127.0.0.1:1".to_string()),
+                api_key: "sk-test".to_string(),
+            }),
+        });
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::EmitThenCancel {
+                segments: vec![seg("one")],
+            }],
+            llm: Some(source),
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        q.enqueue(a, llm_task_spec(h.input_file("a.mp3")), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        // The task ends Canceled — never Completed — so no segment rows (and
+        // therefore no translations) are ever persisted.
+        let calls = h.store_calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, StoreCall::Canceled(x) if *x == a))
+        );
+        assert!(!calls.iter().any(|c| matches!(c, StoreCall::Completed(..))));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Canceled))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+    }
+
+    /// Network-free (passes sandboxed): an `ArtifactEnsurer` is configured,
+    /// but the task's backend is `OpenAiApi` — which has no local model/VAD to
+    /// resolve — so the whole ensure phase is skipped (design spec §2.1): zero
+    /// ensure calls, no `ModelDownloadProgress` events, and the engine factory
+    /// is handed `resolved: None`. The task still runs to completion.
+    #[test]
+    fn openaiapi_task_skips_model_ensure_and_vad() {
+        let model_calls = Arc::new(Mutex::new(Vec::new()));
+        let vad_calls = Arc::new(Mutex::new(0usize));
+        let ensurer = Arc::new(FakeEnsurer {
+            model_scripts: Arc::new(Mutex::new(VecDeque::new())),
+            vad_scripts: Arc::new(Mutex::new(VecDeque::new())),
+            model_calls: Arc::clone(&model_calls),
+            vad_calls: Arc::clone(&vad_calls),
+            model_gate: None,
+        });
+        let (q, h) = build_with_ensurer(
+            Cfg {
+                scripts: vec![EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![seg("hi")],
+                }],
+                ..Cfg::default()
+            },
+            ensurer,
+        );
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let mut spec = path_task(h.input_file("a.mp3"));
+        spec.options = TranscriptionOptions {
+            model: ModelSpec {
+                backend: Backend::OpenAiApi,
+                size: ModelSize::Small,
+                hf_repo: None,
+            },
+            ..TranscriptionOptions::default()
+        };
+        q.enqueue(a, spec, Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        // The ensurer was configured but never consulted for this backend.
+        assert!(model_calls.lock().expect("model calls").is_empty());
+        assert_eq!(*vad_calls.lock().expect("vad calls"), 0);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.kind, TaskEventKind::ModelDownloadProgress { .. }))
+        );
+        // The task still ran to completion, and the factory saw `resolved =
+        // None` (no ensured path for the API backend).
+        let calls = h.store_calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, StoreCall::Completed(x, _) if *x == a))
+        );
+        assert_eq!(h.resolved_calls(), vec![None]);
     }
 }

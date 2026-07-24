@@ -7,12 +7,14 @@
 //! fakes only.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use crate::boundary::{AudioDecoder, EngineOptions, MediaProber, SegmentSink, TranscriptionEngine};
 use crate::cancel::CancelToken;
 use crate::domain::{JobSpec, Segment};
 use crate::error::{CoreError, ExportError, MediaError};
 use crate::export::{TextKey, output_file_path, write_format};
+use crate::openai::{LlmEndpointSource, TranslatorConfig, TranslatorHandle};
 
 /// The result of a successful [`run_file_job`]: the (trimmed) segments
 /// produced by transcription, and the paths written, in `job.output.formats`
@@ -58,6 +60,12 @@ impl Default for EngineTuning {
     }
 }
 
+/// Collected `(segment ordinal, translation)` results from the per-task LLM
+/// translator's callback thread (F-031), merged onto the segments after
+/// transcription succeeds. Shared (via [`Arc`]) between [`run_file_job`] and
+/// the translator's `on_result` callback, which runs on the worker thread.
+type TranslationResults = Arc<Mutex<Vec<(i64, String)>>>;
+
 /// Forwards every segment/progress update to `observer` while also
 /// collecting the segments for the final [`JobOutcome`].
 ///
@@ -70,12 +78,24 @@ impl Default for EngineTuning {
 struct TeeSink<'a> {
     observer: &'a mut dyn SegmentSink,
     segments: Vec<Segment>,
+    /// When `Some`, each trimmed segment's text is additionally enqueued for
+    /// LLM translation (F-031), tagged with its arrival ordinal as the id so
+    /// [`run_file_job`]'s post-transcription merge can map each result back to
+    /// `segments[ordinal].translation`. `None` (the common case: no LLM
+    /// translation requested, or no endpoint resolved) makes this a no-op —
+    /// the sink then behaves byte-for-byte as it did before F-031.
+    translator: Option<&'a TranslatorHandle>,
 }
 
 impl SegmentSink for TeeSink<'_> {
     fn on_segment(&mut self, mut segment: Segment) {
         segment.text = segment.text.trim().to_string();
         self.observer.on_segment(segment.clone());
+        if let Some(translator) = self.translator {
+            // Ordinal = arrival index (the length *before* this push); the
+            // merge step keys each translation on it.
+            translator.enqueue(segment.text.clone(), Some(self.segments.len() as i64));
+        }
         self.segments.push(segment);
     }
 
@@ -92,6 +112,25 @@ impl SegmentSink for TeeSink<'_> {
 /// One deliberate deviation: humm creates the output directory if it's
 /// missing (`create_dir_all`) instead of failing, since Buzz's `write_output`
 /// simply fails when `-d` names a nonexistent directory.
+///
+/// # LLM translation (F-031, design spec §6)
+///
+/// When `job.options.llm` is `Some` **and** `llm` resolves an endpoint (a key
+/// is available), each produced segment's text is enqueued to a per-task
+/// [`TranslatorHandle`] as it is transcribed; after transcription succeeds the
+/// worker is stopped (a bounded join), and each translation is merged onto its
+/// segment's `translation` field before export/return. Absent either the
+/// option or a resolvable endpoint, translation is inert: no worker, no
+/// channel, no allocation (design spec §6's zero-overhead-when-disabled) —
+/// humm's ✚ over Buzz, whose "Enable AI translation" checkbox is dead on the
+/// file path (design spec §1). Buzz wires no translator into file
+/// transcription at all; the batching/prompt/error machinery reused here is
+/// ported byte-faithfully from `translator.py` (deviations ledger #1).
+// One argument past clippy's default limit: `llm` extends the existing
+// seven-parameter boundary-injection signature (job/tuning + the
+// decoder/prober/engine/observer/cancel collaborators the caller owns), which
+// there is no cohesive struct to fold into without obscuring the call sites.
+#[allow(clippy::too_many_arguments)]
 pub fn run_file_job(
     job: &JobSpec,
     tuning: &EngineTuning,
@@ -100,6 +139,7 @@ pub fn run_file_job(
     engine: &mut dyn TranscriptionEngine,
     observer: &mut dyn SegmentSink,
     cancel: &CancelToken,
+    llm: Option<&dyn LlmEndpointSource>,
 ) -> Result<JobOutcome, CoreError> {
     if !job.input.exists() {
         return Err(CoreError::InputMissing {
@@ -145,12 +185,101 @@ pub fn run_file_job(
         threads: tuning.threads,
     };
 
-    let mut tee = TeeSink {
-        observer,
-        segments: Vec::new(),
+    // F-031: optionally spin up a per-task LLM translator. A worker is spawned
+    // only when the task opted in (`job.options.llm`) *and* the source resolves
+    // an endpoint (a key is available); otherwise the whole feature stays inert
+    // — no thread, no channel, no allocation. `translation_results` collects
+    // `(ordinal, translation)` pairs from the worker's callback thread.
+    let (translator, translation_results): (Option<TranslatorHandle>, Option<TranslationResults>) =
+        match (&job.options.llm, llm) {
+            (Some(llm_opts), Some(source)) => match source.resolve() {
+                Some(endpoint) => {
+                    let results: TranslationResults =
+                        Arc::new(Mutex::new(Vec::<(i64, String)>::new()));
+                    let sink_results = Arc::clone(&results);
+                    let on_result: Box<dyn FnMut(String, Option<i64>) + Send> =
+                        Box::new(move |translation, id| {
+                            if let Some(id) = id {
+                                sink_results
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .push((id, translation));
+                            }
+                        });
+                    let handle = TranslatorHandle::spawn(
+                        TranslatorConfig {
+                            auth: endpoint.auth,
+                            model: llm_opts.model.clone(),
+                            prompt: llm_opts.prompt.clone(),
+                        },
+                        on_result,
+                    );
+                    (Some(handle), Some(results))
+                }
+                None => {
+                    log::warn!(
+                        "LLM translation enabled but no API key/endpoint available — \
+                     task will complete without translations"
+                    );
+                    (None, None)
+                }
+            },
+            _ => (None, None),
+        };
+
+    let (transcribe_result, mut segments) = {
+        let mut tee = TeeSink {
+            observer,
+            segments: Vec::new(),
+            translator: translator.as_ref(),
+        };
+        let result = engine.transcribe(&pcm, &engine_options, &mut tee, cancel);
+        (result, tee.segments)
     };
-    engine.transcribe(&pcm, &engine_options, &mut tee, cancel)?;
-    let segments = tee.segments;
+
+    if let Err(err) = transcribe_result {
+        // Transcription failed: abandon any spawned translator without blocking
+        // (its queued items are moot) and propagate the error unchanged.
+        if let Some(handle) = translator {
+            handle.stop_detached();
+        }
+        return Err(err.into());
+    }
+
+    // Drain and merge LLM translations (if a translator ran). `stop()` joins
+    // the worker; the wait is bounded by the worker's own per-request 60 s
+    // timeouts (design spec §4.2/§6).
+    if let Some(handle) = translator {
+        // A cancel that has *already* landed is honored without waiting on the
+        // drain at all: detach the worker and bail (design spec §6 / ADR-022's
+        // "stop_detached + Canceled").
+        if cancel.is_canceled() {
+            handle.stop_detached();
+            return Err(CoreError::Canceled);
+        }
+        handle.stop();
+        // A cancel that landed *during* the (bounded) drain is honored here, at
+        // the post-join check; the collected translations are then discarded.
+        if cancel.is_canceled() {
+            return Err(CoreError::Canceled);
+        }
+        if let Some(results) = &translation_results {
+            for (id, translation) in results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+            {
+                // Empty (errored/missing-marker) translations leave the
+                // segment's `translation` as "" — parity with Buzz's error→""
+                // degradation (`translator.py`).
+                if !translation.is_empty()
+                    && let Some(segment) = segments.get_mut(*id as usize)
+                {
+                    segment.translation = translation.clone();
+                }
+            }
+        }
+    }
 
     let now = chrono::Local::now().naive_local();
     let mut written = Vec::with_capacity(job.output.formats.len());
@@ -423,6 +552,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
         )
         .unwrap();
 
@@ -468,6 +598,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
         )
         .unwrap();
 
@@ -506,6 +637,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
         );
 
         assert!(matches!(
@@ -543,6 +675,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
         );
 
         assert!(matches!(result, Err(CoreError::Canceled)));
@@ -577,6 +710,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
         );
 
         match result {
@@ -621,6 +755,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
         );
         assert!(matches!(
             result,
@@ -647,6 +782,7 @@ mod tests {
             &mut engine2,
             &mut observer2,
             &cancel2,
+            None,
         );
         assert!(result2.is_ok());
         assert_eq!(decoder2.call_count(), 1);
@@ -676,6 +812,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
         )
         .unwrap();
 
@@ -709,6 +846,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
         );
 
         assert!(matches!(result, Err(CoreError::NoAudioDecoded)));
@@ -740,6 +878,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
         )
         .unwrap();
 
@@ -791,6 +930,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
         );
 
         assert!(matches!(result, Err(CoreError::Canceled)));
@@ -835,6 +975,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
         );
 
         assert!(matches!(result, Err(CoreError::Canceled)));

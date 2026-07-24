@@ -1645,6 +1645,44 @@ mod tests {
         assert_eq!(stored_segments, segments);
     }
 
+    /// Guards F-031's linchpin: `mark_completed`'s segment `INSERT` writes the
+    /// `translation` column, so a file task that produced per-segment LLM
+    /// translations (design spec §6) persists them — not just the transcript.
+    /// The column was always written (this is a regression guard, not a fix),
+    /// but nothing previously asserted a *non-empty* translation round-trips.
+    #[test]
+    fn mark_completed_persists_segment_translations() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        store
+            .create_task(&id, &sample_task_spec(), Source::FileImport)
+            .expect("create");
+
+        let segments = vec![
+            Segment {
+                start: Millis(0),
+                end: Millis(1000),
+                text: "uno".to_string(),
+                translation: "one".to_string(),
+            },
+            Segment {
+                start: Millis(1000),
+                end: Millis(2000),
+                text: "dos".to_string(),
+                // A segment whose translation failed/was skipped stays "" —
+                // this must round-trip as empty, not be conflated with the
+                // translated row above.
+                translation: String::new(),
+            },
+        ];
+        store.mark_completed(&id, &segments).expect("completed");
+
+        let stored = store.get_segments(&id).expect("segments");
+        assert_eq!(stored, segments);
+        assert_eq!(stored[0].translation, "one");
+        assert_eq!(stored[1].translation, "");
+    }
+
     #[test]
     fn update_progress_clamps_out_of_range_fractions() {
         let store = SqliteStore::open_in_memory().expect("open");

@@ -237,6 +237,11 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
         // makes that safe: the runner ensures the model/VAD as the task's
         // own first phase (module doc, `queue.rs`).
         artifacts: Some(Arc::new(ensurer) as Arc<dyn ArtifactEnsurer>),
+        // F-031 core wiring lands in Task 9; the GUI's env→settings→keyring
+        // `LlmEndpointSource` is wired in a later M6 GUI task. Until then the
+        // options sheet's "Enable AI translation" toggle has no effect on the
+        // file path.
+        llm: None,
     };
     let queue = spawn_task_runner(deps);
     let events = queue.subscribe();
@@ -457,6 +462,7 @@ pub fn init_with(deps: TestDeps) -> Services {
         tuning: EngineTuning::default(),
         media_dir: deps.media_dir,
         artifacts: deps.artifacts,
+        llm: None,
     };
     let queue = spawn_task_runner(runner_deps);
     let events = queue.subscribe();
