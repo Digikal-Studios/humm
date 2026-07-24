@@ -64,13 +64,30 @@ fn cpal_output_opens_and_invokes_fill() {
     );
 }
 
-/// Opens the default input device, captures ~1 s, and asserts: samples
-/// arrived, the effective output rate is 16 kHz mono (sample count vs wall
-/// time within ±20%), the meter's RMS stayed finite, and `stop` (dropping the
-/// handle) returned promptly — the design doc's cooperative-stop requirement
-/// (§2.1: the session thread must acknowledge a stop request without a
-/// perceptible delay), checked here against this implementation's own
-/// promptness target rather than any externally documented budget.
+/// Opens the default input device, captures for a fixed window, and asserts:
+/// samples arrived, the effective output rate is 16 kHz mono (sample count vs
+/// the *capture* window within ±10%), the meter's RMS stayed finite, and
+/// `stop` (dropping the handle) returned promptly — the design doc's
+/// cooperative-stop requirement (§2.1: the session thread must acknowledge a
+/// stop request without a perceptible delay), checked here against this
+/// implementation's own promptness target rather than any externally
+/// documented budget.
+///
+/// # Why the window is measured *after* `start()` returns
+///
+/// The capture rate must be checked against the time the stream was actually
+/// live, not against wall-clock that includes device-open latency. `start()`
+/// blocks until the owner thread has opened the CoreAudio device and called
+/// `stream.play()` — and on real hardware that device open
+/// (`default_input_device()` + `build_input_stream()`) can take *seconds*, is
+/// highly variable run-to-run, and captures no audio. Timing the window from
+/// before `start()` (as an earlier revision of this test did) counts that dead
+/// startup as if it were capture time, so `16 kHz × elapsed` overshoots the
+/// real sample count by however long the device took to open — the first
+/// real-hardware run measured a 9 s open against a 1 s capture (F-060). The
+/// honest yardstick is `16 kHz × (window measured from when the stream went
+/// live)`; the residual tolerance below absorbs the small fixed effects the
+/// capture path itself introduces (see the assertion).
 #[test]
 #[ignore = "requires a real audio input device (CoreAudio); run with --ignored"]
 fn cpal_capture_streams_16khz_mono_and_stops_promptly() {
@@ -78,14 +95,19 @@ fn cpal_capture_streams_16khz_mono_and_stops_promptly() {
     let meter = Arc::new(MeterSnapshot::new());
 
     let mut capture = CpalCapture::new();
-    let started_at = Instant::now();
     let handle = capture
         .start(None, sink, meter.clone())
         .expect("open default input device");
+    // The stream is live once `start()` returns (the owner thread has already
+    // called `stream.play()`), so the capture window starts *here* — not before
+    // `start()`, whose CoreAudio device-open latency captures no audio (see the
+    // test's doc comment). A 2 s window keeps the small fixed startup/tail
+    // effects well under the tolerance.
+    let stream_live_at = Instant::now();
 
-    let capture_duration = Duration::from_millis(1000);
+    let capture_duration = Duration::from_millis(2000);
     thread::sleep(capture_duration);
-    let elapsed = started_at.elapsed();
+    let capture_window = stream_live_at.elapsed();
 
     let stop_started = Instant::now();
     handle.stop();
@@ -96,16 +118,21 @@ fn cpal_capture_streams_16khz_mono_and_stops_promptly() {
         received += 1;
     }
 
-    assert!(received > 0, "no samples arrived during ~1s of capture");
+    assert!(received > 0, "no samples arrived during the capture window");
 
-    // Sample-count-vs-wall-time tolerance: the drain thread's poll cadence
-    // and OS scheduling both add slop, so this is generous (±20%).
-    let expected = f64::from(SAMPLE_RATE) * elapsed.as_secs_f64();
+    // Sample-count-vs-capture-window tolerance. Against the honestly-measured
+    // window the capture path tracks 16 kHz to well under a percent (the first
+    // real-hardware run measured 0.7% over a 1 s window, F-060); ±10% is
+    // generous headroom for the small fixed effects the count carries that the
+    // window does not: the CoreAudio warm-up before the first callback (a few
+    // ms), up to one drain poll interval of tail flushed after `stop()`, and OS
+    // scheduling slop on the sleep.
+    let expected = f64::from(SAMPLE_RATE) * capture_window.as_secs_f64();
     let rel_err = (received as f64 - expected).abs() / expected;
     assert!(
-        rel_err < 0.20,
-        "received {received} samples over {elapsed:?}; expected ~{expected:.0} at 16kHz \
-         (rel err {rel_err:.3})"
+        rel_err < 0.10,
+        "received {received} samples over a {capture_window:?} capture window; expected \
+         ~{expected:.0} at 16kHz (rel err {rel_err:.3})"
     );
 
     let rms = meter.get_current_rms();
@@ -118,9 +145,10 @@ fn cpal_capture_streams_16khz_mono_and_stops_promptly() {
     );
 
     println!(
-        "cpal_capture_streams_16khz_mono_and_stops_promptly: {received} samples over \
-         {elapsed:?} (~{:.0} Hz effective), RMS {rms}, stop() took {stop_elapsed:?}",
-        received as f64 / elapsed.as_secs_f64()
+        "cpal_capture_streams_16khz_mono_and_stops_promptly: {received} samples over a \
+         {capture_window:?} capture window (~{:.0} Hz effective), RMS {rms}, stop() took \
+         {stop_elapsed:?}",
+        received as f64 / capture_window.as_secs_f64()
     );
 }
 
