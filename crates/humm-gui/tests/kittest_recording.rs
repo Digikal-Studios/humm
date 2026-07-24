@@ -42,7 +42,9 @@ use humm_gui::live_session::{
 };
 use humm_gui::recording::{RecordingDeps, RecordingStatus, RecordingVm};
 use humm_gui::services::{self, Capabilities, Services, TestDeps};
-use humm_gui::translate_seam::ScriptedTranslateSpawner;
+use humm_gui::translate_seam::{
+    DeferredScriptedTranslateSpawner, ScriptedTranslateSpawner, TranslateSpawner,
+};
 use humm_gui::viewer::can_open;
 use humm_gui::viewmodel::TasksVm;
 use humm_gui::views::recording::{CopyLabelState, recording_ui};
@@ -1486,6 +1488,208 @@ fn live_translation_end_to_end_panel_export_and_store() {
         std::fs::read_to_string(&transcript).expect("read transcript"),
         "utterance one\n\nutterance two\n\n",
         "transcript export is untouched by translation"
+    );
+}
+
+// -- Task 17 review fix (F-063): late translation arrivals after Stop ---------
+//
+// The exact regression the review found: a translation that completes *after*
+// the session's Stop (the session tail — common with real network latency) must
+// still land in the panel/store/export while the recording window is open (spec
+// §7.4). The synchronous `ScriptedTranslateSpawner` can't reproduce this — it
+// translates the instant it enqueues, always mid-session. The
+// `DeferredScriptedTranslateSpawner` queues each enqueue and lets the test fire
+// every callback via `flush()` at a moment of its choosing: here, only *after*
+// the session has fully stopped (`RecordingStatus::Stopped`, `vm.session` gone).
+#[test]
+fn late_translation_arrivals_after_stop_reach_panel_store_and_export() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("humm.sqlite3");
+    let store = Arc::new(SqliteStore::open(&db_path).expect("open store"));
+    let export_dir = dir.path().join("export");
+    std::fs::create_dir_all(&export_dir).expect("mkdir export");
+    let model_path = dir.path().join("fake-model.bin");
+    std::fs::write(&model_path, b"never opened by the scripted engine").expect("write");
+
+    let mut settings = Settings::default();
+    settings.recording.export_enabled = true;
+    settings.recording.export_folder = Some(export_dir.clone());
+    settings.recording.enable_llm_translation = true;
+    settings.recording.llm_model = Some("gpt-4o-mini".to_string());
+    settings.recording.llm_prompt = Some("Translate.".to_string());
+
+    let secrets = MemorySecretStore::new();
+    secrets
+        .set(SecretKey::OpenAiApiKey, "sk-test")
+        .expect("seed key");
+
+    // The deferred spawner: every enqueued transcript is *queued*, not
+    // translated, until this test calls `flush()`. Held here so the test drives
+    // the callback timing (and polls `pending_len`).
+    let spawner = Arc::new(DeferredScriptedTranslateSpawner::new(Arc::new(
+        |text: &str| format!("X:{text}"),
+    )));
+
+    let services = services::init_with(TestDeps {
+        store: Arc::clone(&store),
+        media_dir: dir.path().join("media"),
+        model_root: dir.path().join("models"),
+        settings,
+        settings_path: dir.path().join("settings.toml"),
+        engines: Box::new(NeverCalledEngineFactory),
+        fetcher: None,
+        capabilities: Capabilities::default(),
+        artifacts: None,
+        secrets: Arc::new(secrets) as Arc<dyn SecretStore>,
+        translate: Arc::clone(&spawner) as Arc<dyn TranslateSpawner>,
+        llm: None,
+        validate: services::default_test_validate(),
+    });
+
+    let mock_capture = Arc::new(Mutex::new(MockCapture::new(vec![0.5; 2 * BATCH_SAMPLES])));
+    let engine_calls = Arc::new(AtomicUsize::new(0));
+    let scripted_deps = RecordingDeps {
+        capture: Mutex::new(Box::new(SharedMockCapture(Arc::clone(&mock_capture)))),
+        store: Arc::clone(&store) as Arc<dyn LiveStore>,
+        model_ensurer: Arc::new(InstantEnsurer { model_path }),
+        engine_factory: Arc::new(ScriptedEngineFactory {
+            capture: Arc::clone(&mock_capture),
+            calls: Arc::clone(&engine_calls),
+        }),
+        upload_factory: Arc::new(NeverCalledUploadFactory),
+        dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
+    };
+
+    let mut harness = HarnessBuilder::default()
+        .with_size(egui::Vec2::new(1000.0, 600.0))
+        .build_eframe(move |_cc| {
+            let mut app = HummApp::new_for_test(services);
+            app.set_recording_deps_for_test(scripted_deps);
+            app
+        });
+    harness.step();
+
+    harness.state_mut().open_recording_window_for_test();
+    harness.step();
+    let vm_arc = harness
+        .state()
+        .recording_vm_for_test()
+        .expect("window is open");
+    let deps_arc = harness.state().recording_deps_for_test();
+
+    // Record.
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    harness.step();
+
+    // Both utterances are transcribed and *enqueued* while recording — but the
+    // deferred spawner has translated nothing yet, so the panel stays empty.
+    wait_for(
+        &mut harness,
+        "both utterances to be enqueued for translation",
+        {
+            let spawner = Arc::clone(&spawner);
+            move |_app| spawner.pending_len() == 2
+        },
+    );
+    assert!(
+        vm_arc
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .translation_panel_text
+            .is_empty(),
+        "no translation has been flushed yet, so the panel is still empty while recording"
+    );
+
+    // Stop, and let the session fully finish. Reaching `RecordingStatus::Stopped`
+    // means `finish_live_session` ran, which sets `vm.session = None` (dropping
+    // the session's `SessionMessage` receiver) immediately before restoring the
+    // stopped UI — so this status is exactly the point past which the old
+    // session channel is dead.
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    wait_for(&mut harness, "the session to stop", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            vm_arc.lock().unwrap_or_else(|p| p.into_inner()).status == RecordingStatus::Stopped
+        }
+    });
+    assert!(
+        vm_arc
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .translation_panel_text
+            .is_empty(),
+        "still empty right after Stop — nothing has been translated yet"
+    );
+
+    // NOW the translations arrive — strictly after Stop, with the session (and
+    // its receiver) already gone. Pre-fix, these panel updates were routed
+    // through the dead `SessionMessage` channel and silently vanished.
+    let flushed = spawner.flush();
+    assert_eq!(flushed, 2, "both queued translations fire on flush");
+
+    // -- Panel: the late arrivals reach it (the pre-fix symptom — an empty
+    //    panel after a post-Stop flush — is gone).
+    wait_for(&mut harness, "the late translations to reach the panel", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            vm_arc
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .translation_panel_text
+                .contains("X:utterance two")
+        }
+    });
+    {
+        let vm = vm_arc.lock().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(
+            vm.translation_panel_text, "X:utterance one\n\nX:utterance two",
+            "the panel shows both late translations, applied after Stop"
+        );
+        assert!(
+            !vm.translation_panel_text.is_empty(),
+            "pre-fix symptom is gone: the panel is non-empty after a post-Stop flush"
+        );
+    }
+
+    // -- Store: each segment carries its late-arriving translation.
+    let tasks = TasksVm::load(&store);
+    let row = tasks
+        .sorted_rows()
+        .first()
+        .expect("exactly one live session row")
+        .clone();
+    let segments = store.get_segment_rows(row.id).expect("segments");
+    assert_eq!(segments.len(), 2);
+    assert_eq!(
+        segments[0].translation, "X:utterance one",
+        "segment 0 carries its post-Stop translation"
+    );
+    assert_eq!(
+        segments[1].translation, "X:utterance two",
+        "segment 1 carries its post-Stop translation"
+    );
+
+    // -- Export: the `.translated` sibling was written by the post-Stop flush.
+    let mut translated: Option<PathBuf> = None;
+    for entry in std::fs::read_dir(&export_dir).expect("read export dir") {
+        let path = entry.expect("dir entry").path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if name.contains(".translated.") {
+            translated = Some(path);
+        }
+    }
+    let translated =
+        translated.expect("a .translated export file exists after the post-Stop flush");
+    assert_eq!(
+        std::fs::read_to_string(&translated).expect("read translated"),
+        "X:utterance one\n\nX:utterance two\n\n",
+        "translated export carries the late translations"
     );
 }
 

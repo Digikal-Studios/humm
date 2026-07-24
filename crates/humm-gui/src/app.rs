@@ -2371,17 +2371,19 @@ impl HummApp {
         // handle) iff translation is enabled, a model is configured, and an
         // endpoint resolves — otherwise record proceeds untranslated with a
         // warning (Buzz would construct a client with an empty key and fail
-        // every request). The `SessionMessage` channel is created here so the
-        // translation callback (running on the worker thread) can post
-        // `TranslationPanel` through the same channel the session's own sink
-        // uses; the UI's single per-frame drain then feeds both panels.
+        // every request). The translation-panel text does **not** ride the
+        // `SessionMessage` channel below: that channel dies with the session
+        // (its receiver is dropped at Stop), which would silently swallow any
+        // translation completing after Stop. Instead the worker posts panel
+        // text into a dedicated channel the `LiveTranslator` owns, drained by
+        // the recording window every frame it is open — see
+        // `Self::build_live_translation` and `LiveTranslator::drain_panels`.
         let (session_tx, session_rx) = mpsc::channel::<SessionMessage>();
         let (translation_enqueue, live_translator, llm_snapshot) = self.build_live_translation(
             &options,
             mode,
             &recording_settings,
             export_sink.clone(),
-            &session_tx,
             ctx,
         );
 
@@ -2440,18 +2442,22 @@ impl HummApp {
     /// thread (never the UI thread — M5's hard rule): for each arrived
     /// translation it applies the [`TranslationApplier`] (panel + `.translated`
     /// export), persists the raw translation onto the segment row when a row id
-    /// is known, and posts the new translation-panel text through `session_tx`.
-    /// It only ever pushes into channels / does direct work — it **never**
-    /// calls back into the translate control (the scripted seam invokes it
-    /// synchronously from `enqueue`; re-entering the control there would
-    /// deadlock).
+    /// is known, and posts the new translation-panel text into a dedicated
+    /// panel channel the returned [`LiveTranslator`] owns (drained by the
+    /// recording window via [`LiveTranslator::drain_panels`]). Routing the
+    /// panel through the translator's own channel — not the session's
+    /// `SessionMessage` channel, whose receiver is dropped at Stop — is what
+    /// makes a translation completing *after* Stop still reach the panel while
+    /// the window is open (F-063, spec §7.4). It only ever pushes into channels
+    /// / does direct work — it **never** calls back into the translate control
+    /// (the scripted seam invokes it synchronously from `enqueue`; re-entering
+    /// the control there would deadlock).
     fn build_live_translation(
         &self,
         options: &crate::recording::RecordingOptions,
         mode: RecordingMode,
         recording_settings: &humm_core::settings::RecordingSettings,
         export_sink: Option<Arc<ExportSink>>,
-        session_tx: &mpsc::Sender<SessionMessage>,
         ctx: &egui::Context,
     ) -> (
         Option<crate::live_translation::TranslationEnqueue>,
@@ -2501,18 +2507,21 @@ impl HummApp {
             prompt: prompt.clone(),
         };
 
-        // The applier + shared export sink + store handle + session sender +
+        // The applier + shared export sink + store handle + panel sender +
         // repaint handle the worker thread's `on_result` owns for the session's
         // lifetime. `TranslationApplier` is the translation-side twin of the
         // transcript `SessionApplier`, seeded with the same mode/separator/
-        // hide-unconfirmed values (spec §7.4).
+        // hide-unconfirmed values (spec §7.4). `panel_tx`/`panel_rx` is the
+        // dedicated translation-panel channel: the callback holds the sender,
+        // the returned `LiveTranslator` owns the receiver (so it outlives the
+        // session — see this method's doc and `LiveTranslator::drain_panels`).
         let mut applier = TranslationApplier::new(
             mode,
             options.line_separator.clone(),
             recording_settings.hide_unconfirmed,
         );
         let store = Arc::clone(&self.services.store);
-        let tx = session_tx.clone();
+        let (panel_tx, panel_rx) = mpsc::channel::<String>();
         let repaint_ctx = ctx.clone();
         let on_result: Box<dyn FnMut(String, Option<i64>) + Send> =
             Box::new(move |raw: String, id: Option<i64>| {
@@ -2529,12 +2538,12 @@ impl HummApp {
                 {
                     log::warn!("live translation: store write failed for segment {row_id}: {err}");
                 }
-                let _ = tx.send(SessionMessage::TranslationPanel(panel));
+                let _ = panel_tx.send(panel);
                 repaint_ctx.request_repaint();
             });
 
         let control = self.services.translate.spawn(cfg, on_result);
-        let translator = LiveTranslator::new(control);
+        let translator = LiveTranslator::new(control, panel_rx);
         let enqueue = translator.enqueue_handle();
         let llm_snapshot = humm_core::domain::LlmTranslationOptions { model, prompt };
         (Some(enqueue), Some(translator), Some(llm_snapshot))
@@ -2545,11 +2554,15 @@ impl HummApp {
     /// shape) and applies each message — see `crate::live_session`'s module
     /// doc for what each variant does and doesn't carry (in particular: no
     /// store write happens here, only the one `TasksVm::refresh_row` *read*).
-    /// Then, regardless of whether any message arrived this frame, checks
-    /// for a crashed session ([`Self::recover_crashed_session`]) — the two
-    /// must not be gated on "some message arrived", since a crash is
-    /// exactly the scenario where *no* message (in particular, no
-    /// `Stopped`) will ever arrive again.
+    /// Then drains the F-063 translation-panel channel — which is **not** gated
+    /// on an active session: its receiver lives on the [`LiveTranslator`], which
+    /// outlives the session (Stop drops the session and its `rx`, but not the
+    /// translator), so a translation completing after Stop still updates the
+    /// panel while the window is open (spec §7.4). Finally, regardless of
+    /// whether any message arrived this frame, checks for a crashed session
+    /// ([`Self::recover_crashed_session`]) — that check must not be gated on
+    /// "some message arrived", since a crash is exactly the scenario where *no*
+    /// message (in particular, no `Stopped`) will ever arrive again.
     fn drain_live_session(&mut self, ctx: &egui::Context) {
         let Some(vm_arc) = self.recording.clone() else {
             return;
@@ -2569,7 +2582,38 @@ impl HummApp {
             }
             ctx.request_repaint();
         }
+        self.drain_translation_panel(&vm_arc, ctx);
         self.recover_crashed_session(&vm_arc, ctx);
+    }
+
+    /// Drains the live-translation panel channel and applies the latest
+    /// whole-panel replace to [`RecordingVm::translation_panel_text`] (F-063).
+    /// Independent of [`RecordingVm::session`] on purpose: the channel's
+    /// receiver belongs to the [`LiveTranslator`] (`RecordingVm::live_translator`),
+    /// which is torn down only at window close / next Record click — never at
+    /// Stop. Draining it every frame the window is open is what lets a
+    /// translation completing after the session's Stop (common with real
+    /// network latency, the session tail) still reach the panel. Each drained
+    /// item is a whole-panel replace already applied off-thread by the
+    /// [`humm_core::live::translation::TranslationApplier`], so the last one
+    /// this frame wins.
+    fn drain_translation_panel(&self, vm_arc: &Arc<Mutex<RecordingVm>>, ctx: &egui::Context) {
+        let latest = {
+            let vm = vm_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match &vm.live_translator {
+                Some(translator) => translator.drain_panels().last(),
+                None => None,
+            }
+        };
+        if let Some(text) = latest {
+            let mut vm = vm_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            vm.translation_panel_text = text;
+            ctx.request_repaint();
+        }
     }
 
     /// Applies one already-drained [`SessionMessage`] to `vm_arc`/app state.
@@ -2621,15 +2665,6 @@ impl HummApp {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 vm.panel_text = text;
-            }
-            SessionMessage::TranslationPanel(text) => {
-                // F-063: a late arrival (after Stop, while the window is still
-                // open) still lands here — the translation worker is not
-                // stopped at session Stop (spec §7.4 lifecycle).
-                let mut vm = vm_arc
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                vm.translation_panel_text = text;
             }
             SessionMessage::Error(cause) => {
                 let mut vm = vm_arc

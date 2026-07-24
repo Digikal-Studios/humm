@@ -498,13 +498,17 @@ pub struct RecordingVm {
     /// whole-panel replace), applied verbatim.
     pub panel_text: String,
     /// The read-only **translation** panel text (F-063) — the most recent
-    /// [`crate::live_session::SessionMessage::TranslationPanel`] (a whole-panel
-    /// replace, already mode-dispatched/merged/`strip_newlines`'d by the
-    /// off-UI-thread [`humm_core::live::translation::TranslationApplier`]).
-    /// The recording window's translation panel is shown iff
-    /// [`RecordingOptions::enable_llm_translation`] (live show/hide on toggle,
-    /// Buzz `:544-547`); this text feeds both that panel and, when non-empty,
-    /// the presentation window's translation region.
+    /// whole-panel replace drained from the [`LiveTranslator`]'s dedicated
+    /// panel channel ([`LiveTranslator::drain_panels`], applied by
+    /// `app.rs::drain_translation_panel`); the text itself was already
+    /// mode-dispatched/merged/`strip_newlines`'d by the off-UI-thread
+    /// [`humm_core::live::translation::TranslationApplier`]. That channel's
+    /// receiver lives on [`Self::live_translator`], which outlives the session,
+    /// so a translation arriving after Stop still updates this while the window
+    /// is open (spec §7.4). The recording window's translation panel is shown
+    /// iff [`RecordingOptions::enable_llm_translation`] (live show/hide on
+    /// toggle, Buzz `:544-547`); this text feeds both that panel and, when
+    /// non-empty, the presentation window's translation region.
     pub translation_panel_text: String,
     /// Whether the presentation options bar (`views::presentation::bar_ui`
     /// — show-window button, text-size/theme/color controls, fullscreen

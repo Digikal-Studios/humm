@@ -201,6 +201,143 @@ impl TranslateControl for ScriptedTranslateControl {
     }
 }
 
+/// The shared state a [`DeferredScriptedTranslateSpawner`]'s control and its
+/// test-held [`DeferredScriptedTranslateSpawner::flush`] both touch: the queue
+/// of not-yet-translated `(text, id)` pairs and the spawned worker's
+/// `on_result` (captured at spawn). Behind an [`Arc<Mutex<..>>`] so the test
+/// thread (which calls `flush`) and the forwarder thread (which calls
+/// `enqueue`) can both reach it.
+#[derive(Default)]
+struct DeferredShared {
+    /// `(text, id)` pairs enqueued but not yet flushed, in enqueue order.
+    queue: Vec<(String, Option<i64>)>,
+    /// The spawned worker's result callback, set at [`TranslateSpawner::spawn`]
+    /// (`None` until a control has been spawned). `flush` invokes it for each
+    /// queued item.
+    on_result: Option<OnResult>,
+}
+
+/// A [`TranslateSpawner`] test double like [`ScriptedTranslateSpawner`], except
+/// its controls **defer** every translation instead of running it synchronously
+/// from `enqueue`: each `enqueue` records `(text, id)` into a shared queue, and
+/// the callback fires only when a test calls [`Self::flush`] at a moment of its
+/// choosing. This is what lets a kittest exercise the **late-arrival** path
+/// (design spec §7.4, F-063): translations that complete *after* the live
+/// session's Stop must still reach the panel/store/export while the recording
+/// window is open — a flow the synchronous [`ScriptedTranslateSpawner`] (which
+/// translates the instant it enqueues, always mid-session) structurally cannot
+/// reproduce.
+///
+/// Re-entrancy: `flush` invokes `on_result` on the **calling** thread, holding
+/// only its own shared lock; the callback obeys the same rule the production
+/// worker thread does — it only sends into channels / does direct store+applier
+/// work, never a call back into the control — so nothing re-enters this
+/// spawner's lock. `update_options`/`stop` are recorded into a separate
+/// [`ScriptedState`] a test reads via [`Self::state`], exactly as the
+/// synchronous double does.
+pub struct DeferredScriptedTranslateSpawner {
+    mapper: Mapper,
+    shared: Arc<Mutex<DeferredShared>>,
+    state: Arc<Mutex<ScriptedState>>,
+}
+
+impl DeferredScriptedTranslateSpawner {
+    /// Builds a deferred spawner whose controls will translate each queued text
+    /// through `mapper` when [`Self::flush`] fires.
+    pub fn new(mapper: Mapper) -> Self {
+        DeferredScriptedTranslateSpawner {
+            mapper,
+            shared: Arc::new(Mutex::new(DeferredShared::default())),
+            state: Arc::new(Mutex::new(ScriptedState::default())),
+        }
+    }
+
+    /// The shared `update_options`/`stop` record its spawned control writes into
+    /// (see [`ScriptedTranslateSpawner::state`]).
+    pub fn state(&self) -> Arc<Mutex<ScriptedState>> {
+        Arc::clone(&self.state)
+    }
+
+    /// How many `(text, id)` pairs are queued but not yet flushed. A test polls
+    /// this to know every enqueue has reached the control (enqueues arrive
+    /// asynchronously, via the [`crate::live_translation::LiveTranslator`]
+    /// forwarder thread) before calling [`Self::flush`].
+    pub fn pending_len(&self) -> usize {
+        self.shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .queue
+            .len()
+    }
+
+    /// Invokes the spawned worker's `on_result` for every queued `(text, id)`
+    /// (each `text` mapped through this spawner's `mapper`), in enqueue order,
+    /// on the calling thread — then clears the queue. Returns how many items
+    /// were flushed. A no-op returning `0` if no control has been spawned yet.
+    pub fn flush(&self) -> usize {
+        let mut shared = self
+            .shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let DeferredShared { queue, on_result } = &mut *shared;
+        let Some(callback) = on_result.as_mut() else {
+            return 0;
+        };
+        let items = std::mem::take(queue);
+        let flushed = items.len();
+        for (text, id) in items {
+            let translated = (self.mapper)(&text);
+            callback(translated, id);
+        }
+        flushed
+    }
+}
+
+impl TranslateSpawner for DeferredScriptedTranslateSpawner {
+    fn spawn(&self, _cfg: TranslatorConfig, on_result: OnResult) -> Box<dyn TranslateControl> {
+        self.shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .on_result = Some(on_result);
+        Box::new(DeferredScriptedTranslateControl {
+            shared: Arc::clone(&self.shared),
+            state: Arc::clone(&self.state),
+        })
+    }
+}
+
+/// A [`TranslateControl`] whose `enqueue` **queues** `(text, id)` (rather than
+/// translating synchronously) for a later [`DeferredScriptedTranslateSpawner::flush`].
+struct DeferredScriptedTranslateControl {
+    shared: Arc<Mutex<DeferredShared>>,
+    state: Arc<Mutex<ScriptedState>>,
+}
+
+impl TranslateControl for DeferredScriptedTranslateControl {
+    fn enqueue(&self, text: String, id: Option<i64>) {
+        self.shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .queue
+            .push((text, id));
+    }
+
+    fn update_options(&self, model: String, prompt: String) {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .update_options
+            .push((model, prompt));
+    }
+
+    fn stop(self: Box<Self>) {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .stopped = true;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +395,62 @@ mod tests {
             ]
         );
         assert!(guard.stopped, "stop must be recorded");
+    }
+
+    #[test]
+    fn deferred_enqueue_queues_without_calling_on_result_until_flush() {
+        let spawner =
+            DeferredScriptedTranslateSpawner::new(Arc::new(|text: &str| format!("X:{text}")));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&received);
+        let control = spawner.spawn(
+            dummy_cfg(),
+            Box::new(move |text, id| {
+                sink.lock().unwrap().push((text, id));
+            }),
+        );
+
+        control.enqueue("one".to_string(), Some(1));
+        control.enqueue("two".to_string(), Some(2));
+
+        // Deferred: nothing has fired yet; both items are queued.
+        assert!(
+            received.lock().unwrap().is_empty(),
+            "no translation fires before flush"
+        );
+        assert_eq!(spawner.pending_len(), 2, "both enqueues are queued");
+
+        let flushed = spawner.flush();
+
+        assert_eq!(flushed, 2);
+        assert_eq!(spawner.pending_len(), 0, "flush drains the queue");
+        assert_eq!(
+            *received.lock().unwrap(),
+            vec![
+                ("X:one".to_string(), Some(1)),
+                ("X:two".to_string(), Some(2))
+            ],
+            "flush invokes on_result for every queued item, mapped and in order"
+        );
+    }
+
+    #[test]
+    fn deferred_records_update_options_and_stop_and_flush_without_control_is_noop() {
+        let spawner = DeferredScriptedTranslateSpawner::new(Arc::new(|t: &str| t.to_string()));
+        // No control spawned yet: flush is a no-op.
+        assert_eq!(spawner.flush(), 0, "flush before any spawn does nothing");
+
+        let control = spawner.spawn(dummy_cfg(), Box::new(|_text, _id| {}));
+        control.update_options("gpt-4o".to_string(), "New.".to_string());
+        control.stop();
+
+        let state = spawner.state();
+        let guard = state.lock().unwrap();
+        assert_eq!(
+            guard.update_options,
+            vec![("gpt-4o".to_string(), "New.".to_string())]
+        );
+        assert!(guard.stopped, "stop is recorded");
     }
 
     /// Compile-level + prompt-return proof that [`RealTranslateSpawner`]

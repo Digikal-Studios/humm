@@ -22,23 +22,50 @@
 //! `update_options`, and the consuming `stop` all happen on that one thread,
 //! serially, with no shared-ownership gymnastics.
 //!
+//! ## The translation-panel channel (F-063 late-arrival fix, spec §7.4)
+//!
+//! The worker's `on_result` callback (built in `app.rs::build_live_translation`)
+//! does three things per arrived translation: persist it onto the segment row,
+//! write the `.translated` export, and update the **translation panel**. The
+//! first two hold their `Arc`s directly, so they land regardless of session
+//! state. The panel, however, is UI state — it can only be written on the UI
+//! thread. So the panel text travels through a dedicated [`mpsc`] channel whose
+//! **receiver this `LiveTranslator` owns** ([`Self::panel_rx`]) and whose sender
+//! the callback holds. The recording window drains it every frame
+//! ([`Self::drain_panels`]) — crucially **independent of the live session**.
+//!
+//! This is the fix for the finding that late translations were lost after Stop:
+//! the session's own `SessionMessage` channel dies with the session (its
+//! receiver is dropped when `finish_live_session` sets `RecordingVm::session =
+//! None`), so a panel update routed through *that* channel after Stop reached a
+//! dropped receiver and vanished. This translator — and therefore this panel
+//! receiver — **outlives** the session (torn down only at window close / next
+//! Record click), so a translation that completes after Stop (common with real
+//! network latency, the session tail) still reaches the panel while the window
+//! is open.
+//!
 //! ## Lifecycle (Buzz `_do_close:1213-1218`, spec §7.4)
 //!
 //! - **Stop (of the recording, not the window)** does *not* stop the
 //!   translator: queued items keep processing and late translations still
 //!   land in the panel/store/export (Buzz's sentinel-after-queue semantics).
 //!   The session thread's enqueue handle is simply dropped when the session
-//!   ends; the worker drains whatever was already queued.
+//!   ends; the worker drains whatever was already queued, and each result's
+//!   panel text still arrives through [`Self::panel_rx`] (which this translator
+//!   owns, so it is still alive after Stop — see the section above).
 //! - **Window close / next Record click** calls [`LiveTranslator::stop`],
 //!   which sends [`ForwarderMsg::Stop`] — the forwarder consumes the control
 //!   via `stop` (which is `stop_detached` for the real worker, non-blocking —
-//!   the UI thread never waits on an in-flight request) and exits.
+//!   the UI thread never waits on an in-flight request) and exits. Dropping
+//!   this `LiveTranslator` also drops [`Self::panel_rx`], so a straggler that
+//!   the *previous* session's worker emits after teardown is correctly
+//!   discarded rather than bleeding into the next session's panel.
 //! - [`Drop`] is a backstop: it sends `Stop` too, so a `LiveTranslator` that
 //!   goes away without an explicit `stop` still tears its worker down. The
 //!   forwarder thread is **detached** (never joined), so no teardown path
 //!   ever blocks the UI thread.
 
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 
 use crate::translate_seam::TranslateControl;
@@ -69,6 +96,14 @@ enum ForwarderMsg {
 /// to the session thread.
 pub struct LiveTranslator {
     tx: Sender<ForwarderMsg>,
+    /// Receives fully-applied translation-panel text (whole-panel replaces)
+    /// from the worker's `on_result`, drained by the recording window every
+    /// frame it is open via [`Self::drain_panels`] — **independent of the live
+    /// session**. Owning it here (not on the session's `ActiveSession`, whose
+    /// receiver dies at Stop) is exactly what lets a translation completing
+    /// after Stop still reach the panel while the window is open (F-063, spec
+    /// §7.4 — see the module doc's "translation-panel channel" section).
+    panel_rx: Receiver<String>,
     /// The forwarder thread, kept only so it is not joined at construction;
     /// it is **never** joined (detached teardown — see the module doc), so a
     /// window close never blocks the UI thread.
@@ -81,7 +116,13 @@ impl LiveTranslator {
     /// on the channel, driving `control` per message, until a [`ForwarderMsg::Stop`]
     /// (or the channel disconnecting — every sender dropped) — at which point
     /// it consumes the control via [`TranslateControl::stop`] and exits.
-    pub fn new(control: Box<dyn TranslateControl>) -> Self {
+    ///
+    /// `panel_rx` is the receiving end of the translation-panel channel whose
+    /// sender the worker's `on_result` holds (`app.rs::build_live_translation`
+    /// creates the pair). This translator owns the receiver so it outlives the
+    /// session — see the module doc's "translation-panel channel" section and
+    /// [`Self::drain_panels`].
+    pub fn new(control: Box<dyn TranslateControl>, panel_rx: Receiver<String>) -> Self {
         let (tx, rx) = mpsc::channel::<ForwarderMsg>();
         let thread = std::thread::spawn(move || {
             // `Option` so the consuming `stop` can `take` the control out;
@@ -114,8 +155,21 @@ impl LiveTranslator {
         });
         LiveTranslator {
             tx,
+            panel_rx,
             _thread: thread,
         }
+    }
+
+    /// Drains every translation-panel update that has arrived since the last
+    /// call — non-blocking `try_iter`, the same per-frame shape
+    /// [`crate::live_session::ActiveSession`]'s own channel is drained with.
+    /// Each item is a whole-panel replace (already `strip_newlines`'d,
+    /// mode-dispatched, and merged by the off-UI-thread applier), so the caller
+    /// applies them in order and the last one wins. Called by the recording
+    /// window every frame it is open, regardless of session presence, so a
+    /// translation completing after Stop still lands (F-063).
+    pub fn drain_panels(&self) -> impl Iterator<Item = String> + '_ {
+        self.panel_rx.try_iter()
     }
 
     /// A clone-able enqueue handle for the session thread: enqueues `(text,
@@ -205,7 +259,8 @@ mod tests {
                     .push((text, id));
             }),
         );
-        let translator = LiveTranslator::new(control);
+        let (_panel_tx, panel_rx) = mpsc::channel::<String>();
+        let translator = LiveTranslator::new(control, panel_rx);
 
         let enqueue = translator.enqueue_handle();
         enqueue("hello".to_string(), Some(7));
@@ -223,11 +278,39 @@ mod tests {
     }
 
     #[test]
+    fn drain_panels_yields_what_the_worker_posts_to_the_panel_channel() {
+        // The panel-channel path (F-063): the `on_result` posts each mapped
+        // translation into the panel sender; `drain_panels` (drained by the UI
+        // thread) yields it. This receiver lives with the translator, not the
+        // session — the mechanism that keeps late arrivals reaching the panel.
+        let (panel_tx, panel_rx) = mpsc::channel::<String>();
+        let spawner = ScriptedTranslateSpawner::uppercase();
+        let control = spawner.spawn(
+            dummy_cfg(),
+            Box::new(move |text, _id| {
+                // Only a channel send — never a call back into the control
+                // (the seam's re-entrancy rule).
+                let _ = panel_tx.send(text);
+            }),
+        );
+        let translator = LiveTranslator::new(control, panel_rx);
+
+        let enqueue = translator.enqueue_handle();
+        enqueue("hi".to_string(), None);
+
+        wait_until(
+            "the panel text to arrive on the translator's channel",
+            || translator.drain_panels().next() == Some("HI".to_string()),
+        );
+    }
+
+    #[test]
     fn update_options_and_stop_reach_the_control() {
         let spawner = ScriptedTranslateSpawner::identity();
         let state = spawner.state();
         let control = spawner.spawn(dummy_cfg(), Box::new(|_text, _id| {}));
-        let translator = LiveTranslator::new(control);
+        let (_panel_tx, panel_rx) = mpsc::channel::<String>();
+        let translator = LiveTranslator::new(control, panel_rx);
 
         translator.update_options("gpt-4o".to_string(), "New instructions.".to_string());
         wait_until("update_options to be recorded", || {
@@ -256,7 +339,8 @@ mod tests {
         let spawner = ScriptedTranslateSpawner::identity();
         let state = spawner.state();
         let control = spawner.spawn(dummy_cfg(), Box::new(|_text, _id| {}));
-        let translator = LiveTranslator::new(control);
+        let (_panel_tx, panel_rx) = mpsc::channel::<String>();
+        let translator = LiveTranslator::new(control, panel_rx);
 
         drop(translator);
 

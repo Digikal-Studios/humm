@@ -792,7 +792,10 @@ mod tests {
             },
             Box::new(|_text, _id| {}),
         );
-        (LiveTranslator::new(control), spawner)
+        // This test drives `update_options` only, never the translation panel,
+        // so a throwaway panel receiver (its sender dropped immediately) is fine.
+        let (_panel_tx, panel_rx) = std::sync::mpsc::channel::<String>();
+        (LiveTranslator::new(control, panel_rx), spawner)
     }
 
     fn wait_until(message: &str, mut cond: impl FnMut() -> bool) {

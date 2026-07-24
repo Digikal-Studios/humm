@@ -292,15 +292,6 @@ pub enum SessionMessage {
     /// replace, not an append (the sender already holds the full text via
     /// its own [`PanelText`]).
     PanelText(String),
-    /// One arrived translation's fully-applied **translation** panel text
-    /// (F-063) -- already `strip_newlines`'d, mode-dispatched, and merged by
-    /// the off-UI-thread [`humm_core::live::translation::TranslationApplier`].
-    /// A whole-panel replace, like [`Self::PanelText`]. Posted by the
-    /// translation worker's `on_result` callback through its own clone of the
-    /// session-message sender (never the session thread) -- late arrivals
-    /// (after Stop, while the window is still open) still land here, since the
-    /// worker is not stopped at session Stop (spec §7.4 lifecycle).
-    TranslationPanel(String),
     /// A genuine failure (Buzz's error-dialog cause, still the raw
     /// message -- `app.rs` wraps it in the byte-exact dialog text, since
     /// [`crate::i18n::tr`] may only run on the UI thread). The loop has
@@ -480,11 +471,13 @@ pub fn record_measured_speed(
 /// drain does while stopped.
 ///
 /// The `SessionMessage` channel `(tx, rx)` is created by the caller
-/// (`app.rs::start_live_session`) rather than here so the F-063 live-translation
-/// callback can hold its **own** clone of `tx` and post
-/// [`SessionMessage::TranslationPanel`] through the same channel this session's
-/// sink uses — a single drain (`ActiveSession::rx`) then feeds both the
-/// transcript panel and the translation panel.
+/// (`app.rs::start_live_session`) rather than here purely for symmetry with the
+/// rest of that method's setup. The F-063 live-translation panel text does
+/// **not** travel on this channel: it would be lost the moment the session ends
+/// (this `rx` is dropped when `RecordingVm::session` becomes `None` at Stop),
+/// so the translation worker posts panel text into a separate channel owned by
+/// the longer-lived [`crate::live_translation::LiveTranslator`] instead (spec
+/// §7.4 — late arrivals after Stop must still reach the panel).
 pub fn spawn_live_session(
     deps: Arc<crate::recording::RecordingDeps>,
     request: LiveSessionRequest,
