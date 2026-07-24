@@ -24,14 +24,19 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use humm_core::secrets::SecretStore;
 use humm_core::settings::Settings;
 
 use crate::i18n::tr;
 use crate::models_ui::{self, ModelsTabState};
+use crate::views::prefs_general::{self, GeneralTabState, ValidateFn};
 
 /// Which tab is currently selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefsTab {
+    /// The OpenAI block (partial F-100, design spec §7.1) — the rest of
+    /// Buzz's General tab arrives M7.
+    General,
     /// F-044 basic model list.
     Models,
     /// ADR-009/UX §J-11 telemetry + update-check toggles.
@@ -39,43 +44,69 @@ pub enum PrefsTab {
 }
 
 /// The Preferences window's full live state, owned by `HummApp` for as long
-/// as the window is open (rebuilt fresh — `Models` re-scanned from disk —
-/// each time it's (re)opened; see `app.rs`).
+/// as the window is open (rebuilt fresh — `Models` re-scanned from disk,
+/// `General`'s key field re-read from the keyring — each time it's
+/// (re)opened; see `app.rs`).
 #[derive(Debug)]
 pub struct PreferencesState {
     /// The selected tab.
     pub tab: PrefsTab,
+    /// The General tab's own state (partial F-100, Task 13).
+    pub general: GeneralTabState,
     /// The Models tab's own state.
     pub models: ModelsTabState,
 }
 
 impl PreferencesState {
-    /// Builds fresh state opened on the Models tab (Buzz's own preferences
-    /// dialog always opens on its first tab), with `models` scanned from
-    /// `root` and seeded from the current custom-URL setting.
-    pub fn new(root: &Path, custom_url: Option<&str>) -> Self {
+    /// Builds fresh state opened on the General tab — Buzz's own preferences
+    /// dialog always opens on its first tab (`preferences_dialog.py:46-48`),
+    /// and General is that first tab both in Buzz and in this tab strip's own
+    /// order. `models` is scanned from `root` and seeded from the current
+    /// custom-URL setting; `general` is seeded from `secrets`/`openai`
+    /// (`settings.openai`, snapshotted by the caller when the window opens).
+    pub fn new(
+        root: &Path,
+        custom_url: Option<&str>,
+        secrets: &Arc<dyn SecretStore>,
+        openai: &humm_core::settings::OpenAiSettings,
+    ) -> Self {
         PreferencesState {
-            tab: PrefsTab::Models,
+            tab: PrefsTab::General,
+            general: GeneralTabState::new(secrets.as_ref(), openai),
             models: ModelsTabState::new(root, custom_url),
         }
     }
 }
 
 /// Renders the tab strip + the selected tab's content.
+#[allow(clippy::too_many_arguments)]
 pub fn ui(
     ui: &mut egui::Ui,
     state: &mut PreferencesState,
     model_root: &Path,
     settings: &Arc<Mutex<Settings>>,
     settings_path: &Path,
+    secrets: &Arc<dyn SecretStore>,
+    validate: &ValidateFn,
 ) {
     ui.horizontal(|ui| {
+        ui.selectable_value(&mut state.tab, PrefsTab::General, tr("prefs-tab-general"));
         ui.selectable_value(&mut state.tab, PrefsTab::Models, tr("prefs-tab-models"));
         ui.selectable_value(&mut state.tab, PrefsTab::Privacy, tr("prefs-tab-privacy"));
     });
     ui.separator();
 
     match state.tab {
+        PrefsTab::General => {
+            prefs_general::ui(
+                ui,
+                &mut state.general,
+                settings,
+                settings_path,
+                secrets,
+                validate,
+            );
+        }
         PrefsTab::Models => {
             models_ui::ui(ui, &mut state.models, model_root, settings, settings_path);
         }
@@ -161,13 +192,20 @@ fn disabled_at_compile_time() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use humm_core::secrets::MemorySecretStore;
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn new_opens_on_the_models_tab() {
+    fn new_opens_on_the_general_tab() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let state = PreferencesState::new(dir.path(), None);
-        assert_eq!(state.tab, PrefsTab::Models);
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let state = PreferencesState::new(
+            dir.path(),
+            None,
+            &secrets,
+            &humm_core::settings::OpenAiSettings::default(),
+        );
+        assert_eq!(state.tab, PrefsTab::General);
     }
 
     #[test]

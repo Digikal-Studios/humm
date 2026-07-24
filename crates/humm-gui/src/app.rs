@@ -580,6 +580,18 @@ impl HummApp {
         settings.models.custom_model_url.clone()
     }
 
+    /// The current `settings.openai` snapshot — the Preferences window's
+    /// General tab (partial F-100, Task 13) seeds its base-URL/API-model
+    /// buffers from this the moment the window opens.
+    fn openai_settings_snapshot(&self) -> humm_core::settings::OpenAiSettings {
+        let settings = self
+            .services
+            .settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        settings.openai.clone()
+    }
+
     /// Opens the options sheet for `request`, prefilled from the current
     /// `settings.file_transcriber`/`settings.models` snapshot.
     fn open_options_sheet(&mut self, request: ImportRequest) {
@@ -1363,6 +1375,8 @@ impl HummApp {
         let settings = &self.services.settings;
         let settings_path = &self.services.settings_path;
         let model_root = &self.services.model_root;
+        let secrets = &self.services.secrets;
+        let validate = &self.services.validate;
         let mut close_requested = false;
 
         ctx.show_viewport_immediate(
@@ -1373,7 +1387,15 @@ impl HummApp {
                 .with_min_inner_size([650.0, 500.0]),
             |ui, _class| {
                 egui::CentralPanel::default().show(ui, |ui| {
-                    preferences::ui(ui, state, model_root, settings, settings_path);
+                    preferences::ui(
+                        ui,
+                        state,
+                        model_root,
+                        settings,
+                        settings_path,
+                        secrets,
+                        validate,
+                    );
                 });
                 if ui.ctx().input(|input| input.viewport().close_requested()) {
                     close_requested = true;
@@ -3081,9 +3103,12 @@ impl eframe::App for HummApp {
             // live state (an in-flight download's `Downloading` row, a
             // half-typed custom URL, an open delete-confirm modal).
             if !self.preferences_open {
+                let openai = self.openai_settings_snapshot();
                 self.preferences_state = Some(PreferencesState::new(
                     &self.services.model_root,
                     self.custom_model_url().as_deref(),
+                    &self.services.secrets,
+                    &openai,
                 ));
             }
             self.preferences_open = true;
@@ -3383,6 +3408,7 @@ mod shutdown_tests {
             secrets: services::default_test_secrets(),
             translate: services::default_test_translate(),
             llm: None,
+            validate: services::default_test_validate(),
         });
 
         let id = TranscriptionId::new();
@@ -3475,6 +3501,7 @@ mod crash_recovery_tests {
             secrets: services::default_test_secrets(),
             translate: services::default_test_translate(),
             llm: None,
+            validate: services::default_test_validate(),
         });
         HummApp::new_for_test(services)
     }

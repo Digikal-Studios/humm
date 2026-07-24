@@ -80,6 +80,7 @@ fn test_services(store: Arc<SqliteStore>, capabilities: Capabilities, dir: &Path
         secrets: services::default_test_secrets(),
         translate: services::default_test_translate(),
         llm: None,
+        validate: services::default_test_validate(),
     })
 }
 

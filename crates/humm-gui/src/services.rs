@@ -46,6 +46,7 @@ use humm_store::{KeyringSecretStore, SqliteStore};
 use crate::engine_factory::{DownloaderEnsurer, GuiEngineFactory};
 use crate::llm_source::GuiLlmSource;
 use crate::translate_seam::{RealTranslateSpawner, ScriptedTranslateSpawner, TranslateSpawner};
+use crate::views::prefs_general::{ValidateFn, real_validate_fn, stub_validate_fn};
 
 /// ffmpeg/ffprobe/yt-dlp availability, probed once at startup.
 ///
@@ -163,6 +164,11 @@ pub struct Services {
     /// translation panel (Task 17) spawn workers through this, reached — like
     /// [`Self::secrets`] — via `HummApp`'s owned `Services`.
     pub translate: Arc<dyn TranslateSpawner>,
+    /// The Preferences General tab's Test-button seam (partial F-100, design
+    /// spec section 7.1, Task 13): `real_validate_fn()` in production
+    /// ([`init`]), a scripted/stub [`ValidateFn`] in tests ([`init_with`]) so
+    /// a kittest click on Test never issues a real HTTP request.
+    pub validate: ValidateFn,
 }
 
 impl Services {
@@ -302,6 +308,7 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
         update_tx,
         secrets,
         translate: Arc::new(RealTranslateSpawner) as Arc<dyn TranslateSpawner>,
+        validate: real_validate_fn(),
     })
 }
 
@@ -497,6 +504,11 @@ pub struct TestDeps {
     /// exactly as before; a test exercising F-031 injects a
     /// [`GuiLlmSource`]/fixed source pointed at a mock endpoint.
     pub llm: Option<Arc<dyn LlmEndpointSource>>,
+    /// The Preferences → General tab's Test-button seam — [`stub_validate_fn`]
+    /// by default ([`default_test_validate`]), which never runs a real check;
+    /// a test exercising the Test button injects its own scripted
+    /// `Arc::new(|_auth| ValidateOutcome::...)` here.
+    pub validate: ValidateFn,
 }
 
 /// The default test secret store: a fresh, empty in-memory
@@ -515,6 +527,14 @@ pub fn default_test_secrets() -> Arc<dyn SecretStore> {
 /// [`ScriptedTranslateSpawner`] and injects it instead.
 pub fn default_test_translate() -> Arc<dyn TranslateSpawner> {
     Arc::new(ScriptedTranslateSpawner::identity())
+}
+
+/// The default test [`ValidateFn`]: [`stub_validate_fn`] — never touches the
+/// network, always reports `Invalid` with a message that would fail any
+/// assertion actually depending on the real check. A test exercising the
+/// Preferences General tab's Test button injects its own scripted fn instead.
+pub fn default_test_validate() -> ValidateFn {
+    stub_validate_fn()
 }
 
 /// Builds [`Services`] from caller-supplied fakes/temp state — no real
@@ -558,6 +578,7 @@ pub fn init_with(deps: TestDeps) -> Services {
         update_tx,
         secrets: deps.secrets,
         translate: deps.translate,
+        validate: deps.validate,
     }
 }
 
@@ -753,6 +774,7 @@ mod tests {
             secrets: default_test_secrets(),
             translate: default_test_translate(),
             llm: None,
+            validate: default_test_validate(),
         }
     }
 

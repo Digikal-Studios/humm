@@ -287,6 +287,7 @@ fn download_phases_render_media_then_model_then_complete() {
         secrets: services::default_test_secrets(),
         translate: services::default_test_translate(),
         llm: None,
+        validate: services::default_test_validate(),
     });
 
     // Enqueued directly against `services.queue()` *before* `services` moves

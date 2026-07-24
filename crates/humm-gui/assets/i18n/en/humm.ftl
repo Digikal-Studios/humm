@@ -167,8 +167,28 @@ about-check-failed = Update check failed — see the log file
 ## Preferences window shell (views/preferences.rs, F-044/ADR-009)
 
 prefs-title = Preferences
+prefs-tab-general = General
 prefs-tab-models = Models
 prefs-tab-privacy = Privacy
+
+## Preferences General tab -- OpenAI block only (views/prefs_general.rs,
+## partial F-100, design spec §7.1)
+
+prefs-general-openai-key-label = OpenAI API key
+prefs-general-openai-key-placeholder = sk-...
+prefs-general-key-show = Show
+prefs-general-key-hide = Hide
+prefs-general-test-button = Test
+prefs-general-test-title = OpenAI API Key Test
+prefs-general-test-success-body = Your API key is valid. humm will use this key to perform Whisper API transcriptions and AI translations.
+prefs-general-invalid-key-title = Invalid API key
+prefs-general-invalid-key-body = API supports only base64 characters (A-Za-z0-9+/=_-). Other characters in API key may cause errors.
+prefs-general-key-save-error-title = Error
+prefs-general-key-save-error-body = Unable to save OpenAI API key to keyring
+prefs-general-base-url-label = OpenAI base url
+prefs-general-base-url-placeholder = https://api.openai.com/v1
+prefs-general-model-label = OpenAI API model
+prefs-general-model-placeholder = whisper-1
 
 ## Privacy tab (views/preferences.rs, ADR-009, UX §J-11)
 

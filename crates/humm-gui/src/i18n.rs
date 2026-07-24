@@ -136,8 +136,26 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "about-check-failed",
         // Preferences window shell (views/preferences.rs, F-044/ADR-009)
         "prefs-title",
+        "prefs-tab-general",
         "prefs-tab-models",
         "prefs-tab-privacy",
+        // Preferences General tab -- OpenAI block only (views/prefs_general.rs,
+        // partial F-100, design spec §7.1, Task 13)
+        "prefs-general-openai-key-label",
+        "prefs-general-openai-key-placeholder",
+        "prefs-general-key-show",
+        "prefs-general-key-hide",
+        "prefs-general-test-button",
+        "prefs-general-test-title",
+        "prefs-general-test-success-body",
+        "prefs-general-invalid-key-title",
+        "prefs-general-invalid-key-body",
+        "prefs-general-key-save-error-title",
+        "prefs-general-key-save-error-body",
+        "prefs-general-base-url-label",
+        "prefs-general-base-url-placeholder",
+        "prefs-general-model-label",
+        "prefs-general-model-placeholder",
         // Privacy tab (views/preferences.rs, ADR-009, UX §J-11)
         "privacy-telemetry-checkbox",
         "privacy-telemetry-disabled-caption",
@@ -417,6 +435,29 @@ mod tests {
         );
         assert_eq!(tr("recording-copy-copied"), "Copied!");
         assert_eq!(tr("recording-copy-nothing"), "Nothing to copy!");
+    }
+
+    #[test]
+    fn prefs_general_strings_are_buzz_byte_exact_with_the_product_name_swap() {
+        // Buzz `general_preferences_widget.py:261-267`/`:349`: identical
+        // wording, verbatim.
+        assert_eq!(tr("prefs-general-invalid-key-title"), "Invalid API key");
+        assert_eq!(
+            tr("prefs-general-invalid-key-body"),
+            "API supports only base64 characters (A-Za-z0-9+/=_-). Other characters in API key may cause errors."
+        );
+        // `main_window.py:330`.
+        assert_eq!(
+            tr("prefs-general-key-save-error-body"),
+            "Unable to save OpenAI API key to keyring"
+        );
+        // `:248`/`:249` -- Buzz's own text names "Buzz"; humm's substitutes
+        // its own product name (design spec §7.1).
+        assert_eq!(tr("prefs-general-test-title"), "OpenAI API Key Test");
+        assert_eq!(
+            tr("prefs-general-test-success-body"),
+            "Your API key is valid. humm will use this key to perform Whisper API transcriptions and AI translations."
+        );
     }
 
     #[test]

@@ -601,6 +601,7 @@ fn test_services(store: Arc<SqliteStore>, dir: &Path) -> Services {
         secrets: services::default_test_secrets(),
         translate: services::default_test_translate(),
         llm: None,
+        validate: services::default_test_validate(),
     })
 }
 
@@ -899,6 +900,7 @@ fn scripted_end_to_end_record_two_utterances_then_stop() {
         secrets: services::default_test_secrets(),
         translate: services::default_test_translate(),
         llm: None,
+        validate: services::default_test_validate(),
     });
 
     // Uniform-loud script covering both batches (0.5 amplitude — well above
@@ -1119,6 +1121,7 @@ fn session_thread_panic_recovers_the_window_and_completes_the_store_row() {
         secrets: services::default_test_secrets(),
         translate: services::default_test_translate(),
         llm: None,
+        validate: services::default_test_validate(),
     });
 
     let mock_capture = Arc::new(Mutex::new(MockCapture::new(vec![0.5; 2 * BATCH_SAMPLES])));
