@@ -613,9 +613,12 @@ fn encode_mp3_round_trips_through_decode() {
     );
 }
 
+/// The pre-canceled fast path: a token already canceled before
+/// `encode_mp3()` is called short-circuits before ffmpeg is even spawned
+/// (mirrors `cancel_kills_decode_pre_canceled_fast_path`).
 #[test]
 #[ignore = "requires ffmpeg + Buzz testdata"]
-fn encode_mp3_cancel_kills_promptly() {
+fn encode_mp3_precanceled_returns_immediately() {
     let pcm = synth_sine_pcm(440.0, 3.0, 0.5);
     let dir = tempfile::tempdir().expect("tempdir");
     let dest = dir.path().join("encoded.mp3");
@@ -638,6 +641,60 @@ fn encode_mp3_cancel_kills_promptly() {
     assert!(
         !dest.exists() || std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) == 0,
         "dest should be absent or empty after a pre-canceled encode, found {dest:?}"
+    );
+}
+
+/// Genuinely exercises the mid-encode `kill()`/`wait()`/thread-join path
+/// (mirrors `cancel_kills_decode_mid_read`'s and
+/// `fetch_cancel_kills_download_mid_transfer`'s throttle-the-producer
+/// technique): a wrapper script injects `-re` before the real ffmpeg's args,
+/// so it consumes the piped PCM at realtime rate instead of racing through
+/// the whole ~60 s clip in a fraction of a second. Canceling 300 ms in is
+/// then guaranteed to land while `encode_mp3()` is still in its
+/// `Child::try_wait` poll loop, on any hardware.
+#[test]
+#[ignore = "requires ffmpeg + Buzz testdata"]
+#[cfg(unix)]
+fn encode_mp3_cancel_kills_mid_encode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wrapper = dir.path().join("ffmpeg-realtime.sh");
+    // `exec` keeps ffmpeg in the wrapper's own PID so `child.kill()` reaches
+    // it directly; `${HUMM_FFMPEG:-ffmpeg}` matches `FfmpegDecoder::new()`'s
+    // binary resolution.
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\nexec \"${HUMM_FFMPEG:-ffmpeg}\" -re \"$@\"\n",
+    )
+    .expect("write wrapper script");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod wrapper script");
+
+    let pcm = synth_sine_pcm(440.0, 60.0, 0.5);
+    let dest = dir.path().join("encoded.mp3");
+    let cancel = CancelToken::new();
+    let cancel_from_main = cancel.clone();
+
+    let start = Instant::now();
+    let handle = thread::spawn(move || {
+        let encoder = FfmpegDecoder::with_binary(&wrapper);
+        encoder.encode_mp3(&pcm, &dest, &cancel)
+    });
+
+    thread::sleep(Duration::from_millis(300));
+    cancel_from_main.cancel();
+
+    let result = handle.join().expect("encode thread should not panic");
+    let elapsed = start.elapsed();
+
+    assert!(
+        matches!(result, Err(MediaError::Canceled)),
+        "expected Canceled, got {result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "cancellation took too long: {elapsed:?}"
     );
 }
 

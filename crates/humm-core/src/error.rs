@@ -26,11 +26,12 @@ pub enum MediaError {
         /// Diagnostic detail (stderr excerpt, exit code).
         detail: String,
     },
-    /// The ffmpeg encoder subprocess failed to produce a compressed audio
-    /// file.
-    #[error("ffmpeg encode failed: {detail}")]
+    /// The encoder subprocess failed to produce a compressed audio file.
+    #[error("audio encode failed: {detail}")]
     EncodeFailed {
-        /// Diagnostic detail (stderr excerpt, exit code).
+        /// Diagnostic detail — the adapter names its tool here (e.g.
+        /// "ffmpeg exited with status ...") since this message is
+        /// tool-agnostic (mirrors `DecodeFailed`/`ProbeFailed`/`FetchFailed`).
         detail: String,
     },
     /// The prober subprocess failed to report media metadata.

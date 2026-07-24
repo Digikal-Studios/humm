@@ -106,7 +106,15 @@ impl AudioEncoder for FfmpegDecoder {
             let stderr_bytes = stderr_handle.join().unwrap_or_default();
 
             if !status.success() {
-                let detail = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
+                let stderr_detail = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
+                // `MediaError::EncodeFailed`'s format string is tool-agnostic
+                // (core has no ffmpeg-specific knowledge); the adapter names
+                // the tool in `detail` itself so messages still say "ffmpeg".
+                let detail = if stderr_detail.is_empty() {
+                    format!("ffmpeg exited with status {status}")
+                } else {
+                    format!("ffmpeg exited with status {status}: {stderr_detail}")
+                };
                 return Err(MediaError::EncodeFailed { detail });
             }
             return Ok(());
