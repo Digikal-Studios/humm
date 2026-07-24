@@ -18,6 +18,7 @@
 //! `rename` it over the target, so a crash mid-write never corrupts the
 //! previous file.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,11 @@ pub struct Settings {
     /// Transcript-viewer window state (F-080): persisted toggles, playback
     /// rate, splitter fractions, and shared window geometry.
     pub viewer: ViewerSettings,
+    /// Live recording transcriber settings (F-060, F-061): sticky options and
+    /// export configuration.
+    pub recording: RecordingSettings,
+    /// Live presentation window settings (F-065): display style preferences.
+    pub presentation: PresentationSettings,
 }
 
 /// Settings governing model selection (`buzz/model_loader.py` custom-model
@@ -324,6 +330,244 @@ pub struct ViewerGeometry {
     pub h: f32,
 }
 
+/// Live recording transcriber settings (F-060, F-061, F-064), ported from
+/// Buzz's `recording-transcriber/*` `QSettings` group (F-060/F-061: model
+/// options, chunking, display mode, hide_unconfirmed; F-064: export
+/// configuration and upload URL). Sticky options are saved when the recording
+/// window closes (Buzz parity, except Buzz saves export fields immediately).
+///
+/// `#[derive(Default)]` is deliberately not used: several fields have
+/// non-zero defaults that would be lost. The manual [`Default`] impl below is
+/// the single source of truth for those defaults; container-level
+/// `#[serde(default)]` fills any missing field from it, and per-field
+/// `#[serde(default = "…")]` attributes make "section present, key absent"
+/// cases explicit (belt-and-braces pattern matching [`ViewerSettings`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecordingSettings {
+    /// Last-selected language code (`crate::language::Language::code`), or
+    /// `None` for auto-detect.
+    pub language: Option<String>,
+    /// Last-selected task (`crate::domain::TaskKind::as_str`).
+    pub task: Option<String>,
+    /// Last-selected model size (`crate::domain::ModelSize::as_str`).
+    pub model_size: Option<String>,
+    /// Last-entered custom initial prompt text.
+    pub initial_prompt: Option<String>,
+    /// Silence threshold for skipping batches (RMS). Clamped to the valid
+    /// range `0.0..=1.0` when the settings file is loaded; a non-finite
+    /// stored value resets to [`RecordingSettings::DEFAULT_SILENCE_THRESHOLD`].
+    #[serde(default = "default_silence_threshold")]
+    pub silence_threshold: f32,
+    /// Line separator used in append modes (stored as literal, not escaped
+    /// — the GUI sheet handles escaping/unescaping). Default is `"\n\n"`.
+    #[serde(default = "default_line_separator")]
+    pub line_separator: String,
+    /// Chunk size in seconds for append-and-correct mode (rolling-prompt path).
+    /// Clamped to `2.0..=5.0` when the settings file is loaded; a non-finite
+    /// stored value resets to [`RecordingSettings::DEFAULT_TRANSCRIPTION_STEP`].
+    #[serde(default = "default_transcription_step")]
+    pub transcription_step: f64,
+    /// Display mode index: 0 = AppendBelow, 1 = AppendAbove, 2 = AppendAndCorrect
+    /// (Buzz parity: stored as index, not enum).
+    #[serde(default = "default_mode")]
+    pub mode: usize,
+    /// Whether to hide unconfirmed text (last utterance) in append-and-correct
+    /// mode. Default is `true`.
+    #[serde(default = "default_true")]
+    pub hide_unconfirmed: bool,
+    /// Whether live export to TXT/CSV is enabled.
+    pub export_enabled: bool,
+    /// Directory to write exported files to.
+    pub export_folder: Option<PathBuf>,
+    /// Custom filename template ({{placeholders}}) for exports.
+    pub export_file_name: Option<String>,
+    /// Export file type: `"txt"` or `"csv"`. Default is `"txt"`.
+    #[serde(default = "default_export_file_type")]
+    pub export_file_type: String,
+    /// Maximum number of entries to keep in the export file (0 = all,
+    /// range 0–99). Clamped to `0..=99` when the settings file is loaded.
+    #[serde(default = "default_export_max_entries")]
+    pub export_max_entries: u32,
+    /// Upload URL for realtime transcript posting (✚ humm addition, ADR-018).
+    /// Overridden by `HUMM_UPLOAD_URL` env var if set.
+    pub upload_url: Option<String>,
+    /// Measured realtime speed per model size, persisted across sessions
+    /// (✚ humm addition, ADR-018). Keyed by model-size wire string;
+    /// a value < 1.0 triggers the realtime-fit warning.
+    #[serde(default = "default_measured_speed")]
+    pub measured_speed: BTreeMap<String, f32>,
+}
+
+impl RecordingSettings {
+    /// Minimum transcription step (seconds).
+    pub const MIN_TRANSCRIPTION_STEP: f64 = 2.0;
+    /// Maximum transcription step (seconds).
+    pub const MAX_TRANSCRIPTION_STEP: f64 = 5.0;
+    /// Default transcription step (seconds, append-and-correct mode).
+    pub const DEFAULT_TRANSCRIPTION_STEP: f64 = 3.5;
+    /// Default silence threshold (RMS).
+    pub const DEFAULT_SILENCE_THRESHOLD: f32 = 0.0025;
+    /// Default line separator.
+    pub const DEFAULT_LINE_SEPARATOR: &'static str = "\n\n";
+    /// Default mode (index).
+    pub const DEFAULT_MODE: usize = 0;
+    /// Default export file type.
+    pub const DEFAULT_EXPORT_FILE_TYPE: &'static str = "txt";
+    /// Default max export entries.
+    pub const DEFAULT_EXPORT_MAX_ENTRIES: u32 = 0;
+
+    /// Clamps stored recording settings into their valid ranges on load,
+    /// resetting non-finite values (`NaN`/`±inf` from a hand-edited file)
+    /// to defaults rather than propagating them. Applied by [`Settings::load`]
+    /// so downstream readers never see out-of-range or non-finite values.
+    pub fn clamp(&mut self) {
+        if self.transcription_step.is_finite() {
+            self.transcription_step = self
+                .transcription_step
+                .clamp(Self::MIN_TRANSCRIPTION_STEP, Self::MAX_TRANSCRIPTION_STEP);
+        } else {
+            self.transcription_step = Self::DEFAULT_TRANSCRIPTION_STEP;
+        }
+
+        if self.silence_threshold.is_finite() {
+            self.silence_threshold = self.silence_threshold.clamp(0.0, 1.0);
+        } else {
+            self.silence_threshold = Self::DEFAULT_SILENCE_THRESHOLD;
+        }
+
+        self.export_max_entries = self.export_max_entries.min(99);
+    }
+}
+
+impl Default for RecordingSettings {
+    fn default() -> Self {
+        RecordingSettings {
+            language: None,
+            task: None,
+            model_size: None,
+            initial_prompt: None,
+            silence_threshold: Self::DEFAULT_SILENCE_THRESHOLD,
+            line_separator: Self::DEFAULT_LINE_SEPARATOR.to_string(),
+            transcription_step: Self::DEFAULT_TRANSCRIPTION_STEP,
+            mode: Self::DEFAULT_MODE,
+            hide_unconfirmed: true,
+            export_enabled: false,
+            export_folder: None,
+            export_file_name: None,
+            export_file_type: Self::DEFAULT_EXPORT_FILE_TYPE.to_string(),
+            export_max_entries: Self::DEFAULT_EXPORT_MAX_ENTRIES,
+            upload_url: None,
+            measured_speed: BTreeMap::new(),
+        }
+    }
+}
+
+/// Live presentation window settings (F-065), ported from Buzz's
+/// `presentation-window/*` `QSettings` group. Display preferences for the
+/// live-transcript presentation window: text size, theme, and colors.
+///
+/// `#[derive(Default)]` is deliberately not used: all fields have non-zero
+/// defaults. The manual [`Default`] impl below is the single source of truth;
+/// container-level `#[serde(default)]` fills any missing field from it, and
+/// per-field `#[serde(default = "…")]` attributes make "section present,
+/// key absent" cases explicit (belt-and-braces pattern).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PresentationSettings {
+    /// Font size in points, range 10–100. Clamped to this range when the
+    /// settings file is loaded. Default is 24.
+    #[serde(default = "default_presentation_text_size")]
+    pub text_size: u32,
+    /// Theme name: `"light"`, `"dark"`, or `"custom"`. Default is `"light"`.
+    #[serde(default = "default_presentation_theme")]
+    pub theme: String,
+    /// Text color in hex format `#RRGGBB`. Default is `"#000000"` (black).
+    #[serde(default = "default_presentation_text_color")]
+    pub text_color: String,
+    /// Background color in hex format `#RRGGBB`. Default is `"#FFFFFF"` (white).
+    #[serde(default = "default_presentation_background_color")]
+    pub background_color: String,
+}
+
+impl PresentationSettings {
+    /// Minimum text size (points).
+    pub const MIN_TEXT_SIZE: u32 = 10;
+    /// Maximum text size (points).
+    pub const MAX_TEXT_SIZE: u32 = 100;
+    /// Default text size (points).
+    pub const DEFAULT_TEXT_SIZE: u32 = 24;
+    /// Default theme.
+    pub const DEFAULT_THEME: &'static str = "light";
+    /// Default text color.
+    pub const DEFAULT_TEXT_COLOR: &'static str = "#000000";
+    /// Default background color.
+    pub const DEFAULT_BACKGROUND_COLOR: &'static str = "#FFFFFF";
+
+    /// Clamps stored presentation settings into their valid ranges on load.
+    /// Applied by [`Settings::load`].
+    pub fn clamp(&mut self) {
+        self.text_size = self
+            .text_size
+            .clamp(Self::MIN_TEXT_SIZE, Self::MAX_TEXT_SIZE);
+    }
+}
+
+impl Default for PresentationSettings {
+    fn default() -> Self {
+        PresentationSettings {
+            text_size: Self::DEFAULT_TEXT_SIZE,
+            theme: Self::DEFAULT_THEME.to_string(),
+            text_color: Self::DEFAULT_TEXT_COLOR.to_string(),
+            background_color: Self::DEFAULT_BACKGROUND_COLOR.to_string(),
+        }
+    }
+}
+
+fn default_silence_threshold() -> f32 {
+    RecordingSettings::DEFAULT_SILENCE_THRESHOLD
+}
+
+fn default_line_separator() -> String {
+    RecordingSettings::DEFAULT_LINE_SEPARATOR.to_string()
+}
+
+fn default_transcription_step() -> f64 {
+    RecordingSettings::DEFAULT_TRANSCRIPTION_STEP
+}
+
+fn default_mode() -> usize {
+    RecordingSettings::DEFAULT_MODE
+}
+
+fn default_export_file_type() -> String {
+    RecordingSettings::DEFAULT_EXPORT_FILE_TYPE.to_string()
+}
+
+fn default_export_max_entries() -> u32 {
+    RecordingSettings::DEFAULT_EXPORT_MAX_ENTRIES
+}
+
+fn default_measured_speed() -> BTreeMap<String, f32> {
+    BTreeMap::new()
+}
+
+fn default_presentation_text_size() -> u32 {
+    PresentationSettings::DEFAULT_TEXT_SIZE
+}
+
+fn default_presentation_theme() -> String {
+    PresentationSettings::DEFAULT_THEME.to_string()
+}
+
+fn default_presentation_text_color() -> String {
+    PresentationSettings::DEFAULT_TEXT_COLOR.to_string()
+}
+
+fn default_presentation_background_color() -> String {
+    PresentationSettings::DEFAULT_BACKGROUND_COLOR.to_string()
+}
+
 impl Settings {
     /// Loads settings from `path`.
     ///
@@ -350,11 +594,13 @@ impl Settings {
                 path: path.to_path_buf(),
                 detail: error.to_string(),
             })?;
-        // Normalize the persisted playback rate into its valid range on load
-        // (design spec §6): a hand-edited or corrupt file must never hand the
-        // player an out-of-range or non-finite speed.
+        // Normalize persisted settings into their valid ranges on load (design
+        // spec §6): hand-edited or corrupt files must never hand downstream
+        // out-of-range or non-finite values.
         settings.viewer.playback_rate =
             ViewerSettings::clamp_playback_rate(settings.viewer.playback_rate);
+        settings.recording.clamp();
+        settings.presentation.clamp();
         Ok(settings)
     }
 
@@ -425,7 +671,10 @@ pub enum SettingsError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, SettingsError, ViewerGeometry, ViewerSettings};
+    use super::{
+        PresentationSettings, RecordingSettings, Settings, SettingsError, ViewerGeometry,
+        ViewerSettings,
+    };
     use std::path::Path;
 
     #[test]
@@ -680,5 +929,294 @@ mod tests {
             detail: "bad token".to_string(),
         };
         assert!(err.to_string().contains("bad token"));
+    }
+
+    // RecordingSettings tests
+
+    #[test]
+    fn recording_settings_defaults_match_spec() {
+        let rec = RecordingSettings::default();
+        assert_eq!(rec.silence_threshold, 0.0025);
+        assert_eq!(rec.line_separator, "\n\n");
+        assert_eq!(rec.transcription_step, 3.5);
+        assert_eq!(rec.mode, 0);
+        assert!(rec.hide_unconfirmed);
+        assert!(!rec.export_enabled);
+        assert_eq!(rec.export_file_type, "txt");
+        assert_eq!(rec.export_max_entries, 0);
+        assert!(rec.language.is_none());
+        assert!(rec.task.is_none());
+        assert!(rec.model_size.is_none());
+        assert!(rec.initial_prompt.is_none());
+        assert!(rec.export_folder.is_none());
+        assert!(rec.export_file_name.is_none());
+        assert!(rec.upload_url.is_none());
+        assert!(rec.measured_speed.is_empty());
+    }
+
+    #[test]
+    fn recording_defaults_apply_when_section_present_but_partial() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        std::fs::write(
+            &path,
+            "[recording]\nlanguage = \"es\"\nsilence_threshold = 0.005\n",
+        )
+        .expect("write file");
+
+        let loaded = Settings::load(&path).expect("load");
+        assert_eq!(loaded.recording.language, Some("es".to_string()));
+        assert_eq!(loaded.recording.silence_threshold, 0.005);
+        // Other fields take their defaults
+        assert_eq!(loaded.recording.transcription_step, 3.5);
+        assert_eq!(loaded.recording.line_separator, "\n\n");
+        assert_eq!(loaded.recording.mode, 0);
+        assert!(loaded.recording.hide_unconfirmed);
+        assert_eq!(loaded.recording.export_file_type, "txt");
+    }
+
+    #[test]
+    fn recording_transcription_step_clamped_on_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+
+        // Below the min → clamped up to 2.0.
+        std::fs::write(&path, "[recording]\ntranscription_step = 1.0\n").expect("write file");
+        assert_eq!(
+            Settings::load(&path)
+                .expect("load")
+                .recording
+                .transcription_step,
+            2.0
+        );
+
+        // Above the max → clamped down to 5.0.
+        std::fs::write(&path, "[recording]\ntranscription_step = 9.9\n").expect("write file");
+        assert_eq!(
+            Settings::load(&path)
+                .expect("load")
+                .recording
+                .transcription_step,
+            5.0
+        );
+
+        // Non-finite → reset to the default 3.5.
+        std::fs::write(&path, "[recording]\ntranscription_step = nan\n").expect("write file");
+        assert_eq!(
+            Settings::load(&path)
+                .expect("load")
+                .recording
+                .transcription_step,
+            3.5
+        );
+    }
+
+    #[test]
+    fn recording_silence_threshold_clamped_on_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+
+        // Below zero → clamped to 0.0.
+        std::fs::write(&path, "[recording]\nsilence_threshold = -0.5\n").expect("write file");
+        assert_eq!(
+            Settings::load(&path)
+                .expect("load")
+                .recording
+                .silence_threshold,
+            0.0
+        );
+
+        // Above 1.0 → clamped to 1.0.
+        std::fs::write(&path, "[recording]\nsilence_threshold = 5.0\n").expect("write file");
+        assert_eq!(
+            Settings::load(&path)
+                .expect("load")
+                .recording
+                .silence_threshold,
+            1.0
+        );
+
+        // Non-finite → reset to the default 0.0025.
+        std::fs::write(&path, "[recording]\nsilence_threshold = inf\n").expect("write file");
+        assert_eq!(
+            Settings::load(&path)
+                .expect("load")
+                .recording
+                .silence_threshold,
+            0.0025
+        );
+    }
+
+    #[test]
+    fn recording_export_max_entries_clamped_on_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+
+        // Above the max → clamped to 99.
+        std::fs::write(&path, "[recording]\nexport_max_entries = 250\n").expect("write file");
+        assert_eq!(
+            Settings::load(&path)
+                .expect("load")
+                .recording
+                .export_max_entries,
+            99
+        );
+
+        // Within range → unchanged.
+        std::fs::write(&path, "[recording]\nexport_max_entries = 50\n").expect("write file");
+        assert_eq!(
+            Settings::load(&path)
+                .expect("load")
+                .recording
+                .export_max_entries,
+            50
+        );
+    }
+
+    #[test]
+    fn recording_round_trip_all_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+
+        let mut settings = Settings::default();
+        settings.recording.language = Some("fr".to_string());
+        settings.recording.task = Some("translate".to_string());
+        settings.recording.model_size = Some("large-v3".to_string());
+        settings.recording.initial_prompt = Some("proper nouns: Buzz".to_string());
+        settings.recording.silence_threshold = 0.003;
+        settings.recording.line_separator = "\n".to_string();
+        settings.recording.transcription_step = 4.0;
+        settings.recording.mode = 2;
+        settings.recording.hide_unconfirmed = false;
+        settings.recording.export_enabled = true;
+        settings.recording.export_folder = Some(Path::new("/tmp/exports").to_path_buf());
+        settings.recording.export_file_name = Some("my_export_{{ date_time }}".to_string());
+        settings.recording.export_file_type = "csv".to_string();
+        settings.recording.export_max_entries = 25;
+        settings.recording.upload_url = Some("https://example.com/upload".to_string());
+        settings
+            .recording
+            .measured_speed
+            .insert("small".to_string(), 2.5);
+        settings
+            .recording
+            .measured_speed
+            .insert("base".to_string(), 1.1);
+
+        settings.save(&path).expect("save");
+        let loaded = Settings::load(&path).expect("load");
+
+        assert_eq!(loaded.recording.language, Some("fr".to_string()));
+        assert_eq!(loaded.recording.task, Some("translate".to_string()));
+        assert_eq!(loaded.recording.model_size, Some("large-v3".to_string()));
+        assert_eq!(
+            loaded.recording.initial_prompt,
+            Some("proper nouns: Buzz".to_string())
+        );
+        assert_eq!(loaded.recording.silence_threshold, 0.003);
+        assert_eq!(loaded.recording.line_separator, "\n");
+        assert_eq!(loaded.recording.transcription_step, 4.0);
+        assert_eq!(loaded.recording.mode, 2);
+        assert!(!loaded.recording.hide_unconfirmed);
+        assert!(loaded.recording.export_enabled);
+        assert_eq!(
+            loaded.recording.export_folder,
+            Some(Path::new("/tmp/exports").to_path_buf())
+        );
+        assert_eq!(
+            loaded.recording.export_file_name,
+            Some("my_export_{{ date_time }}".to_string())
+        );
+        assert_eq!(loaded.recording.export_file_type, "csv");
+        assert_eq!(loaded.recording.export_max_entries, 25);
+        assert_eq!(
+            loaded.recording.upload_url,
+            Some("https://example.com/upload".to_string())
+        );
+        assert_eq!(loaded.recording.measured_speed.get("small"), Some(&2.5));
+        assert_eq!(loaded.recording.measured_speed.get("base"), Some(&1.1));
+    }
+
+    // PresentationSettings tests
+
+    #[test]
+    fn presentation_settings_defaults_match_spec() {
+        let pres = PresentationSettings::default();
+        assert_eq!(pres.text_size, 24);
+        assert_eq!(pres.theme, "light");
+        assert_eq!(pres.text_color, "#000000");
+        assert_eq!(pres.background_color, "#FFFFFF");
+    }
+
+    #[test]
+    fn presentation_defaults_apply_when_section_present_but_partial() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "[presentation]\ntheme = \"dark\"\n").expect("write file");
+
+        let loaded = Settings::load(&path).expect("load");
+        assert_eq!(loaded.presentation.theme, "dark");
+        // Other fields take their defaults
+        assert_eq!(loaded.presentation.text_size, 24);
+        assert_eq!(loaded.presentation.text_color, "#000000");
+        assert_eq!(loaded.presentation.background_color, "#FFFFFF");
+    }
+
+    #[test]
+    fn presentation_text_size_clamped_on_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+
+        // Below the min → clamped up to 10.
+        std::fs::write(&path, "[presentation]\ntext_size = 5\n").expect("write file");
+        assert_eq!(
+            Settings::load(&path).expect("load").presentation.text_size,
+            10
+        );
+
+        // Above the max → clamped down to 100.
+        std::fs::write(&path, "[presentation]\ntext_size = 500\n").expect("write file");
+        assert_eq!(
+            Settings::load(&path).expect("load").presentation.text_size,
+            100
+        );
+
+        // Within range → unchanged.
+        std::fs::write(&path, "[presentation]\ntext_size = 50\n").expect("write file");
+        assert_eq!(
+            Settings::load(&path).expect("load").presentation.text_size,
+            50
+        );
+    }
+
+    #[test]
+    fn presentation_round_trip_all_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+
+        let mut settings = Settings::default();
+        settings.presentation.text_size = 48;
+        settings.presentation.theme = "dark".to_string();
+        settings.presentation.text_color = "#FFFFFF".to_string();
+        settings.presentation.background_color = "#1a1a1a".to_string();
+
+        settings.save(&path).expect("save");
+        let loaded = Settings::load(&path).expect("load");
+
+        assert_eq!(loaded.presentation.text_size, 48);
+        assert_eq!(loaded.presentation.theme, "dark");
+        assert_eq!(loaded.presentation.text_color, "#FFFFFF");
+        assert_eq!(loaded.presentation.background_color, "#1a1a1a");
+    }
+
+    #[test]
+    fn recording_and_presentation_sections_absent_give_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "").expect("write empty file");
+
+        let loaded = Settings::load(&path).expect("load");
+        assert_eq!(loaded.recording, RecordingSettings::default());
+        assert_eq!(loaded.presentation, PresentationSettings::default());
     }
 }
