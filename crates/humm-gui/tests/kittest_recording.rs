@@ -1,36 +1,56 @@
-//! kittest coverage for Task 10 (F-060/F-004): the recording window's chrome
-//! renders (`views::recording::recording_ui`, driven directly over a bare
-//! `egui::Ui` via `Harness::new_ui_state` — the recording window is a
-//! deferred OS viewport an `egui_kittest` `Harness` cannot reach into, the
-//! same constraint `kittest_viewer.rs`'s own module doc explains for the
-//! transcript viewer), the Record click's UI state machine, the meter's
-//! repeated-paint stability, and the toolbar Record button's F-004 unlock.
+//! kittest coverage for the live-recording window: the chrome renders
+//! (`views::recording::recording_ui`, driven directly over a bare `egui::Ui`
+//! via `Harness::new_ui_state` — the recording window is a deferred OS
+//! viewport an `egui_kittest` `Harness` cannot reach into, the same
+//! constraint `kittest_viewer.rs`'s own module doc explains for the
+//! transcript viewer) and the Record click's UI state machine (Task 10,
+//! F-060/F-004), plus (Task 11, F-060/F-061/F-064/Q-10) a scripted
+//! end-to-end session driven through a full `HummApp` (the only way to
+//! exercise `app.rs`'s real harvest/drain wiring, since the recording
+//! window's own Record/Stop button is unreachable — the e2e test drives
+//! `RecordingVm::on_record_clicked` directly instead, exactly what a real
+//! click would invoke).
 //!
 //! Every fixture here uses `humm_audio::MockCapture` — never `CpalCapture` —
 //! including the full-`HummApp` toolbar test: `HummApp::new_for_test` always
 //! wires a `MockCapture` (see `app.rs`'s `recording_deps` field doc), so no
-//! test in this file ever touches real audio hardware.
+//! test in this file ever touches real audio hardware. The Task 11 e2e test
+//! additionally scripts the model ensurer/engine/upload seams
+//! (`humm_gui::live_session`) so it never touches the network or a real
+//! whisper model either (Global Constraint 3).
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use egui_kittest::kittest::{AccessKitNode, NodeT, Queryable};
 use egui_kittest::{Harness, HarnessBuilder};
 use humm_audio::MockCapture;
-use humm_core::boundary::AudioDevice;
-use humm_core::domain::ModelSpec;
-use humm_core::error::CoreError;
-use humm_core::queue::EngineFactory;
+use humm_core::boundary::{AudioCapture, AudioDevice, CaptureHandle, MeterSnapshot};
+use humm_core::cancel::CancelToken;
+use humm_core::domain::{ModelSpec, Status};
+use humm_core::error::{AudioError, CoreError, EngineError};
+use humm_core::models::download::DownloadProgress;
+use humm_core::queue::{ArtifactEnsurer, EngineFactory};
 use humm_core::settings::Settings;
 use humm_gui::app::HummApp;
+use humm_gui::live_session::{
+    LiveEngineFactory, LiveEngineSession, LiveStore, LiveUpload, UploadFactory,
+};
 use humm_gui::recording::{RecordingDeps, RecordingStatus, RecordingVm};
 use humm_gui::services::{self, Capabilities, Services, TestDeps};
+use humm_gui::viewer::can_open;
+use humm_gui::viewmodel::TasksVm;
 use humm_gui::views::recording::recording_ui;
 use humm_store::SqliteStore;
+use humm_whisper::LiveOptions;
 
 /// A fake [`EngineFactory`] for tests that never actually run a job: nothing
-/// in this file enqueues a transcription task.
+/// in this file enqueues a transcription task (via the task *queue* — the
+/// Task 11 e2e test's live session is a separate path, scripted via
+/// `humm_gui::live_session`'s own seams below).
 struct NeverCalledEngineFactory;
 
 impl EngineFactory for NeverCalledEngineFactory {
@@ -40,6 +60,73 @@ impl EngineFactory for NeverCalledEngineFactory {
         _resolved: Option<&Path>,
     ) -> Result<Box<dyn humm_core::boundary::TranscriptionEngine>, CoreError> {
         unreachable!("no task is ever enqueued in this file's tests")
+    }
+}
+
+/// A [`LiveStore`]/[`LiveEngineFactory`]/[`UploadFactory`] stand-in for the
+/// Task 10-only fixtures in this file, which never drive a real session
+/// (`fixture_with_devices`'s `RecordingVm` is never harvested by a real
+/// `HummApp` — nothing here calls these).
+struct NeverCalledLiveStore;
+impl LiveStore for NeverCalledLiveStore {
+    fn insert_live_session(
+        &self,
+        _name: &str,
+        _options: &humm_core::domain::TranscriptionOptions,
+    ) -> Result<humm_core::domain::TranscriptionId, humm_core::error::StoreError> {
+        unreachable!("Task 10 fixtures never start a real session")
+    }
+    fn append_live_segment(
+        &self,
+        _id: humm_core::domain::TranscriptionId,
+        _start: humm_core::domain::Millis,
+        _end: humm_core::domain::Millis,
+        _text: &str,
+    ) -> Result<(), humm_core::error::StoreError> {
+        unreachable!("Task 10 fixtures never start a real session")
+    }
+    fn complete_live_session(
+        &self,
+        _id: humm_core::domain::TranscriptionId,
+    ) -> Result<(), humm_core::error::StoreError> {
+        unreachable!("Task 10 fixtures never start a real session")
+    }
+}
+
+struct NeverCalledEnsurer;
+impl ArtifactEnsurer for NeverCalledEnsurer {
+    fn ensure_model(
+        &self,
+        _model: &ModelSpec,
+        _progress: &mut dyn FnMut(DownloadProgress),
+        _cancel: &CancelToken,
+    ) -> Result<PathBuf, CoreError> {
+        unreachable!("Task 10 fixtures never start a real session")
+    }
+    fn ensure_vad(
+        &self,
+        _progress: &mut dyn FnMut(DownloadProgress),
+        _cancel: &CancelToken,
+    ) -> Option<PathBuf> {
+        unreachable!("Task 10 fixtures never start a real session")
+    }
+}
+
+struct NeverCalledLiveEngineFactory;
+impl LiveEngineFactory for NeverCalledLiveEngineFactory {
+    fn load(
+        &self,
+        _model_path: &Path,
+        _use_gpu: bool,
+    ) -> Result<Box<dyn LiveEngineSession>, EngineError> {
+        unreachable!("Task 10 fixtures never start a real session")
+    }
+}
+
+struct NeverCalledUploadFactory;
+impl UploadFactory for NeverCalledUploadFactory {
+    fn build(&self, _url: String) -> Box<dyn LiveUpload> {
+        unreachable!("Task 10 fixtures never start a real session")
     }
 }
 
@@ -73,6 +160,10 @@ struct Fixture {
 fn fixture_with_devices(devices: Vec<AudioDevice>) -> Fixture {
     let deps = RecordingDeps {
         capture: Mutex::new(Box::new(MockCapture::new(Vec::new()).with_devices(devices))),
+        store: Arc::new(NeverCalledLiveStore),
+        model_ensurer: Arc::new(NeverCalledEnsurer),
+        engine_factory: Arc::new(NeverCalledLiveEngineFactory),
+        upload_factory: Arc::new(NeverCalledUploadFactory),
     };
     let settings = Settings::default();
     let vm = RecordingVm::open(&deps, &settings);
@@ -171,7 +262,13 @@ fn record_click_disables_options_and_shows_the_presentation_placeholder() {
 }
 
 #[test]
-fn stop_click_flips_back_and_shows_the_copy_bar_placeholder() {
+fn stop_click_moves_to_stopping_and_disables_the_button_pending_the_session_ack() {
+    // Two-phase stop (spec §2.1, Task 11): a bare `recording_ui` fixture
+    // (no real session/`app.rs` harvest behind it) can only exercise the
+    // *click*'s own effect — moving to `Stopping` and disabling the button
+    // — not the eventual restore, which `finish_stopping` performs once a
+    // real session's `Stopped` message arrives (see the sibling test for
+    // that half).
     let mut harness = build_harness(fixture());
     harness.step();
     harness.get_by_label("Record").click();
@@ -182,6 +279,38 @@ fn stop_click_flips_back_and_shows_the_copy_bar_placeholder() {
     harness.get_by_label("Stop").click();
     harness.step();
     harness.step(); // settle frame.
+
+    assert_eq!(harness.state().vm.status, RecordingStatus::Stopping);
+    // Options/device/mic row stay disabled (status != Stopped).
+    assert!(
+        harness
+            .get_by_label("Advanced...")
+            .accesskit_node()
+            .is_disabled()
+    );
+    // Bars are unchanged from the Recording state — still mid-stop.
+    assert!(harness.state().vm.presentation_bar_visible);
+    assert!(!harness.state().vm.copy_bar_visible);
+    let stop_button = harness.get_by_label("Stop");
+    assert!(
+        stop_button.accesskit_node().is_disabled(),
+        "Buzz disables the button until the session thread's ack (`stop_recording`, :1103-1111)"
+    );
+}
+
+#[test]
+fn finish_stopping_restores_the_stopped_ui_once_the_session_acks() {
+    let mut fixture = fixture();
+    fixture.vm.on_record_clicked(&fixture.deps); // -> Recording
+    fixture.vm.on_record_clicked(&fixture.deps); // -> Stopping
+    assert_eq!(fixture.vm.status, RecordingStatus::Stopping);
+
+    // Simulates `app.rs::finish_live_session`'s non-`pending_close` arm —
+    // this fixture has no real session thread to send the `Stopped`
+    // message, so the ack is invoked directly.
+    fixture.vm.finish_stopping(&fixture.deps);
+    let mut harness = build_harness(fixture);
+    harness.step();
 
     assert_eq!(harness.state().vm.status, RecordingStatus::Stopped);
     assert!(
@@ -293,4 +422,375 @@ fn toolbar_record_is_unconditionally_enabled_and_its_click_opens_the_recording_w
         harness.state().is_recording_window_open_for_test(),
         "clicking the toolbar Record button opens the live-recording window"
     );
+}
+
+// -- Task 11: scripted end-to-end live session (F-060/F-061/F-064, Q-10) -----
+//
+// Record -> 2 scripted utterances -> Stop, driven through a full `HummApp`
+// (the real `harvest_recording_intent`/`drain_live_session`/
+// `finish_live_session` wiring). Every adapter is scripted/network-free:
+// - `store`: a REAL `SqliteStore` at a temp-file path (not `:memory:` — the
+//   restart-survival assertion reopens the same file).
+// - `model_ensurer`/`engine_factory`: instant, no network, no real ggml file
+//   ever opened (`ScriptedEngine` never touches the resolved path).
+// - `capture`: `MockCapture`, shared with the scripted engine so the engine
+//   can push the second batch mid-call — mirrors `humm-core`'s own
+//   `live::session` test pattern ("the engine closure owns the producer").
+// - `upload_factory`: records calls instead of ever binding a socket.
+
+/// Wraps a [`MockCapture`] behind a shared handle so both `RecordingDeps.capture`
+/// (via this thin delegate) and the scripted engine (to push the second
+/// batch mid-call) can drive the same instance — no real-time pacing, no
+/// polling: the session thread's own `drain_ring`/engine-call sequencing is
+/// the only synchronization needed (see `ScriptedEngine::transcribe_live`).
+#[derive(Clone)]
+struct SharedMockCapture(Arc<Mutex<MockCapture>>);
+
+impl AudioCapture for SharedMockCapture {
+    fn devices(&self) -> Result<Vec<AudioDevice>, AudioError> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).devices()
+    }
+
+    fn start(
+        &mut self,
+        device_id: Option<&str>,
+        sink: rtrb::Producer<f32>,
+        meter: Arc<MeterSnapshot>,
+    ) -> Result<Box<dyn CaptureHandle>, AudioError> {
+        let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let handle = inner.start(device_id, sink, meter)?;
+        // Batch 1: 80_000 uniform-loud samples (5s @ 16kHz, AppendBelow's
+        // fixed `n_batch_samples`; uniform amplitude avoids a
+        // silence-driven early cut — `humm-core`'s own `live::session`
+        // tests use the identical fixture for the identical reason).
+        // Pushed here, synchronously, before `run_session`'s loop ever
+        // starts, so its very first `drain_ring` call already sees the
+        // whole batch — no idle-pause is ever reached for batch 1.
+        inner.pump(BATCH_SAMPLES);
+        Ok(handle)
+    }
+}
+
+const BATCH_SAMPLES: usize = 80_000;
+
+struct ScriptedEngineFactory {
+    capture: Arc<Mutex<MockCapture>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl LiveEngineFactory for ScriptedEngineFactory {
+    fn load(
+        &self,
+        _model_path: &Path,
+        _use_gpu: bool,
+    ) -> Result<Box<dyn LiveEngineSession>, EngineError> {
+        Ok(Box::new(ScriptedEngine {
+            capture: Arc::clone(&self.capture),
+            calls: Arc::clone(&self.calls),
+        }))
+    }
+}
+
+/// Returns "utterance one" then "utterance two"; on its *first* call, pushes
+/// the second batch into the shared `MockCapture` — by the time
+/// `run_session`'s loop reaches its next `drain_ring`, the ring (already
+/// drained empty by the time this call started) has room for the whole
+/// batch again, so this never overflows regardless of scheduling.
+struct ScriptedEngine {
+    capture: Arc<Mutex<MockCapture>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl LiveEngineSession for ScriptedEngine {
+    fn transcribe_live(
+        &mut self,
+        _samples: &[f32],
+        _opts: &LiveOptions,
+        _prompt: &str,
+        _cancel: &CancelToken,
+    ) -> Result<String, EngineError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            self.capture
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .pump(BATCH_SAMPLES);
+            Ok("utterance one".to_string())
+        } else {
+            Ok("utterance two".to_string())
+        }
+    }
+}
+
+/// Resolves instantly to a scripted path — never a real ggml file, and
+/// never opened for real (`ScriptedEngine` ignores it entirely).
+struct InstantEnsurer {
+    model_path: PathBuf,
+}
+
+impl ArtifactEnsurer for InstantEnsurer {
+    fn ensure_model(
+        &self,
+        _model: &ModelSpec,
+        _progress: &mut dyn FnMut(DownloadProgress),
+        _cancel: &CancelToken,
+    ) -> Result<PathBuf, CoreError> {
+        Ok(self.model_path.clone())
+    }
+
+    fn ensure_vad(
+        &self,
+        _progress: &mut dyn FnMut(DownloadProgress),
+        _cancel: &CancelToken,
+    ) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// One recorded [`RecordingUpload`] call — the network-free stand-in for a
+/// real `TestServer` (brief: "do NOT bind TCP in kittest").
+#[derive(Debug, Clone, PartialEq)]
+enum UploadCall {
+    Clear,
+    Transcript { text: String, replace: bool },
+}
+
+struct RecordingUpload {
+    calls: Arc<Mutex<Vec<UploadCall>>>,
+}
+
+impl LiveUpload for RecordingUpload {
+    fn clear(&self) {
+        self.calls
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(UploadCall::Clear);
+    }
+
+    fn transcript(&self, text: &str, replace: bool) {
+        self.calls
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(UploadCall::Transcript {
+                text: text.to_string(),
+                replace,
+            });
+    }
+}
+
+struct RecordingUploadFactory {
+    calls: Arc<Mutex<Vec<UploadCall>>>,
+}
+
+impl UploadFactory for RecordingUploadFactory {
+    fn build(&self, _url: String) -> Box<dyn LiveUpload> {
+        Box::new(RecordingUpload {
+            calls: Arc::clone(&self.calls),
+        })
+    }
+}
+
+/// Polls `condition` every 5 ms (the established deadline-loop idiom this
+/// workspace's other kittest files use for real background-thread work —
+/// `kittest_actions.rs`/`kittest_phases.rs`/`acceptance.rs`), stepping
+/// `harness` each time so the app's own per-frame harvest/drain runs.
+/// Panics with `message` if `condition` hasn't been met within 10 s.
+fn wait_for(
+    harness: &mut Harness<'_, HummApp>,
+    message: &str,
+    mut condition: impl FnMut(&HummApp) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        harness.step();
+        if condition(harness.state()) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "timed out: {message}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn scripted_end_to_end_record_two_utterances_then_stop() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("humm.sqlite3");
+    let store = Arc::new(SqliteStore::open(&db_path).expect("open store"));
+    let export_dir = dir.path().join("export");
+    std::fs::create_dir_all(&export_dir).expect("mkdir export");
+    let model_path = dir.path().join("fake-model.bin");
+    std::fs::write(&model_path, b"never opened by the scripted engine").expect("write");
+
+    let mut settings = Settings::default();
+    settings.recording.export_enabled = true;
+    settings.recording.export_folder = Some(export_dir.clone());
+    settings.recording.upload_url = Some("http://upload.invalid/ingest".to_string());
+    // `settings.recording.mode` defaults to 0 (AppendBelow) — Buzz parity,
+    // and the mode this test's separator/export-format assertions target.
+
+    let services = services::init_with(TestDeps {
+        store: Arc::clone(&store),
+        media_dir: dir.path().join("media"),
+        model_root: dir.path().join("models"),
+        settings,
+        settings_path: dir.path().join("settings.toml"),
+        engines: Box::new(NeverCalledEngineFactory),
+        fetcher: None,
+        capabilities: Capabilities::default(),
+        artifacts: None,
+    });
+
+    // Uniform-loud script covering both batches (0.5 amplitude — well above
+    // the default `silence_threshold` of 0.0025, and uniform so
+    // `find_silence_cut_point` never cuts short, same fixture `humm-core`'s
+    // own `live::session` tests use).
+    let mock_capture = Arc::new(Mutex::new(MockCapture::new(vec![0.5; 2 * BATCH_SAMPLES])));
+    let engine_calls = Arc::new(AtomicUsize::new(0));
+    let upload_calls: Arc<Mutex<Vec<UploadCall>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let scripted_deps = RecordingDeps {
+        capture: Mutex::new(Box::new(SharedMockCapture(Arc::clone(&mock_capture)))),
+        store: Arc::clone(&store) as Arc<dyn LiveStore>,
+        model_ensurer: Arc::new(InstantEnsurer { model_path }),
+        engine_factory: Arc::new(ScriptedEngineFactory {
+            capture: Arc::clone(&mock_capture),
+            calls: Arc::clone(&engine_calls),
+        }),
+        upload_factory: Arc::new(RecordingUploadFactory {
+            calls: Arc::clone(&upload_calls),
+        }),
+    };
+
+    let mut harness = HarnessBuilder::default()
+        .with_size(egui::Vec2::new(1000.0, 600.0))
+        .build_eframe(move |_cc| {
+            let mut app = HummApp::new_for_test(services);
+            app.set_recording_deps_for_test(scripted_deps);
+            app
+        });
+    harness.step();
+
+    harness.state_mut().open_recording_window_for_test();
+    harness.step();
+    let vm_arc = harness
+        .state()
+        .recording_vm_for_test()
+        .expect("window is open");
+    let deps_arc = harness.state().recording_deps_for_test();
+
+    // Record click (`RecordingVm::on_record_clicked` is exactly what a real
+    // click on the window's own button invokes).
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    harness.step();
+
+    wait_for(&mut harness, "the second utterance to land on the panel", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            vm_arc
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .panel_text
+                .contains("utterance two")
+        }
+    });
+
+    assert_eq!(
+        vm_arc.lock().unwrap_or_else(|p| p.into_inner()).panel_text,
+        "utterance one\n\nutterance two",
+        "append-below, default separator"
+    );
+
+    // Stop click.
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    wait_for(&mut harness, "the session to stop", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            vm_arc.lock().unwrap_or_else(|p| p.into_inner()).status == RecordingStatus::Stopped
+        }
+    });
+    assert!(
+        harness.state().is_recording_window_open_for_test(),
+        "the window stays open once Stopped — it only closes on a real close request"
+    );
+
+    // -- Store: InProgress -> Completed, visible in `TasksVm`, `can_open`
+    //    admits it, 2 ordered non-overlapping raw-text segments.
+    let tasks = TasksVm::load(&store);
+    let row = tasks
+        .sorted_rows()
+        .first()
+        .expect("exactly one live session row");
+    assert_eq!(row.status, Status::Completed);
+    assert!(
+        can_open(row.status),
+        "a completed live row must open in the viewer"
+    );
+    assert!(
+        row.display_name.starts_with("Live recording <"),
+        "row name: {}",
+        row.display_name
+    );
+
+    let segments = store.get_segment_rows(row.id).expect("segments");
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0].text, "utterance one");
+    assert_eq!(segments[1].text, "utterance two");
+    assert!(
+        segments[0].start <= segments[0].end && segments[0].end <= segments[1].start,
+        "segments must be ordered and non-overlapping: {segments:?}"
+    );
+
+    // -- TXT export file, exact bytes (append-below: "text" + separator per
+    //    utterance, no rewrite pass since `export_max_entries` is 0).
+    let export_files: Vec<_> = std::fs::read_dir(&export_dir)
+        .expect("read export dir")
+        .filter_map(Result::ok)
+        .collect();
+    assert_eq!(export_files.len(), 1, "exactly one export file");
+    let export_content = std::fs::read_to_string(export_files[0].path()).expect("read export");
+    assert_eq!(export_content, "utterance one\n\nutterance two\n\n");
+
+    // -- Upload: clear at start, then one "append" transcript call per
+    //    utterance (append-below is never "replace" — that's
+    //    append-and-correct only).
+    let uploads = upload_calls
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    assert_eq!(
+        uploads,
+        vec![
+            UploadCall::Clear,
+            UploadCall::Transcript {
+                text: "utterance one".to_string(),
+                replace: false,
+            },
+            UploadCall::Transcript {
+                text: "utterance two".to_string(),
+                replace: false,
+            },
+        ]
+    );
+
+    // -- Restart survival (acceptance #4's automated half): drop and reopen
+    //    the same on-disk store — the row and its segments survive intact.
+    drop(store);
+    let reopened = SqliteStore::open(&db_path).expect("reopen store");
+    let reopened_row = reopened
+        .get_task(&row.id)
+        .expect("get_task")
+        .expect("row survives a restart");
+    assert_eq!(reopened_row.status, Status::Completed);
+    let reopened_segments = reopened
+        .get_segment_rows(row.id)
+        .expect("segments survive a restart");
+    assert_eq!(reopened_segments.len(), 2);
+    assert_eq!(reopened_segments[0].text, "utterance one");
+    assert_eq!(reopened_segments[1].text, "utterance two");
 }

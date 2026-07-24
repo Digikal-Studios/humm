@@ -63,6 +63,12 @@ use serde_json::json;
 use crate::domain::TaskKind;
 use crate::live::RecordingMode;
 
+/// The `%d-%b-%Y %H-%M-%S` datetime format shared by [`live_export_file_name`]'s
+/// `{{ date_time }}` substitution and (Task 11, spec §4) the live session
+/// row's own name (`"Live recording <%d-%b-%Y %H-%M-%S>"`) — one literal so
+/// the table row and any exported file's timestamp can never drift apart.
+pub const LIVE_DATETIME_FORMAT: &str = "%d-%b-%Y %H-%M-%S";
+
 /// Retry attempt count shared by every export read/write (Buzz's `retries: int = 5`
 /// default, `:787,824,866`).
 const RETRY_ATTEMPTS: u32 = 5;
@@ -106,7 +112,7 @@ pub fn live_export_file_name(
     now: NaiveDateTime,
 ) -> String {
     let template = template.unwrap_or(crate::export::DEFAULT_EXPORT_TEMPLATE);
-    let date_time = now.format("%d-%b-%Y %H-%M-%S").to_string();
+    let date_time = now.format(LIVE_DATETIME_FORMAT).to_string();
 
     template
         .replace("{{ input_file_name }}", "live recording")

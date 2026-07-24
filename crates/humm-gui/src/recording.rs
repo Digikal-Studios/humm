@@ -37,7 +37,10 @@ use humm_core::cancel::CancelToken;
 use humm_core::domain::{ModelSize, TaskKind};
 use humm_core::language::Language;
 use humm_core::live::{RealSleeper, Sleeper};
+use humm_core::queue::ArtifactEnsurer;
 use humm_core::settings::{RecordingSettings, Settings};
+
+use crate::live_session::{ActiveSession, LiveEngineFactory, LiveStore, PrepUpdate, UploadFactory};
 
 /// Ring-buffer capacity for the meter-only capture: ~1 s at 16 kHz (the
 /// capture adapter's own documented sizing, `humm-audio`'s `capture` module).
@@ -48,16 +51,32 @@ const RING_CAPACITY: usize = SAMPLE_RATE as usize;
 /// the polling-loop price of humm's ring-buffer threading model, spec §1.1).
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-/// Buzz `RecordingTranscriberWidget.RecordingStatus` (`:88-90`).
+/// Buzz `RecordingTranscriberWidget.RecordingStatus` (`:88-90`), extended
+/// with a third, humm-only [`RecordingStatus::Stopping`] state: Buzz encodes
+/// "stop requested, awaiting the transcriber thread's `finished`/`error`
+/// signal" as the *same* `RECORDING` status plus a disabled Record button
+/// (`stop_recording`, `:1103-1111`: `self.record_button.setDisabled(True)`);
+/// humm makes that wait an explicit state instead; every render-side
+/// enablement check that Buzz derives from "is the button disabled" derives
+/// from `status != Stopped` (options/device) or `status == Stopping`
+/// (button) here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RecordingStatus {
     /// Not recording — the meter-only capture may be running, options/device
     /// controls are enabled.
     #[default]
     Stopped,
-    /// Recording is (nominally, pending Task 11) in progress — options/
-    /// device/mic-label are disabled, the presentation bar placeholder shows.
+    /// A session is preparing (model ensure/engine load) or actively
+    /// transcribing. Options/device/mic-label are disabled; the Record
+    /// button shows "Stop" and stays clickable (clicking it, or requesting
+    /// model-download/engine-load cancellation, both move to
+    /// [`RecordingStatus::Stopping`]).
     Recording,
+    /// Stop was requested (button click, or a deferred window close, spec
+    /// §2.1's two-phase close): the session's cooperative-cancel token has
+    /// been tripped and the UI is waiting for its `Stopped` acknowledgement
+    /// (Buzz `stop_recording`: Record button disabled until `finished`).
+    Stopping,
 }
 
 /// A Record/Stop transition the click just made, latched on
@@ -159,22 +178,41 @@ pub fn realtime_fit_warning_visible(
         .is_some_and(|ratio| *ratio < 1.0)
 }
 
-/// The bundle of adapter handles the recording window's render closure
-/// needs. Only `capture` this task (F-060 skeleton); the engine/session/store
-/// seams Task 11 needs arrive there, per the task brief — adding them now
-/// would be seam creep with nothing yet to plug into them.
+/// The bundle of adapter handles the recording window's render closure and
+/// the live-session thread (`crate::live_session::run_live_session`) need.
 ///
-/// `Mutex`-wrapped (not `Arc`-cloned per open, like [`crate::viewer::ViewerDeps`]'s
-/// read-only adapters) because [`AudioCapture::start`] takes `&mut self`: the
-/// single recording window shares one adapter instance across
-/// open/device-change/stop calls, so interior mutability is required here
-/// where the read-only viewer adapters didn't need it.
+/// `capture` is `Mutex`-wrapped (not `Arc`-cloned per open, like
+/// [`crate::viewer::ViewerDeps`]'s read-only adapters) because
+/// [`AudioCapture::start`] takes `&mut self`: the single recording window
+/// (meter-only capture while stopped) and, once started, the live-session
+/// thread (Task 11) share one adapter instance across open/device-change/
+/// record/stop calls, so interior mutability is required here where the
+/// read-only viewer adapters didn't need it. The two capture users are never
+/// concurrent — `RecordingVm::on_record_clicked` always tears the meter-only
+/// capture down *before* a session start is requested, and the session
+/// thread only restarts it (`RecordingVm::finish_stopping`) after its own
+/// `capture_handle.stop()` has already run.
 pub struct RecordingDeps {
     /// The audio-input capture adapter (`humm_audio::CpalCapture` in
     /// production, `humm_audio::MockCapture` in tests — never the reverse,
     /// since a real `CpalCapture::start` opens an actual input stream and
     /// this crate's kittest coverage must never touch real audio hardware).
     pub capture: Mutex<Box<dyn AudioCapture>>,
+    /// The live-session store seam (real `humm_store::SqliteStore` in
+    /// production and kittest — already a real, often temp-file, store even
+    /// in test builds).
+    pub store: Arc<dyn LiveStore>,
+    /// The model artifact ensurer (real
+    /// `crate::engine_factory::DownloaderEnsurer` in production; a
+    /// network-free fake in kittest — Task 11's brief: "do NOT bind TCP in
+    /// kittest").
+    pub model_ensurer: Arc<dyn ArtifactEnsurer>,
+    /// The live engine loader (real `crate::live_session::RealLiveEngineFactory`
+    /// in production; a scripted fake in tests).
+    pub engine_factory: Arc<dyn LiveEngineFactory>,
+    /// The upload-client builder (real `crate::live_session::RealUploadFactory`
+    /// in production; a network-free recording fake in kittest).
+    pub upload_factory: Arc<dyn UploadFactory>,
 }
 
 /// The pure accumulate-and-average logic behind Buzz's
@@ -266,8 +304,7 @@ fn spawn_meter_only_drain(
 /// `Arc<Mutex<_>>` (the viewer/resizer windows' own shape) since the deferred
 /// viewport's render closure needs shared access across frames.
 pub struct RecordingVm {
-    /// Stopped, or (nominally) Recording — see the module doc for this
-    /// task's scope.
+    /// Stopped, Recording, or Stopping — see [`RecordingStatus`]'s doc.
     pub status: RecordingStatus,
     /// Every available input device, refreshed only at [`Self::open`] (Buzz
     /// itself never re-enumerates after construction either).
@@ -288,27 +325,54 @@ pub struct RecordingVm {
     /// consumes and clears it. Harmless while unconsumed (this task never
     /// reads it back).
     pub advanced_requested: bool,
-    /// The read-only transcription panel text — empty (placeholder shown)
-    /// until Task 11 starts filling it with live utterances.
+    /// The read-only transcription panel text — the live session thread's
+    /// most recent [`crate::live_session::SessionMessage::PanelText`] (a
+    /// whole-panel replace), applied verbatim.
     pub panel_text: String,
     /// Presentation-bar placeholder visibility (Buzz
-    /// `presentation_options_bar` — real controls are a later task; this
-    /// task only flips the same show/hide Buzz's own click handler does).
+    /// `presentation_options_bar` — real controls are Task 12's).
     pub presentation_bar_visible: bool,
     /// Copy-bar placeholder visibility (Buzz `copy_actions_bar`).
     pub copy_bar_visible: bool,
     /// The Record/Stop transition the click just made, for `app.rs`'s
-    /// harvest (Task 11's seam — see the module doc).
+    /// harvest (`app.rs::harvest_recording_intent` starts/signals the real
+    /// session).
     pub pending_intent: Option<RecordingIntent>,
     /// Set by the deferred-viewport render closure when the OS window's
-    /// close is requested while [`RecordingStatus::Stopped`] (a close while
-    /// Recording is deferred this task, spec §2.1 — Task 11 needs the
-    /// session-thread-finish gate to close then). The app harvests this each
-    /// frame to persist sticky prefs and drop the window.
+    /// close is requested while [`RecordingStatus::Stopped`] (an immediate
+    /// close) **or** once a deferred close (spec §2.1's two-phase close,
+    /// see [`Self::pending_close`]) has reached [`RecordingStatus::Stopped`]
+    /// again. The app harvests this each frame to persist sticky prefs and
+    /// drop the window (`app.rs::harvest_recording_close`, unchanged from
+    /// Task 10).
     pub close_requested: bool,
     /// Set when the window is re-invoked (toolbar/Ctrl+R) while already open —
     /// focus it instead of duplicating (the viewer's own deviation #1 shape).
     pub focus_requested: bool,
+    /// Set when an OS window-close was requested while
+    /// [`RecordingStatus::Recording`]/[`RecordingStatus::Stopping`] (spec
+    /// §2.1's two-phase close, Buzz `closeEvent`/`_closing`): the close is
+    /// deferred until the active session's `Stopped` acknowledgement
+    /// arrives, at which point `app.rs` sets [`Self::close_requested`]
+    /// instead of restoring the ordinary stopped-state UI (skipping
+    /// [`Self::finish_stopping`]'s meter-only-capture restart, since the
+    /// window is about to close anyway — Buzz's own `_do_close` skips
+    /// `set_recording_status_stopped` on this path too).
+    pub pending_close: bool,
+    /// The model-download/engine-load progress row (spec §2.1: "shown
+    /// inline in the window"), or `None` once the session is actually
+    /// transcribing (or hasn't started).
+    pub prep: Option<PrepUpdate>,
+    /// Buzz's error-dialog text (byte-exact,
+    /// [`crate::live_session::recording_error_dialog_text`]), or `None`
+    /// while no error is showing. The render fn shows this as a dismissible
+    /// `egui::Modal`; dismissing clears it.
+    pub error_dialog: Option<String>,
+
+    /// The active live session, `None` while [`RecordingStatus::Stopped`].
+    /// Owned by `app.rs`'s harvest (`start`/`stop`/drain) — see
+    /// `crate::live_session`'s module doc for the threading split.
+    pub(crate) session: Option<ActiveSession>,
 
     meter_only_handle: Option<Box<dyn CaptureHandle>>,
     meter_only_cancel: Option<CancelToken>,
@@ -353,6 +417,10 @@ impl RecordingVm {
             pending_intent: None,
             close_requested: false,
             focus_requested: false,
+            pending_close: false,
+            prep: None,
+            error_dialog: None,
+            session: None,
             meter_only_handle: None,
             meter_only_cancel: None,
             meter_only_thread: None,
@@ -373,16 +441,33 @@ impl RecordingVm {
     }
 
     /// Record/Stop button clicked (Buzz `on_record_button_clicked`,
-    /// `:591-621`). Flips the full UI state machine this task (see the
-    /// module doc): Stopped→Recording tears down the meter-only capture,
-    /// resets the meter (Buzz `audio_meter_widget.reset_amplitude()`, called
-    /// *before* the transcriber starts), disables the options/device
-    /// controls (via `status`, which the render fn reads), and shows the
-    /// presentation-bar placeholder; Recording→Stopped flips back
-    /// immediately (no ack-wait — there is no real session yet to wait on)
-    /// and restarts the meter-only capture. Either way, latches
-    /// [`Self::pending_intent`] for Task 11's harvest.
-    pub fn on_record_clicked(&mut self, deps: &RecordingDeps) {
+    /// `:591-621`).
+    ///
+    /// Stopped→Recording: tears down the meter-only capture, resets the
+    /// meter (Buzz `audio_meter_widget.reset_amplitude()`, called *before*
+    /// the transcriber starts), clears the panel/any stale error dialog,
+    /// disables the options/device controls (via `status`, which the render
+    /// fn reads), and shows the presentation-bar placeholder. Latches
+    /// [`Self::pending_intent`] so `app.rs`'s harvest starts the real
+    /// session (`crate::live_session::spawn_live_session`).
+    ///
+    /// Recording→Stopping: latches a stop intent and moves to
+    /// [`RecordingStatus::Stopping`] — **no** UI restore and **no**
+    /// meter-only-capture restart here (Task 10's original behavior):
+    /// spec §2.1/Buzz `stop_recording` disables the button and waits for
+    /// the session thread's acknowledgement; `app.rs`'s harvest cancels the
+    /// active session and, once its `Stopped` message arrives, calls
+    /// [`Self::finish_stopping`] to do the restore this method used to do
+    /// eagerly.
+    ///
+    /// Stopping→Stopping: a defensive no-op (the button is disabled in this
+    /// state; nothing double-latches a second stop intent).
+    ///
+    /// `_deps` is unused now that the Recording→Stopping transition no
+    /// longer restarts the meter-only capture eagerly (see
+    /// [`Self::finish_stopping`]) — kept in the signature (rather than
+    /// removed) so every existing call site (views/tests) stays unchanged.
+    pub fn on_record_clicked(&mut self, _deps: &RecordingDeps) {
         match self.status {
             RecordingStatus::Stopped => {
                 self.stop_meter_only_capture();
@@ -391,16 +476,34 @@ impl RecordingVm {
                 self.status = RecordingStatus::Recording;
                 self.presentation_bar_visible = true;
                 self.copy_bar_visible = false;
+                self.panel_text.clear();
+                self.error_dialog = None;
+                self.prep = None;
                 self.pending_intent = Some(RecordingIntent::StartRequested);
             }
             RecordingStatus::Recording => {
-                self.status = RecordingStatus::Stopped;
-                self.presentation_bar_visible = false;
-                self.copy_bar_visible = true;
+                self.status = RecordingStatus::Stopping;
                 self.pending_intent = Some(RecordingIntent::StopRequested);
-                self.start_meter_only_capture(deps);
             }
+            RecordingStatus::Stopping => {}
         }
+    }
+
+    /// The session thread's `Stopped` acknowledgement has arrived (Buzz
+    /// `on_transcriber_finished`/`on_transcriber_error` ->
+    /// `set_recording_status_stopped`, `:755-763`): restores the ordinary
+    /// stopped-state UI (options/device re-enabled via `status`,
+    /// presentation bar hidden, copy bar shown) and restarts the meter-only
+    /// capture. Not called when [`Self::pending_close`] is set — the window
+    /// is closing anyway, so `app.rs` sets [`Self::close_requested`]
+    /// instead (Buzz's `_do_close` skips this same restore on its
+    /// close-while-recording path).
+    pub fn finish_stopping(&mut self, deps: &RecordingDeps) {
+        self.status = RecordingStatus::Stopped;
+        self.presentation_bar_visible = false;
+        self.copy_bar_visible = true;
+        self.prep = None;
+        self.start_meter_only_capture(deps);
     }
 
     /// Window close while stopped (Buzz `_do_close`,
@@ -409,9 +512,13 @@ impl RecordingVm {
     /// `settings` (the caller persists `settings` to disk — this only
     /// mutates the in-memory struct, matching
     /// [`crate::views::options_sheet::SheetState::write_to`]'s own split of
-    /// concerns).
+    /// concerns). Also drops any lingering [`Self::session`] handle
+    /// (defensive — by the time this runs the session has already sent its
+    /// `Stopped` message and `app.rs` has taken it, so this is normally a
+    /// no-op).
     pub fn close(&mut self, settings: &mut RecordingSettings) {
         self.stop_meter_only_capture();
+        self.session = None;
         self.options.write_to(settings);
     }
 
@@ -653,11 +760,84 @@ mod tests {
 
     // -- RecordingVm state machine (MockCapture-backed) --------------------------
 
+    /// A [`LiveStore`] that panics if ever called — nothing in this module's
+    /// tests drives a real session (that's `live_session`'s own unit tests
+    /// and the kittest end-to-end coverage); this is only here so
+    /// [`RecordingDeps`] can be constructed at all.
+    struct NeverCalledStore;
+    impl LiveStore for NeverCalledStore {
+        fn insert_live_session(
+            &self,
+            _name: &str,
+            _options: &humm_core::domain::TranscriptionOptions,
+        ) -> Result<humm_core::domain::TranscriptionId, humm_core::error::StoreError> {
+            unreachable!("recording.rs's own tests never start a real session")
+        }
+        fn append_live_segment(
+            &self,
+            _id: humm_core::domain::TranscriptionId,
+            _start: humm_core::domain::Millis,
+            _end: humm_core::domain::Millis,
+            _text: &str,
+        ) -> Result<(), humm_core::error::StoreError> {
+            unreachable!("recording.rs's own tests never start a real session")
+        }
+        fn complete_live_session(
+            &self,
+            _id: humm_core::domain::TranscriptionId,
+        ) -> Result<(), humm_core::error::StoreError> {
+            unreachable!("recording.rs's own tests never start a real session")
+        }
+    }
+
+    struct NeverCalledEnsurer;
+    impl ArtifactEnsurer for NeverCalledEnsurer {
+        fn ensure_model(
+            &self,
+            _model: &humm_core::domain::ModelSpec,
+            _progress: &mut dyn FnMut(humm_core::models::download::DownloadProgress),
+            _cancel: &CancelToken,
+        ) -> Result<std::path::PathBuf, humm_core::error::CoreError> {
+            unreachable!("recording.rs's own tests never start a real session")
+        }
+
+        fn ensure_vad(
+            &self,
+            _progress: &mut dyn FnMut(humm_core::models::download::DownloadProgress),
+            _cancel: &CancelToken,
+        ) -> Option<std::path::PathBuf> {
+            unreachable!("recording.rs's own tests never start a real session")
+        }
+    }
+
+    struct NeverCalledEngineFactory;
+    impl LiveEngineFactory for NeverCalledEngineFactory {
+        fn load(
+            &self,
+            _model_path: &std::path::Path,
+            _use_gpu: bool,
+        ) -> Result<Box<dyn crate::live_session::LiveEngineSession>, humm_core::error::EngineError>
+        {
+            unreachable!("recording.rs's own tests never start a real session")
+        }
+    }
+
+    struct NeverCalledUploadFactory;
+    impl UploadFactory for NeverCalledUploadFactory {
+        fn build(&self, _url: String) -> Box<dyn crate::live_session::LiveUpload> {
+            unreachable!("recording.rs's own tests never start a real session")
+        }
+    }
+
     fn mock_deps(devices: Vec<AudioDevice>) -> RecordingDeps {
         RecordingDeps {
             capture: Mutex::new(Box::new(
                 humm_audio::MockCapture::new(Vec::new()).with_devices(devices),
             )),
+            store: Arc::new(NeverCalledStore),
+            model_ensurer: Arc::new(NeverCalledEnsurer),
+            engine_factory: Arc::new(NeverCalledEngineFactory),
+            upload_factory: Arc::new(NeverCalledUploadFactory),
         }
     }
 
@@ -683,17 +863,52 @@ mod tests {
     }
 
     #[test]
-    fn second_record_click_flips_recording_back_to_stopped_and_latches_stop_intent() {
+    fn second_record_click_moves_recording_to_stopping_and_latches_stop_intent() {
+        // Two-phase stop (spec §2.1, Task 11): the click only latches the
+        // stop intent and moves to `Stopping` — the UI restore (bars,
+        // meter-only capture) waits for `finish_stopping`, called once the
+        // session thread's `Stopped` message arrives (`app.rs`'s harvest).
         let deps = mock_deps(vec![device("a", "Device A", true)]);
         let mut vm = RecordingVm::open(&deps, &Settings::default());
         vm.on_record_clicked(&deps);
 
         vm.on_record_clicked(&deps);
 
-        assert_eq!(vm.status, RecordingStatus::Stopped);
+        assert_eq!(vm.status, RecordingStatus::Stopping);
         assert_eq!(vm.pending_intent, Some(RecordingIntent::StopRequested));
+        // Bars are unchanged from the Recording state — still mid-stop.
+        assert!(vm.presentation_bar_visible);
+        assert!(!vm.copy_bar_visible);
+    }
+
+    #[test]
+    fn a_third_click_while_stopping_is_a_defensive_no_op() {
+        let deps = mock_deps(vec![device("a", "Device A", true)]);
+        let mut vm = RecordingVm::open(&deps, &Settings::default());
+        vm.on_record_clicked(&deps); // -> Recording
+        vm.on_record_clicked(&deps); // -> Stopping
+        vm.pending_intent = None;
+
+        vm.on_record_clicked(&deps);
+
+        assert_eq!(vm.status, RecordingStatus::Stopping);
+        assert_eq!(vm.pending_intent, None);
+    }
+
+    #[test]
+    fn finish_stopping_restores_the_stopped_ui_and_restarts_the_meter_only_capture() {
+        let deps = mock_deps(vec![device("a", "Device A", true)]);
+        let mut vm = RecordingVm::open(&deps, &Settings::default());
+        vm.on_record_clicked(&deps); // -> Recording
+        vm.on_record_clicked(&deps); // -> Stopping
+        vm.prep = Some(crate::live_session::PrepUpdate::LoadingEngine);
+
+        vm.finish_stopping(&deps);
+
+        assert_eq!(vm.status, RecordingStatus::Stopped);
         assert!(!vm.presentation_bar_visible);
         assert!(vm.copy_bar_visible);
+        assert_eq!(vm.prep, None);
     }
 
     #[test]

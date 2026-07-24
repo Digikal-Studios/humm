@@ -11,14 +11,25 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use humm_core::boundary::{AudioCapture, TaskStore};
-use humm_core::domain::{Segment, Source, Status, TranscriptionId};
-use humm_core::queue::{QueueHandle, TaskEvent, TaskEventKind};
+use humm_core::cancel::CancelToken;
+use humm_core::domain::{ModelSpec, Segment, Source, Status, TranscriptionId};
+use humm_core::env::use_gpu_from_env;
+use humm_core::error::{CoreError, EngineError};
+use humm_core::live::{RecordingMode, SessionConfig, effective_upload_url};
+use humm_core::models::download::DownloadProgress;
+use humm_core::queue::{ArtifactEnsurer, QueueHandle, TaskEvent, TaskEventKind};
 use humm_core::settings::{FileTranscriberSettings, GuiSettings, ViewerGeometry};
 use humm_media::{FfmpegDecoder, FfmpegVideoStreamer, FfprobeProber};
+use humm_whisper::LiveOptions;
 
+use crate::engine_factory::DownloaderEnsurer;
 use crate::events::{self, SharedEventQueue};
 use crate::i18n::tr;
 use crate::import::{FileDialogs, ImportRequest, RfdFileDialogs, scan_folder};
+use crate::live_session::{
+    self, LiveEngineFactory, LiveEngineSession, LiveSessionRequest, LiveStore, LiveUpload,
+    SessionMessage, UploadFactory,
+};
 use crate::recording::{RecordingDeps, RecordingStatus, RecordingVm};
 use crate::services::{self, Services, UpdateNotice};
 use crate::shortcuts::ShortcutMap;
@@ -134,6 +145,13 @@ pub struct HummApp {
     /// just injected at construction here since [`AudioCapture::start`]
     /// needs `&mut self`).
     recording_deps: Arc<RecordingDeps>,
+    /// Whether the live-recording session's engine load may use GPU
+    /// (Metal/CoreML) acceleration — resolved once at startup from
+    /// `HUMM_FORCE_CPU` (`Self::new`, mirroring `services::init`'s own
+    /// `use_gpu_from_env`; always `false` in [`Self::new_for_test`], which
+    /// never reads real process env — final-review fix 8's own rule applied
+    /// here too).
+    use_gpu: bool,
     /// GUI-internal event channel (design spec §1.2): resize/merge workers
     /// (Task 12) send [`AppEvent`]s that the app drains each frame. The sender
     /// is clonable into those workers; dormant until Task 12 wires a sender.
@@ -228,12 +246,27 @@ impl HummApp {
                 .as_deref(),
             std::env::var("HUMM_SMOKE_OPEN_VIEWER").ok().as_deref(),
         );
+        let use_gpu = use_gpu_from_env(std::env::var("HUMM_FORCE_CPU").ok().as_deref());
+        // Mirrors `services::init`'s own `DownloaderEnsurer` construction
+        // (`root`/`settings`/`coreml`) exactly — the queue's instance is
+        // already consumed into its `RunnerDeps` and not re-exposed from
+        // `Services`, so the recording window gets its own, otherwise
+        // identical, instance.
+        let model_ensurer = Arc::new(DownloaderEnsurer {
+            root: services.model_root.clone(),
+            settings: Arc::clone(&services.settings),
+            coreml: cfg!(all(target_os = "macos", target_arch = "aarch64")),
+        });
         Self::build(
             services,
             Some(event_queue),
             argv_import,
             smoke_hooks,
             Box::new(humm_audio::CpalCapture::new()),
+            model_ensurer,
+            Arc::new(live_session::RealLiveEngineFactory) as Arc<dyn LiveEngineFactory>,
+            Arc::new(live_session::RealUploadFactory) as Arc<dyn UploadFactory>,
+            use_gpu,
         )
     }
 
@@ -265,24 +298,52 @@ impl HummApp {
         // hardware-free stand-in that still lists its own default "Mock
         // Microphone" device, so device-selection/meter-only-capture logic
         // is still exercised end to end.
+        // Never a real `LiveEngineFactory`/`UploadFactory`/`ArtifactEnsurer`
+        // either (`Unwired*` below): a kittest file that opens the recording
+        // window but never clicks Record is unaffected; one that clicks
+        // Record without first calling `set_recording_deps_for_test` gets an
+        // actionable "not wired for this test" error/panic instead of
+        // silently reaching the real network (Global Constraint 3).
         Self::build(
             services,
             None,
             Vec::new(),
             SmokeHooks::default(),
             Box::new(humm_audio::MockCapture::new(Vec::new())),
+            Arc::new(UnwiredModelEnsurer) as Arc<dyn ArtifactEnsurer>,
+            Arc::new(UnwiredLiveEngineFactory) as Arc<dyn LiveEngineFactory>,
+            Arc::new(UnwiredUploadFactory) as Arc<dyn UploadFactory>,
+            false,
         )
+    }
+
+    /// Test-only seam: replaces the recording window's adapter bundle
+    /// (`self.recording_deps`) wholesale — the hook a kittest file uses to
+    /// script a full live session (`crate::recording::RecordingDeps`'s
+    /// `store`/`model_ensurer`/`engine_factory`/`upload_factory`, plus a
+    /// scripted `capture`) without touching real hardware, disk models, or
+    /// the network. Must be called before [`Self::open_recording_window_for_test`]
+    /// (or the toolbar/Ctrl+R equivalent) — swapping it out from under an
+    /// already-open window is unsupported (no open window holds this Arc
+    /// across the swap in any test in this workspace).
+    pub fn set_recording_deps_for_test(&mut self, deps: RecordingDeps) {
+        self.recording_deps = Arc::new(deps);
     }
 
     /// Shared constructor body: loads the task table's view-model from
     /// `services.store` and restores its persisted layout/sort from
     /// `services.settings.gui` before the first frame ever renders.
+    #[allow(clippy::too_many_arguments)]
     fn build(
         services: Services,
         event_queue: Option<SharedEventQueue>,
         pending_argv_import: Vec<PathBuf>,
         smoke_hooks: SmokeHooks,
         capture: Box<dyn AudioCapture>,
+        model_ensurer: Arc<dyn ArtifactEnsurer>,
+        engine_factory: Arc<dyn LiveEngineFactory>,
+        upload_factory: Arc<dyn UploadFactory>,
+        use_gpu: bool,
     ) -> Self {
         let (gui_settings, stored_available_version) = {
             let settings = services
@@ -321,14 +382,19 @@ impl HummApp {
             audio_output: Arc::new(humm_audio::CpalOutput::new()),
             dialogs: Arc::new(RfdFileDialogs),
         });
-        // The recording window's adapter bundle (F-060): `capture` is real
-        // (`CpalCapture`) or scripted (`MockCapture`) per the constructor
-        // that called `build` (`Self::new`/`Self::new_for_test`) — see
-        // `recording_deps`'s own field doc for why the real/fake split
-        // happens at injection here rather than being always-real like
-        // `viewer_deps`.
+        // The recording window's adapter bundle (F-060/F-061/F-064, Q-10):
+        // `capture`/`model_ensurer`/`engine_factory`/`upload_factory` are
+        // real or scripted per the constructor that called `build`
+        // (`Self::new`/`Self::new_for_test`) — see `recording_deps`'s own
+        // field doc. `store` is always the *real* `services.store` (already
+        // a real, often temp-file, `SqliteStore` even under `new_for_test`
+        // — see `services::TestDeps`).
         let recording_deps = Arc::new(RecordingDeps {
             capture: Mutex::new(capture),
+            store: Arc::clone(&services.store) as Arc<dyn LiveStore>,
+            model_ensurer,
+            engine_factory,
+            upload_factory,
         });
         let (app_event_tx, app_event_rx) = mpsc::channel();
 
@@ -368,6 +434,7 @@ impl HummApp {
             viewer_deps,
             recording: None,
             recording_deps,
+            use_gpu,
             app_event_tx,
             app_event_rx,
             action_state: ActionState {
@@ -1732,15 +1799,20 @@ impl HummApp {
     /// [`crate::views::recording::recording_ui`] never locks `Settings`
     /// itself, matching `options_sheet::ui`'s own convention).
     ///
-    /// A close request while [`RecordingStatus::Stopped`] latches
-    /// `close_requested` for [`Self::harvest_recording_close`]; while
-    /// [`RecordingStatus::Recording`] it is vetoed
-    /// (`ViewportCommand::CancelClose`) — Task 10's scope stops at the UI
-    /// state machine (see `recording.rs`'s module doc): there is no real
-    /// session thread yet whose finish this could wait for (spec §2.1's
-    /// "defer the close" gate), so the safest interim behavior is simply not
-    /// closing while (nominally) recording rather than silently discarding
-    /// it.
+    /// Close-while-recording is the spec §2.1 / Buzz `closeEvent` two-phase
+    /// deferral: a close request while [`RecordingStatus::Stopped`] latches
+    /// `close_requested` immediately for [`Self::harvest_recording_close`];
+    /// while [`RecordingStatus::Recording`] it instead latches
+    /// [`RecordingVm::pending_close`], moves to
+    /// [`RecordingStatus::Stopping`], and latches a stop intent (the exact
+    /// same intent a Stop click would) — `Self::harvest_recording_intent`
+    /// cancels the active session, and once its `Stopped` message arrives
+    /// (`Self::drain_live_session`), `pending_close` makes that handler set
+    /// `close_requested` instead of restoring the stopped-state UI. While
+    /// already [`RecordingStatus::Stopping`], a close request just latches
+    /// `pending_close` (the stop is already in flight). Every branch that
+    /// doesn't allow an immediate close sends `CancelClose` so the OS window
+    /// itself never disappears out from under the deferred logic.
     fn show_recording_viewport(&mut self, ctx: &egui::Context) {
         let Some(vm_arc) = &self.recording else {
             return;
@@ -1780,10 +1852,21 @@ impl HummApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
                 if ctx.input(|input| input.viewport().close_requested()) {
-                    if vm.status == RecordingStatus::Stopped {
-                        vm.close_requested = true;
-                    } else {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    match vm.status {
+                        RecordingStatus::Stopped => {
+                            vm.close_requested = true;
+                        }
+                        RecordingStatus::Recording => {
+                            vm.pending_close = true;
+                            vm.status = RecordingStatus::Stopping;
+                            vm.pending_intent =
+                                Some(crate::recording::RecordingIntent::StopRequested);
+                            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                        }
+                        RecordingStatus::Stopping => {
+                            vm.pending_close = true;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                        }
                     }
                 }
             },
@@ -1820,6 +1903,245 @@ impl HummApp {
             if let Err(err) = settings.save(&self.services.settings_path) {
                 log::warn!("could not persist recording sticky prefs: {err}");
             }
+        }
+    }
+
+    /// Harvests `RecordingVm::pending_intent` — the click seam Task 10 left
+    /// (`recording.rs`'s module doc), now consumed for real: `StartRequested`
+    /// (Stopped→Recording, including the deferred-close-triggered path,
+    /// `Self::show_recording_viewport`) builds a [`LiveSessionRequest`] from
+    /// the window's live options + `settings.recording` and spawns the
+    /// session; `StopRequested` (Recording→Stopping) cancels the active
+    /// session's cooperative-stop token — a no-op if none is active (a Stop
+    /// intent latched before `StartRequested` was ever harvested, which
+    /// [`RecordingVm::on_record_clicked`]'s own state machine makes
+    /// unreachable, but defensive regardless).
+    fn harvest_recording_intent(&mut self, ctx: &egui::Context) {
+        let Some(vm_arc) = self.recording.clone() else {
+            return;
+        };
+        let intent = {
+            let mut vm = vm_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            vm.pending_intent.take()
+        };
+        match intent {
+            Some(crate::recording::RecordingIntent::StartRequested) => {
+                self.start_live_session(&vm_arc, ctx);
+            }
+            Some(crate::recording::RecordingIntent::StopRequested) => {
+                let vm = vm_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(session) = &vm.session {
+                    session.cancel.cancel();
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Builds a [`LiveSessionRequest`] from `vm`'s live options snapshot and
+    /// the current `settings.recording`/`HUMM_UPLOAD_URL`, and spawns it
+    /// (`crate::live_session::spawn_live_session`). The live options — model
+    /// size/task/language/prompt, and the selected device — come from the
+    /// **VM**, not `settings.recording` directly: the options group reflects
+    /// live, possibly-just-edited selections, and `settings.recording` is
+    /// only the sticky *prefill/save* target (Buzz: `self.transcription_options`
+    /// is the group box's live state; matches `recording_transcriber_widget.py`'s
+    /// own split).
+    fn start_live_session(&mut self, vm_arc: &Arc<Mutex<RecordingVm>>, ctx: &egui::Context) {
+        let (device_id, options, meter) = {
+            let vm = vm_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                vm.selected_device.clone(),
+                vm.options.clone(),
+                Arc::clone(&vm.meter),
+            )
+        };
+        let recording_settings = {
+            let settings = self
+                .services
+                .settings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            settings.recording.clone()
+        };
+
+        let model = ModelSpec {
+            size: options.model_size,
+            hf_repo: None,
+        };
+        let live_options = LiveOptions {
+            language: options.language,
+            task: options.task,
+            temperature: humm_core::domain::DEFAULT_TEMPERATURE.to_vec(),
+            threads: None,
+        };
+        let mode = RecordingMode::from_index(recording_settings.mode);
+        let session_config = SessionConfig {
+            mode,
+            transcription_step_secs: recording_settings.transcription_step,
+            silence_threshold: recording_settings.silence_threshold,
+            initial_prompt: options.initial_prompt.clone(),
+        };
+        let export = live_session::export_request_from_settings(&recording_settings);
+        let upload_url = effective_upload_url(
+            std::env::var("HUMM_UPLOAD_URL").ok().as_deref(),
+            recording_settings.upload_url.as_deref(),
+        );
+        let session_name = live_session::live_session_name(chrono::Local::now().naive_local());
+        let options_snapshot = humm_core::domain::TranscriptionOptions {
+            language: options.language,
+            task: options.task,
+            model: model.clone(),
+            word_timestamps: false,
+            initial_prompt: options.initial_prompt.clone(),
+            temperature: humm_core::domain::DEFAULT_TEMPERATURE.to_vec(),
+        };
+
+        let request = LiveSessionRequest {
+            device_id,
+            model,
+            use_gpu: self.use_gpu,
+            live_options,
+            session_config,
+            separator: recording_settings.line_separator.clone(),
+            hide_unconfirmed: recording_settings.hide_unconfirmed,
+            options_snapshot,
+            session_name,
+            export,
+            upload_url,
+            meter,
+        };
+
+        let session = live_session::spawn_live_session(Arc::clone(&self.recording_deps), request);
+        let mut vm = vm_arc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        vm.session = Some(session);
+        ctx.request_repaint();
+    }
+
+    /// Drains the active session's [`SessionMessage`] channel (non-blocking
+    /// `try_iter`, mirroring `models_ui::poll_downloads`'s own per-frame poll
+    /// shape) and applies each message — see `crate::live_session`'s module
+    /// doc for what each variant does and doesn't carry (in particular: no
+    /// store write happens here, only the one `TasksVm::refresh_row` *read*).
+    /// A no-op while no session is active.
+    fn drain_live_session(&mut self, ctx: &egui::Context) {
+        let Some(vm_arc) = self.recording.clone() else {
+            return;
+        };
+        let messages: Vec<SessionMessage> = {
+            let vm = vm_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match &vm.session {
+                Some(session) => session.rx.try_iter().collect(),
+                None => Vec::new(),
+            }
+        };
+        if messages.is_empty() {
+            return;
+        }
+        for message in messages {
+            match message {
+                SessionMessage::Preparing(update) => {
+                    let mut vm = vm_arc
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    vm.prep = Some(update);
+                }
+                SessionMessage::TableRefresh(id) => {
+                    self.tasks.refresh_row(id, &self.services.store);
+                }
+                SessionMessage::StoreWriteFailed { operation, detail } => {
+                    log::warn!("live session store write failed ({operation}): {detail}");
+                    self.action_state.banner.on_store_write_failed();
+                }
+                SessionMessage::Ready => {
+                    let mut vm = vm_arc
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    // Buzz `on_model_loaded` -> `reset_recording_controls()`:
+                    // clears the progress row once the model/capture are
+                    // actually ready, not on the first utterance (which
+                    // silence could delay indefinitely).
+                    vm.prep = None;
+                }
+                SessionMessage::PanelText(text) => {
+                    let mut vm = vm_arc
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    vm.panel_text = text;
+                }
+                SessionMessage::Error(cause) => {
+                    let mut vm = vm_arc
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    vm.error_dialog = Some(live_session::recording_error_dialog_text(&cause));
+                }
+                SessionMessage::Stopped { measurement } => {
+                    self.finish_live_session(&vm_arc, measurement);
+                }
+            }
+        }
+        ctx.request_repaint();
+    }
+
+    /// The session thread's terminal `Stopped` message (Buzz
+    /// `on_transcriber_finished`/`on_transcriber_error` ->
+    /// `set_recording_status_stopped`): persists this session's measured
+    /// realtime ratio (spec §2.8, last-run-wins per model size — a save
+    /// failure is logged, not fatal, same non-fatal-settings-write contract
+    /// as [`Self::persist_layout_if_changed`]), drops the [`ActiveSession`]
+    /// handle (detaching its thread — see the handle's own doc for why this
+    /// is never a blocking `.join()`), then either finishes closing the
+    /// window ([`RecordingVm::pending_close`] was set — a deferred close,
+    /// `Self::show_recording_viewport`) or restores the ordinary
+    /// stopped-state UI ([`RecordingVm::finish_stopping`]).
+    ///
+    /// [`ActiveSession`]: crate::live_session::ActiveSession
+    fn finish_live_session(
+        &mut self,
+        vm_arc: &Arc<Mutex<RecordingVm>>,
+        measurement: Option<humm_core::live::LiveMeasurement>,
+    ) {
+        let model_size = {
+            let vm = vm_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            vm.options.model_size
+        };
+        if let Some(ratio) = measurement.and_then(|m| m.realtime_ratio()) {
+            let mut settings = self
+                .services
+                .settings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            live_session::record_measured_speed(
+                &mut settings.recording.measured_speed,
+                model_size,
+                ratio,
+            );
+            if let Err(err) = settings.save(&self.services.settings_path) {
+                log::warn!("could not persist measured live-transcription speed: {err}");
+            }
+        }
+
+        let mut vm = vm_arc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        vm.session = None;
+        if vm.pending_close {
+            vm.close_requested = true;
+        } else {
+            let deps = Arc::clone(&self.recording_deps);
+            vm.finish_stopping(&deps);
         }
     }
 
@@ -1941,6 +2263,15 @@ impl HummApp {
     pub fn is_recording_window_open_for_test(&self) -> bool {
         self.recording.is_some()
     }
+
+    /// The recording window's adapter bundle (Task 11) — so a scripted
+    /// end-to-end test can drive `RecordingVm::on_record_clicked` directly
+    /// with the exact same `RecordingDeps` `app.rs`'s own harvest uses (the
+    /// recording window's own Record/Stop button lives inside a deferred
+    /// viewport a kittest `Harness` cannot click; see the module doc).
+    pub fn recording_deps_for_test(&self) -> Arc<RecordingDeps> {
+        Arc::clone(&self.recording_deps)
+    }
 }
 
 /// Buzz's Restart gate (`transcription_tasks_table_widget.py:696-725`):
@@ -1989,6 +2320,80 @@ fn resizer_viewport_builder(title: &str) -> egui::ViewportBuilder {
         .with_title(title)
         .with_min_inner_size([600.0, 300.0])
         .with_inner_size([600.0, 480.0])
+}
+
+/// [`Self::new_for_test`]'s default `recording_deps.model_ensurer` — every
+/// call fails actionably (never touches the network) so a kittest file that
+/// never scripts a live session (nearly all of them) is unaffected, and one
+/// that clicks Record without first calling
+/// [`HummApp::set_recording_deps_for_test`] gets a clear, actionable error
+/// instead of silently reaching the real network (Global Constraint 3).
+struct UnwiredModelEnsurer;
+
+impl ArtifactEnsurer for UnwiredModelEnsurer {
+    fn ensure_model(
+        &self,
+        _model: &ModelSpec,
+        _progress: &mut dyn FnMut(DownloadProgress),
+        _cancel: &CancelToken,
+    ) -> Result<PathBuf, CoreError> {
+        Err(CoreError::Engine(EngineError::ModelLoad {
+            path: PathBuf::from("(recording session not wired for this test)"),
+            detail: "call HummApp::set_recording_deps_for_test to script a live session"
+                .to_string(),
+        }))
+    }
+
+    fn ensure_vad(
+        &self,
+        _progress: &mut dyn FnMut(DownloadProgress),
+        _cancel: &CancelToken,
+    ) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// [`Self::new_for_test`]'s default `recording_deps.engine_factory` — see
+/// [`UnwiredModelEnsurer`]'s doc for the rationale (same "actionable error,
+/// never touches anything real" contract; engine load never reaches this
+/// stand-in unless a model somehow resolved without a scripted
+/// `model_ensurer`, which is itself unreachable by construction here).
+struct UnwiredLiveEngineFactory;
+
+impl LiveEngineFactory for UnwiredLiveEngineFactory {
+    fn load(
+        &self,
+        _model_path: &Path,
+        _use_gpu: bool,
+    ) -> Result<Box<dyn LiveEngineSession>, EngineError> {
+        Err(EngineError::ModelLoad {
+            path: PathBuf::from("(recording session not wired for this test)"),
+            detail: "call HummApp::set_recording_deps_for_test to script a live session"
+                .to_string(),
+        })
+    }
+}
+
+/// [`Self::new_for_test`]'s default `recording_deps.upload_factory` — unlike
+/// [`UnwiredModelEnsurer`]/[`UnwiredLiveEngineFactory`], [`UploadFactory::build`]
+/// cannot return an error (upload failures are logged-and-swallowed by
+/// design, `humm_core::live::UploadClient`'s own contract), and it is only
+/// ever reached when a session's *effective* upload URL is `Some` — never
+/// true by default (`Settings::default()`'s `recording.upload_url` is
+/// `None`, and `HUMM_UPLOAD_URL` is never set in this workspace's test
+/// environment) — so panicking here is the same "prove no test in this
+/// workspace accidentally reaches it" contract
+/// `tests/kittest_recording.rs`'s own `NeverCalledEngineFactory` already
+/// uses for the *queue's* engine factory.
+struct UnwiredUploadFactory;
+
+impl UploadFactory for UnwiredUploadFactory {
+    fn build(&self, _url: String) -> Box<dyn LiveUpload> {
+        unreachable!(
+            "recording upload requested without HummApp::set_recording_deps_for_test — no \
+             test's settings configure an upload_url by default"
+        )
+    }
 }
 
 /// Environment-gated smoke-test hooks (see the `smoke_hooks` field doc on
@@ -2166,6 +2571,8 @@ impl eframe::App for HummApp {
         self.show_viewer_viewports(ui.ctx());
         self.show_resizer_viewports(ui.ctx(), now);
         self.show_recording_viewport(ui.ctx());
+        self.harvest_recording_intent(ui.ctx());
+        self.drain_live_session(ui.ctx());
         self.harvest_recording_close();
 
         self.persist_layout_if_changed();

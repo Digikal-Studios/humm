@@ -237,6 +237,11 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "recording-presentation-bar-placeholder",
         "recording-panel-placeholder",
         "recording-copy-bar-placeholder",
+        "recording-model-downloading",
+        "recording-model-downloading-indeterminate",
+        "recording-model-loading",
+        "recording-error-prefix",
+        "recording-error-suffix",
         "meter-average-volume",
         "meter-queue",
     ]

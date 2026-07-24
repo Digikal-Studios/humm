@@ -15,11 +15,32 @@
 use std::collections::BTreeMap;
 
 use crate::i18n::{tr, tr_args};
+use crate::live_session::PrepUpdate;
 use crate::recording::{RecordingDeps, RecordingStatus, RecordingVm, realtime_fit_warning_visible};
 use crate::views::audio_meter::audio_meter;
 use crate::views::options_sheet::{
     render_language_combo, render_model_combo, render_task_combo, title_case,
 };
+
+/// Formats a [`PrepUpdate`] into the label the inline progress row shows
+/// (spec §2.1: "shown inline in the window", non-modal — the humm M3 J-1 ✚
+/// pattern, unlike Buzz's modal `ModelDownloadProgressDialog`).
+fn prep_label(prep: &PrepUpdate) -> String {
+    match prep {
+        PrepUpdate::Downloading {
+            downloaded,
+            total: Some(total),
+        } if *total > 0 => {
+            let pct = (*downloaded as f64 / *total as f64 * 100.0).clamp(0.0, 100.0);
+            tr_args(
+                "recording-model-downloading",
+                &[("percent", &format!("{pct:.0}"))],
+            )
+        }
+        PrepUpdate::Downloading { .. } => tr("recording-model-downloading-indeterminate"),
+        PrepUpdate::LoadingEngine => tr("recording-model-loading"),
+    }
+}
 
 /// Buzz's own Apple-Silicon gate for the model-load-time info tooltip
 /// (`transcription_options_group_box.py:106`: `platform.system() == "Darwin"
@@ -122,14 +143,33 @@ pub fn recording_ui(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let label = match vm.status {
                 RecordingStatus::Stopped => tr("recording-record-button"),
-                RecordingStatus::Recording => tr("recording-stop-button"),
+                RecordingStatus::Recording | RecordingStatus::Stopping => {
+                    tr("recording-stop-button")
+                }
             };
-            if ui.button(label).clicked() {
+            // Buzz `stop_recording`: the button is disabled until the
+            // session thread's `finished`/`error` acknowledgement arrives
+            // (`RecordingStatus::Stopping`) — clicking it again while
+            // stopping would double-latch a stop intent nothing consumes.
+            let enabled = vm.status != RecordingStatus::Stopping;
+            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
                 vm.on_record_clicked(deps);
             }
             audio_meter(ui, &vm.meter, &mut vm.meter_current_amplitude);
         });
     });
+
+    // Model-download/engine-load inline progress (spec §2.1): shown
+    // non-modally in the window itself while a session is starting up.
+    // The Record/Stop button above doubles as Cancel (Buzz's separate
+    // dialog Cancel button and this button both end up signaling the same
+    // cooperative stop — mechanism deviation, documented).
+    if let Some(prep) = &vm.prep {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(prep_label(prep));
+        });
+    }
 
     // Presentation options bar (spec §2.6): hidden until recording starts.
     // Placeholder only this task — Task 12 owns the real controls.
@@ -159,5 +199,21 @@ pub fn recording_ui(
         ui.horizontal(|ui| {
             ui.weak(tr("recording-copy-bar-placeholder"));
         });
+    }
+
+    // Buzz's error dialog (`QMessageBox.critical`, byte-exact text) --
+    // egui's non-native `egui::Modal` equivalent (`models_ui::ui`'s own
+    // download-error modal is the precedent this mirrors).
+    if vm.error_dialog.is_some() {
+        let mut close = false;
+        let modal = egui::Modal::new(egui::Id::new("humm-recording-error")).show(ui.ctx(), |ui| {
+            ui.label(vm.error_dialog.as_deref().unwrap_or_default());
+            if ui.button(tr("dialog-ok")).clicked() {
+                close = true;
+            }
+        });
+        if close || modal.should_close() {
+            vm.error_dialog = None;
+        }
     }
 }
