@@ -261,7 +261,12 @@ resolution is skipped for `Backend::OpenAiApi`, same as model download).
   that overflow i64 are treated as non-matches the way Python's `int()`
   never fails on `\d+` — cap: parse as `u32`, ignore on overflow (a
   documented micro-deviation; a real LLM emitting a >4-billion marker is
-  degenerate input either way).
+  degenerate input either way). A second micro-deviation, documented during
+  Task 7 rather than pre-approved here: non-ASCII Unicode decimal digits in
+  markers (e.g. Arabic-Indic `٣`) are not honored, though Python's `int()`
+  would parse them — an implementation decision, not spec-approved like the
+  overflow cap, and regression-tested rather than differential-fixtured
+  (asserting Rust/Python disagreement isn't what a parity fixture is for).
 
 **Differential fixtures:** `validation/m6-differential/gen_batch_parse_fixtures.py`
 stub-imports Buzz's own unmodified `Translator._parse_batch_response`

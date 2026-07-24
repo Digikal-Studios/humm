@@ -261,6 +261,14 @@ CASES: list[tuple[str, str, int]] = [
         "[1] Hello world\n",
         1,
     ),
+    (
+        # `\s*` after the marker also consumes a literal tab, not just
+        # spaces/newlines -- covers whitespace-variants' blind spot for
+        # horizontal-tab specifically.
+        "marker-followed-by-tab",
+        "[1]\ttabbed text\n[2] second",
+        2,
+    ),
 ]
 
 

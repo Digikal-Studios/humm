@@ -1,0 +1,9 @@
+{
+  "name": "marker-followed-by-tab",
+  "response": "[1]\ttabbed text\n[2] second",
+  "expected_count": 2,
+  "parsed": [
+    "tabbed text",
+    "second"
+  ]
+}
