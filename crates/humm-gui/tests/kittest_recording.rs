@@ -34,7 +34,7 @@ use humm_core::domain::{ModelSpec, Status, TranscriptionId};
 use humm_core::error::{AudioError, CoreError, EngineError};
 use humm_core::models::download::DownloadProgress;
 use humm_core::queue::{ArtifactEnsurer, EngineFactory};
-use humm_core::settings::{RecordingSettings, Settings};
+use humm_core::settings::{PresentationSettings, RecordingSettings, Settings};
 use humm_gui::app::HummApp;
 use humm_gui::live_session::{
     LiveEngineFactory, LiveEngineSession, LiveStore, LiveUpload, UploadFactory,
@@ -323,7 +323,10 @@ fn finish_stopping_restores_the_stopped_ui_once_the_session_acks() {
     // Simulates `app.rs::finish_live_session`'s non-`pending_close` arm —
     // this fixture has no real session thread to send the `Stopped`
     // message, so the ack is invoked directly.
-    fixture.vm.finish_stopping(&fixture.deps);
+    let mut presentation_settings = PresentationSettings::default();
+    let _flushed = fixture
+        .vm
+        .finish_stopping(&fixture.deps, &mut presentation_settings);
     let mut harness = build_harness(fixture);
     harness.step();
 

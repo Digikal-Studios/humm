@@ -38,7 +38,7 @@ use humm_core::domain::{ModelSize, TaskKind, TranscriptionId};
 use humm_core::language::Language;
 use humm_core::live::{RealSleeper, Sleeper};
 use humm_core::queue::ArtifactEnsurer;
-use humm_core::settings::{RecordingSettings, Settings};
+use humm_core::settings::{PresentationSettings, RecordingSettings, Settings};
 
 use crate::import::FileDialogs;
 use crate::live_session::{ActiveSession, LiveEngineFactory, LiveStore, PrepUpdate, UploadFactory};
@@ -577,13 +577,33 @@ impl RecordingVm {
     /// capture. Not called when [`Self::pending_close`] is set — the window
     /// is closing anyway, so `app.rs` sets [`Self::close_requested`]
     /// instead (Buzz's `_do_close` skips this same restore on its
-    /// close-while-recording path).
-    pub fn finish_stopping(&mut self, deps: &RecordingDeps) {
+    /// close-while-recording path — [`Self::close`] performs the equivalent
+    /// flush on that path instead).
+    ///
+    /// Also unconditionally flushes any pending debounced presentation
+    /// text-size/color edit (`PresentationVm::flush_pending_save`,
+    /// review fix): hiding the presentation bar here
+    /// (`presentation_bar_visible = false`) means `views::presentation::bar_ui`
+    /// — the only place that drives the normal ~100 ms debounce
+    /// (`drive_pending_save_debounce`) — stops rendering the instant this
+    /// returns. Without this flush, an edit made in the last ~100 ms before
+    /// Stop is silently lost: `pending_save_last_edit` stays armed forever
+    /// with nothing left to ever check it again until the *next* recording
+    /// re-shows the bar, by which point the in-memory value has often moved
+    /// on. Returns whether anything was actually flushed, so the caller
+    /// (`app.rs`) knows whether `presentation_settings` needs persisting.
+    #[must_use]
+    pub fn finish_stopping(
+        &mut self,
+        deps: &RecordingDeps,
+        presentation_settings: &mut PresentationSettings,
+    ) -> bool {
         self.status = RecordingStatus::Stopped;
         self.presentation_bar_visible = false;
         self.copy_bar_visible = true;
         self.prep = None;
         self.start_meter_only_capture(deps);
+        self.presentation.flush_pending_save(presentation_settings)
     }
 
     /// Window close while stopped (Buzz `_do_close`,
@@ -596,6 +616,17 @@ impl RecordingVm {
     /// (defensive — by the time this runs the session has already sent its
     /// `Stopped` message and `app.rs` has taken it, so this is normally a
     /// no-op).
+    ///
+    /// Does **not** flush a pending presentation edit itself (unlike
+    /// [`Self::finish_stopping`]) — this method only ever touches
+    /// `RecordingSettings`, and the caller (`app.rs::harvest_recording_close`)
+    /// already holds the full `Settings` lock this window's close needs, so
+    /// it calls [`crate::views::presentation::PresentationVm::flush_pending_save`]
+    /// directly on `self.presentation` alongside this call, piggybacking on
+    /// the same unconditional post-close `settings.save`. The invariant
+    /// still holds (review fix): the whole recording window disappearing
+    /// means every future `bar_ui` render disappears with it, so a pending
+    /// edit must be flushed here too, one way or another.
     pub fn close(&mut self, settings: &mut RecordingSettings) {
         self.stop_meter_only_capture();
         self.session = None;
@@ -999,12 +1030,58 @@ mod tests {
         vm.on_record_clicked(&deps); // -> Stopping
         vm.prep = Some(crate::live_session::PrepUpdate::LoadingEngine);
 
-        vm.finish_stopping(&deps);
+        let mut presentation_settings = PresentationSettings::default();
+        let flushed = vm.finish_stopping(&deps, &mut presentation_settings);
 
         assert_eq!(vm.status, RecordingStatus::Stopped);
         assert!(!vm.presentation_bar_visible);
         assert!(vm.copy_bar_visible);
         assert_eq!(vm.prep, None);
+        assert!(
+            !flushed,
+            "nothing was pending -- no presentation edit was made"
+        );
+        assert_eq!(
+            presentation_settings,
+            PresentationSettings::default(),
+            "untouched when nothing was pending"
+        );
+    }
+
+    /// Review fix: a presentation text-size/color edit made in the last
+    /// ~100ms before Stop must not be silently lost. Before the fix,
+    /// `finish_stopping` hid the presentation bar (`presentation_bar_visible
+    /// = false`) with the pending edit still only sitting in
+    /// `PresentationVm::pending_save_last_edit` — nothing was ever going to
+    /// render `bar_ui` again to drive `drive_pending_save_debounce` to
+    /// completion, so the edit never reached `settings.presentation`.
+    #[test]
+    fn finish_stopping_flushes_a_pending_presentation_edit_before_the_debounce_elapses() {
+        let deps = mock_deps(vec![device("a", "Device A", true)]);
+        let mut vm = RecordingVm::open(&deps, &Settings::default());
+        vm.on_record_clicked(&deps); // -> Recording, presentation bar shows
+
+        // Simulate a color edit `bar_ui` just staged (field updated, shared
+        // debounce timer armed) — an injected clock (`Instant::now()`, never
+        // advanced) stands in for "well within the 100ms window", proving
+        // the flush does not depend on any elapsed time at all.
+        vm.presentation.text_color = "#abcdef".to_string();
+        vm.presentation.pending_save_last_edit = Some(std::time::Instant::now());
+
+        vm.on_record_clicked(&deps); // -> Stopping (user hits Stop mid-edit)
+
+        let mut presentation_settings = PresentationSettings::default();
+        let flushed = vm.finish_stopping(&deps, &mut presentation_settings);
+
+        assert!(flushed, "the pending edit must be reported as flushed");
+        assert_eq!(
+            presentation_settings.text_color, "#abcdef",
+            "settings.presentation must contain the new value, not the pre-edit default"
+        );
+        assert_eq!(
+            vm.presentation.pending_save_last_edit, None,
+            "the pending timer must clear so a later real debounce fire doesn't double-save"
+        );
     }
 
     #[test]

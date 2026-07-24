@@ -388,6 +388,32 @@ impl PresentationVm {
             css_dirty: true,
         }
     }
+
+    /// Unconditionally persists any pending debounced text-size/color edit
+    /// into `settings` and clears the pending timer — the flush every place
+    /// that's about to stop rendering [`bar_ui`] (and so stop ever driving
+    /// [`drive_pending_save_debounce`] again) must call first, or the edit
+    /// is silently lost (review fix): `RecordingVm::finish_stopping` (the
+    /// bar hides with `presentation_bar_visible`) and
+    /// `app.rs::harvest_recording_close` (the whole window, bar included,
+    /// closes). Mirrors [`drive_pending_save_debounce`]'s own three-field
+    /// write, minus the debounce wait; also sets [`Self::css_dirty`], the
+    /// same as a normal debounce fire, so a presentation window that stays
+    /// open across the flush (`finish_stopping`'s case — only the *bar*
+    /// disappears, not necessarily the window) picks up the change on its
+    /// next render. Returns `true` iff something was actually pending (and
+    /// therefore `settings` was mutated) — the caller decides whether that
+    /// warrants a `Settings::save` call; a no-op call must not force one.
+    pub fn flush_pending_save(&mut self, settings: &mut PresentationSettings) -> bool {
+        if self.pending_save_last_edit.take().is_none() {
+            return false;
+        }
+        settings.text_size = self.text_size;
+        settings.text_color = self.text_color.clone();
+        settings.background_color = self.background_color.clone();
+        self.css_dirty = true;
+        true
+    }
 }
 
 /// Locks `settings`, applies `f` to `settings.presentation`, and saves —
@@ -834,5 +860,54 @@ mod tests {
             vm.css_dirty,
             "the first presentation-viewport render must load the CSS override once"
         );
+    }
+
+    // -- PresentationVm::flush_pending_save (review fix) --------------------------
+
+    #[test]
+    fn flush_pending_save_persists_a_pending_edit_regardless_of_elapsed_time() {
+        // The whole point of the flush is that it does NOT wait out the
+        // ~100ms debounce -- an edit staged an instant ago (injected clock:
+        // `Instant::now()`, never advanced) must still be persisted
+        // immediately, since `bar_ui` (the only thing that would otherwise
+        // drive the debounce to completion) is about to stop rendering.
+        let mut vm = PresentationVm::from_settings(&PresentationSettings::default());
+        vm.text_size = 42;
+        vm.text_color = "#123456".to_string();
+        vm.background_color = "#654321".to_string();
+        vm.pending_save_last_edit = Some(Instant::now());
+        vm.css_dirty = false; // simulate "already reloaded this frame"
+
+        let mut settings = PresentationSettings::default();
+        let flushed = vm.flush_pending_save(&mut settings);
+
+        assert!(flushed, "a pending edit must report that it was flushed");
+        assert_eq!(settings.text_size, 42);
+        assert_eq!(settings.text_color, "#123456");
+        assert_eq!(settings.background_color, "#654321");
+        assert_eq!(
+            vm.pending_save_last_edit, None,
+            "the pending timer must clear so a later real debounce fire doesn't double-save"
+        );
+        assert!(
+            vm.css_dirty,
+            "a flushed save is a settings change -- same CSS-reload trigger as a normal debounce fire"
+        );
+    }
+
+    #[test]
+    fn flush_pending_save_is_a_noop_when_nothing_is_pending() {
+        let mut vm = PresentationVm::from_settings(&PresentationSettings::default());
+        vm.css_dirty = false;
+        let mut settings = PresentationSettings {
+            text_size: 99,
+            ..PresentationSettings::default()
+        };
+
+        let flushed = vm.flush_pending_save(&mut settings);
+
+        assert!(!flushed);
+        assert_eq!(settings.text_size, 99, "untouched -- nothing was pending");
+        assert!(!vm.css_dirty, "a no-op flush must not force a CSS reload");
     }
 }

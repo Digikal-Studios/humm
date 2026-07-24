@@ -1986,6 +1986,16 @@ impl HummApp {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             vm.close(&mut settings.recording);
+            // Review fix: the whole window (and its embedded presentation
+            // bar) is disappearing, so any presentation edit still sitting
+            // in the ~100 ms debounce window must be flushed here too, or
+            // it's lost — piggybacks on the unconditional `settings.save`
+            // just below (`RecordingVm::close`'s own doc comment). The
+            // returned bool is ignored on purpose: this save already runs
+            // unconditionally regardless of whether anything was pending.
+            let _ = vm
+                .presentation
+                .flush_pending_save(&mut settings.presentation);
             if let Err(err) = settings.save(&self.services.settings_path) {
                 log::warn!("could not persist recording sticky prefs: {err}");
             }
@@ -2340,7 +2350,7 @@ impl HummApp {
             vm.close_requested = true;
         } else {
             let deps = Arc::clone(&self.recording_deps);
-            vm.finish_stopping(&deps);
+            self.flush_finish_stopping(&mut vm, &deps);
         }
         ctx.request_repaint();
     }
@@ -2393,7 +2403,31 @@ impl HummApp {
             vm.close_requested = true;
         } else {
             let deps = Arc::clone(&self.recording_deps);
-            vm.finish_stopping(&deps);
+            self.flush_finish_stopping(&mut vm, &deps);
+        }
+    }
+
+    /// Calls [`RecordingVm::finish_stopping`] and persists
+    /// `settings.presentation` iff it actually flushed a pending debounced
+    /// text-size/color edit (review fix — `finish_stopping` hides the
+    /// presentation bar, the only place that normally drives that debounce,
+    /// so a pending edit must be flushed right here or it's lost). Shared by
+    /// both terminal-session paths that call `finish_stopping`
+    /// ([`Self::finish_live_session`]'s healthy stop and
+    /// [`Self::recover_crashed_session`]'s crash recovery) so the
+    /// flush-then-maybe-save sequence is written once. `vm` is already the
+    /// caller's own locked `RecordingVm` guard (not re-locked here); this
+    /// method only locks `self.services.settings`, mirroring every other
+    /// `RecordingVm`-then-`Settings` lock ordering in this file.
+    fn flush_finish_stopping(&self, vm: &mut RecordingVm, deps: &RecordingDeps) {
+        let mut settings = self
+            .services
+            .settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let flushed = vm.finish_stopping(deps, &mut settings.presentation);
+        if flushed && let Err(err) = settings.save(&self.services.settings_path) {
+            log::warn!("could not persist a pending presentation-settings edit: {err}");
         }
     }
 
