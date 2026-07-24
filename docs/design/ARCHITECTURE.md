@@ -44,6 +44,16 @@ pub trait AudioDecoder: Send + Sync {
         -> Result<PlaybackPcm, MediaError>;
 }
 
+/// Encodes decoded PCM to a compressed audio file (M6 as-built addition, not
+/// in the original design sketch). Impl: ffmpeg subprocess (`humm-media`'s
+/// `FfmpegDecoder`, same binary config as `AudioDecoder`). Used by the
+/// OpenAI-compatible API transcription engine (F-041) to prepare an mp3
+/// upload from already-decoded `Pcm` instead of Buzz's re-encode of the
+/// original file (design spec §3.1, deviations ledger #2).
+pub trait AudioEncoder: Send + Sync {
+    fn encode_mp3(&self, pcm: &Pcm, dest: &Path, cancel: &CancelToken) -> Result<(), MediaError>;
+}
+
 /// Probe container/stream metadata. Impl: ffprobe -print_format json.
 pub trait MediaProber: Send + Sync {
     fn probe(&self, path: &Path) -> Result<MediaInfo, MediaError>; // duration, has_audio, has_video, video: Option<VideoStreamInfo>
@@ -77,7 +87,9 @@ pub trait MediaFetcher: Send + Sync {
         -> Result<PathBuf, MediaError>;
 }
 
-/// Speech-to-text over PCM. Impls: humm-whisper (local), core::engines::openai (API).
+/// Speech-to-text over PCM. Impls: humm-whisper (local),
+/// `humm_core::openai::OpenAiEngine` (API — as-built module name is
+/// `openai`, not this sketch's `engines::openai`, M6/F-041).
 pub trait TranscriptionEngine: Send {
     fn transcribe(&mut self, audio: &Pcm, opts: &EngineOptions, sink: &mut dyn SegmentSink,
                   cancel: &CancelToken) -> Result<(), EngineError>;
@@ -120,6 +132,10 @@ pub trait SpeechIsolator: Send + Sync { /* demucs-equivalent vocal isolation */ 
 pub trait Diarizer: Send + Sync { /* speaker segmentation + embeddings + clustering */ }
 
 /// Cross-cutting:
+/// SecretStore as-built (M6): realized by `KeyringSecretStore`
+/// (`crates/humm-store/src/secrets.rs`, over the `keyring` crate) — service
+/// `"humm"`, well-known entry `"OpenAI API key"` (`SecretKey::OpenAiApiKey`,
+/// ADR-012).
 pub trait SecretStore: Send + Sync { /* keyring; get/set/delete by well-known key */ }
 pub trait Telemetry: Send + Sync { fn capture(&self, event: Event); } // PostHog | Noop
 ```
@@ -137,6 +153,8 @@ Adapter obligations (Standing Policy): startup probe (`ffmpeg -version`, `yt-dlp
 | Playback (M4 as-built, ADR-019) | cpal output stream whose **fill callback reads straight from the whole-file in-memory `PlaybackPcm`** (no feeder thread / no `rtrb` ring — there is no I/O-bound producer to decouple, so all playback logic runs inside the fill closure); position published via one packed `{generation, frame}` `AtomicU64` (the A/V master clock), seeks published by a single CAS so a lost seek is impossible; **varispeed by linear interpolation** over a fractional source cursor (sample-exact frame accounting the loop-wrap + A/V clock depend on — rubato's priming delay would offset the clock, so rubato is used only for device-rate conversion inside `CpalOutput`) | sample-accurate seek/loop without a media framework; pitch-shifting varispeed that actually works (Buzz's was mute) |
 | GUI | eframe event loop; subscribes to `TaskEvent` receivers; `Context::request_repaint()` on event arrival | zero idle CPU, no polling |
 | CLI | blocks on the same core APIs; renders events to stderr progress + `--json` lines | identical core path as GUI (parity by construction) |
+| OpenAI-compatible API requests (M6 as-built, ADR-022) | `openai::client::cancelable` runs each blocking call on its own short-lived, named `"openai-request"` thread while the caller polls its `CancelToken` every ~100 ms and returns as soon as cancel fires; on cancel the request thread is **detached, not killed** (Rust has no safe mid-syscall thread kill), bounded by its own request timeout. `OpenAiEngine::transcribe_one`'s 600 s per-chunk request is `cancelable`'s one production caller; `validate`'s two probes (5 s/15 s) and the translator worker's batched requests (60 s, below) deliberately bypass it and call `reqwest` directly on their own disposable threads instead | sub-second cancel *acknowledgment* even mid-request, without unsafe thread termination |
+| LLM translator worker (M6 as-built, F-031/F-063/F-085, ADR-022) | `TranslatorHandle::spawn` (`openai::translate`) — one dedicated `"humm-translator"` OS thread per active translator, draining a `flume` channel and batching up to `BATCH_SIZE` (10) items per `/chat/completions` request under its own 60 s timeout, not `cancelable` | the worker thread is disposable/cheap to spawn per task and `Stop` is already honored between requests, so wrapping every translation request in a second cancel-poll layer would only duplicate the guarantee the 60 s timeout already provides (`pipeline.rs`'s drain calls `TranslatorHandle::stop()`, joining the worker directly) |
 
 **Event bus.** `TaskEvent { task_id, kind: Queued | DownloadProgress(f32) | Started | Segment(Segment) | Progress(f32) | Completed | Failed(ErrorInfo) | Canceled }` — the single source of truth consumed by GUI table, CLI renderer, exporters, and the store (which persists state transitions). This is the Rust-shaped replacement for Buzz's Qt-signal spaghetti and fixes Buzz's restart-loses-options bug structurally: the full `JobSpec` is part of the queue record and persisted with it.
 

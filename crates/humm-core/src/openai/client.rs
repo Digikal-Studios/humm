@@ -110,10 +110,15 @@ pub enum ApiFailure {
 /// acknowledgment) or "stop waiting for it and let it run to its own
 /// conclusion in the background" (chosen here). The detached thread's
 /// lifetime is still bounded: `send`'s own client-level request timeout
-/// (5 s/15 s/60 s/600 s depending on the caller) guarantees it exits on its
-/// own even though nothing joins it, and its eventual `tx.send(..)` against
-/// a receiver that has already been dropped is a silent no-op — not a
-/// panic.
+/// guarantees it exits on its own even though nothing joins it, and its
+/// eventual `tx.send(..)` against a receiver that has already been dropped
+/// is a silent no-op — not a panic. In practice only one caller routes
+/// through here today, `OpenAiEngine::transcribe_one`'s 600 s per-chunk
+/// request (`engine.rs`); `validate`'s two probes (5 s/15 s) and the
+/// translator worker's batched requests (60 s, `translate.rs`) deliberately
+/// bypass this wrapper and call `reqwest` directly on their own
+/// short-lived/disposable threads instead (this module's top-level doc
+/// comment, and ADR-022 in `docs/design/DECISIONS.md`, explain why).
 pub fn cancelable<T: Send + 'static>(
     cancel: &CancelToken,
     send: impl FnOnce() -> Result<T, ApiFailure> + Send + 'static,

@@ -344,6 +344,7 @@ recording-error-prefix = An error occurred while starting a new recording:
 recording-error-suffix = Please check your audio devices or check the application logs for more information.
 recording-thread-crashed = The recording session ended unexpectedly. Please check the application logs for more information.
 meter-average-volume = Average volume
+meter-queue = Queue
 
 ## Recording advanced-settings sheet (views/recording_advanced.rs, F-060, Task 12)
 ##
@@ -406,4 +407,3 @@ recording-copy-button = Copy
 recording-copy-tooltip = Copy transcription to clipboard
 recording-copy-copied = Copied!
 recording-copy-nothing = Nothing to copy!
-meter-queue = Queue

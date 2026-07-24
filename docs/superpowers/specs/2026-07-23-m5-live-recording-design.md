@@ -136,6 +136,8 @@ Copy bar (shown when stopped): right-aligned "Copy" button → whole panel text 
 LiveEvent { Text(String), MeterBatch { rms, queue_len }, ModelDownload(f32), Error(String), Stopped }
 ```
 
+(As-built: `ModelDownload(f32)` shipped as the richer `SessionMessage::Preparing(PrepUpdate)` — `Downloading{downloaded,total}`/`LoadingEngine` — in `humm-gui::live_session`, M5 Task 11 impl; noted during the M6 docs sweep.)
+
 GUI mapping: `Text` → display-mode application (§2.3) + persistence (§4) + live export/upload (§2.4) + presentation mirror; `Error` → Buzz's error dialog text + stopped state; `Stopped` → stopped-state UI + session finalization. Stop is a `CancelToken`; in-flight engine calls abort via the existing callback; the session thread acknowledges by sending `Stopped`.
 
 ## 4. Persistence (Q-10 ✚ — approved improvement; Buzz persists nothing)

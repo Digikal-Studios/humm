@@ -86,6 +86,16 @@ history write (`operation` names the store method, e.g. `mark_started`) failed
 and is logged, but the run is unaffected — it may appear anywhere in a task's
 sequence and never changes it.
 
+LLM translation (F-031) adds **no new `--json` event** in M6 — the schema
+above is unchanged: `humm add` has no LLM-translation flag (`humm-cli`'s
+grammar has no equivalent of the options sheet's/recording window's "Enable
+AI translation" toggle), so there is no CLI path that enables the feature at
+all this milestone. `openai::translate::LlmEndpointSource`'s own doc comment
+states this explicitly: "the CLI supplies no source at all in M6 (`None` →
+translation is simply never attempted, Buzz's CLI having no LLM-translation
+path either)" — an absence, not an omission: the same out-of-band-and-additive
+spirit as `store_write_failed` above (ADR-018), just with nothing to add.
+
 Human mode instead prints, to **stderr**, a per-task progress line
 `<input>  NN% — ETA: <eta>` (ETA rendered `NNm NNs` or `NNs`, Buzz's formula)
 and a URL download phase line `downloading <url>  NN%`; written export paths go
@@ -240,6 +250,9 @@ the recording window closes (Buzz's `_do_close`/`closeEvent` save, spec §6).
 | `export_max_entries` | u32 | `0` | `0` = keep all entries; else cap, range `0..=99` (clamped on load). |
 | `upload_url` | `Option<String>` | `None` | ✚ Advanced-sheet upload URL field; `HUMM_UPLOAD_URL` env still wins (§5.1). |
 | `measured_speed` | `BTreeMap<String, f32>` | `{}` | ✚ Per-model-size measured realtime ratio (spec §2.8), keyed by model-size wire string, last-run-wins; a value `< 1.0` drives the inline realtime-fit warning. |
+| `enable_llm_translation` (M6, F-063) | bool | `false` | Whether live AI translation is enabled. Persisted on window close alongside `llm_model`/`llm_prompt` (design spec §7.4). |
+| `llm_model` (M6, F-063) | `Option<String>` | `None` | Last-entered LLM translation model id, if live AI translation was configured. |
+| `llm_prompt` (M6, F-063) | `Option<String>` | `None` | Last-entered LLM translation prompt, if live AI translation was configured. |
 
 `[presentation]`:
 
@@ -252,6 +265,33 @@ the recording window closes (Buzz's `_do_close`/`closeEvent` save, spec §6).
 The presentation window's user-stylesheet override
 (`<config_dir>/presentation_style.css`, §6 above) is a file, not a setting —
 listed in the file-locations table.
+
+### 6.3 File-transcriber backend & LLM-translation settings (`[file_transcriber]`, M6 additions)
+
+`FileTranscriberSettings` (F-020/F-023) already backs the options sheet's
+sticky prefill (`last_import_folder`/`language`/`task`/`model_size`/`hf_repo`/
+`word_timestamps`/`initial_prompt`/`export_formats`); M6 adds these four
+fields for the backend selector and per-task LLM translation (F-041/F-031):
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `backend` | `Option<String>` | `None` | Last-selected backend wire string (e.g. `"openai_api"`); `None` = the default local whisper.cpp backend (F-041). |
+| `enable_llm_translation` | bool | `false` | Whether AI translation was last enabled in the options sheet (F-031). |
+| `llm_model` | `Option<String>` | `None` | Last-entered LLM translation model id, if AI translation was configured. |
+| `llm_prompt` | `Option<String>` | `None` | Last-entered LLM translation prompt, if AI translation was configured. |
+
+### 6.4 OpenAI-compatible API backend settings (`[openai]`, M6, F-041/F-031)
+
+Read fresh at task-engine-construction time (§1); humm's mapping of Buzz's
+`transcriber/custom-openai-base-url` and `transcriber/openai-api-model`
+`QSettings` keys. Deliberately has **no API key field** — the key lives only
+in the OS keyring via `SecretStore` (§6's keyring row above, ADR-012), never
+in this plain TOML file.
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `base_url` | `Option<String>` | `None` | Base URL for the OpenAI-compatible API. `None` uses the client's built-in default, `https://api.openai.com/v1`. |
+| `api_model` | String | `"whisper-1"` | Model id used for the OpenAI-compatible transcription endpoint. |
 
 ## 7. First-run migration
 

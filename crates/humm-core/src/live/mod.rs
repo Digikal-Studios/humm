@@ -29,20 +29,13 @@ pub mod merge;
 pub mod session;
 pub mod translation;
 
-pub use chunker::{Batch, Chunker};
 pub use export::{
-    ExportFileType, ExportSink, InsertMode, LIVE_DATETIME_FORMAT, RealSleeper, Sleeper,
-    UploadClient, WriteMode, effective_upload_url, live_export_file_name, write_csv_export,
-    write_to_export_file, write_txt_export,
+    ExportFileType, ExportSink, LIVE_DATETIME_FORMAT, RealSleeper, Sleeper, UploadClient,
+    effective_upload_url,
 };
-pub use merge::{
-    MergeState, PanelText, filter_text, find_common_part, merge_text_no_overlap,
-    no_space_between_sentences,
-};
-pub use session::{
-    Clock, EngineFn, LiveEvent, LiveMeasurement, RealClock, SessionConfig, run_session,
-};
-pub use translation::{TranslationApplier, strip_newlines};
+pub use merge::{MergeState, PanelText, filter_text};
+pub use session::{LiveEvent, LiveMeasurement, RealClock, SessionConfig, run_session};
+pub use translation::TranslationApplier;
 
 /// Which of Buzz's three live-transcript display strategies is in effect.
 ///
