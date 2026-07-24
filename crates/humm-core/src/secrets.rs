@@ -87,9 +87,29 @@ pub trait SecretStore: Send + Sync {
 /// other crates construct this directly so nothing in the workspace's normal
 /// test run touches the real OS keychain — only the `#[ignore]`d contract
 /// test in `humm-store` does that.
-#[derive(Debug, Default)]
+///
+/// [`std::fmt::Debug`] is implemented by hand rather than derived: a derived
+/// impl would print every stored secret value verbatim if this type were
+/// ever formatted (e.g. in a `dbg!` left behind, or a panic message), which
+/// would defeat the point of keeping secrets out of logs (design spec §5).
+/// The manual impl below prints only the type name and entry count.
+#[derive(Default)]
 pub struct MemorySecretStore {
     values: Mutex<HashMap<SecretKey, String>>,
+}
+
+impl std::fmt::Debug for MemorySecretStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Best-effort: a poisoned mutex still yields a usable entry count via
+        // `into_inner`, and this is diagnostic output, not a fallible path.
+        let entry_count = match self.values.lock() {
+            Ok(guard) => guard.len(),
+            Err(poisoned) => poisoned.into_inner().len(),
+        };
+        f.debug_struct("MemorySecretStore")
+            .field("entry_count", &entry_count)
+            .finish()
+    }
 }
 
 impl MemorySecretStore {
@@ -171,5 +191,22 @@ mod tests {
     #[test]
     fn entry_name_matches_buzz_key_value() {
         assert_eq!(SecretKey::OpenAiApiKey.entry_name(), "OpenAI API key");
+    }
+
+    #[test]
+    fn debug_output_redacts_stored_secret_values() {
+        let store = MemorySecretStore::new();
+        let secret_value = "sk-super-secret-value-must-not-be-printed";
+        store.set(SecretKey::OpenAiApiKey, secret_value).unwrap();
+
+        let debug_output = format!("{store:?}");
+
+        assert!(
+            !debug_output.contains(secret_value),
+            "Debug output must not contain the stored secret value, got: {debug_output}"
+        );
+        // Sanity check the impl still reports something useful.
+        assert!(debug_output.contains("MemorySecretStore"));
+        assert!(debug_output.contains("entry_count"));
     }
 }

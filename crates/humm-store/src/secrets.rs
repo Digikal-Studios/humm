@@ -9,23 +9,46 @@ use humm_core::secrets::{SERVICE, SecretError, SecretKey, SecretStore};
 
 /// An OS-keyring-backed [`SecretStore`].
 ///
-/// Each call opens a fresh `keyring::Entry` scoped to [`SERVICE`] and the
+/// Each call opens a fresh `keyring::Entry` scoped to `service` and the
 /// key's [`SecretKey::entry_name`] — the `keyring` crate's `Entry` is a cheap
-/// handle (no connection is held between calls), so there is no state to
-/// hold here.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct KeyringSecretStore;
+/// handle (no connection is held between calls), so there is no other state
+/// to hold here.
+#[derive(Debug, Clone, Copy)]
+pub struct KeyringSecretStore {
+    service: &'static str,
+}
+
+impl Default for KeyringSecretStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl KeyringSecretStore {
-    /// Creates a new keyring-backed secret store.
+    /// Creates a new keyring-backed secret store scoped to humm's production
+    /// service name ([`SERVICE`], `"humm"`) — the service the shipped app
+    /// reads and writes.
     pub fn new() -> Self {
-        KeyringSecretStore
+        KeyringSecretStore { service: SERVICE }
+    }
+
+    /// Creates a keyring-backed secret store scoped to an arbitrary
+    /// `service`, instead of the production [`SERVICE`].
+    ///
+    /// For contract tests only: it lets a test round-trip through the real
+    /// OS keyring without ever touching the production `"humm"` entry the
+    /// shipped app reads (a machine with a real key stored would otherwise
+    /// have it overwritten then deleted by the test). [`KeyringSecretStore::new`]
+    /// is the constructor production code should use — it always keeps
+    /// service `"humm"`.
+    pub fn with_service(service: &'static str) -> Self {
+        KeyringSecretStore { service }
     }
 
     /// Opens the platform keyring entry for `key`, mapping any failure to
     /// [`SecretError::Backend`].
     fn entry(&self, key: SecretKey) -> Result<keyring::Entry, SecretError> {
-        keyring::Entry::new(SERVICE, key.entry_name()).map_err(|err| SecretError::Backend {
+        keyring::Entry::new(self.service, key.entry_name()).map_err(|err| SecretError::Backend {
             detail: format!("failed to open keyring entry: {err}"),
         })
     }
