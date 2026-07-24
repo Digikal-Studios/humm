@@ -82,6 +82,22 @@ pub enum EngineError {
         /// Diagnostic detail.
         detail: String,
     },
+    /// A cloud-API transcription backend failed: an HTTP/transport error, a
+    /// non-2xx response, a response whose body didn't match any expected
+    /// shape, or a failure preparing the upload
+    /// (`OpenAiEngine`, design spec §2.2/§3).
+    ///
+    /// `detail` is actionable — it names the endpoint's host and (for HTTP
+    /// responses) the status plus a short body excerpt, and suggests
+    /// checking the API key/base URL. It **never** contains the API key or
+    /// the request's `Authorization` header (design spec §2's key-hygiene
+    /// invariant).
+    #[error("OpenAI API backend error: {detail}")]
+    Api {
+        /// Actionable detail: endpoint host + status + body excerpt. Never
+        /// the API key or request headers.
+        detail: String,
+    },
     /// The operation was canceled via `CancelToken`.
     #[error("canceled")]
     Canceled,
