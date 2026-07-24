@@ -30,7 +30,7 @@ use egui_kittest::{Harness, HarnessBuilder};
 use humm_audio::MockCapture;
 use humm_core::boundary::{AudioCapture, AudioDevice, CaptureHandle, MeterSnapshot};
 use humm_core::cancel::CancelToken;
-use humm_core::domain::{ModelSpec, Status};
+use humm_core::domain::{ModelSpec, Status, TranscriptionId};
 use humm_core::error::{AudioError, CoreError, EngineError};
 use humm_core::models::download::DownloadProgress;
 use humm_core::queue::{ArtifactEnsurer, EngineFactory};
@@ -522,6 +522,55 @@ impl LiveEngineSession for ScriptedEngine {
     }
 }
 
+struct PanickingEngineFactory {
+    capture: Arc<Mutex<MockCapture>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl LiveEngineFactory for PanickingEngineFactory {
+    fn load(
+        &self,
+        _model_path: &Path,
+        _use_gpu: bool,
+    ) -> Result<Box<dyn LiveEngineSession>, EngineError> {
+        Ok(Box::new(PanickingEngine {
+            capture: Arc::clone(&self.capture),
+            calls: Arc::clone(&self.calls),
+        }))
+    }
+}
+
+/// Returns "utterance one" on its first call (pushing the second batch into
+/// the shared `MockCapture`, same pattern as [`ScriptedEngine`]), then
+/// panics on its second call — simulating a session-thread crash for
+/// `HummApp::recover_crashed_session`'s own kittest coverage (Task 11
+/// review finding 2).
+struct PanickingEngine {
+    capture: Arc<Mutex<MockCapture>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl LiveEngineSession for PanickingEngine {
+    fn transcribe_live(
+        &mut self,
+        _samples: &[f32],
+        _opts: &LiveOptions,
+        _prompt: &str,
+        _cancel: &CancelToken,
+    ) -> Result<String, EngineError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            self.capture
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .pump(BATCH_SAMPLES);
+            Ok("utterance one".to_string())
+        } else {
+            panic!("scripted engine crash — Task 11 review finding 2's own kittest coverage");
+        }
+    }
+}
+
 /// Resolves instantly to a scripted path — never a real ggml file, and
 /// never opened for real (`ScriptedEngine` ignores it entirely).
 struct InstantEnsurer {
@@ -686,6 +735,31 @@ fn scripted_end_to_end_record_two_utterances_then_stop() {
         .on_record_clicked(&deps_arc);
     harness.step();
 
+    // Poll until the session row exists (spec §4: inserted before the
+    // first chunk), learning its id from a store read, then assert the
+    // *running app's own table* — not a fresh `TasksVm::load` — already
+    // shows it (review finding 3: this is what actually exercises
+    // `SessionMessage::TableRefresh`'s wiring end to end, via
+    // `HummApp::tasks_row_for_test`).
+    let mut live_row_id: Option<TranscriptionId> = None;
+    wait_for(&mut harness, "the live session row to appear", |_app| {
+        let Some(row) = TasksVm::load(&store).sorted_rows().first().cloned() else {
+            return false;
+        };
+        live_row_id = Some(row.id);
+        true
+    });
+    let live_row_id = live_row_id.expect("the wait_for deadline-loop only exits on success");
+    let app_row_at_start = harness
+        .state()
+        .tasks_row_for_test(live_row_id)
+        .expect("the running app's own table shows the live row at session start");
+    assert_eq!(
+        app_row_at_start.status,
+        Status::InProgress,
+        "TableRefresh at insert must reach the running app's table, not just the store"
+    );
+
     wait_for(&mut harness, "the second utterance to land on the panel", {
         let vm_arc = Arc::clone(&vm_arc);
         move |_app| {
@@ -719,6 +793,19 @@ fn scripted_end_to_end_record_two_utterances_then_stop() {
         "the window stays open once Stopped — it only closes on a real close request"
     );
 
+    // Review finding 3, other half: the running app's own table must also
+    // have flipped to Completed via the *second* `TableRefresh` (sent after
+    // `complete_live_session`), not just the store underneath it.
+    let app_row_at_stop = harness
+        .state()
+        .tasks_row_for_test(live_row_id)
+        .expect("the running app's own table still shows the live row after Stop");
+    assert_eq!(
+        app_row_at_stop.status,
+        Status::Completed,
+        "TableRefresh at completion must reach the running app's table, not just the store"
+    );
+
     // -- Store: InProgress -> Completed, visible in `TasksVm`, `can_open`
     //    admits it, 2 ordered non-overlapping raw-text segments.
     let tasks = TasksVm::load(&store);
@@ -726,6 +813,7 @@ fn scripted_end_to_end_record_two_utterances_then_stop() {
         .sorted_rows()
         .first()
         .expect("exactly one live session row");
+    assert_eq!(row.id, live_row_id, "the same row throughout the session");
     assert_eq!(row.status, Status::Completed);
     assert!(
         can_open(row.status),
@@ -793,4 +881,119 @@ fn scripted_end_to_end_record_two_utterances_then_stop() {
     assert_eq!(reopened_segments.len(), 2);
     assert_eq!(reopened_segments[0].text, "utterance one");
     assert_eq!(reopened_segments[1].text, "utterance two");
+}
+
+// -- Task 11 review finding 2: session-thread panic recovery -----------------
+
+#[test]
+fn session_thread_panic_recovers_the_window_and_completes_the_store_row() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("humm.sqlite3");
+    let store = Arc::new(SqliteStore::open(&db_path).expect("open store"));
+    let model_path = dir.path().join("fake-model.bin");
+    std::fs::write(&model_path, b"never opened by the scripted engine").expect("write");
+
+    let services = services::init_with(TestDeps {
+        store: Arc::clone(&store),
+        media_dir: dir.path().join("media"),
+        model_root: dir.path().join("models"),
+        settings: Settings::default(),
+        settings_path: dir.path().join("settings.toml"),
+        engines: Box::new(NeverCalledEngineFactory),
+        fetcher: None,
+        capabilities: Capabilities::default(),
+        artifacts: None,
+    });
+
+    let mock_capture = Arc::new(Mutex::new(MockCapture::new(vec![0.5; 2 * BATCH_SAMPLES])));
+    let engine_calls = Arc::new(AtomicUsize::new(0));
+
+    let scripted_deps = RecordingDeps {
+        capture: Mutex::new(Box::new(SharedMockCapture(Arc::clone(&mock_capture)))),
+        store: Arc::clone(&store) as Arc<dyn LiveStore>,
+        model_ensurer: Arc::new(InstantEnsurer { model_path }),
+        engine_factory: Arc::new(PanickingEngineFactory {
+            capture: Arc::clone(&mock_capture),
+            calls: Arc::clone(&engine_calls),
+        }),
+        upload_factory: Arc::new(NeverCalledUploadFactory),
+    };
+
+    let mut harness = HarnessBuilder::default()
+        .with_size(egui::Vec2::new(1000.0, 600.0))
+        .build_eframe(move |_cc| {
+            let mut app = HummApp::new_for_test(services);
+            app.set_recording_deps_for_test(scripted_deps);
+            app
+        });
+    harness.step();
+
+    harness.state_mut().open_recording_window_for_test();
+    harness.step();
+    let vm_arc = harness
+        .state()
+        .recording_vm_for_test()
+        .expect("window is open");
+    let deps_arc = harness.state().recording_deps_for_test();
+
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    harness.step();
+
+    // The scripted engine's second call panics — the session thread dies
+    // without ever sending `Stopped`, breaking `run_live_session`'s own
+    // "always emits Stopped last" contract. Poll (bounded, no sleeping
+    // beyond the established deadline-loop idiom — `wait_for`) until
+    // `HummApp::recover_crashed_session` observes the dead `JoinHandle` and
+    // recovers on its own.
+    wait_for(&mut harness, "crash recovery to restore the stopped UI", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            let vm = vm_arc.lock().unwrap_or_else(|p| p.into_inner());
+            vm.status == RecordingStatus::Stopped
+        }
+    });
+
+    {
+        let vm = vm_arc.lock().unwrap_or_else(|p| p.into_inner());
+        // "Window closable": `show_recording_viewport`'s own close-request
+        // handling (Task 10/11, tested separately) vetoes a close only
+        // while `status != Stopped` — proving the crash recovered `status`
+        // all the way back to `Stopped` (with no lingering close-request
+        // state) *is* the proof the veto has lifted; the deferred viewport
+        // itself is unreachable from kittest (this file's own module doc),
+        // so this is the correct-altitude assertion, matching every other
+        // close-related assertion already in this file. (`RecordingVm::session`
+        // — also cleared by recovery — is `pub(crate)`, not visible from
+        // this external test crate; `status == Stopped` is the externally
+        // observable proof.)
+        assert!(
+            !vm.pending_close,
+            "no close was ever requested in this test"
+        );
+        assert!(
+            vm.error_dialog
+                .as_deref()
+                .is_some_and(|text| !text.is_empty()),
+            "a crash must surface a non-empty error dialog, got {:?}",
+            vm.error_dialog
+        );
+    }
+
+    // -- Store: the crash-recovery fallback still marks the row Completed
+    //    (Q-10 — a partial transcript is finished work worth opening), with
+    //    only the one utterance that landed before the crash.
+    let tasks = TasksVm::load(&store);
+    let row = tasks
+        .sorted_rows()
+        .first()
+        .expect("exactly one live session row");
+    assert_eq!(row.status, Status::Completed);
+    assert!(can_open(row.status));
+
+    let segments = store.get_segment_rows(row.id).expect("segments");
+    assert_eq!(segments.len(), 1, "only the pre-crash utterance landed");
+    assert_eq!(segments[0].text, "utterance one");
 }

@@ -35,6 +35,24 @@
 //! directly is the exact same `Arc<MeterSnapshot>` `RecordingVm` already
 //! reads every repaint (spec §2.5), so the meter animates live with zero
 //! additional plumbing.
+//!
+//! ## Capture teardown/restart ordering (enforced, not just documented)
+//!
+//! [`SessionMessage::Stopped`] is what makes the UI thread restart the
+//! meter-only capture on the same device
+//! ([`crate::recording::RecordingVm::finish_stopping`]). If that message
+//! reached the UI *before* the real session capture had actually finished
+//! tearing down, the restart could race an in-flight stream teardown on the
+//! same device (two streams on one device — the exact failure mode Buzz's
+//! own `reset_recording_amplitude_listener` avoids). [`run_live_session`]
+//! therefore never forwards core's `LiveEvent::Stopped` straight to the
+//! caller: its wrapping sink only *records* the measurement; the real
+//! [`SessionMessage::Stopped`] send happens after `run_session` has
+//! returned *and* `CaptureHandle::stop` has actually run — see
+//! [`run_live_session`]'s own doc comment for the exact sequencing, and its
+//! test module for a wrapper-ordering test that proves it (a scripted
+//! capture handle whose `stop()` and the eventual `Stopped` send both
+//! append to one shared, order-preserving log).
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -346,11 +364,17 @@ pub struct ActiveSession {
     pub cancel: CancelToken,
     /// Drained (`try_iter`) every frame by `app.rs`.
     pub rx: mpsc::Receiver<SessionMessage>,
-    /// The session thread. Never `.join()`-ed from the UI thread (that would
-    /// block the UI frame on this thread's post-`Stopped` cleanup, e.g.
-    /// [`humm_core::boundary::CaptureHandle::stop`]) -- simply dropped once
+    /// The session thread. Never `.join()`-ed from the UI thread on the
+    /// normal-completion path (that would block the UI frame on this
+    /// thread's post-`Stopped` cleanup) -- simply dropped once
     /// [`SessionMessage::Stopped`] has been observed, which detaches it; by
-    /// that point every persistent side effect has already happened.
+    /// that point [`run_live_session`]'s own enforced ordering (see the
+    /// module doc's "Capture teardown/restart ordering" section) guarantees
+    /// every persistent side effect, *and* the real capture's teardown,
+    /// have already happened. Kept (not discarded at spawn time) precisely
+    /// so `app.rs` can also poll [`JoinHandle::is_finished`] as a liveness
+    /// check -- a thread that exited *without* ever sending `Stopped` (a
+    /// panic) is the crash-recovery fallback's own signal.
     pub thread: Option<JoinHandle<()>>,
 }
 
@@ -432,7 +456,15 @@ pub fn spawn_live_session(
     let (tx, rx) = mpsc::channel();
     let cancel_for_thread = cancel.clone();
     let thread = std::thread::spawn(move || {
-        run_live_session(&deps, request, &tx, &cancel_for_thread);
+        // `run_live_session` takes its sink as `&dyn Fn(SessionMessage)`
+        // (not the concrete `mpsc::Sender` directly) precisely so its own
+        // tests can inject an order-observing fake instead of a real
+        // channel -- see the module doc's "Capture teardown/restart
+        // ordering" section and this function's own test module.
+        let sink = move |message: SessionMessage| {
+            let _ = tx.send(message);
+        };
+        run_live_session(&deps, request, &sink, &cancel_for_thread);
     });
     ActiveSession {
         cancel,
@@ -572,15 +604,31 @@ fn is_model_ensure_cancellation(err: &CoreError) -> bool {
 /// [`SessionMessage::Stopped`], mirroring `run_session`'s own "always emits
 /// `Stopped` last" contract so the caller has one terminal signal to wait
 /// for regardless of when the session ended.
+///
+/// `sink` is a plain `&dyn Fn(SessionMessage)` rather than a concrete
+/// `mpsc::Sender` -- [`spawn_live_session`] wraps a real channel in one for
+/// production; this function's own tests inject an order-observing fake
+/// instead (see the module doc's "Capture teardown/restart ordering"
+/// section, and this function's own real-capture-path tests below).
+///
+/// **Ordering invariant (enforced, not just documented):** once real audio
+/// capture has started (i.e. past the `capture_handle` block below), this
+/// function *never* forwards core's `LiveEvent::Stopped` straight to `sink`
+/// -- it only records the measurement in a local. The real
+/// [`SessionMessage::Stopped`] send happens after `run_session` has
+/// returned *and* `capture_handle.stop()` has actually run, so by the time
+/// the UI thread ever sees `Stopped` (and therefore might restart the
+/// meter-only capture on the same device,
+/// [`crate::recording::RecordingVm::finish_stopping`]), the real session's
+/// own stream is already fully torn down.
 pub fn run_live_session(
     deps: &crate::recording::RecordingDeps,
     request: LiveSessionRequest,
-    tx: &mpsc::Sender<SessionMessage>,
+    sink: &dyn Fn(SessionMessage),
     cancel: &CancelToken,
 ) {
-    let tx_for_progress = tx.clone();
-    let mut progress_cb = move |update: DownloadProgress| {
-        let _ = tx_for_progress.send(SessionMessage::Preparing(PrepUpdate::Downloading {
+    let mut progress_cb = |update: DownloadProgress| {
+        sink(SessionMessage::Preparing(PrepUpdate::Downloading {
             downloaded: update.downloaded,
             total: update.total,
         }));
@@ -592,28 +640,28 @@ pub fn run_live_session(
         Ok(path) => path,
         Err(err) => {
             if !is_model_ensure_cancellation(&err) {
-                let _ = tx.send(SessionMessage::Error(err.to_string()));
+                sink(SessionMessage::Error(err.to_string()));
             }
-            let _ = tx.send(SessionMessage::Stopped { measurement: None });
+            sink(SessionMessage::Stopped { measurement: None });
             return;
         }
     };
 
-    let _ = tx.send(SessionMessage::Preparing(PrepUpdate::LoadingEngine));
+    sink(SessionMessage::Preparing(PrepUpdate::LoadingEngine));
     if cancel.is_canceled() {
-        let _ = tx.send(SessionMessage::Stopped { measurement: None });
+        sink(SessionMessage::Stopped { measurement: None });
         return;
     }
     let mut engine = match deps.engine_factory.load(&model_path, request.use_gpu) {
         Ok(engine) => engine,
         Err(err) => {
-            let _ = tx.send(SessionMessage::Error(err.to_string()));
-            let _ = tx.send(SessionMessage::Stopped { measurement: None });
+            sink(SessionMessage::Error(err.to_string()));
+            sink(SessionMessage::Stopped { measurement: None });
             return;
         }
     };
     if cancel.is_canceled() {
-        let _ = tx.send(SessionMessage::Stopped { measurement: None });
+        sink(SessionMessage::Stopped { measurement: None });
         return;
     }
 
@@ -625,11 +673,11 @@ pub fn run_live_session(
         .insert_live_session(&request.session_name, &request.options_snapshot)
     {
         Ok(id) => {
-            let _ = tx.send(SessionMessage::TableRefresh(id));
+            sink(SessionMessage::TableRefresh(id));
             Some(id)
         }
         Err(err) => {
-            let _ = tx.send(SessionMessage::StoreWriteFailed {
+            sink(SessionMessage::StoreWriteFailed {
                 operation: "insert_live_session".to_string(),
                 detail: err.to_string(),
             });
@@ -664,7 +712,8 @@ pub fn run_live_session(
     // shared capture adapter for the session's lifetime (Task 10's
     // meter-only drain uses the same adapter while stopped; the two are
     // never both active on the same device, `recording::RecordingVm`'s own
-    // teardown-before-start ordering).
+    // teardown-before-start ordering, *and* this function's own
+    // capture-before-`Stopped` ordering below).
     let capture_handle = {
         let mut capture = match deps.capture.lock() {
             Ok(guard) => guard,
@@ -677,13 +726,13 @@ pub fn run_live_session(
         ) {
             Ok(handle) => handle,
             Err(err) => {
-                let _ = tx.send(SessionMessage::Error(err.to_string()));
-                let _ = tx.send(SessionMessage::Stopped { measurement: None });
+                sink(SessionMessage::Error(err.to_string()));
+                sink(SessionMessage::Stopped { measurement: None });
                 return;
             }
         }
     };
-    let _ = tx.send(SessionMessage::Ready);
+    sink(SessionMessage::Ready);
 
     let applier = RefCell::new(SessionApplier::new(
         request.session_config.mode,
@@ -694,17 +743,24 @@ pub fn run_live_session(
         export.as_ref(),
         upload.as_deref(),
     ));
-    let sink = |event: LiveEvent| match event {
+    // Captures the session's final measurement without ever forwarding
+    // `LiveEvent::Stopped` to `sink` directly -- see this function's own
+    // "Ordering invariant" doc above. `Cell` (not `RefCell`): `LiveMeasurement`
+    // is `Copy`, and this is only ever written once (`run_session`'s own
+    // contract: `Stopped` is emitted exactly once, always last).
+    let stopped_measurement: std::cell::Cell<Option<Option<LiveMeasurement>>> =
+        std::cell::Cell::new(None);
+    let live_sink = |event: LiveEvent| match event {
         LiveEvent::Text { text, start, end } => {
             let outcome = applier.borrow_mut().apply_text(&text, start, end);
             if let Some(detail) = outcome.store_error {
-                let _ = tx.send(SessionMessage::StoreWriteFailed {
+                sink(SessionMessage::StoreWriteFailed {
                     operation: "append_live_segment".to_string(),
                     detail,
                 });
             }
             if let Some(panel) = outcome.panel {
-                let _ = tx.send(SessionMessage::PanelText(panel));
+                sink(SessionMessage::PanelText(panel));
             }
         }
         LiveEvent::MeterBatch { .. } => {
@@ -713,23 +769,10 @@ pub fn run_live_session(
             // (module doc).
         }
         LiveEvent::Error(msg) => {
-            let _ = tx.send(SessionMessage::Error(msg));
+            sink(SessionMessage::Error(msg));
         }
         LiveEvent::Stopped { measurement } => {
-            if let Some(id) = session_id {
-                match deps.store.complete_live_session(id) {
-                    Ok(()) => {
-                        let _ = tx.send(SessionMessage::TableRefresh(id));
-                    }
-                    Err(err) => {
-                        let _ = tx.send(SessionMessage::StoreWriteFailed {
-                            operation: "complete_live_session".to_string(),
-                            detail: err.to_string(),
-                        });
-                    }
-                }
-            }
-            let _ = tx.send(SessionMessage::Stopped { measurement });
+            stopped_measurement.set(Some(measurement));
         }
     };
 
@@ -741,14 +784,31 @@ pub fn run_live_session(
         consumer,
         &mut engine_call,
         &request.meter,
-        &sink,
+        &live_sink,
         cancel,
         &request.session_config,
         &RealClock,
         &RealSleeper,
     );
 
+    // `run_session` always calls the sink with exactly one `Stopped` as its
+    // very last action before returning -- so this is always `Some`.
+    let measurement = stopped_measurement.get().unwrap_or(None);
+
+    // Tear the real capture down *before* announcing the session is over
+    // (the ordering invariant this function's doc comment states).
     capture_handle.stop();
+
+    if let Some(id) = session_id {
+        match deps.store.complete_live_session(id) {
+            Ok(()) => sink(SessionMessage::TableRefresh(id)),
+            Err(err) => sink(SessionMessage::StoreWriteFailed {
+                operation: "complete_live_session".to_string(),
+                detail: err.to_string(),
+            }),
+        }
+    }
+    sink(SessionMessage::Stopped { measurement });
 }
 
 #[cfg(test)]
@@ -1069,5 +1129,201 @@ mod tests {
 
         record_measured_speed(&mut measured, humm_core::domain::ModelSize::Base, 3.0);
         assert_eq!(measured.len(), 2, "a different size is a separate entry");
+    }
+
+    // -- run_live_session: capture-teardown-before-Stopped ordering ---------
+    //
+    // Review finding: `SessionMessage::Stopped` must never reach the caller
+    // until `capture_handle.stop()` has actually completed, or
+    // `RecordingVm::finish_stopping` could restart the meter-only capture
+    // while the old stream is still tearing down (two streams on one
+    // device). This drives a full, real `run_live_session` call (ensure ->
+    // load -> insert -> capture.start -> one real batch -> Stop) with a
+    // scripted `CaptureHandle` and sink that both append to one shared,
+    // order-preserving log, and asserts the capture's entry comes first.
+
+    use humm_core::boundary::{AudioCapture, AudioDevice, CaptureHandle};
+    use humm_core::error::AudioError;
+    use humm_core::queue::ArtifactEnsurer;
+
+    use crate::recording::RecordingDeps;
+
+    struct OrderingOkStore;
+    impl LiveStore for OrderingOkStore {
+        fn insert_live_session(
+            &self,
+            _name: &str,
+            _options: &TranscriptionOptions,
+        ) -> Result<TranscriptionId, StoreError> {
+            Ok(TranscriptionId::new())
+        }
+
+        fn append_live_segment(
+            &self,
+            _id: TranscriptionId,
+            _start: Millis,
+            _end: Millis,
+            _text: &str,
+        ) -> Result<(), StoreError> {
+            Ok(())
+        }
+
+        fn complete_live_session(&self, _id: TranscriptionId) -> Result<(), StoreError> {
+            Ok(())
+        }
+    }
+
+    struct OrderingOkEnsurer;
+    impl ArtifactEnsurer for OrderingOkEnsurer {
+        fn ensure_model(
+            &self,
+            _model: &ModelSpec,
+            _progress: &mut dyn FnMut(DownloadProgress),
+            _cancel: &CancelToken,
+        ) -> Result<PathBuf, CoreError> {
+            Ok(PathBuf::from("dummy-model"))
+        }
+
+        fn ensure_vad(
+            &self,
+            _progress: &mut dyn FnMut(DownloadProgress),
+            _cancel: &CancelToken,
+        ) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    /// Returns one utterance, then requests cancellation via the *same*
+    /// token `run_session` forwards through -- the Task 8 critical contract
+    /// this crate relies on (Stop must abort in-flight calls) -- so this
+    /// test drives one real batch through a real session rather than an
+    /// artificially empty one.
+    struct SelfCancelingEngine;
+    impl LiveEngineSession for SelfCancelingEngine {
+        fn transcribe_live(
+            &mut self,
+            _samples: &[f32],
+            _opts: &LiveOptions,
+            _prompt: &str,
+            cancel: &CancelToken,
+        ) -> Result<String, EngineError> {
+            cancel.cancel();
+            Ok("ordering test utterance".to_string())
+        }
+    }
+
+    struct OrderingOkEngineFactory;
+    impl LiveEngineFactory for OrderingOkEngineFactory {
+        fn load(
+            &self,
+            _model_path: &Path,
+            _use_gpu: bool,
+        ) -> Result<Box<dyn LiveEngineSession>, EngineError> {
+            Ok(Box::new(SelfCancelingEngine))
+        }
+    }
+
+    struct OrderingNeverCalledUploadFactory;
+    impl UploadFactory for OrderingNeverCalledUploadFactory {
+        fn build(&self, _url: String) -> Box<dyn LiveUpload> {
+            unreachable!("request.upload_url is None in the ordering test")
+        }
+    }
+
+    /// Appends `"capture_stopped"` to the shared log when `stop()` runs.
+    struct LoggingCaptureHandle(Arc<StdMutex<Vec<String>>>);
+    impl CaptureHandle for LoggingCaptureHandle {
+        fn stop(self: Box<Self>) {
+            self.0.lock().unwrap().push("capture_stopped".to_string());
+        }
+    }
+
+    /// Pushes one full batch's worth of uniform-loud samples straight into
+    /// the ring on `start()` (synchronously, on the caller's thread -- no
+    /// real capture thread involved), so `run_session`'s very first
+    /// `drain_ring` already has a whole batch to work with -- no real
+    /// sleeping anywhere in this test.
+    struct LoggingCapture {
+        log: Arc<StdMutex<Vec<String>>>,
+    }
+    impl AudioCapture for LoggingCapture {
+        fn devices(&self) -> Result<Vec<AudioDevice>, AudioError> {
+            Ok(Vec::new())
+        }
+
+        fn start(
+            &mut self,
+            _device_id: Option<&str>,
+            mut sink: rtrb::Producer<f32>,
+            _meter: Arc<MeterSnapshot>,
+        ) -> Result<Box<dyn CaptureHandle>, AudioError> {
+            for _ in 0..SESSION_RING_CAPACITY {
+                let _ = sink.push(0.5);
+            }
+            Ok(Box::new(LoggingCaptureHandle(Arc::clone(&self.log))))
+        }
+    }
+
+    fn ordering_test_request() -> LiveSessionRequest {
+        LiveSessionRequest {
+            device_id: None,
+            model: ModelSpec {
+                size: humm_core::domain::ModelSize::Small,
+                hf_repo: None,
+            },
+            use_gpu: false,
+            live_options: LiveOptions {
+                language: None,
+                task: humm_core::domain::TaskKind::Transcribe,
+                temperature: humm_core::domain::DEFAULT_TEMPERATURE.to_vec(),
+                threads: None,
+            },
+            session_config: SessionConfig {
+                mode: RecordingMode::AppendBelow,
+                transcription_step_secs: 3.5,
+                silence_threshold: 0.0025,
+                initial_prompt: String::new(),
+            },
+            separator: "\n\n".to_string(),
+            hide_unconfirmed: true,
+            options_snapshot: TranscriptionOptions::default(),
+            session_name: "Live recording <test>".to_string(),
+            export: None,
+            upload_url: None,
+            meter: Arc::new(MeterSnapshot::new()),
+        }
+    }
+
+    #[test]
+    fn stopped_is_sent_only_after_capture_teardown_completes() {
+        let log: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let deps = RecordingDeps {
+            capture: std::sync::Mutex::new(Box::new(LoggingCapture {
+                log: Arc::clone(&log),
+            })),
+            store: Arc::new(OrderingOkStore),
+            model_ensurer: Arc::new(OrderingOkEnsurer),
+            engine_factory: Arc::new(OrderingOkEngineFactory),
+            upload_factory: Arc::new(OrderingNeverCalledUploadFactory),
+        };
+        let cancel = CancelToken::new();
+
+        let log_for_sink = Arc::clone(&log);
+        let sink = move |message: SessionMessage| {
+            if matches!(message, SessionMessage::Stopped { .. }) {
+                log_for_sink
+                    .lock()
+                    .unwrap()
+                    .push("sent:Stopped".to_string());
+            }
+        };
+
+        run_live_session(&deps, ordering_test_request(), &sink, &cancel);
+
+        assert_eq!(
+            log.lock().unwrap().clone(),
+            vec!["capture_stopped".to_string(), "sent:Stopped".to_string()],
+            "capture_handle.stop() must complete before SessionMessage::Stopped is sent"
+        );
     }
 }

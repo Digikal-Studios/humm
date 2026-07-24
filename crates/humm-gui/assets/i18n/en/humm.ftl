@@ -292,5 +292,6 @@ recording-model-downloading-indeterminate = Downloading model…
 recording-model-loading = Loading model…
 recording-error-prefix = An error occurred while starting a new recording:
 recording-error-suffix = Please check your audio devices or check the application logs for more information.
+recording-thread-crashed = The recording session ended unexpectedly. Please check the application logs for more information.
 meter-average-volume = Average volume
 meter-queue = Queue

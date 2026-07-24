@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use humm_core::boundary::{AudioCapture, AudioDevice, CaptureHandle, MeterSnapshot, SAMPLE_RATE};
 use humm_core::cancel::CancelToken;
-use humm_core::domain::{ModelSize, TaskKind};
+use humm_core::domain::{ModelSize, TaskKind, TranscriptionId};
 use humm_core::language::Language;
 use humm_core::live::{RealSleeper, Sleeper};
 use humm_core::queue::ArtifactEnsurer;
@@ -191,7 +191,12 @@ pub fn realtime_fit_warning_visible(
 /// concurrent — `RecordingVm::on_record_clicked` always tears the meter-only
 /// capture down *before* a session start is requested, and the session
 /// thread only restarts it (`RecordingVm::finish_stopping`) after its own
-/// `capture_handle.stop()` has already run.
+/// `capture_handle.stop()` has already run. That second half is a
+/// *mechanically enforced* ordering, not just a documented convention:
+/// `live_session::run_live_session` never lets `SessionMessage::Stopped` —
+/// the message that triggers `finish_stopping` — reach the UI thread until
+/// `capture_handle.stop()` has actually completed (see that function's own
+/// "Ordering invariant" doc and its wrapper-ordering test).
 pub struct RecordingDeps {
     /// The audio-input capture adapter (`humm_audio::CpalCapture` in
     /// production, `humm_audio::MockCapture` in tests — never the reverse,
@@ -373,6 +378,16 @@ pub struct RecordingVm {
     /// Owned by `app.rs`'s harvest (`start`/`stop`/drain) — see
     /// `crate::live_session`'s module doc for the threading split.
     pub(crate) session: Option<ActiveSession>,
+    /// The current session's store row id, once known — set (idempotently)
+    /// whenever a `SessionMessage::TableRefresh` arrives (the same id both
+    /// times: right after `insert_live_session` succeeds, and again at
+    /// completion). `None` until then, or if `insert_live_session` failed
+    /// (ADR-018 — nothing to complete). Exists solely for `app.rs`'s
+    /// session-crashed liveness fallback (`Self::session`'s `JoinHandle`
+    /// finished without ever sending `Stopped`): normal completion runs
+    /// `complete_live_session` on the session thread itself and never reads
+    /// this field.
+    pub(crate) session_id: Option<TranscriptionId>,
 
     meter_only_handle: Option<Box<dyn CaptureHandle>>,
     meter_only_cancel: Option<CancelToken>,
@@ -421,6 +436,7 @@ impl RecordingVm {
             prep: None,
             error_dialog: None,
             session: None,
+            session_id: None,
             meter_only_handle: None,
             meter_only_cancel: None,
             meter_only_thread: None,
@@ -479,6 +495,7 @@ impl RecordingVm {
                 self.panel_text.clear();
                 self.error_dialog = None;
                 self.prep = None;
+                self.session_id = None;
                 self.pending_intent = Some(RecordingIntent::StartRequested);
             }
             RecordingStatus::Recording => {

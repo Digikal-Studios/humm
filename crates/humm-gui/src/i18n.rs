@@ -242,6 +242,7 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "recording-model-loading",
         "recording-error-prefix",
         "recording-error-suffix",
+        "recording-thread-crashed",
         "meter-average-volume",
         "meter-queue",
     ]

@@ -2031,7 +2031,11 @@ impl HummApp {
     /// shape) and applies each message — see `crate::live_session`'s module
     /// doc for what each variant does and doesn't carry (in particular: no
     /// store write happens here, only the one `TasksVm::refresh_row` *read*).
-    /// A no-op while no session is active.
+    /// Then, regardless of whether any message arrived this frame, checks
+    /// for a crashed session ([`Self::recover_crashed_session`]) — the two
+    /// must not be gated on "some message arrived", since a crash is
+    /// exactly the scenario where *no* message (in particular, no
+    /// `Stopped`) will ever arrive again.
     fn drain_live_session(&mut self, ctx: &egui::Context) {
         let Some(vm_arc) = self.recording.clone() else {
             return;
@@ -2045,50 +2049,134 @@ impl HummApp {
                 None => Vec::new(),
             }
         };
-        if messages.is_empty() {
-            return;
-        }
-        for message in messages {
-            match message {
-                SessionMessage::Preparing(update) => {
-                    let mut vm = vm_arc
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    vm.prep = Some(update);
-                }
-                SessionMessage::TableRefresh(id) => {
-                    self.tasks.refresh_row(id, &self.services.store);
-                }
-                SessionMessage::StoreWriteFailed { operation, detail } => {
-                    log::warn!("live session store write failed ({operation}): {detail}");
-                    self.action_state.banner.on_store_write_failed();
-                }
-                SessionMessage::Ready => {
-                    let mut vm = vm_arc
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    // Buzz `on_model_loaded` -> `reset_recording_controls()`:
-                    // clears the progress row once the model/capture are
-                    // actually ready, not on the first utterance (which
-                    // silence could delay indefinitely).
-                    vm.prep = None;
-                }
-                SessionMessage::PanelText(text) => {
-                    let mut vm = vm_arc
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    vm.panel_text = text;
-                }
-                SessionMessage::Error(cause) => {
-                    let mut vm = vm_arc
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    vm.error_dialog = Some(live_session::recording_error_dialog_text(&cause));
-                }
-                SessionMessage::Stopped { measurement } => {
-                    self.finish_live_session(&vm_arc, measurement);
+        if !messages.is_empty() {
+            for message in messages {
+                match message {
+                    SessionMessage::Preparing(update) => {
+                        let mut vm = vm_arc
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        vm.prep = Some(update);
+                    }
+                    SessionMessage::TableRefresh(id) => {
+                        {
+                            let mut vm = vm_arc
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            // Idempotent: the same id arrives once at
+                            // insert and once at completion. Exists only
+                            // for `Self::recover_crashed_session` (a
+                            // crashed session never reaches the completion
+                            // send, so this is the only way that fallback
+                            // learns which row to complete).
+                            vm.session_id = Some(id);
+                        }
+                        self.tasks.refresh_row(id, &self.services.store);
+                    }
+                    SessionMessage::StoreWriteFailed { operation, detail } => {
+                        log::warn!("live session store write failed ({operation}): {detail}");
+                        self.action_state.banner.on_store_write_failed();
+                    }
+                    SessionMessage::Ready => {
+                        let mut vm = vm_arc
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        // Buzz `on_model_loaded` -> `reset_recording_controls()`:
+                        // clears the progress row once the model/capture are
+                        // actually ready, not on the first utterance (which
+                        // silence could delay indefinitely).
+                        vm.prep = None;
+                    }
+                    SessionMessage::PanelText(text) => {
+                        let mut vm = vm_arc
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        vm.panel_text = text;
+                    }
+                    SessionMessage::Error(cause) => {
+                        let mut vm = vm_arc
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        vm.error_dialog = Some(live_session::recording_error_dialog_text(&cause));
+                    }
+                    SessionMessage::Stopped { measurement } => {
+                        self.finish_live_session(&vm_arc, measurement);
+                    }
                 }
             }
+            ctx.request_repaint();
+        }
+        self.recover_crashed_session(&vm_arc, ctx);
+    }
+
+    /// Liveness fallback for a session thread that panicked: normally the
+    /// thread always sends exactly one `Stopped` before exiting
+    /// (`live_session::run_live_session`'s own contract), which is what
+    /// clears [`RecordingVm::session`]. If the thread's `JoinHandle` reports
+    /// [`JoinHandle::is_finished`] while [`RecordingVm::session`] is still
+    /// `Some` — i.e. it exited *without* ever sending `Stopped` — that
+    /// contract was broken by a panic, not a normal return, and the window
+    /// would otherwise be stranded in `Recording`/`Stopping` forever (the
+    /// close veto never lifts, nothing ever restores the stopped-state UI).
+    ///
+    /// Recovery: best-effort `complete_live_session` for whatever the
+    /// session's own id turned out to be (Q-10 — a partial transcript is
+    /// still finished work worth opening; ADR-018 surfaces a failure here
+    /// the same way every other store write does), refresh its table row,
+    /// surface a dedicated (not Buzz-parity — this is a humm-only failure
+    /// mode Buzz's own threading model can't produce) error dialog, drop
+    /// the stale `session` handle, and finish exactly like a normal
+    /// `Stopped` would ([`Self::finish_live_session`]'s own
+    /// `pending_close`-or-`finish_stopping` split) — which is what actually
+    /// lifts the close veto.
+    ///
+    /// Note: a real `CpalCapture`'s audio stream has no owner left to stop
+    /// it once its thread is gone — this fallback cannot clean that up, only
+    /// recover the UI/store from the crash. Recorded as a known limitation
+    /// (task report), not fixed here.
+    fn recover_crashed_session(&mut self, vm_arc: &Arc<Mutex<RecordingVm>>, ctx: &egui::Context) {
+        let crashed = {
+            let vm = vm_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match &vm.session {
+                Some(session) => session
+                    .thread
+                    .as_ref()
+                    .is_some_and(std::thread::JoinHandle::is_finished),
+                None => false,
+            }
+        };
+        if !crashed {
+            return;
+        }
+
+        let session_id = {
+            let vm = vm_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            vm.session_id
+        };
+        if let Some(id) = session_id {
+            match self.recording_deps.store.complete_live_session(id) {
+                Ok(()) => self.tasks.refresh_row(id, &self.services.store),
+                Err(err) => {
+                    log::warn!("crashed live session {id}: could not mark completed: {err}");
+                    self.action_state.banner.on_store_write_failed();
+                }
+            }
+        }
+
+        let mut vm = vm_arc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        vm.session = None;
+        vm.error_dialog = Some(tr("recording-thread-crashed"));
+        if vm.pending_close {
+            vm.close_requested = true;
+        } else {
+            let deps = Arc::clone(&self.recording_deps);
+            vm.finish_stopping(&deps);
         }
         ctx.request_repaint();
     }
@@ -2271,6 +2359,20 @@ impl HummApp {
     /// viewport a kittest `Harness` cannot click; see the module doc).
     pub fn recording_deps_for_test(&self) -> Arc<RecordingDeps> {
         Arc::clone(&self.recording_deps)
+    }
+
+    /// The task table's own row for `id`, as the running app currently
+    /// holds it (`self.tasks`, kept live by [`Self::drain_live_session`]'s
+    /// `SessionMessage::TableRefresh` handling — *not* a fresh read from the
+    /// store) — so a test can assert the live-session `TableRefresh` wiring
+    /// itself, rather than only ever re-deriving `TasksVm` from the store
+    /// independently of the running app.
+    pub fn tasks_row_for_test(&self, id: TranscriptionId) -> Option<crate::viewmodel::RowVm> {
+        self.tasks
+            .sorted_rows()
+            .iter()
+            .find(|row| row.id == id)
+            .cloned()
     }
 }
 
