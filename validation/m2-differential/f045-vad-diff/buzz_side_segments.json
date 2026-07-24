@@ -1,0 +1,114 @@
+{
+  "segment_level": [
+    {
+      "start": 100,
+      "end": 8360,
+      "text": "Bienvenue dans Passrail, un podcast pensé pour aider la curiosité des apprenances et des apprenances de français.",
+      "translation": ""
+    }
+  ],
+  "word_level": [
+    {
+      "start": 100,
+      "end": 802,
+      "text": "Bienvenue",
+      "translation": ""
+    },
+    {
+      "start": 968,
+      "end": 1361,
+      "text": "dans",
+      "translation": ""
+    },
+    {
+      "start": 1361,
+      "end": 2229,
+      "text": "Passrail,",
+      "translation": ""
+    },
+    {
+      "start": 2322,
+      "end": 2322,
+      "text": "un",
+      "translation": ""
+    },
+    {
+      "start": 2384,
+      "end": 2632,
+      "text": "podcast",
+      "translation": ""
+    },
+    {
+      "start": 2632,
+      "end": 3191,
+      "text": "pensé",
+      "translation": ""
+    },
+    {
+      "start": 3191,
+      "end": 3490,
+      "text": "pour",
+      "translation": ""
+    },
+    {
+      "start": 3552,
+      "end": 3894,
+      "text": "aider",
+      "translation": ""
+    },
+    {
+      "start": 3894,
+      "end": 4121,
+      "text": "la",
+      "translation": ""
+    },
+    {
+      "start": 4121,
+      "end": 5248,
+      "text": "curiosité",
+      "translation": ""
+    },
+    {
+      "start": 5268,
+      "end": 5506,
+      "text": "des",
+      "translation": ""
+    },
+    {
+      "start": 5506,
+      "end": 6571,
+      "text": "apprenances",
+      "translation": ""
+    },
+    {
+      "start": 6581,
+      "end": 6788,
+      "text": "et",
+      "translation": ""
+    },
+    {
+      "start": 6788,
+      "end": 6954,
+      "text": "des",
+      "translation": ""
+    },
+    {
+      "start": 6954,
+      "end": 7429,
+      "text": "apprenances",
+      "translation": ""
+    },
+    {
+      "start": 7636,
+      "end": 7708,
+      "text": "de",
+      "translation": ""
+    },
+    {
+      "start": 7708,
+      "end": 8360,
+      "text": "français.",
+      "translation": ""
+    }
+  ]
+}

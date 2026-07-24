@@ -79,11 +79,28 @@ fn ffmpeg_binary() -> PathBuf {
 /// — so dimensions/fps/duration are exactly known without shipping a binary
 /// fixture. Used by the video/probe contract tests below.
 fn write_video_fixture(dir: &Path, duration_secs: u32, fps: u32) -> PathBuf {
+    write_video_fixture_at_rate(dir, duration_secs, &fps.to_string())
+}
+
+/// As [`write_video_fixture`], but `rate` is an arbitrary ffmpeg rate
+/// expression rather than a plain integer — `testsrc2`'s `rate` option is an
+/// `AVRational`, so a fraction such as `"30000/1001"` (NTSC's 29.97 fps)
+/// works exactly like `-r 30000/1001` would on the command line, and stamps
+/// the encoded stream's `r_frame_rate` with that exact fraction (verified
+/// against a real ffmpeg/ffprobe round-trip: `ffprobe -show_entries
+/// stream=r_frame_rate` on a `rate=30000/1001` fixture reports
+/// `r_frame_rate=30000/1001`, not a rounded decimal). Used by the
+/// fractional-fps spot-check (M4 hardware debt): 29.97 is the most common
+/// non-integer fps in real-world footage, and `FfprobeProber::parse_frame_rate`
+/// (`probe.rs`) is only unit-tested against a synthetic mocked
+/// `r_frame_rate`; this closes the loop against a genuine ffmpeg-encoded
+/// fixture.
+fn write_video_fixture_at_rate(dir: &Path, duration_secs: u32, rate: &str) -> PathBuf {
     let path = dir.join("fixture.mp4");
     let status = Command::new(ffmpeg_binary())
         .args(["-y", "-f", "lavfi"])
         .arg("-i")
-        .arg(format!("testsrc2=duration={duration_secs}:rate={fps}"))
+        .arg(format!("testsrc2=duration={duration_secs}:rate={rate}"))
         .args(["-f", "lavfi"])
         .arg("-i")
         .arg(format!("sine=duration={duration_secs}"))
@@ -449,6 +466,78 @@ fn probe_reports_video_info() {
         info.duration.expect("duration should be known").0 > 0,
         "duration should be positive"
     );
+}
+
+/// Fractional-fps spot-check (M4 hardware debt, carried to M5): every prior
+/// contract test in this file generates its fixture at an integer fps
+/// (`25`), so `FfprobeProber::parse_frame_rate`'s `"n/d"` division only ever
+/// got exercised against a *mocked* fractional `r_frame_rate` in
+/// `probe.rs`'s unit tests, never a genuine ffmpeg-encoded stream. This
+/// fixture is generated at NTSC's 30000/1001 (≈29.97 fps) — the most common
+/// non-integer fps in real-world footage — and proves two things end to end
+/// against real binaries: (1) ffprobe reports `r_frame_rate` as the exact
+/// fraction `"30000/1001"` for this fixture and `FfprobeProber` divides it
+/// into the expected ≈29.970_03 fps float, and (2) `FfmpegVideoStreamer`
+/// still streams frames with strictly monotonic timestamps at that rate
+/// (the same assertion `video_stream_yields_monotonic_frames_with_dimensions`
+/// makes at 25 fps) — i.e. the fractional rate doesn't confuse the decode
+/// pacing (`frame_for`'s frame-boundary math) the way it might if some path
+/// silently rounded fps to an integer.
+#[test]
+#[ignore = "requires ffmpeg"]
+fn probe_and_stream_fractional_29_97_fps() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_video_fixture_at_rate(dir.path(), 2, "30000/1001");
+
+    let prober = FfprobeProber::new();
+    let info = prober.probe(&path).expect("probe should succeed");
+    let video_info = info.video.expect("expected a video stream");
+
+    // 30000/1001 = 29.970029970029969... — assert the parsed float matches
+    // that division exactly, not some rounded stand-in like 29.97 or 30.0.
+    let expected_fps = 30_000.0 / 1001.0;
+    assert!(
+        (video_info.fps - expected_fps).abs() < 1e-9,
+        "expected ~{expected_fps} fps (30000/1001), got {}",
+        video_info.fps
+    );
+    assert!(
+        (video_info.fps - 30.0).abs() > 0.01,
+        "29.97 fps must not have been rounded up to a flat 30 fps"
+    );
+
+    let streamer = FfmpegVideoStreamer::new();
+    let mut stream = streamer
+        .open(&path, Millis(0), &video_info)
+        .expect("open should succeed");
+
+    let frame_ms = (1000.0 / video_info.fps).round() as i64;
+    let mut frames = Vec::new();
+    let mut position = Millis(0);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while frames.len() < 50 {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for frames; got {} of 50",
+            frames.len()
+        );
+        match stream.frame_for(position) {
+            Some(frame) => {
+                position = Millis(position.0 + frame_ms);
+                frames.push(frame);
+            }
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+
+    let timestamps: Vec<i64> = frames.iter().map(|f| f.ts.0).collect();
+    assert_eq!(timestamps[0], 0, "first frame's ts should be 0");
+    for pair in timestamps.windows(2) {
+        assert!(
+            pair[1] > pair[0],
+            "timestamps should be strictly ascending at 29.97 fps: {timestamps:?}"
+        );
+    }
 }
 
 // --- yt-dlp `MediaFetcher` contract tests (F-022, ADR-016) ---

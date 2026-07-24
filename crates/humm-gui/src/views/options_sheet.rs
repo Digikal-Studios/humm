@@ -18,11 +18,12 @@ use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use humm_core::domain::{
-    DEFAULT_TEMPERATURE, Input, ModelSize, ModelSpec, OutputFormat, OutputSpec, Source, TaskKind,
-    TaskSpec, TranscriptionId, TranscriptionOptions,
+    DEFAULT_TEMPERATURE, Input, Millis, ModelSize, ModelSpec, OutputFormat, OutputSpec, Source,
+    TaskKind, TaskSpec, TranscriptionId, TranscriptionOptions,
 };
 use humm_core::language::Language;
 use humm_core::settings::FileTranscriberSettings;
+use humm_core::viewer::text_view::paragraph_split_from_env;
 
 use crate::i18n::tr;
 use crate::import::ImportRequest;
@@ -195,9 +196,34 @@ pub enum SheetOutcome {
 /// all sharing the same [`TranscriptionOptions`]/[`OutputSpec`] derived from
 /// `state`. Pure and `egui`-free, so it's directly unit-testable against
 /// synthetic sheet state without ever rendering anything.
+///
+/// `output.paragraph_split` is read fresh from `HUMM_PARAGRAPH_SPLIT_TIME`
+/// here, at spec-build time — exactly like `humm-cli`'s `run.rs`, which sets
+/// the same field from the same [`paragraph_split_from_env`] call (queue-path
+/// parity, HUMM_SURFACE §5: previously this fell through to
+/// `OutputSpec::default()`'s hardcoded 2000 ms and silently ignored the env
+/// override for every queue-enqueued task, even though the viewer's own
+/// Text-mode display and TXT export already read it fresh). One shared
+/// source: this function, the CLI, and the viewer's export menu
+/// (`export_menu::export_entry`) all call the very same core helper rather
+/// than each re-deriving the "env or 2000 ms" rule.
 pub fn build_specs(
     request: &ImportRequest,
     state: &SheetState,
+) -> Vec<(TranscriptionId, TaskSpec, Source)> {
+    build_specs_with_paragraph_split(request, state, paragraph_split_from_env())
+}
+
+/// Value-threaded core of [`build_specs`]: unit-testable without touching the
+/// real process env (this crate's lib tests run in parallel and several
+/// *other* tests call `paragraph_split_from_env()` too, so a real
+/// `std::env::set_var` here would be a genuine flaky-test hazard — the same
+/// "no env mutation in tests" convention `export_menu::write_export_file`
+/// and `humm_core::paths`'s "Global Constraint 9" doc comment establish).
+fn build_specs_with_paragraph_split(
+    request: &ImportRequest,
+    state: &SheetState,
+    paragraph_split: Millis,
 ) -> Vec<(TranscriptionId, TaskSpec, Source)> {
     let options = TranscriptionOptions {
         language: state.language,
@@ -212,6 +238,7 @@ pub fn build_specs(
     };
     let output = OutputSpec {
         formats: state.formats.clone(),
+        paragraph_split,
         ..OutputSpec::default()
     };
 
@@ -745,6 +772,37 @@ mod tests {
 
         let specs = build_specs(&request, &state);
         assert_eq!(specs[0].1.options.temperature, DEFAULT_TEMPERATURE.to_vec());
+    }
+
+    /// HUMM_SURFACE §5 queue-path gap: `build_specs` must read
+    /// `HUMM_PARAGRAPH_SPLIT_TIME` at spec-build time, exactly like
+    /// `humm-cli`'s `run.rs` does, rather than always taking
+    /// `OutputSpec::default()`'s hardcoded 2000 ms. Proven via the
+    /// value-threaded seam (`build_specs_with_paragraph_split`) rather than a
+    /// real `std::env::set_var` — this crate's lib tests run in parallel and
+    /// several *other* tests call `paragraph_split_from_env()` too, so
+    /// mutating the real process env here would be a genuine flaky-test
+    /// hazard (the same convention `export_menu`'s
+    /// `export_txt_honors_paragraph_split_env` and `humm_core::paths`'s
+    /// "Global Constraint 9" doc comment establish).
+    #[test]
+    fn build_specs_threads_a_non_default_paragraph_split() {
+        let state = base_state();
+        let request = ImportRequest::Files(vec![PathBuf::from("/a.wav")]);
+        let overridden = Millis(500);
+
+        let specs = build_specs_with_paragraph_split(&request, &state, overridden);
+        assert_eq!(specs[0].1.output.paragraph_split, overridden);
+
+        // And the default-reading entry point matches the default constant
+        // when the env var is genuinely unset in this process.
+        if std::env::var_os("HUMM_PARAGRAPH_SPLIT_TIME").is_none() {
+            let default_specs = build_specs(&request, &state);
+            assert_eq!(
+                default_specs[0].1.output.paragraph_split,
+                humm_core::export::DEFAULT_PARAGRAPH_SPLIT
+            );
+        }
     }
 
     // -- header/summary text ----------------------------------------------------

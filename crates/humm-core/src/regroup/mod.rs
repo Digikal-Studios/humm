@@ -137,9 +137,13 @@ pub fn algo_from_env_or(built: String) -> String {
     )
 }
 
-/// Pure core of [`algo_from_env_or`] (testable without touching real env):
-/// `env_value` wins when present, else the `built` string is used.
-fn override_algo(built: String, env_value: Option<&str>) -> String {
+/// Value-threaded core of [`algo_from_env_or`]: `env_value` wins whenever it
+/// is present — even an empty string — else the `built` string is used
+/// (Buzz's `os.getenv(name, default)` semantics). Public so callers that must
+/// not mutate process env in tests (e.g. `humm-gui`'s resizer, which threads
+/// an explicit `Option<&str>` instead of calling [`algo_from_env_or`]
+/// directly) can reuse this rule verbatim rather than re-deriving it.
+pub fn override_algo(built: String, env_value: Option<&str>) -> String {
     match env_value {
         Some(v) => v.to_string(),
         None => built,

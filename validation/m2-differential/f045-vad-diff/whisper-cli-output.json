@@ -1,0 +1,451 @@
+{
+	"systeminfo": "WHISPER : COREML = 0 | OPENVINO = 0 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | DOTPROD = 1 | ACCELERATE = 1 | REPACK = 1 | ",
+	"model": {
+		"type": "tiny",
+		"multilingual": true,
+		"vocab": 51865,
+		"audio": {
+			"ctx": 1500,
+			"state": 384,
+			"head": 6,
+			"layer": 4
+		},
+		"text": {
+			"ctx": 448,
+			"state": 384,
+			"head": 6,
+			"layer": 4
+		},
+		"mels": 80,
+		"ftype": 1
+	},
+	"params": {
+		"model": "/Users/jawad/Library/Application Support/humm/models/ggml-tiny.bin",
+		"language": "fr",
+		"translate": false
+	},
+	"result": {
+		"language": "fr"
+	},
+	"transcription": [
+		{
+			"timestamps": {
+				"from": "00:00:00,100",
+				"to": "00:00:08,360"
+			},
+			"offsets": {
+				"from": 100,
+				"to": 8360
+			},
+			"text": " Bienvenue dans Passrail, un podcast pensé pour aider la curiosité des apprenances et des apprenances de français.",
+			"tokens": [
+				{
+					"text": "[_BEG_]",
+					"timestamps": {
+						"from": "00:00:00,000",
+						"to": "00:00:00,000"
+					},
+					"offsets": {
+						"from": 0,
+						"to": 0
+					},
+					"id": 50364,
+					"p": 0.994253,
+					"t_dtw": -1
+				},
+				{
+					"text": " Bien",
+					"timestamps": {
+						"from": "00:00:00,010",
+						"to": "00:00:00,380"
+					},
+					"offsets": {
+						"from": 10,
+						"to": 380
+					},
+					"id": 16956,
+					"p": 0.404667,
+					"t_dtw": -1
+				},
+				{
+					"text": "venue",
+					"timestamps": {
+						"from": "00:00:00,380",
+						"to": "00:00:00,690"
+					},
+					"offsets": {
+						"from": 380,
+						"to": 690
+					},
+					"id": 29307,
+					"p": 0.577258,
+					"t_dtw": -1
+				},
+				{
+					"text": " dans",
+					"timestamps": {
+						"from": "00:00:00,850",
+						"to": "00:00:01,230"
+					},
+					"offsets": {
+						"from": 850,
+						"to": 1230
+					},
+					"id": 2680,
+					"p": 0.970526,
+					"t_dtw": -1
+				},
+				{
+					"text": " Pass",
+					"timestamps": {
+						"from": "00:00:01,230",
+						"to": "00:00:01,560"
+					},
+					"offsets": {
+						"from": 1230,
+						"to": 1560
+					},
+					"id": 10319,
+					"p": 0.14867,
+					"t_dtw": -1
+				},
+				{
+					"text": "rail",
+					"timestamps": {
+						"from": "00:00:01,760",
+						"to": "00:00:02,000"
+					},
+					"offsets": {
+						"from": 1760,
+						"to": 2000
+					},
+					"id": 44765,
+					"p": 0.0839355,
+					"t_dtw": -1
+				},
+				{
+					"text": ",",
+					"timestamps": {
+						"from": "00:00:02,000",
+						"to": "00:00:02,070"
+					},
+					"offsets": {
+						"from": 2000,
+						"to": 2070
+					},
+					"id": 11,
+					"p": 0.310482,
+					"t_dtw": -1
+				},
+				{
+					"text": " un",
+					"timestamps": {
+						"from": "00:00:02,160",
+						"to": "00:00:02,160"
+					},
+					"offsets": {
+						"from": 2160,
+						"to": 2160
+					},
+					"id": 517,
+					"p": 0.69059,
+					"t_dtw": -1
+				},
+				{
+					"text": " podcast",
+					"timestamps": {
+						"from": "00:00:02,220",
+						"to": "00:00:02,460"
+					},
+					"offsets": {
+						"from": 2220,
+						"to": 2460
+					},
+					"id": 7367,
+					"p": 0.847607,
+					"t_dtw": -1
+				},
+				{
+					"text": " pens",
+					"timestamps": {
+						"from": "00:00:02,460",
+						"to": "00:00:02,820"
+					},
+					"offsets": {
+						"from": 2460,
+						"to": 2820
+					},
+					"id": 6099,
+					"p": 0.591508,
+					"t_dtw": -1
+				},
+				{
+					"text": "é",
+					"timestamps": {
+						"from": "00:00:02,820",
+						"to": "00:00:03,000"
+					},
+					"offsets": {
+						"from": 2820,
+						"to": 3000
+					},
+					"id": 526,
+					"p": 0.981697,
+					"t_dtw": -1
+				},
+				{
+					"text": " pour",
+					"timestamps": {
+						"from": "00:00:03,000",
+						"to": "00:00:03,290"
+					},
+					"offsets": {
+						"from": 3000,
+						"to": 3290
+					},
+					"id": 2016,
+					"p": 0.904321,
+					"t_dtw": -1
+				},
+				{
+					"text": " aider",
+					"timestamps": {
+						"from": "00:00:03,350",
+						"to": "00:00:03,680"
+					},
+					"offsets": {
+						"from": 3350,
+						"to": 3680
+					},
+					"id": 36669,
+					"p": 0.0657053,
+					"t_dtw": -1
+				},
+				{
+					"text": " la",
+					"timestamps": {
+						"from": "00:00:03,680",
+						"to": "00:00:03,900"
+					},
+					"offsets": {
+						"from": 3680,
+						"to": 3900
+					},
+					"id": 635,
+					"p": 0.942757,
+					"t_dtw": -1
+				},
+				{
+					"text": " curios",
+					"timestamps": {
+						"from": "00:00:03,900",
+						"to": "00:00:04,530"
+					},
+					"offsets": {
+						"from": 3900,
+						"to": 4530
+					},
+					"id": 13625,
+					"p": 0.952622,
+					"t_dtw": -1
+				},
+				{
+					"text": "ité",
+					"timestamps": {
+						"from": "00:00:04,530",
+						"to": "00:00:04,990"
+					},
+					"offsets": {
+						"from": 4530,
+						"to": 4990
+					},
+					"id": 5066,
+					"p": 0.998136,
+					"t_dtw": -1
+				},
+				{
+					"text": " des",
+					"timestamps": {
+						"from": "00:00:05,010",
+						"to": "00:00:05,240"
+					},
+					"offsets": {
+						"from": 5010,
+						"to": 5240
+					},
+					"id": 730,
+					"p": 0.480721,
+					"t_dtw": -1
+				},
+				{
+					"text": " app",
+					"timestamps": {
+						"from": "00:00:05,240",
+						"to": "00:00:05,520"
+					},
+					"offsets": {
+						"from": 5240,
+						"to": 5520
+					},
+					"id": 724,
+					"p": 0.486943,
+					"t_dtw": -1
+				},
+				{
+					"text": "ren",
+					"timestamps": {
+						"from": "00:00:05,520",
+						"to": "00:00:05,800"
+					},
+					"offsets": {
+						"from": 5520,
+						"to": 5800
+					},
+					"id": 1095,
+					"p": 0.68595,
+					"t_dtw": -1
+				},
+				{
+					"text": "ances",
+					"timestamps": {
+						"from": "00:00:05,800",
+						"to": "00:00:06,270"
+					},
+					"offsets": {
+						"from": 5800,
+						"to": 6270
+					},
+					"id": 2676,
+					"p": 0.541952,
+					"t_dtw": -1
+				},
+				{
+					"text": " et",
+					"timestamps": {
+						"from": "00:00:06,280",
+						"to": "00:00:06,480"
+					},
+					"offsets": {
+						"from": 6280,
+						"to": 6480
+					},
+					"id": 1030,
+					"p": 0.493792,
+					"t_dtw": -1
+				},
+				{
+					"text": " des",
+					"timestamps": {
+						"from": "00:00:06,480",
+						"to": "00:00:06,640"
+					},
+					"offsets": {
+						"from": 6480,
+						"to": 6640
+					},
+					"id": 730,
+					"p": 0.636614,
+					"t_dtw": -1
+				},
+				{
+					"text": " app",
+					"timestamps": {
+						"from": "00:00:06,640",
+						"to": "00:00:06,780"
+					},
+					"offsets": {
+						"from": 6640,
+						"to": 6780
+					},
+					"id": 724,
+					"p": 0.767713,
+					"t_dtw": -1
+				},
+				{
+					"text": "ren",
+					"timestamps": {
+						"from": "00:00:06,800",
+						"to": "00:00:06,960"
+					},
+					"offsets": {
+						"from": 6800,
+						"to": 6960
+					},
+					"id": 1095,
+					"p": 0.991024,
+					"t_dtw": -1
+				},
+				{
+					"text": "ances",
+					"timestamps": {
+						"from": "00:00:06,960",
+						"to": "00:00:07,100"
+					},
+					"offsets": {
+						"from": 6960,
+						"to": 7100
+					},
+					"id": 2676,
+					"p": 0.946153,
+					"t_dtw": -1
+				},
+				{
+					"text": " de",
+					"timestamps": {
+						"from": "00:00:07,300",
+						"to": "00:00:07,370"
+					},
+					"offsets": {
+						"from": 7300,
+						"to": 7370
+					},
+					"id": 368,
+					"p": 0.682194,
+					"t_dtw": -1
+				},
+				{
+					"text": " français",
+					"timestamps": {
+						"from": "00:00:07,370",
+						"to": "00:00:07,990"
+					},
+					"offsets": {
+						"from": 7370,
+						"to": 7990
+					},
+					"id": 21425,
+					"p": 0.619859,
+					"t_dtw": -1
+				},
+				{
+					"text": ".",
+					"timestamps": {
+						"from": "00:00:07,990",
+						"to": "00:00:08,000"
+					},
+					"offsets": {
+						"from": 7990,
+						"to": 8000
+					},
+					"id": 13,
+					"p": 0.877748,
+					"t_dtw": -1
+				},
+				{
+					"text": "[_TT_400]",
+					"timestamps": {
+						"from": "00:00:08,000",
+						"to": "00:00:08,000"
+					},
+					"offsets": {
+						"from": 8000,
+						"to": 8000
+					},
+					"id": 50764,
+					"p": 0.107598,
+					"t_dtw": -1
+				}
+			]
+		}
+	]
+}

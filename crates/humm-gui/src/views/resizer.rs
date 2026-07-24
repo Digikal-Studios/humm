@@ -29,7 +29,7 @@ use std::sync::Mutex;
 use egui::RichText;
 use humm_core::domain::{Millis, Segment, TranscriptionId};
 use humm_core::error::StoreError;
-use humm_core::regroup::default_algo;
+use humm_core::regroup::{default_algo, override_algo};
 use humm_core::settings::Settings;
 use humm_store::SqliteStore;
 
@@ -203,27 +203,18 @@ impl ResizerVm {
 /// Buzz's `HUMM_MERGE_REGROUP_RULE` override applied — `os.getenv(
 /// "BUZZ_MERGE_REGROUP_RULE", regroup_string)`
 /// (`transcription_resizer_widget.py:459`, humm's env-var rename). Reads the
-/// env once and threads the value into [`merge_algo_from`], the same "override
-/// wins when set" rule core's [`humm_core::regroup::algo_from_env_or`] applies
-/// — split that way so this wiring is unit-testable without mutating process
-/// env (`humm-gui` uses no `unsafe`, and `std::env::set_var` is `unsafe` in
-/// edition 2024). Kept in lockstep with `algo_from_env_or`.
+/// env once and delegates the "override wins when set" rule to core's
+/// [`override_algo`] (the same value-threaded core
+/// [`humm_core::regroup::algo_from_env_or`] uses) rather than re-deriving it
+/// here — reading the env in this thin wrapper (instead of calling
+/// `algo_from_env_or` directly) keeps the GUI able to unit-test the rule by
+/// threading explicit values (`humm-gui` uses no `unsafe`, and
+/// `std::env::set_var` is `unsafe` in edition 2024).
 pub fn merge_algo_for(vm: &ResizerVm) -> String {
-    merge_algo_from(
+    override_algo(
         vm.build_algo(),
         std::env::var("HUMM_MERGE_REGROUP_RULE").ok().as_deref(),
     )
-}
-
-/// Value-threaded core of [`merge_algo_for`]: the `HUMM_MERGE_REGROUP_RULE`
-/// override wins whenever it is set — even to an empty string — else the
-/// `built` algorithm is used (Buzz's `os.getenv(name, default)` semantics /
-/// core's `algo_from_env_or`).
-pub(crate) fn merge_algo_from(built: String, env_override: Option<&str>) -> String {
-    match env_override {
-        Some(value) => value.to_string(),
-        None => built,
-    }
 }
 
 /// Parses the "Extend endings by up to (seconds)" field to a millisecond
@@ -710,27 +701,33 @@ mod tests {
     // -- HUMM_MERGE_REGROUP_RULE override wiring -----------------------------
 
     #[test]
-    fn merge_algo_from_override_wins_when_set_even_empty() {
+    fn override_algo_wins_when_set_even_empty() {
+        // Delegated straight to core's `override_algo` (M4 final-review finding
+        // 6): no GUI-local copy of the "set wins, even empty" rule survives.
         let built = "mg=0.2++42+1_sl=42".to_string();
         // No override → the built string passes through unchanged.
-        assert_eq!(merge_algo_from(built.clone(), None), built);
+        assert_eq!(override_algo(built.clone(), None), built);
         // A set override replaces it entirely (Buzz `os.getenv(name, default)`).
-        assert_eq!(merge_algo_from(built.clone(), Some("da=1")), "da=1");
+        assert_eq!(override_algo(built.clone(), Some("da=1")), "da=1");
         // An *empty* override still wins (set-but-empty is "set").
-        assert_eq!(merge_algo_from(built, Some("")), "");
+        assert_eq!(override_algo(built, Some("")), "");
     }
 
     #[test]
-    fn merge_algo_for_is_build_algo_without_the_env_override() {
-        // Only meaningful when the var is not set in this process — guarded by a
-        // value read (never a mutation: humm-gui uses no `unsafe`). Proves the
-        // merge-launch capture composes build_algo through the override rule
-        // (with no override → the built string), i.e. the app no longer feeds
-        // the pre-override string straight to the regrouper.
+    fn merge_algo_for_matches_core_override_algo_threaded_explicitly() {
+        // Pins env-override equivalence between the GUI path (`merge_algo_for`,
+        // which reads the real process env once) and core's value-threaded
+        // `override_algo` fed the same built string and an explicit `None` —
+        // i.e. "no override set" — standing in for the env read. Guarded by a
+        // value read (never a mutation: humm-gui uses no `unsafe`, and
+        // `std::env::set_var` is `unsafe` in edition 2024 — Global Constraint
+        // 9's no-env-mutation-in-tests convention).
         if std::env::var_os("HUMM_MERGE_REGROUP_RULE").is_some() {
             return;
         }
         let vm = vm_for_algo(true, true, true);
+        assert_eq!(merge_algo_for(&vm), override_algo(vm.build_algo(), None));
+        // And unchanged from build_algo() itself when nothing overrides it.
         assert_eq!(merge_algo_for(&vm), vm.build_algo());
     }
 
@@ -738,11 +735,11 @@ mod tests {
     fn env_supplied_unsupported_op_surfaces_as_regroup_error() {
         // The value-threaded drive of the merge path (spec §2.6): an override
         // string with an unsupported op (`da`) flows through the same
-        // resolution the app uses and then errors in the regrouper — which the
-        // merge worker turns into the resizer's error banner (start_merge's Err
-        // arm sets `vm.error`).
+        // resolution the app uses (core's `override_algo`) and then errors in
+        // the regrouper — which the merge worker turns into the resizer's
+        // error banner (start_merge's Err arm sets `vm.error`).
         let vm = vm_for_algo(true, true, true);
-        let algo = merge_algo_from(vm.build_algo(), Some("da=1"));
+        let algo = override_algo(vm.build_algo(), Some("da=1"));
         assert_eq!(algo, "da=1", "the override string reaches the merge path");
 
         let segs = [seg(0, 1000, "hello world.", "")];
