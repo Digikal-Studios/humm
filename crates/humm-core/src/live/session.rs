@@ -244,6 +244,18 @@ fn idle_pause(sleeper: &dyn Sleeper, cancel: &CancelToken) {
 /// [`crate::live::export::RealSleeper`]; tests substitute fakes so the
 /// whole loop runs with no real waiting and fully scripted timing.
 ///
+/// Cancellation is checked between iterations (top of the loop, and inside
+/// [`idle_pause`]'s slices) -- this loop cannot preempt an `engine` call
+/// that is already in progress, since it blocks synchronously on it like
+/// any other function call. Spec §3's "in-flight engine call aborts" stop
+/// semantic is therefore the *caller's* responsibility: `engine`'s closure
+/// is expected to close over the same `cancel` token and forward it to the
+/// underlying `TranscriptionEngine::transcribe`'s abort callback (spec
+/// §2.2.4), so a long inference genuinely stops early. Once that call
+/// returns (aborted or not), this loop's very next cancel check -- at the
+/// top of the `while` -- guarantees no further batch is drained or
+/// transcribed.
+///
 /// Eight collaborators is exactly the shape of "generic over every boundary
 /// this loop touches" the spec calls for (capture ring, engine, meter,
 /// event sink, cancellation, config, and the two testability seams) --
