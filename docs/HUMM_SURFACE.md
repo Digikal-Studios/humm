@@ -123,9 +123,12 @@ warning lines only.
 ### 5.1 `humm-gui`-only environment variables
 
 The CLI-shared variables above apply to `humm-gui` too (it calls the same
-`humm-core::paths`/`humm-core::env` functions). These four are GUI-specific:
+`humm-core::paths`/`humm-core::env` functions). These are GUI-specific:
 `HUMM_FAVORITE_LANGUAGES` from M3 Task 9 (import paths + options sheet); the
-other three from M3 Task 11 (preferences/update/telemetry wiring).
+telemetry/update-check/PostHog three from M3 Task 11 (preferences/update/
+telemetry wiring); `HUMM_MERGE_REGROUP_RULE` from M4 Task 12 (resizer); the
+`HUMM_SMOKE_*` group (test-only); `HUMM_UPLOAD_URL` from M5 (live export/
+upload, F-064).
 
 | Variable | Effect |
 |----------|--------|
@@ -134,6 +137,7 @@ other three from M3 Task 11 (preferences/update/telemetry wiring).
 | `HUMM_POSTHOG_KEY` | Build-time only (`option_env!`, not read at runtime): humm's own PostHog project key. Absent at build time compiles telemetry down to a permanent no-op — there is no way to enable it at runtime without rebuilding. |
 | `HUMM_FAVORITE_LANGUAGES` | Comma-separated language codes (Buzz: `BUZZ_FAVORITE_LANGUAGES`) shown as a separator-wrapped "favorites" block at the top of the options sheet's language combo (F-023); invalid codes are silently dropped. Unset or empty renders no favorites block at all. |
 | `HUMM_MERGE_REGROUP_RULE` | Overrides the regroup algorithm string the resizer's **Merge** builds from its checkboxes (F-086, ADR-020) — a stable-ts-style `mg`/`sp`/`sl` op string (e.g. `mg=0.2++42+1_sp=…_sl=42`). Only `mg`/`sp`/`sl` are supported; any other op yields an actionable `UnsupportedOp` error naming the op and the supported set. Timings use Buzz's decisecond quirk (`mg=0.2` ⇒ merge gaps ≤ 20 ms real). Unset ⇒ the checkbox-built string is used. |
+| `HUMM_UPLOAD_URL` | Overrides the live-recording export's upload URL (F-064, spec §2.4, ✚ — Buzz has no advanced-sheet field for this, only the env var; humm adds the field, but the env still wins per that same ✚ decision). Effective value = `HUMM_UPLOAD_URL` if set and non-empty, else `settings.recording.upload_url` (the advanced sheet's "Upload URL:" field, M5 Task 12), else no upload for the session (`humm_core::live::effective_upload_url`). Read once per session start, not per-frame. |
 | `HUMM_SMOKE_OPEN_WINDOWS` / `HUMM_SMOKE_AUTO_CLOSE_FRAMES` | Test-only, unstable — smoke-test hooks, not user surface. Drive the `docs/gui-manual/M3.md` windowed multi-window/clean-shutdown smoke under a controller with no OS input-injection access (`app.rs`'s `SmokeHooks`): the first opens the About/Preferences viewports on the first frame; the second requests a normal window close after that many frames. |
 | `HUMM_SMOKE_OPEN_VIEWER` | Test-only, unstable — A/V-drift acceptance hook, not user surface (`app.rs`'s `SmokeHooks`, F-083). Set to a media-file path: on the first frame humm seeds a completed transcript row for it, opens its viewer through the normal open path, auto-starts playback once the player is ready, and requests a clean app shutdown once playback reaches end-of-media (`ViewerVm::smoke_autoplay`/`drive_smoke_playback`) — the deferred-viewport analogue of `HUMM_SMOKE_OPEN_WINDOWS`, so the windowed 10-min A/V-drift run (`docs/gui-manual/M4.md`, `docs/benchmarks/M4.md`) runs without OS input injection. Pair with `HUMM_SMOKE_AV_DRIFT_LOG` to capture the pairs. Unset or empty ⇒ inert. |
 | `HUMM_SMOKE_AV_DRIFT_LOG` | Test-only, unstable — A/V-sync acceptance instrumentation, not user surface (F-083, `viewer.rs`'s `DriftLog`). When set to a writable file path and the open transcript is video, the viewer appends one `audio_ms,frame_ts_ms` CSV line per rendered video frame (audio position = master clock vs. the displayed frame's presentation timestamp). Feeds the windowed 10-min ±50 ms p95 drift check in the Task 14 gui-manual run over a generated `testsrc2`+`sine` fixture. Unset or empty ⇒ no log. |
@@ -151,6 +155,21 @@ other three from M3 Task 11 (preferences/update/telemetry wiring).
 | GUI window/table state (`humm-gui` only) | `~/Library/Application Support/humm/gui.ron` | `HUMM_CONFIG_DIR` (`eframe`'s `persistence_path`, §7) |
 | Single-instance stale-flip lock | `~/Library/Application Support/humm/instance.lock` | `HUMM_DATA_DIR` (§7) |
 | GUI exclusivity lock (`humm-gui` only) | `~/Library/Application Support/humm/gui.lock` | `HUMM_DATA_DIR` (§7) |
+| Presentation-window CSS override (`humm-gui` only, F-065, M5 Task 12) | `~/Library/Application Support/humm/presentation_style.css` (optional — absent by default) | `HUMM_CONFIG_DIR` |
+
+The presentation-window CSS override is a **subset-parser mechanism deviation**
+from Buzz (spec §2.6, `views/presentation.rs::parse_presentation_css`): Buzz's
+`presentation_window.py` renders the transcript via Qt's `QTextBrowser::setHtml`
+and looks for a full user stylesheet at
+`user_cache_dir("Buzz")/presentation_window_style.css`; egui has no HTML/CSS
+renderer, so humm paints the text directly and only understands the three
+declarations Buzz's own generated stylesheet actually uses — `color`,
+`background-color`, `font-size` (a `pt` suffix) — from a file at humm's
+**config** dir (not cache dir — the one settings-adjacent, user-discoverable
+directory this port already uses for every other per-user file) named
+`presentation_style.css` (not `presentation_window_style.css`). Unrecognized
+declarations are ignored and logged once; a file present but with nothing
+recognized, or unreadable, leaves the theme unchanged.
 
 Linux/Windows follow the platform config/data/state conventions
 (`directories` crate); see `crates/humm-core/src/paths.rs`.

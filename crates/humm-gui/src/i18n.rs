@@ -234,9 +234,7 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "recording-record-button",
         "recording-stop-button",
         "recording-realtime-warning",
-        "recording-presentation-bar-placeholder",
         "recording-panel-placeholder",
-        "recording-copy-bar-placeholder",
         "recording-model-downloading",
         "recording-model-downloading-indeterminate",
         "recording-model-loading",
@@ -245,6 +243,51 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "recording-thread-crashed",
         "meter-average-volume",
         "meter-queue",
+        // Recording advanced-settings sheet (views/recording_advanced.rs, Task 12)
+        "recording-advanced-title",
+        "recording-advanced-speech-heading",
+        "recording-advanced-initial-prompt-label",
+        "recording-advanced-translation-heading",
+        "recording-advanced-llm-enable",
+        "recording-advanced-llm-tooltip",
+        "recording-advanced-llm-model-label",
+        "recording-advanced-llm-instructions-label",
+        "recording-advanced-recording-heading",
+        "recording-advanced-silence-threshold-label",
+        "recording-advanced-mode-label",
+        "recording-advanced-mode-append-below",
+        "recording-advanced-mode-append-above",
+        "recording-advanced-mode-append-and-correct",
+        "recording-advanced-separator-label",
+        "recording-advanced-step-label",
+        "recording-advanced-hide-unconfirmed",
+        "recording-advanced-export-enable",
+        "recording-advanced-export-folder-label",
+        "recording-advanced-export-browse",
+        "recording-advanced-export-file-name-label",
+        "recording-advanced-export-file-type-label",
+        "recording-advanced-export-file-type-txt",
+        "recording-advanced-export-file-type-csv",
+        "recording-advanced-export-max-entries-label",
+        "recording-advanced-upload-url-label",
+        "recording-advanced-ok",
+        // Presentation window + bar (views/presentation.rs, Task 12)
+        "presentation-show-button",
+        "presentation-show-tooltip",
+        "presentation-text-size-label",
+        "presentation-theme-label",
+        "presentation-theme-light",
+        "presentation-theme-dark",
+        "presentation-theme-custom",
+        "presentation-text-color-label",
+        "presentation-background-color-label",
+        "presentation-fullscreen-button",
+        "presentation-window-title",
+        // Copy bar (views/recording.rs, Task 12)
+        "recording-copy-button",
+        "recording-copy-tooltip",
+        "recording-copy-copied",
+        "recording-copy-nothing",
     ]
 }
 
@@ -338,6 +381,42 @@ mod tests {
     #[test]
     fn unknown_key_resolves_to_itself() {
         assert_eq!(tr("no-such-key"), "no-such-key");
+    }
+
+    #[test]
+    fn recording_advanced_max_entries_label_has_the_buzz_embedded_newline() {
+        // Buzz: QLabel(_("Limit export entries\n(0 = export all):")) --
+        // `advanced_settings_dialog.py:242`. Fluent's own multi-line value
+        // syntax (indented continuation lines) joins with `\n`.
+        assert_eq!(
+            tr("recording-advanced-export-max-entries-label"),
+            "Limit export entries\n(0 = export all):"
+        );
+    }
+
+    #[test]
+    fn recording_advanced_ok_is_title_case_not_all_caps() {
+        // Buzz's advanced-dialog button box explicitly relabels its Ok
+        // button to "Ok" (`_setup_button_box`, `:261`) -- distinct from the
+        // generic all-caps "OK" every other humm dialog uses (`dialog-ok`).
+        assert_eq!(tr("recording-advanced-ok"), "Ok");
+        assert_ne!(tr("recording-advanced-ok"), tr("dialog-ok"));
+    }
+
+    #[test]
+    fn presentation_and_copy_strings_are_buzz_byte_exact() {
+        assert_eq!(tr("presentation-show-tooltip"), "Show in new window");
+        assert_eq!(
+            tr("presentation-window-title"),
+            "Live Transcript Presentation"
+        );
+        assert_eq!(tr("recording-copy-button"), "Copy");
+        assert_eq!(
+            tr("recording-copy-tooltip"),
+            "Copy transcription to clipboard"
+        );
+        assert_eq!(tr("recording-copy-copied"), "Copied!");
+        assert_eq!(tr("recording-copy-nothing"), "Nothing to copy!");
     }
 
     #[test]

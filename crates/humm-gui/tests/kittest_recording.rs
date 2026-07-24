@@ -34,7 +34,7 @@ use humm_core::domain::{ModelSpec, Status, TranscriptionId};
 use humm_core::error::{AudioError, CoreError, EngineError};
 use humm_core::models::download::DownloadProgress;
 use humm_core::queue::{ArtifactEnsurer, EngineFactory};
-use humm_core::settings::Settings;
+use humm_core::settings::{RecordingSettings, Settings};
 use humm_gui::app::HummApp;
 use humm_gui::live_session::{
     LiveEngineFactory, LiveEngineSession, LiveStore, LiveUpload, UploadFactory,
@@ -43,7 +43,8 @@ use humm_gui::recording::{RecordingDeps, RecordingStatus, RecordingVm};
 use humm_gui::services::{self, Capabilities, Services, TestDeps};
 use humm_gui::viewer::can_open;
 use humm_gui::viewmodel::TasksVm;
-use humm_gui::views::recording::recording_ui;
+use humm_gui::views::recording::{CopyLabelState, recording_ui};
+use humm_gui::views::recording_advanced::AdvancedSheetState;
 use humm_store::SqliteStore;
 use humm_whisper::LiveOptions;
 
@@ -149,12 +150,18 @@ fn two_mock_devices() -> Vec<AudioDevice> {
 }
 
 /// The recording-window render fixture: a `MockCapture`-backed `RecordingVm`
-/// plus everything `recording_ui` needs.
+/// plus everything `recording_ui` needs, including a real (temp-file)
+/// `Settings`/`settings_path` pair for the advanced sheet's and presentation
+/// bar's immediate-save fields (Task 12) — mirrors `kittest_resizer.rs`'s own
+/// `Mutex<Settings>` + temp `settings_path` fixture shape.
 struct Fixture {
     vm: RecordingVm,
     deps: RecordingDeps,
     custom_model_available: bool,
     measured_speed: BTreeMap<String, f32>,
+    settings: Mutex<Settings>,
+    settings_path: PathBuf,
+    _settings_dir: tempfile::TempDir,
 }
 
 fn fixture_with_devices(devices: Vec<AudioDevice>) -> Fixture {
@@ -164,14 +171,20 @@ fn fixture_with_devices(devices: Vec<AudioDevice>) -> Fixture {
         model_ensurer: Arc::new(NeverCalledEnsurer),
         engine_factory: Arc::new(NeverCalledLiveEngineFactory),
         upload_factory: Arc::new(NeverCalledUploadFactory),
+        dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
     };
     let settings = Settings::default();
     let vm = RecordingVm::open(&deps, &settings);
+    let settings_dir = tempfile::tempdir().expect("tempdir");
+    let settings_path = settings_dir.path().join("settings.toml");
     Fixture {
         vm,
         deps,
         custom_model_available: false,
         measured_speed: BTreeMap::new(),
+        settings: Mutex::new(settings),
+        settings_path,
+        _settings_dir: settings_dir,
     }
 }
 
@@ -188,6 +201,8 @@ fn build_harness(fixture: Fixture) -> Harness<'static, Fixture> {
                 &fixture.deps,
                 fixture.custom_model_available,
                 &fixture.measured_speed,
+                &fixture.settings,
+                &fixture.settings_path,
             );
         },
         fixture,
@@ -377,6 +392,194 @@ fn no_realtime_fit_warning_renders_with_no_measured_entry() {
         })
         .count();
     assert_eq!(matches, 0, "no measured entry means no warning label");
+}
+
+// -- Task 12: advanced sheet ---------------------------------------------------
+
+#[test]
+fn advanced_button_click_opens_the_sheet() {
+    let mut harness = build_harness(fixture());
+    harness.step();
+
+    harness.get_by_label("Advanced...").click();
+    harness.step();
+    harness.step(); // settle frame -- same one-frame click/render-order lag
+    // the Record-click tests document (`recording.rs`'s own click handler
+    // runs before this frame's later `recording_advanced::ui` call sees the
+    // flag it just set; one more frame renders fully consistent).
+
+    harness.get_by_label("Advanced Settings");
+    harness.get_by_label("Speech recognition settings");
+    harness.get_by_label("Translation settings");
+    harness.get_by_label("Recording settings");
+    harness.get_by_label("Initial Prompt:");
+    harness.get_by_label("Silence threshold:");
+    harness.get_by_label("Live recording mode:");
+    harness.get_by_label("Ok");
+}
+
+#[test]
+fn disabled_llm_block_renders_with_its_tooltip_target_present() {
+    let mut harness = build_harness(fixture());
+    harness.get_by_label("Advanced...").click();
+    harness.step();
+    harness.step();
+
+    let checkbox = harness.get_by_label("Enable AI translation");
+    assert!(
+        checkbox.accesskit_node().is_disabled(),
+        "F-063 is M6 -- the LLM-translation checkbox renders permanently disabled"
+    );
+    harness.get_by_label("AI model:");
+    harness.get_by_label("Instructions for AI:");
+}
+
+#[test]
+fn advanced_sheet_mode_dependent_rows_swap_with_the_mode() {
+    // Opened directly with a known `AdvancedSheetState` (mode 0, Append
+    // below) rather than via a click+combo-select round trip -- driving an
+    // `egui::ComboBox` selection has no kittest precedent in this workspace;
+    // `recording_advanced::is_append_and_correct`'s own unit tests already
+    // pin the pure index->visibility mapping this render reacts to, so this
+    // test only needs to prove the *render* reacts to `mode_index` changing.
+    let mut fixture = fixture();
+    fixture.vm.advanced_sheet = Some(AdvancedSheetState::from_settings(
+        &RecordingSettings::default(),
+        &fixture.vm.options.line_separator,
+    ));
+    let mut harness = build_harness(fixture);
+    harness.step();
+
+    harness.get_by_label("Line separator:");
+    assert!(harness.query_by_label("Transcription step:").is_none());
+    assert!(harness.query_by_label("Hide unconfirmed").is_none());
+
+    harness
+        .state_mut()
+        .vm
+        .advanced_sheet
+        .as_mut()
+        .expect("sheet is open")
+        .mode_index = 2; // Append and correct
+    harness.step();
+
+    harness.get_by_label("Transcription step:");
+    harness.get_by_label("Hide unconfirmed");
+    assert!(harness.query_by_label("Line separator:").is_none());
+}
+
+#[test]
+fn export_block_gates_on_the_enable_checkbox() {
+    let mut harness = build_harness(fixture());
+    harness.get_by_label("Advanced...").click();
+    harness.step();
+    harness.step();
+
+    let browse = harness.get_by_label("Browse");
+    assert!(
+        browse.accesskit_node().is_disabled(),
+        "export fields start disabled -- export_enabled defaults to false"
+    );
+
+    harness.get_by_label("Enable live recording export").click();
+    harness.step();
+
+    let browse = harness.get_by_label("Browse");
+    assert!(
+        !browse.accesskit_node().is_disabled(),
+        "checking Enable live recording export re-enables the export block"
+    );
+    // Immediate-save contract (Buzz `on_export_enabled_changed`): the change
+    // has already reached `settings.recording`, not just the sheet's own
+    // mirror.
+    assert!(
+        harness
+            .state()
+            .settings
+            .lock()
+            .unwrap()
+            .recording
+            .export_enabled
+    );
+}
+
+// -- Task 12: presentation bar --------------------------------------------------
+
+#[test]
+fn presentation_bar_show_button_opens_the_presentation_window_flag() {
+    let mut fixture = fixture();
+    fixture.vm.on_record_clicked(&fixture.deps); // -> Recording, presentation bar visible
+    let mut harness = build_harness(fixture);
+    harness.step();
+
+    assert!(!harness.state().vm.presentation.open);
+    harness.get_by_label("Show").click();
+    harness.step();
+
+    assert!(harness.state().vm.presentation.open);
+}
+
+#[test]
+fn presentation_bar_custom_theme_reveals_color_buttons() {
+    let mut fixture = fixture();
+    fixture.vm.on_record_clicked(&fixture.deps);
+    fixture.vm.presentation.theme = humm_gui::views::presentation::PresentationTheme::Custom;
+    let mut harness = build_harness(fixture);
+    harness.step();
+
+    harness.get_by_label("Text Color");
+    harness.get_by_label("Background Color");
+}
+
+#[test]
+fn presentation_bar_light_theme_hides_color_buttons() {
+    let mut fixture = fixture();
+    fixture.vm.on_record_clicked(&fixture.deps);
+    let mut harness = build_harness(fixture);
+    harness.step();
+
+    assert!(harness.query_by_label("Text Color").is_none());
+    assert!(harness.query_by_label("Background Color").is_none());
+}
+
+// -- Task 12: copy bar ---------------------------------------------------------
+
+#[test]
+fn copy_click_relabels_to_copied_for_a_non_empty_panel() {
+    let mut fixture = fixture();
+    fixture.vm.copy_bar_visible = true;
+    fixture.vm.panel_text = "hello world".to_string();
+    let mut harness = build_harness(fixture);
+    harness.step();
+
+    harness.get_by_label("Copy").click();
+    harness.step();
+    harness.step(); // settle frame -- same click/render-order lag as the Record-click tests.
+
+    harness.get_by_label("Copied!");
+    assert!(matches!(
+        harness.state().vm.copy_label,
+        CopyLabelState::Copied(_)
+    ));
+}
+
+#[test]
+fn copy_click_relabels_to_nothing_to_copy_for_an_empty_panel() {
+    let mut fixture = fixture();
+    fixture.vm.copy_bar_visible = true;
+    fixture.vm.panel_text = "   ".to_string();
+    let mut harness = build_harness(fixture);
+    harness.step();
+
+    harness.get_by_label("Copy").click();
+    harness.step();
+    harness.step(); // settle frame -- same click/render-order lag as the Record-click tests.
+
+    harness.get_by_label("Nothing to copy!");
+    assert!(matches!(
+        harness.state().vm.copy_label,
+        CopyLabelState::NothingToCopy(_)
+    ));
 }
 
 // -- Toolbar Record button (F-004/F-060 unlock) -------------------------------
@@ -708,6 +911,7 @@ fn scripted_end_to_end_record_two_utterances_then_stop() {
         upload_factory: Arc::new(RecordingUploadFactory {
             calls: Arc::clone(&upload_calls),
         }),
+        dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
     };
 
     let mut harness = HarnessBuilder::default()
@@ -917,6 +1121,7 @@ fn session_thread_panic_recovers_the_window_and_completes_the_store_row() {
             calls: Arc::clone(&engine_calls),
         }),
         upload_factory: Arc::new(NeverCalledUploadFactory),
+        dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
     };
 
     let mut harness = HarnessBuilder::default()

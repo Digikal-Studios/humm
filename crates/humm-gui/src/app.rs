@@ -395,6 +395,7 @@ impl HummApp {
             model_ensurer,
             engine_factory,
             upload_factory,
+            dialogs: Arc::new(RfdFileDialogs),
         });
         let (app_event_tx, app_event_rx) = mpsc::channel();
 
@@ -1820,6 +1821,7 @@ impl HummApp {
         let vm_for_cb = Arc::clone(vm_arc);
         let deps = Arc::clone(&self.recording_deps);
         let settings = Arc::clone(&self.services.settings);
+        let settings_path = self.services.settings_path.clone();
 
         ctx.show_viewport_deferred(
             egui::ViewportId::from_hash_of(("recording",)),
@@ -1846,6 +1848,8 @@ impl HummApp {
                         &deps,
                         custom_model_available,
                         &measured_speed,
+                        &settings,
+                        &settings_path,
                     );
                 });
                 if std::mem::take(&mut vm.focus_requested) {
@@ -1868,6 +1872,76 @@ impl HummApp {
                             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                         }
                     }
+                }
+            },
+        );
+    }
+
+    /// Renders the presentation window as a deferred egui viewport (F-065,
+    /// spec §2.6), mirroring [`Self::show_recording_viewport`] — a no-op
+    /// while [`Self::recording`] is `None` **or** its
+    /// [`crate::views::presentation::PresentationVm::open`] is false. This
+    /// double gate is also how the presentation window closes when the
+    /// recording window does (Buzz `_do_close`, `:1204-1206`): once
+    /// `self.recording` is dropped by [`Self::harvest_recording_close`],
+    /// this method's early return simply stops calling
+    /// `show_viewport_deferred` for it, and egui/eframe treat an
+    /// unrequested deferred viewport as closed — no explicit teardown call
+    /// needed here.
+    ///
+    /// Owns every call that must run from *this* viewport's own deferred
+    /// closure rather than the recording window's (`views::presentation`'s
+    /// module doc): reading/toggling OS fullscreen state
+    /// (`ViewportCommand::Fullscreen`) and Esc-exits-fullscreen-only
+    /// (Buzz `keyPressEvent`, `presentation_window.py:172-179`).
+    fn show_presentation_viewport(&mut self, ctx: &egui::Context) {
+        let Some(vm_arc) = &self.recording else {
+            return;
+        };
+        let open = vm_arc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .presentation
+            .open;
+        if !open {
+            return;
+        }
+        let vm_for_cb = Arc::clone(vm_arc);
+
+        ctx.show_viewport_deferred(
+            egui::ViewportId::from_hash_of(("presentation",)),
+            egui::ViewportBuilder::default()
+                .with_title(tr("presentation-window-title"))
+                .with_inner_size([800.0, 600.0]),
+            move |ctx, _class| {
+                let mut vm = vm_for_cb
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let css_override = crate::views::presentation::load_css_override();
+                let style = crate::views::presentation::effective_style(
+                    &vm.presentation,
+                    css_override.as_ref(),
+                );
+                let text = vm.panel_text.clone();
+                crate::views::presentation::window_ui(ctx, &text, &style);
+
+                if std::mem::take(&mut vm.presentation.focus_requested) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                if std::mem::take(&mut vm.presentation.fullscreen_toggle_requested) {
+                    let currently_fullscreen = ctx
+                        .input(|input| input.viewport().fullscreen)
+                        .unwrap_or(false);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!currently_fullscreen));
+                }
+                let is_fullscreen = ctx
+                    .input(|input| input.viewport().fullscreen)
+                    .unwrap_or(false);
+                if is_fullscreen && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                }
+                if ctx.input(|input| input.viewport().close_requested()) {
+                    vm.presentation.open = false;
                 }
             },
         );
@@ -1945,12 +2019,19 @@ impl HummApp {
     /// Builds a [`LiveSessionRequest`] from `vm`'s live options snapshot and
     /// the current `settings.recording`/`HUMM_UPLOAD_URL`, and spawns it
     /// (`crate::live_session::spawn_live_session`). The live options — model
-    /// size/task/language/prompt, and the selected device — come from the
-    /// **VM**, not `settings.recording` directly: the options group reflects
-    /// live, possibly-just-edited selections, and `settings.recording` is
-    /// only the sticky *prefill/save* target (Buzz: `self.transcription_options`
-    /// is the group box's live state; matches `recording_transcriber_widget.py`'s
-    /// own split).
+    /// size/task/language/prompt, silence threshold, line separator,
+    /// transcription step, and the selected device — come from the **VM**
+    /// (`RecordingOptions`, mutated live by both the options group and the
+    /// Task 12 advanced sheet), not `settings.recording` directly: they
+    /// reflect live, possibly-just-edited selections, and `settings.recording`
+    /// is only the sticky *prefill/save* target for those same fields (Buzz:
+    /// `self.transcription_options` is the shared live object both the group
+    /// box and `AdvancedSettingsDialog` mutate in place; matches
+    /// `recording_transcriber_widget.py:667-673`'s own split). Mode/hide-
+    /// unconfirmed/export/upload-url are the advanced sheet's *immediate*-save
+    /// fields instead (`views::recording_advanced`'s own module doc) — those
+    /// genuinely do come from `recording_settings` below, since `settings.recording`
+    /// already holds their current value the instant they change.
     fn start_live_session(&mut self, vm_arc: &Arc<Mutex<RecordingVm>>, ctx: &egui::Context) {
         let (device_id, options, meter) = {
             let vm = vm_arc
@@ -1982,10 +2063,17 @@ impl HummApp {
             threads: None,
         };
         let mode = RecordingMode::from_index(recording_settings.mode);
+        // silence_threshold/transcription_step/initial_prompt come from the
+        // *live* `options` snapshot, not `recording_settings` — Buzz parity
+        // (Task 12): the advanced sheet mutates the same in-memory object
+        // this reads, so an edit made before this Record click already
+        // applies, even if the window hasn't closed (and thus hasn't
+        // persisted) yet. `separator` below is the same live-edit field
+        // (`crate::recording::RecordingOptions`'s own doc comment).
         let session_config = SessionConfig {
             mode,
-            transcription_step_secs: recording_settings.transcription_step,
-            silence_threshold: recording_settings.silence_threshold,
+            transcription_step_secs: options.transcription_step,
+            silence_threshold: options.silence_threshold,
             initial_prompt: options.initial_prompt.clone(),
         };
         let export = live_session::export_request_from_settings(&recording_settings);
@@ -2009,7 +2097,7 @@ impl HummApp {
             use_gpu: self.use_gpu,
             live_options,
             session_config,
-            separator: recording_settings.line_separator.clone(),
+            separator: options.line_separator.clone(),
             hide_unconfirmed: recording_settings.hide_unconfirmed,
             options_snapshot,
             session_name,
@@ -2737,6 +2825,7 @@ impl eframe::App for HummApp {
         self.show_viewer_viewports(ui.ctx());
         self.show_resizer_viewports(ui.ctx(), now);
         self.show_recording_viewport(ui.ctx());
+        self.show_presentation_viewport(ui.ctx());
         self.harvest_recording_intent(ui.ctx());
         self.drain_live_session(ui.ctx());
         self.harvest_recording_close();

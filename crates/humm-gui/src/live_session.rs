@@ -1305,6 +1305,7 @@ mod tests {
             model_ensurer: Arc::new(OrderingOkEnsurer),
             engine_factory: Arc::new(OrderingOkEngineFactory),
             upload_factory: Arc::new(OrderingNeverCalledUploadFactory),
+            dialogs: Arc::new(crate::import::RfdFileDialogs),
         };
         let cancel = CancelToken::new();
 

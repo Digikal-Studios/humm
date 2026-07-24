@@ -284,9 +284,7 @@ recording-microphone-label = Microphone:
 recording-record-button = Record
 recording-stop-button = Stop
 recording-realtime-warning = { $size } transcribed at { $ratio }× realtime last run — live transcription may fall behind
-recording-presentation-bar-placeholder = Presentation options arrive in a later task
 recording-panel-placeholder = Click Record to begin...
-recording-copy-bar-placeholder = Copy actions arrive in a later task
 recording-model-downloading = Downloading model… { $percent }%
 recording-model-downloading-indeterminate = Downloading model…
 recording-model-loading = Loading model…
@@ -294,4 +292,66 @@ recording-error-prefix = An error occurred while starting a new recording:
 recording-error-suffix = Please check your audio devices or check the application logs for more information.
 recording-thread-crashed = The recording session ended unexpectedly. Please check the application logs for more information.
 meter-average-volume = Average volume
+
+## Recording advanced-settings sheet (views/recording_advanced.rs, F-060, Task 12)
+##
+## Byte-exact ports of `advanced_settings_dialog.py`'s labels (`_setup_*_section`,
+## `:59-255`) — the LLM-translation row strings render permanently disabled
+## this milestone (F-063 is M6, spec §2.1.6).
+
+recording-advanced-title = Advanced Settings
+recording-advanced-speech-heading = Speech recognition settings
+recording-advanced-initial-prompt-label = Initial Prompt:
+recording-advanced-translation-heading = Translation settings
+recording-advanced-llm-enable = Enable AI translation
+recording-advanced-llm-tooltip = Live translation arrives with the API backend milestone
+recording-advanced-llm-model-label = AI model:
+recording-advanced-llm-instructions-label = Instructions for AI:
+recording-advanced-recording-heading = Recording settings
+recording-advanced-silence-threshold-label = Silence threshold:
+recording-advanced-mode-label = Live recording mode:
+recording-advanced-mode-append-below = Append below
+recording-advanced-mode-append-above = Append above
+recording-advanced-mode-append-and-correct = Append and correct
+recording-advanced-separator-label = Line separator:
+recording-advanced-step-label = Transcription step:
+recording-advanced-hide-unconfirmed = Hide unconfirmed
+recording-advanced-export-enable = Enable live recording export
+recording-advanced-export-folder-label = Export folder:
+recording-advanced-export-browse = Browse
+recording-advanced-export-file-name-label = Export file name:
+recording-advanced-export-file-type-label = Export file type:
+recording-advanced-export-file-type-txt = Text file (.txt)
+recording-advanced-export-file-type-csv = CSV (.csv)
+recording-advanced-export-max-entries-label =
+    Limit export entries
+    (0 = export all):
+recording-advanced-upload-url-label = Upload URL:
+recording-advanced-ok = Ok
+
+## Presentation window + bar (views/presentation.rs, F-065, Task 12)
+##
+## Byte-exact ports of `recording_transcriber_widget.py:267-482` (the bar)
+## and `presentation_window.py` (the window title). `presentation-show-button`
+## is humm's own short button label — Buzz's own button is icon-only, its
+## tooltip is the byte-exact-cited string (`presentation-show-tooltip`).
+
+presentation-show-button = Show
+presentation-show-tooltip = Show in new window
+presentation-text-size-label = Text Size:
+presentation-theme-label = Theme
+presentation-theme-light = Light
+presentation-theme-dark = Dark
+presentation-theme-custom = Custom
+presentation-text-color-label = Text Color
+presentation-background-color-label = Background Color
+presentation-fullscreen-button = Fullscreen
+presentation-window-title = Live Transcript Presentation
+
+## Copy bar (views/recording.rs, F-065 §2.7, Task 12)
+
+recording-copy-button = Copy
+recording-copy-tooltip = Copy transcription to clipboard
+recording-copy-copied = Copied!
+recording-copy-nothing = Nothing to copy!
 meter-queue = Queue

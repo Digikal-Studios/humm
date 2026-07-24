@@ -40,7 +40,11 @@ use humm_core::live::{RealSleeper, Sleeper};
 use humm_core::queue::ArtifactEnsurer;
 use humm_core::settings::{RecordingSettings, Settings};
 
+use crate::import::FileDialogs;
 use crate::live_session::{ActiveSession, LiveEngineFactory, LiveStore, PrepUpdate, UploadFactory};
+use crate::views::presentation::PresentationVm;
+use crate::views::recording::CopyLabelState;
+use crate::views::recording_advanced::AdvancedSheetState;
 
 /// Ring-buffer capacity for the meter-only capture: ~1 s at 16 kHz (the
 /// capture adapter's own documented sizing, `humm-audio`'s `capture` module).
@@ -110,12 +114,32 @@ pub struct RecordingOptions {
     pub language: Option<Language>,
     /// Priming text for the model.
     pub initial_prompt: String,
+    /// Silence threshold for skipping batches (RMS), edited live by the
+    /// advanced sheet (Task 12, `views::recording_advanced`). The **same**
+    /// object [`crate::app::HummApp::start_live_session`] reads at session
+    /// start (Buzz: `self.transcription_options.silence_threshold`, the
+    /// dialog's own live in-memory mutation target,
+    /// `advanced_settings_dialog.py:298-300` +
+    /// `recording_transcriber_widget.py:667-673`) — an edit here already
+    /// applies to the *next* Record click, before the window ever closes.
+    pub silence_threshold: f32,
+    /// Line separator used in append modes, stored literal (not escaped —
+    /// the advanced sheet owns escaping/unescaping display). Same live-edit
+    /// contract as [`Self::silence_threshold`].
+    pub line_separator: String,
+    /// Chunk size in seconds for append-and-correct mode. Same live-edit
+    /// contract as [`Self::silence_threshold`].
+    pub transcription_step: f64,
 }
 
 impl RecordingOptions {
     /// Prefills from `settings.recording`'s sticky fields (Buzz parity:
     /// window-open reads sticky prefs; see the module doc for the shared
-    /// resolution rule with the file-transcriber sheet).
+    /// resolution rule with the file-transcriber sheet). `silence_threshold`/
+    /// `line_separator`/`transcription_step` come from `settings.recording`
+    /// too — already clamped/defaulted by [`Settings::load`]
+    /// ([`RecordingSettings::clamp`]), so no further validation is needed
+    /// here.
     pub fn from_settings(settings: &RecordingSettings, custom_model_available: bool) -> Self {
         let mut model_size = settings
             .model_size
@@ -135,18 +159,28 @@ impl RecordingOptions {
                 .unwrap_or(TaskKind::Transcribe),
             language: settings.language.as_deref().and_then(Language::parse),
             initial_prompt: settings.initial_prompt.clone().unwrap_or_default(),
+            silence_threshold: settings.silence_threshold,
+            line_separator: settings.line_separator.clone(),
+            transcription_step: settings.transcription_step,
         }
     }
 
     /// Writes this snapshot back into `settings` (Buzz `_do_close`,
-    /// `recording_transcriber_widget.py:1202-1260` — the language/task/model/
-    /// initial-prompt fields Task 10 owns; the recording-specific advanced
-    /// fields, e.g. silence threshold/export, are Task 12's).
+    /// `recording_transcriber_widget.py:1202-1260` — every field Buzz's own
+    /// `_do_close` writes from `self.transcription_options`: language/task/
+    /// model/initial-prompt (Task 10) plus silence-threshold/line-separator/
+    /// transcription-step (Task 12, `:1247-1256`). The advanced sheet's
+    /// *immediate*-save fields — mode/hide-unconfirmed/export-*/upload-url —
+    /// are not here; they write straight to `settings.recording` on each
+    /// change instead (`views::recording_advanced`'s own module doc).
     pub fn write_to(&self, settings: &mut RecordingSettings) {
         settings.language = self.language.map(|language| language.code().to_string());
         settings.task = Some(self.task.as_str().to_string());
         settings.model_size = Some(self.model_size.as_str().to_string());
         settings.initial_prompt = Some(self.initial_prompt.clone());
+        settings.silence_threshold = self.silence_threshold;
+        settings.line_separator = self.line_separator.clone();
+        settings.transcription_step = self.transcription_step;
     }
 }
 
@@ -218,6 +252,14 @@ pub struct RecordingDeps {
     /// The upload-client builder (real `crate::live_session::RealUploadFactory`
     /// in production; a network-free recording fake in kittest).
     pub upload_factory: Arc<dyn UploadFactory>,
+    /// Seam over the (blocking, native) folder picker for the advanced
+    /// sheet's export-folder Browse button (F-064/Task 12) — always
+    /// [`crate::import::RfdFileDialogs`] in both real and kittest
+    /// construction, mirroring [`crate::viewer::ViewerDeps::dialogs`] and
+    /// `HummApp::dialogs`'s own "always real, nothing in kittest drives it"
+    /// convention (no test in this workspace clicks Browse — kittest can't
+    /// drive a real rfd dialog).
+    pub dialogs: Arc<dyn FileDialogs>,
 }
 
 /// The pure accumulate-and-average logic behind Buzz's
@@ -326,10 +368,24 @@ pub struct RecordingVm {
     /// `average_rms`/`queue_len` from this module's meter-only drain (while
     /// stopped) or the session/chunker layer (while recording, Task 11).
     pub meter: Arc<MeterSnapshot>,
-    /// Set when the Advanced… button is clicked; Task 12's advanced sheet
-    /// consumes and clears it. Harmless while unconsumed (this task never
-    /// reads it back).
+    /// Set when the Advanced… button is clicked;
+    /// [`crate::views::recording_advanced::ui`] consumes and clears it,
+    /// opening [`Self::advanced_sheet`].
     pub advanced_requested: bool,
+    /// The advanced sheet's own live state while open (Task 12); `None`
+    /// while closed. See `views::recording_advanced`'s module doc for the
+    /// save-timing split with [`Self::options`].
+    pub advanced_sheet: Option<AdvancedSheetState>,
+    /// The presentation window's state (Task 12, F-065): open/focus/
+    /// fullscreen intents plus the persisted display preferences. Read
+    /// fresh from `settings.presentation` at [`Self::open`]; the
+    /// presentation viewport (`app.rs::show_presentation_viewport`) is shown
+    /// only while both this window and [`Self::presentation`]'s `open` flag
+    /// are true, so it closes automatically when the recording window does
+    /// (Buzz `_do_close`, `:1204-1206`) — no explicit teardown needed here.
+    pub presentation: PresentationVm,
+    /// The Copy button's current label/timer state (Task 12, F-065 §2.7).
+    pub copy_label: CopyLabelState,
     /// The read-only transcription panel text — the live session thread's
     /// most recent [`crate::live_session::SessionMessage::PanelText`] (a
     /// whole-panel replace), applied verbatim.
@@ -426,6 +482,9 @@ impl RecordingVm {
             meter_current_amplitude: 0.0,
             meter: Arc::new(MeterSnapshot::new()),
             advanced_requested: false,
+            advanced_sheet: None,
+            presentation: PresentationVm::from_settings(&settings.presentation),
+            copy_label: CopyLabelState::default(),
             panel_text: String::new(),
             presentation_bar_visible: false,
             copy_bar_visible: false,
@@ -655,6 +714,18 @@ mod tests {
         assert_eq!(options.task, TaskKind::Transcribe);
         assert_eq!(options.language, None);
         assert_eq!(options.initial_prompt, "");
+        assert_eq!(
+            options.silence_threshold,
+            RecordingSettings::DEFAULT_SILENCE_THRESHOLD
+        );
+        assert_eq!(
+            options.line_separator,
+            RecordingSettings::DEFAULT_LINE_SEPARATOR
+        );
+        assert_eq!(
+            options.transcription_step,
+            RecordingSettings::DEFAULT_TRANSCRIPTION_STEP
+        );
     }
 
     #[test]
@@ -684,6 +755,9 @@ mod tests {
         options.task = TaskKind::Translate;
         options.language = Language::parse("fr");
         options.initial_prompt = "proper nouns: Buzz, humm".to_string();
+        options.silence_threshold = 0.01;
+        options.line_separator = "---".to_string();
+        options.transcription_step = 4.2;
 
         let mut settings = RecordingSettings::default();
         options.write_to(&mut settings);
@@ -855,6 +929,7 @@ mod tests {
             model_ensurer: Arc::new(NeverCalledEnsurer),
             engine_factory: Arc::new(NeverCalledEngineFactory),
             upload_factory: Arc::new(NeverCalledUploadFactory),
+            dialogs: Arc::new(crate::import::RfdFileDialogs),
         }
     }
 
