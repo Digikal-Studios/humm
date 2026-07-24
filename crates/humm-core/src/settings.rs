@@ -389,11 +389,11 @@ pub struct RecordingSettings {
     /// range 0–99). Clamped to `0..=99` when the settings file is loaded.
     #[serde(default = "default_export_max_entries")]
     pub export_max_entries: u32,
-    /// Upload URL for realtime transcript posting (✚ humm addition, ADR-018).
+    /// Upload URL for realtime transcript posting (✚ humm addition, UX_SPEC J-5).
     /// Overridden by `HUMM_UPLOAD_URL` env var if set.
     pub upload_url: Option<String>,
     /// Measured realtime speed per model size, persisted across sessions
-    /// (✚ humm addition, ADR-018). Keyed by model-size wire string;
+    /// (✚ humm addition, M5 design spec §2.8). Keyed by model-size wire string;
     /// a value < 1.0 triggers the realtime-fit warning.
     #[serde(default = "default_measured_speed")]
     pub measured_speed: BTreeMap<String, f32>,
