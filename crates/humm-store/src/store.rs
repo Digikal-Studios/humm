@@ -1155,7 +1155,14 @@ impl SqliteStore {
     /// Appends one segment row for a live session — the stream-segments
     /// half of Q-10 ✚: called once per accepted utterance while the session
     /// runs, so a killed process loses at most the in-flight chunk.
-    /// `translation` is always empty (live translation is M6, F-063).
+    /// `translation` is always empty at insert time; live translation
+    /// (M6, F-063) fills it in later via [`Self::update_segment_translation`],
+    /// which is why this returns the inserted row's id
+    /// ([`rusqlite::Connection::last_insert_rowid`] — the
+    /// `transcription_segment.id` [`Self::update_segment_translation`] and
+    /// [`SegmentRow::id`] both address by): the caller enqueues the raw
+    /// utterance for translation tagged with this id, then persists the
+    /// translation against it once it arrives.
     ///
     /// Errs if `id` doesn't exist, or if the row is already
     /// [`Status::Completed`] ([`Self::complete_live_session`] already ran):
@@ -1179,7 +1186,7 @@ impl SqliteStore {
         start: Millis,
         end: Millis,
         text: &str,
-    ) -> Result<(), StoreError> {
+    ) -> Result<i64, StoreError> {
         let conn = self.lock()?;
         let status: Option<String> = conn
             .query_row(
@@ -1211,7 +1218,7 @@ impl SqliteStore {
             params![start.0, end.0, text, id.to_string()],
         )
         .map_err(query_error)?;
-        Ok(())
+        Ok(conn.last_insert_rowid())
     }
 
     /// Marks a live session `Completed` (+ `time_ended = now`) — the
@@ -2665,6 +2672,37 @@ mod tests {
         assert_eq!(rows[1].end, Millis(2500));
         assert_eq!(rows[1].text, "world");
         assert_eq!(rows[1].translation, "");
+    }
+
+    #[test]
+    fn append_live_segment_returns_ascending_rowids() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = store
+            .insert_live_session("Live recording", &sample_live_options())
+            .expect("insert");
+
+        let r1 = store
+            .append_live_segment(id, Millis(0), Millis(1000), "one")
+            .expect("append 1");
+        let r2 = store
+            .append_live_segment(id, Millis(1000), Millis(2000), "two")
+            .expect("append 2");
+        let r3 = store
+            .append_live_segment(id, Millis(2000), Millis(3000), "three")
+            .expect("append 3");
+
+        assert!(
+            r1 < r2 && r2 < r3,
+            "row ids must be strictly ascending: {r1} {r2} {r3}"
+        );
+
+        // The returned id is exactly the `transcription_segment.id`
+        // `update_segment_translation` (F-063) later addresses — so
+        // `get_segment_rows` (which selects that same column) round-trips it.
+        let rows = store.get_segment_rows(id).expect("get_segment_rows");
+        assert_eq!(rows[0].id, r1);
+        assert_eq!(rows[1].id, r2);
+        assert_eq!(rows[2].id, r3);
     }
 
     #[test]

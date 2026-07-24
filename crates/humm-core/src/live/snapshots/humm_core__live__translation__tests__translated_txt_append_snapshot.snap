@@ -1,0 +1,9 @@
+---
+source: crates/humm-core/src/live/translation.rs
+expression: "std::fs::read_to_string(sink.translated_path()).unwrap()"
+---
+first translation
+
+second translation
+
+third translation

@@ -18,11 +18,16 @@
 //! - [`session`] -- the recording-session orchestration loop: drains the
 //!   capture ring into [`chunker`], decides skip-vs-transcribe with a
 //!   rolling prompt, and emits [`session::LiveEvent`]s (F-061, spec §3).
+//! - [`translation`] -- the live-translation consumer (`strip_newlines` +
+//!   [`translation::TranslationApplier`]): the translation-side twin of the
+//!   transcript-side `SessionApplier`, dispatching each translation into its
+//!   own panel/merge and the `.translated` export sibling (F-063, spec §7.4).
 
 pub mod chunker;
 pub mod export;
 pub mod merge;
 pub mod session;
+pub mod translation;
 
 pub use chunker::{Batch, Chunker};
 pub use export::{
@@ -37,6 +42,7 @@ pub use merge::{
 pub use session::{
     Clock, EngineFn, LiveEvent, LiveMeasurement, RealClock, SessionConfig, run_session,
 };
+pub use translation::{TranslationApplier, strip_newlines};
 
 /// Which of Buzz's three live-transcript display strategies is in effect.
 ///

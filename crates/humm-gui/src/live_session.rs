@@ -101,14 +101,16 @@ pub trait LiveStore: Send + Sync {
         name: &str,
         options: &TranscriptionOptions,
     ) -> Result<TranscriptionId, StoreError>;
-    /// See [`SqliteStore::append_live_segment`].
+    /// See [`SqliteStore::append_live_segment`] -- returns the inserted
+    /// segment row id (`last_insert_rowid`), which F-063 tags the enqueued
+    /// translation with so it can later be persisted onto that same row.
     fn append_live_segment(
         &self,
         id: TranscriptionId,
         start: Millis,
         end: Millis,
         text: &str,
-    ) -> Result<(), StoreError>;
+    ) -> Result<i64, StoreError>;
     /// See [`SqliteStore::complete_live_session`].
     fn complete_live_session(&self, id: TranscriptionId) -> Result<(), StoreError>;
 }
@@ -128,7 +130,7 @@ impl LiveStore for SqliteStore {
         start: Millis,
         end: Millis,
         text: &str,
-    ) -> Result<(), StoreError> {
+    ) -> Result<i64, StoreError> {
         SqliteStore::append_live_segment(self, id, start, end, text)
     }
 
@@ -482,6 +484,14 @@ pub struct TextOutcome {
     /// `Some(detail)` iff `append_live_segment` was attempted and failed
     /// (ADR-018 -- the utterance's other effects still apply).
     pub store_error: Option<String>,
+    /// The inserted segment row id (`append_live_segment`'s
+    /// `last_insert_rowid`), when a session id was present and the write
+    /// succeeded -- `None` when there was no session to persist against
+    /// (ADR-018) or the write failed. F-063's live-translation wiring (a
+    /// later task) enqueues the raw utterance tagged with this id so the
+    /// arriving translation can be persisted onto the same row via
+    /// `update_segment_translation`.
+    pub segment_row_id: Option<i64>,
 }
 
 /// Owns one session's append-and-correct merge state and panel text, and
@@ -546,16 +556,20 @@ impl<'a> SessionApplier<'a> {
             return TextOutcome {
                 panel: None,
                 store_error: None,
+                segment_row_id: None,
             };
         }
 
-        let store_error = if let Some(id) = self.session_id {
-            self.store
-                .append_live_segment(id, start, end, &filtered)
-                .err()
-                .map(|err| err.to_string())
+        // Capture both the row id (F-063: the translation enqueue tags it)
+        // and any failure detail (ADR-018: surfaced, but the utterance's
+        // other effects still apply) from the one store write.
+        let (segment_row_id, store_error) = if let Some(id) = self.session_id {
+            match self.store.append_live_segment(id, start, end, &filtered) {
+                Ok(row_id) => (Some(row_id), None),
+                Err(err) => (None, Some(err.to_string())),
+            }
         } else {
-            None
+            (None, None)
         };
 
         let display = match self.mode {
@@ -579,6 +593,7 @@ impl<'a> SessionApplier<'a> {
         TextOutcome {
             panel: Some(self.panel.as_str().to_string()),
             store_error,
+            segment_row_id,
         }
     }
 }
@@ -845,17 +860,16 @@ mod tests {
             start: Millis,
             end: Millis,
             text: &str,
-        ) -> Result<(), StoreError> {
+        ) -> Result<i64, StoreError> {
             if self.fail {
                 return Err(StoreError::Query {
                     detail: "boom".to_string(),
                 });
             }
-            self.calls
-                .lock()
-                .unwrap()
-                .push((id, start, end, text.to_string()));
-            Ok(())
+            let mut calls = self.calls.lock().unwrap();
+            calls.push((id, start, end, text.to_string()));
+            // Ascending, 1-based ids -- like the real store's rowids.
+            Ok(calls.len() as i64)
         }
 
         fn complete_live_session(&self, _id: TranscriptionId) -> Result<(), StoreError> {
@@ -1010,6 +1024,47 @@ mod tests {
 
         assert_eq!(out.panel.as_deref(), Some("hi there"));
         assert!(out.store_error.is_some());
+        // A failed write has no row to tag a translation against (F-063).
+        assert_eq!(out.segment_row_id, None);
+    }
+
+    #[test]
+    fn apply_text_threads_the_inserted_segment_row_id() {
+        let store = FakeStore::default();
+        let sid = TranscriptionId::new();
+        let mut applier = SessionApplier::new(
+            RecordingMode::AppendBelow,
+            "\n\n".to_string(),
+            true,
+            Some(sid),
+            &store,
+            None,
+            None,
+        );
+
+        // Each successful append surfaces its inserted row id (ascending),
+        // which F-063 tags the enqueued translation with.
+        let out1 = applier.apply_text("hello", Millis(0), Millis(1000));
+        let out2 = applier.apply_text("world", Millis(1000), Millis(2000));
+        assert_eq!(out1.segment_row_id, Some(1));
+        assert_eq!(out2.segment_row_id, Some(2));
+    }
+
+    #[test]
+    fn apply_text_without_a_session_id_has_no_row_id() {
+        let store = FakeStore::default();
+        let mut applier = SessionApplier::new(
+            RecordingMode::AppendBelow,
+            "\n\n".to_string(),
+            true,
+            None, // insert_live_session failed (ADR-018) -- nothing persisted.
+            &store,
+            None,
+            None,
+        );
+
+        let out = applier.apply_text("hi there", Millis(0), Millis(500));
+        assert_eq!(out.segment_row_id, None);
     }
 
     // -- is_model_ensure_cancellation ----------------------------------------
@@ -1165,8 +1220,8 @@ mod tests {
             _start: Millis,
             _end: Millis,
             _text: &str,
-        ) -> Result<(), StoreError> {
-            Ok(())
+        ) -> Result<i64, StoreError> {
+            Ok(1)
         }
 
         fn complete_live_session(&self, _id: TranscriptionId) -> Result<(), StoreError> {

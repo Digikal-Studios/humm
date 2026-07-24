@@ -607,42 +607,49 @@ impl ExportSink {
         &self.transcript_path
     }
 
-    /// The `.translated` sibling's path (not written by this milestone --
-    /// M6 owns translation; only truncated-at-setup here for parity).
+    /// The `.translated` sibling's path -- the append-below/append-above /
+    /// append-and-correct translation exports land here (F-063,
+    /// [`Self::on_translation_utterance`]/[`Self::on_translation_merged`]),
+    /// and it is also truncated-at-setup for parity (see [`Self::setup`]).
     pub fn translated_path(&self) -> &Path {
         &self.translated_path
     }
 
-    /// Applies one accepted utterance under append-below/append-above
-    /// (`on_next_transcription`'s `:979-1010`). No-op when
-    /// [`Self::enabled`] is `false`. Not the right call for append-and-correct
-    /// mode -- use [`Self::on_merged`] there instead (the caller, `live::session`,
-    /// knows which mode is active and dispatches accordingly).
-    pub fn on_utterance(&self, text: &str) {
+    /// The append-below/append-above per-utterance write (`write_txt_export`
+    /// / `write_csv_export` dispatch), parameterized by target `path` and
+    /// `insert_mode` so the transcript side ([`Self::on_utterance`], writing
+    /// [`Self::transcript_path`]) and the translation side
+    /// ([`Self::on_translation_utterance`], writing [`Self::translated_path`])
+    /// share one byte-for-byte-identical implementation. No-op when
+    /// [`Self::enabled`] is `false`.
+    fn write_utterance_to(&self, path: &Path, text: &str, insert_mode: InsertMode) {
         if !self.enabled {
             return;
         }
         match self.file_type {
             ExportFileType::Txt => write_txt_export(
-                &self.transcript_path,
+                path,
                 text,
-                self.insert_mode,
+                insert_mode,
                 self.max_entries,
                 &self.separator,
                 self.sleeper.as_ref(),
             ),
             ExportFileType::Csv => write_csv_export(
-                &self.transcript_path,
+                path,
                 text,
-                self.insert_mode,
+                insert_mode,
                 self.max_entries,
                 self.sleeper.as_ref(),
             ),
         }
     }
 
-    /// Applies the append-and-correct merged text as a whole-file rewrite
-    /// (`process_transcription_merge`'s export tail, `:955-961`). No-op when
+    /// The append-and-correct whole-file rewrite
+    /// (`process_transcription_merge`'s export tail, `:955-961`),
+    /// parameterized by target `path` so the transcript side
+    /// ([`Self::on_merged`]) and the translation side
+    /// ([`Self::on_translation_merged`]) share one implementation. No-op when
     /// [`Self::enabled`] is `false`.
     ///
     /// TXT: rewrites the whole file with `merged_text`, no separator suffix
@@ -651,26 +658,21 @@ impl ExportSink {
     /// `merged_text` with `max_entries` forced to `0`
     /// (`write_to_export_file(..., mode="w")` then `write_csv_export(...,
     /// 0)`, `:958-959`).
-    pub fn on_merged(&self, merged_text: &str) {
+    fn write_merged_to(&self, path: &Path, merged_text: &str) {
         if !self.enabled {
             return;
         }
         match self.file_type {
             ExportFileType::Txt => write_to_export_file(
-                &self.transcript_path,
+                path,
                 merged_text,
                 WriteMode::Truncate,
                 self.sleeper.as_ref(),
             ),
             ExportFileType::Csv => {
-                write_to_export_file(
-                    &self.transcript_path,
-                    "",
-                    WriteMode::Truncate,
-                    self.sleeper.as_ref(),
-                );
+                write_to_export_file(path, "", WriteMode::Truncate, self.sleeper.as_ref());
                 write_csv_export(
-                    &self.transcript_path,
+                    path,
                     merged_text,
                     InsertMode::Append,
                     0,
@@ -678,6 +680,57 @@ impl ExportSink {
                 );
             }
         }
+    }
+
+    /// Applies one accepted **transcript** utterance under append-below/
+    /// append-above (`on_next_transcription`'s `:979-1010`), writing
+    /// [`Self::transcript_path`]. No-op when [`Self::enabled`] is `false`.
+    /// Not the right call for append-and-correct mode -- use
+    /// [`Self::on_merged`] there instead (the caller, `live::session`, knows
+    /// which mode is active and dispatches accordingly).
+    pub fn on_utterance(&self, text: &str) {
+        self.write_utterance_to(&self.transcript_path, text, self.insert_mode);
+    }
+
+    /// Applies the append-and-correct merged **transcript** text as a
+    /// whole-file rewrite (`process_transcription_merge`'s export tail,
+    /// `:955-961`), writing [`Self::transcript_path`]. See
+    /// [`Self::write_merged_to`] for the TXT/CSV behavior; no-op when
+    /// [`Self::enabled`] is `false`.
+    pub fn on_merged(&self, merged_text: &str) {
+        self.write_merged_to(&self.transcript_path, merged_text);
+    }
+
+    /// Applies one accepted **translation** utterance under append-below/
+    /// append-above (`on_next_translation`'s `:1048-1078`), writing
+    /// [`Self::translated_path`] -- the exact TXT append/prepend + CSV
+    /// append/prepend rules as [`Self::on_utterance`], only the target file
+    /// differs (F-063, spec §7.4). The write is the **raw** translation text
+    /// (Buzz exports raw `text`, not `strip_newlines(text)`, `:1050,1052,
+    /// 1070,1078`); newline normalization is a display-panel concern, not an
+    /// export one. `mode` selects append-vs-prepend
+    /// ([`InsertMode::from_recording_mode`]) -- it is the session's
+    /// [`RecordingMode`], the same one this sink was set up with, threaded in
+    /// by the [`crate::live::translation::TranslationApplier`] rather than
+    /// re-read from `self` so the applier owns the mode decision. No-op when
+    /// [`Self::enabled`] is `false`; not the right call for append-and-correct
+    /// (use [`Self::on_translation_merged`]).
+    pub fn on_translation_utterance(&self, text: &str, mode: RecordingMode) {
+        self.write_utterance_to(
+            &self.translated_path,
+            text,
+            InsertMode::from_recording_mode(mode),
+        );
+    }
+
+    /// Applies the append-and-correct merged **translation** text as a
+    /// whole-file rewrite (`process_transcription_merge` on
+    /// `translation_export_file`, `:955-961` via `:1081`), writing
+    /// [`Self::translated_path`]. Same TXT/CSV behavior as [`Self::on_merged`]
+    /// (see [`Self::write_merged_to`]); no-op when [`Self::enabled`] is
+    /// `false`.
+    pub fn on_translation_merged(&self, merged: &str) {
+        self.write_merged_to(&self.translated_path, merged);
     }
 }
 

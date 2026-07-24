@@ -1035,7 +1035,7 @@ mod tests {
             _start: humm_core::domain::Millis,
             _end: humm_core::domain::Millis,
             _text: &str,
-        ) -> Result<(), humm_core::error::StoreError> {
+        ) -> Result<i64, humm_core::error::StoreError> {
             unreachable!("recording.rs's own tests never start a real session")
         }
         fn complete_live_session(
