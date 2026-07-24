@@ -143,6 +143,22 @@ options-initial-prompt-label = Initial Prompt:
 options-hf-repo-label = Hugging Face model
 options-run = Run
 
+## Options sheet -- backend selector + Api Key row + LLM translation block
+## (F-023 extension, F-041, F-031, Task 14, design spec §7.2). The
+## invalid-charset/keyring-save-error modal reuses the
+## prefs-general-invalid-key-*/prefs-general-key-save-error-* keys above --
+## same underlying keyring entry, same Buzz-exact wording either way.
+
+options-backend-label = Backend:
+options-backend-whisper = Whisper
+options-backend-openai-api = OpenAI Whisper API
+options-api-key-label = Api Key:
+options-llm-heading = Translation settings
+options-llm-enable = Enable AI translation
+options-llm-model-label = AI model:
+options-llm-model-presets-button = Presets
+options-llm-prompt-label = Instructions for AI:
+
 ## Update chip + dialog (views/update_notice.rs, F-006, ADR-015)
 
 update-chip-label = Update Available

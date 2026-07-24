@@ -8,30 +8,76 @@
 //! window) and `transcription_options_group_box.py`/
 //! `file_transcription_form_widget.py` (the form rows) — see
 //! `buzz-notes-options-shortcuts-telemetry.md` §F-023. Buzz's separate
-//! "Advanced Settings" dialog is inlined here as a collapsing section
-//! (documented deviation — no OpenAI/LLM-translation rows: those backends
-//! aren't ported, ADR-008/Q-2); its "Model:" *type* combo (Whisper/
-//! Whisper.cpp/Faster Whisper) is also dropped since humm only ever runs
-//! whisper.cpp (ADR-008) — only the *size* combo below is Buzz-parity.
+//! "Advanced Settings" dialog is inlined here as a collapsing section. Its
+//! "Model:" *type* combo (Whisper/Whisper.cpp/Faster Whisper) is dropped
+//! since humm only ever runs whisper.cpp locally (ADR-008) — only the
+//! *size* combo below is Buzz-parity there.
+//!
+//! ## F-041/F-031 additions (Task 14, design spec §7.2)
+//!
+//! A **backend combo** (`Whisper`/`OpenAI Whisper API`,
+//! [`render_backend_combo`]) sits above the size combo — this is humm's own
+//! row, not Buzz's "Model:" type combo (that label stays attached to the
+//! size combo below, [`render_model_combo`], which is shared verbatim with
+//! the recording window's own size row; giving the new row its own label
+//! (`options-backend-label`) avoids two identically-labeled rows rather
+//! than touching a combo the recording window still renders unchanged this
+//! milestone — backend selection there is deferred, design spec §0).
+//! Selecting
+//! `OpenAI Whisper API` hides the size combo and shows an **Api Key:** row
+//! (masked, eye-toggleable, seeded from the keyring, writing straight
+//! through on commit — [`crate::views::secret_field`], shared with the
+//! Preferences General tab, Task 13); it also hides the Advanced section's
+//! Hugging Face repo field (Buzz's own `reset_visible_rows` hides it for
+//! every non-local model type, `transcription_options_group_box.py:228-244`
+//! — the API backend has no local model to resolve). The Advanced section
+//! also gains the **Translation settings** block (F-031,
+//! [`render_llm_translation_block`]): an "Enable AI translation" checkbox
+//! plus a combo-seeded AI-model field and an instructions textarea, both
+//! disabled while unchecked. Unlike Buzz, whose equivalent fields show
+//! *display* defaults that never become real values until touched, humm's
+//! seeded defaults (`DEFAULT_LLM_MODEL`/`DEFAULT_LLM_PROMPT`) are already
+//! live buffer contents — a Run/Cancel with the checkbox on persists
+//! whatever's in the field, seed or not (design spec §7.2 ledger #10).
 
 use std::collections::BTreeSet;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use humm_core::domain::{
-    Backend, DEFAULT_TEMPERATURE, Input, Millis, ModelSize, ModelSpec, OutputFormat, OutputSpec,
-    Source, TaskKind, TaskSpec, TranscriptionId, TranscriptionOptions,
+    Backend, DEFAULT_TEMPERATURE, Input, LlmTranslationOptions, Millis, ModelSize, ModelSpec,
+    OutputFormat, OutputSpec, Source, TaskKind, TaskSpec, TranscriptionId, TranscriptionOptions,
 };
 use humm_core::language::Language;
+use humm_core::secrets::{SecretKey, SecretStore};
 use humm_core::settings::FileTranscriberSettings;
 use humm_core::viewer::text_view::paragraph_split_from_env;
 
 use crate::i18n::tr;
 use crate::import::ImportRequest;
+use crate::views::secret_field::{self, CommitOutcome};
 
 /// The favorite-languages env var (Buzz: `BUZZ_FAVORITE_LANGUAGES`, renamed
 /// to humm's own `HUMM_*` env convention — comma-separated codes, invalid
 /// codes silently dropped).
 const FAVORITE_LANGUAGES_ENV: &str = "HUMM_FAVORITE_LANGUAGES";
+
+/// The AI-model field's preset picker entries (✚ UX_SPEC J-8, design spec
+/// §7.2) — Buzz has no equivalent preset list, only a literal
+/// `"add-model-id-here"` placeholder in an otherwise-empty field.
+const LLM_MODEL_PRESETS: [&str; 3] = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"];
+
+/// The AI-model field's seeded default: [`LLM_MODEL_PRESETS`]'s first entry
+/// — unlike Buzz's placeholder, this is a real, usable value from the
+/// moment the sheet opens (ledger #10: seeded defaults become real values
+/// on save).
+const DEFAULT_LLM_MODEL: &str = LLM_MODEL_PRESETS[0];
+
+/// The AI-instructions field's seeded default — the spec's neutral J-8
+/// template, byte-exact (not Buzz's English→Spanish sample). `{language}`
+/// is literal text the user edits, not a Fluent placeable.
+const DEFAULT_LLM_PROMPT: &str = "You are a professional translator. Translate each text sent to \
+     you to {language}. Do not add any comments or notes — reply with the translation only.";
 
 /// The sheet's live combo/checkbox/text-field state — everything needed to
 /// both render the form and (via [`build_specs`]) produce the
@@ -39,8 +85,23 @@ const FAVORITE_LANGUAGES_ENV: &str = "HUMM_FAVORITE_LANGUAGES";
 /// types) so it's unit-testable without a UI context.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SheetState {
+    /// Which engine runs this batch (F-041): local whisper.cpp, or the
+    /// OpenAI-compatible HTTP API. Gates the size-combo/Api-Key-row/hf-repo
+    /// visibility ([`size_combo_visible`]/[`api_key_row_visible`]/
+    /// [`hf_repo_row_visible`]) and maps straight onto `ModelSpec.backend`.
+    pub backend: Backend,
     /// The whisper.cpp model size (title-cased for display).
     pub model_size: ModelSize,
+    /// The Api Key row's live buffer (F-041, design spec §7.2) — seeded
+    /// from the keyring at [`OptionsSheet::new`] time, **never** persisted
+    /// by [`SheetState::write_to`]/read by [`SheetState::from_settings`]
+    /// (the key travels only through [`humm_core::secrets::SecretStore`],
+    /// never through `settings.toml` — design spec §5's acceptance
+    /// invariant). Committed on blur/Enter ([`commit_api_key`]), which
+    /// writes straight through to the keyring.
+    pub api_key: String,
+    /// Whether the Api Key row currently renders unmasked (the eye toggle).
+    pub api_key_visible: bool,
     /// Transcribe, or translate to English.
     pub task: TaskKind,
     /// Forced source language, or `None` for "Detect Language".
@@ -59,6 +120,18 @@ pub struct SheetState {
     /// produces a task with nothing to export, mirroring
     /// [`OutputSpec::default`]'s own empty-set default).
     pub formats: BTreeSet<OutputFormat>,
+    /// The Advanced section's "Enable AI translation" checkbox (F-031,
+    /// design spec §7.2). Gates [`llm_options`]: `false` always maps to
+    /// `TranscriptionOptions.llm = None` regardless of `llm_model`/
+    /// `llm_prompt`.
+    pub enable_llm_translation: bool,
+    /// The "AI model:" field — seeded with [`DEFAULT_LLM_MODEL`], editable
+    /// via free text or the preset picker ([`LLM_MODEL_PRESETS`]). An empty
+    /// (trimmed) value also disables translation even when
+    /// `enable_llm_translation` is `true` ([`llm_options`]).
+    pub llm_model: String,
+    /// The "Instructions for AI:" field — seeded with [`DEFAULT_LLM_PROMPT`].
+    pub llm_prompt: String,
 }
 
 impl SheetState {
@@ -93,7 +166,16 @@ impl SheetState {
             .unwrap_or_default();
 
         SheetState {
+            backend: prefill
+                .backend
+                .as_deref()
+                .and_then(|s| Backend::from_str(s).ok())
+                .unwrap_or_default(),
             model_size,
+            // Seeded separately by `OptionsSheet::new` (needs the secret
+            // store, which this settings-only prefill has no access to).
+            api_key: String::new(),
+            api_key_visible: false,
             task: prefill
                 .task
                 .as_deref()
@@ -104,13 +186,23 @@ impl SheetState {
             initial_prompt: prefill.initial_prompt.clone().unwrap_or_default(),
             hf_repo: prefill.hf_repo.clone().unwrap_or_default(),
             formats,
+            enable_llm_translation: prefill.enable_llm_translation,
+            llm_model: prefill
+                .llm_model
+                .clone()
+                .unwrap_or_else(|| DEFAULT_LLM_MODEL.to_string()),
+            llm_prompt: prefill
+                .llm_prompt
+                .clone()
+                .unwrap_or_else(|| DEFAULT_LLM_PROMPT.to_string()),
         }
     }
 
     /// Writes this state back into `settings` (Buzz parity: `closeEvent`
     /// persists on Run *and* plain close/Cancel). `last_import_folder` is
     /// not touched here — that's persisted at dialog time, not sheet-close
-    /// time (binding decision).
+    /// time (binding decision). `api_key` is deliberately **never** written
+    /// here — see its field doc comment.
     pub fn write_to(&self, settings: &mut FileTranscriberSettings) {
         settings.language = self.language.map(|language| language.code().to_string());
         settings.task = Some(self.task.as_str().to_string());
@@ -124,6 +216,10 @@ impl SheetState {
                 .map(|format| format.as_str().to_string())
                 .collect(),
         );
+        settings.backend = Some(self.backend.as_str().to_string());
+        settings.enable_llm_translation = self.enable_llm_translation;
+        settings.llm_model = Some(self.llm_model.clone());
+        settings.llm_prompt = Some(self.llm_prompt.clone());
     }
 }
 
@@ -140,6 +236,52 @@ fn non_empty_trimmed(s: &str) -> Option<String> {
     }
 }
 
+/// `state.llm`'s value for [`build_specs`] (F-031, design spec §7.2):
+/// `Some` iff the checkbox is on **and** `llm_model` is non-blank once
+/// trimmed — matching the task brief's exact gate ("checked + non-empty
+/// model"). The prompt is carried verbatim, untrimmed (an instructions
+/// textarea's leading/trailing whitespace is inconsequential either way,
+/// and this avoids surprising a user who deliberately padded it).
+fn llm_options(state: &SheetState) -> Option<LlmTranslationOptions> {
+    if !state.enable_llm_translation {
+        return None;
+    }
+    let model = state.llm_model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    Some(LlmTranslationOptions {
+        model: model.to_string(),
+        prompt: state.llm_prompt.clone(),
+    })
+}
+
+/// Whether the size combo renders (F-041, design spec §7.2): local
+/// whisper.cpp only — the API backend has no size to pick. A pure function
+/// (rather than inlining the check at the one render call site) so it's
+/// unit-testable without an `egui::Context`.
+pub(crate) fn size_combo_visible(state: &SheetState) -> bool {
+    state.backend == Backend::Whisper
+}
+
+/// Whether the Api Key row renders — the mirror image of
+/// [`size_combo_visible`] (Buzz `transcription_options_group_box.py:242-244`:
+/// `setRowVisible(self.openai_access_token_edit, model_type ==
+/// ModelType.OPEN_AI_WHISPER_API)`).
+pub(crate) fn api_key_row_visible(state: &SheetState) -> bool {
+    state.backend == Backend::OpenAiApi
+}
+
+/// Whether the Advanced section's Hugging Face repo field renders: local
+/// whisper.cpp only, same gate as [`size_combo_visible`] (Buzz's own
+/// `reset_visible_rows` hides `hugging_face_search_line_edit` for every
+/// non-local model type too — design spec §7.2 deliverable A's decision to
+/// match that intent even though humm's hf field lives in the Advanced
+/// section rather than Buzz's main form).
+pub(crate) fn hf_repo_row_visible(state: &SheetState) -> bool {
+    state.backend == Backend::Whisper
+}
+
 /// The sheet's own persistent state: which request it was opened for, plus
 /// its live form state. Owned by `ActionState` (`main_window.rs`) — at most
 /// one sheet open at a time (Buzz also only ever opens one at a time from a
@@ -151,21 +293,76 @@ pub struct OptionsSheet {
     pub request: ImportRequest,
     /// The live form state.
     pub state: SheetState,
+    /// The Api Key row's commit modal (F-041, design spec §7.2), if a
+    /// commit this frame produced one. Lives on the sheet (not
+    /// [`SheetState`]) since it's transient render state, not something
+    /// [`SheetState::write_to`] ever persists.
+    pub modal: Option<SheetModal>,
 }
 
 impl OptionsSheet {
     /// Opens a new sheet for `request`, prefilled from `prefill`
     /// (`settings.file_transcriber`) and gated by `custom_model_available`
-    /// (`settings.models.custom_model_url.is_some()`).
+    /// (`settings.models.custom_model_url.is_some()`). `secrets` seeds the
+    /// Api Key row from the keyring (design spec §7.2) — the one thing
+    /// [`SheetState::from_settings`] cannot do itself, since it only ever
+    /// sees `settings.file_transcriber`.
     pub fn new(
         request: ImportRequest,
         prefill: &FileTranscriberSettings,
         custom_model_available: bool,
+        secrets: &dyn SecretStore,
     ) -> Self {
+        let mut state = SheetState::from_settings(prefill, custom_model_available);
+        state.api_key = secrets
+            .get(SecretKey::OpenAiApiKey)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         OptionsSheet {
             request,
-            state: SheetState::from_settings(prefill, custom_model_available),
+            state,
+            modal: None,
         }
+    }
+}
+
+/// Which modal (if any) the options sheet's Api Key row commit produced
+/// (F-041, design spec §7.2) — the sheet-local counterpart of
+/// `prefs_general::GeneralModal`'s two key-commit variants (its `TestResult`
+/// variant has no sheet equivalent; the sheet has no Test button).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SheetModal {
+    /// The Api Key row's committed value failed
+    /// [`secret_field::is_base64_charset`] — Buzz's "Invalid API key"
+    /// warning. Warn-only: the value is saved regardless.
+    InvalidKeyCharset,
+    /// [`SecretStore::set`] failed while committing the Api Key row —
+    /// Buzz's keyring-save-failure error dialog.
+    KeyringSaveFailed,
+}
+
+fn sheet_modal_title_and_body(modal: SheetModal) -> (String, String) {
+    match modal {
+        SheetModal::InvalidKeyCharset => (
+            tr("prefs-general-invalid-key-title"),
+            tr("prefs-general-invalid-key-body"),
+        ),
+        SheetModal::KeyringSaveFailed => (
+            tr("prefs-general-key-save-error-title"),
+            tr("prefs-general-key-save-error-body"),
+        ),
+    }
+}
+
+/// Commits the Api Key row: charset-checks + writes through to `secrets`
+/// via [`secret_field::commit_secret`] (shared with the Preferences General
+/// tab's key field, Task 13), mapping the outcome onto [`SheetModal`].
+fn commit_api_key(value: &str, secrets: &Arc<dyn SecretStore>) -> Option<SheetModal> {
+    match secret_field::commit_secret(secrets, SecretKey::OpenAiApiKey, value) {
+        CommitOutcome::Saved => None,
+        CommitOutcome::InvalidCharset => Some(SheetModal::InvalidKeyCharset),
+        CommitOutcome::KeyringSaveFailed => Some(SheetModal::KeyringSaveFailed),
     }
 }
 
@@ -229,19 +426,14 @@ fn build_specs_with_paragraph_split(
         language: state.language,
         task: state.task,
         model: ModelSpec {
-            // Backend selection isn't wired into `SheetState` yet (design
-            // spec §7.2's options-sheet backend/LLM rows are a later M6
-            // task), so every sheet-built spec is whisper.cpp for now.
-            backend: Backend::Whisper,
+            backend: state.backend,
             size: state.model_size,
             hf_repo: non_empty_trimmed(&state.hf_repo),
         },
         word_timestamps: state.word_timestamps,
         initial_prompt: state.initial_prompt.clone(),
         temperature: DEFAULT_TEMPERATURE.to_vec(),
-        // LLM translation isn't wired into `SheetState` yet either (F-031
-        // options-sheet UI is a later M6 task).
-        llm: None,
+        llm: llm_options(state),
     };
     let output = OutputSpec {
         formats: state.formats.clone(),
@@ -506,6 +698,88 @@ fn render_export_checkboxes(ui: &mut egui::Ui, state: &mut SheetState) {
     });
 }
 
+/// The backend combo row (F-041, design spec §7.2): `Whisper` /
+/// `OpenAI Whisper API`, sitting above [`render_model_combo`]'s size row.
+/// Sheet-only this milestone (recording-window backend selection is
+/// deferred — spec §0) — not shared like `render_model_combo`/
+/// `render_task_combo`/`render_language_combo`, so it stays a private `fn`.
+fn render_backend_combo(ui: &mut egui::Ui, id_salt: &str, backend: &mut Backend) {
+    ui.horizontal(|ui| {
+        ui.label(tr("options-backend-label"));
+        let selected = match *backend {
+            Backend::Whisper => tr("options-backend-whisper"),
+            Backend::OpenAiApi => tr("options-backend-openai-api"),
+        };
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(backend, Backend::Whisper, tr("options-backend-whisper"));
+                ui.selectable_value(
+                    backend,
+                    Backend::OpenAiApi,
+                    tr("options-backend-openai-api"),
+                );
+            });
+    });
+}
+
+/// The Api Key row (F-041, design spec §7.2): shown only while
+/// [`api_key_row_visible`] — mirrors `prefs_general::ui`'s key row via the
+/// shared [`secret_field`] helpers, committing on blur/Enter straight
+/// through to `secrets` (the same keyring entry Preferences writes,
+/// design spec §7.2 ledger #9). `modal` is [`OptionsSheet::modal`] threaded
+/// in separately rather than the whole `&mut OptionsSheet` — [`ui`] already
+/// holds `state`/`modal` as separate locals after destructuring the sheet.
+fn render_api_key_row(
+    ui: &mut egui::Ui,
+    state: &mut SheetState,
+    modal: &mut Option<SheetModal>,
+    secrets: &Arc<dyn SecretStore>,
+) {
+    let response = secret_field::masked_field_row(
+        ui,
+        tr("options-api-key-label"),
+        &mut state.api_key,
+        &mut state.api_key_visible,
+        tr("prefs-general-openai-key-placeholder"),
+    );
+    if response.lost_focus() {
+        *modal = commit_api_key(&state.api_key, secrets);
+    }
+}
+
+/// The Advanced section's "Translation settings" block (F-031, design spec
+/// §7.2, Buzz `advanced_settings_dialog.py:75-121`): the enable checkbox,
+/// then the AI-model field (a free-text `TextEdit` plus a small preset
+/// picker `ComboBox`, ✚ J-8) and the instructions textarea, both disabled
+/// while unchecked (Buzz's own `.setEnabled(enable_llm_translation)` on
+/// every row below the checkbox).
+fn render_llm_translation_block(ui: &mut egui::Ui, state: &mut SheetState) {
+    ui.label(egui::RichText::new(tr("options-llm-heading")).strong());
+    ui.checkbox(&mut state.enable_llm_translation, tr("options-llm-enable"));
+
+    ui.add_enabled_ui(state.enable_llm_translation, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(tr("options-llm-model-label"));
+            ui.text_edit_singleline(&mut state.llm_model);
+            egui::ComboBox::from_id_salt("humm-options-llm-model-presets")
+                .selected_text(tr("options-llm-model-presets-button"))
+                .show_ui(ui, |ui| {
+                    for preset in LLM_MODEL_PRESETS {
+                        if ui
+                            .selectable_label(state.llm_model == preset, preset)
+                            .clicked()
+                        {
+                            state.llm_model = preset.to_string();
+                        }
+                    }
+                });
+        });
+        ui.label(tr("options-llm-prompt-label"));
+        ui.text_edit_multiline(&mut state.llm_prompt);
+    });
+}
+
 /// Renders the options sheet (a no-op returning `None` while `sheet` is
 /// `None`). Returns `Some(`[`SheetOutcome`]`)` the frame it closes, whether
 /// by Run, Cancel, Escape, or a backdrop click — every path carries the
@@ -518,17 +792,27 @@ fn render_export_checkboxes(ui: &mut egui::Ui, state: &mut SheetState) {
 /// field), matching the brief's documented Enter-vs-text-edit tradeoff:
 /// egui has no per-widget "swallow Enter unless I'm focused" primitive, so a
 /// global "is anything focused" check is the closest equivalent.
+///
+/// `secrets` seeds/commits the Api Key row (F-041) — the same store
+/// Preferences' General tab reads/writes (`main_window::show`'s own
+/// `secrets: &Arc<dyn SecretStore>` parameter, threaded from `app.rs`'s
+/// `Services.secrets`).
 pub fn ui(
     ctx: &egui::Context,
     sheet: &mut Option<OptionsSheet>,
     custom_model_available: bool,
+    secrets: &Arc<dyn SecretStore>,
 ) -> Option<SheetOutcome> {
-    let OptionsSheet { request, state } = sheet.as_mut()?;
+    let OptionsSheet {
+        request,
+        state,
+        modal,
+    } = sheet.as_mut()?;
 
     let mut outcome = None;
     let mut close = false;
 
-    let modal = egui::Modal::new(egui::Id::new("humm-options-sheet")).show(ctx, |ui| {
+    let modal_response = egui::Modal::new(egui::Id::new("humm-options-sheet")).show(ctx, |ui| {
         ui.set_min_width(420.0);
 
         let header = header_text(request);
@@ -549,12 +833,18 @@ pub fn ui(
         ui.label(summary_text(state));
         ui.separator();
 
-        render_model_combo(
-            ui,
-            "humm-options-model-size",
-            &mut state.model_size,
-            custom_model_available,
-        );
+        render_backend_combo(ui, "humm-options-backend", &mut state.backend);
+        if size_combo_visible(state) {
+            render_model_combo(
+                ui,
+                "humm-options-model-size",
+                &mut state.model_size,
+                custom_model_available,
+            );
+        }
+        if api_key_row_visible(state) {
+            render_api_key_row(ui, state, modal, secrets);
+        }
         render_task_combo(ui, "humm-options-task", &mut state.task);
         render_language_combo(ui, "humm-options-language", &mut state.language);
         ui.checkbox(&mut state.word_timestamps, tr("options-word-timestamps"));
@@ -571,8 +861,12 @@ pub fn ui(
         egui::CollapsingHeader::new(tr("options-advanced")).show(ui, |ui| {
             ui.label(tr("options-initial-prompt-label"));
             ui.text_edit_multiline(&mut state.initial_prompt);
-            ui.label(tr("options-hf-repo-label"));
-            ui.text_edit_singleline(&mut state.hf_repo);
+            if hf_repo_row_visible(state) {
+                ui.label(tr("options-hf-repo-label"));
+                ui.text_edit_singleline(&mut state.hf_repo);
+            }
+            ui.separator();
+            render_llm_translation_block(ui, state);
         });
 
         ui.separator();
@@ -601,11 +895,32 @@ pub fn ui(
         });
     });
 
-    if !close && modal.should_close() {
+    if !close && modal_response.should_close() {
         outcome = Some(SheetOutcome::Cancelled {
             sticky: state.clone(),
         });
         close = true;
+    }
+
+    // The Api Key row's own commit-failure modal (F-041) — a second,
+    // independent `egui::Modal` stacked over the sheet's, mirroring
+    // `prefs_general::ui`'s key-commit modal one level up (that one has no
+    // outer modal to stack over). Suppressed the frame the sheet itself
+    // closes (Run/Cancel/Escape) since `*sheet` is about to become `None`.
+    if !close && let Some(pending) = *modal {
+        let (title, body) = sheet_modal_title_and_body(pending);
+        let mut modal_close = false;
+        let key_modal_response = egui::Modal::new(egui::Id::new("humm-options-sheet-key-modal"))
+            .show(ctx, |ui| {
+                ui.heading(title);
+                ui.label(body);
+                if ui.button(tr("dialog-ok")).clicked() {
+                    modal_close = true;
+                }
+            });
+        if modal_close || key_modal_response.should_close() {
+            *modal = None;
+        }
     }
 
     if close {
@@ -623,13 +938,19 @@ mod tests {
 
     fn base_state() -> SheetState {
         SheetState {
+            backend: Backend::Whisper,
             model_size: ModelSize::Small,
+            api_key: String::new(),
+            api_key_visible: false,
             task: TaskKind::Transcribe,
             language: None,
             word_timestamps: false,
             initial_prompt: String::new(),
             hf_repo: String::new(),
             formats: BTreeSet::new(),
+            enable_llm_translation: false,
+            llm_model: String::new(),
+            llm_prompt: String::new(),
         }
     }
 
@@ -639,13 +960,28 @@ mod tests {
     fn from_settings_on_a_fresh_install_matches_transcription_options_defaults() {
         let prefill = FileTranscriberSettings::default();
         let state = SheetState::from_settings(&prefill, false);
+        assert_eq!(state.backend, Backend::Whisper);
         assert_eq!(state.model_size, ModelSize::Small);
+        assert_eq!(
+            state.api_key, "",
+            "api_key is never seeded by from_settings"
+        );
+        assert!(!state.api_key_visible);
         assert_eq!(state.task, TaskKind::Transcribe);
         assert_eq!(state.language, None);
         assert!(!state.word_timestamps);
         assert_eq!(state.initial_prompt, "");
         assert_eq!(state.hf_repo, "");
         assert!(state.formats.is_empty());
+        assert!(!state.enable_llm_translation);
+        assert_eq!(
+            state.llm_model, DEFAULT_LLM_MODEL,
+            "the seeded AI-model default"
+        );
+        assert_eq!(
+            state.llm_prompt, DEFAULT_LLM_PROMPT,
+            "the seeded AI-instructions default"
+        );
     }
 
     #[test]
@@ -673,6 +1009,7 @@ mod tests {
     #[test]
     fn state_round_trips_through_settings() {
         let mut state = base_state();
+        state.backend = Backend::OpenAiApi;
         state.model_size = ModelSize::LargeV3Turbo;
         state.task = TaskKind::Translate;
         state.language = Language::parse("fr");
@@ -680,12 +1017,33 @@ mod tests {
         state.initial_prompt = "proper nouns: Buzz, humm".to_string();
         state.hf_repo = "openai/whisper-tiny".to_string();
         state.formats = [OutputFormat::Srt, OutputFormat::Vtt].into_iter().collect();
+        state.enable_llm_translation = true;
+        state.llm_model = "gpt-4o".to_string();
+        state.llm_prompt = "Translate to French.".to_string();
 
         let mut settings = FileTranscriberSettings::default();
         state.write_to(&mut settings);
         let round_tripped = SheetState::from_settings(&settings, false);
 
         assert_eq!(round_tripped, state);
+    }
+
+    /// Dedicated round-trip test for the backend combo alone (task brief's
+    /// "backend sticky round-trip"), independent of every other field the
+    /// broader [`state_round_trips_through_settings`] also exercises.
+    #[test]
+    fn backend_round_trips_through_settings() {
+        for backend in [Backend::Whisper, Backend::OpenAiApi] {
+            let mut state = base_state();
+            state.backend = backend;
+
+            let mut settings = FileTranscriberSettings::default();
+            state.write_to(&mut settings);
+            assert_eq!(settings.backend.as_deref(), Some(backend.as_str()));
+
+            let round_tripped = SheetState::from_settings(&settings, false);
+            assert_eq!(round_tripped.backend, backend);
+        }
     }
 
     #[test]
@@ -703,6 +1061,24 @@ mod tests {
         let mut settings = FileTranscriberSettings::default();
         state.write_to(&mut settings);
         assert_eq!(settings.hf_repo, None);
+    }
+
+    #[test]
+    fn write_to_never_persists_the_api_key() {
+        let mut state = base_state();
+        state.api_key = "sk-super-secret-value".to_string();
+        let mut settings = FileTranscriberSettings::default();
+        state.write_to(&mut settings);
+
+        // `FileTranscriberSettings` has no `api_key` field at all -- the
+        // strongest possible proof, but also assert the serialized TOML
+        // (what actually lands on disk) never contains the value, in case a
+        // future field addition accidentally carries it.
+        let serialized = toml::to_string(&settings).expect("settings serialize");
+        assert!(
+            !serialized.contains("sk-super-secret-value"),
+            "the API key must never reach settings.toml (design spec §5)"
+        );
     }
 
     // -- build_specs -----------------------------------------------------------
@@ -781,6 +1157,141 @@ mod tests {
         assert_eq!(specs[0].1.options.temperature, DEFAULT_TEMPERATURE.to_vec());
     }
 
+    // -- backend / LLM mapping (F-041, F-031, Task 14) -------------------------
+
+    #[test]
+    fn build_specs_maps_api_backend() {
+        let mut state = base_state();
+        state.backend = Backend::OpenAiApi;
+        let request = ImportRequest::Files(vec![PathBuf::from("/a.wav")]);
+
+        let specs = build_specs(&request, &state);
+        assert_eq!(specs[0].1.options.model.backend, Backend::OpenAiApi);
+    }
+
+    #[test]
+    fn build_specs_maps_whisper_backend_by_default() {
+        let state = base_state();
+        let request = ImportRequest::Files(vec![PathBuf::from("/a.wav")]);
+
+        let specs = build_specs(&request, &state);
+        assert_eq!(specs[0].1.options.model.backend, Backend::Whisper);
+    }
+
+    #[test]
+    fn build_specs_maps_llm_options_when_enabled() {
+        let mut state = base_state();
+        state.enable_llm_translation = true;
+        state.llm_model = "gpt-4o-mini".to_string();
+        state.llm_prompt = "Translate to German.".to_string();
+        let request = ImportRequest::Files(vec![PathBuf::from("/a.wav")]);
+
+        let specs = build_specs(&request, &state);
+        assert_eq!(
+            specs[0].1.options.llm,
+            Some(LlmTranslationOptions {
+                model: "gpt-4o-mini".to_string(),
+                prompt: "Translate to German.".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn llm_none_when_unchecked() {
+        let mut state = base_state();
+        state.enable_llm_translation = false;
+        state.llm_model = "gpt-4o-mini".to_string();
+        state.llm_prompt = "Translate to German.".to_string();
+        let request = ImportRequest::Files(vec![PathBuf::from("/a.wav")]);
+
+        let specs = build_specs(&request, &state);
+        assert_eq!(specs[0].1.options.llm, None);
+    }
+
+    #[test]
+    fn llm_none_when_model_empty() {
+        let mut state = base_state();
+        state.enable_llm_translation = true;
+        state.llm_model = String::new();
+        state.llm_prompt = "Translate to German.".to_string();
+        let request = ImportRequest::Files(vec![PathBuf::from("/a.wav")]);
+
+        let specs = build_specs(&request, &state);
+        assert_eq!(
+            specs[0].1.options.llm, None,
+            "an enabled checkbox with a blank model must still map to None"
+        );
+    }
+
+    #[test]
+    fn llm_none_when_model_is_only_whitespace() {
+        let mut state = base_state();
+        state.enable_llm_translation = true;
+        state.llm_model = "   ".to_string();
+        let request = ImportRequest::Files(vec![PathBuf::from("/a.wav")]);
+
+        let specs = build_specs(&request, &state);
+        assert_eq!(specs[0].1.options.llm, None);
+    }
+
+    /// Design spec §7.2 ledger #10: a sheet opened fresh (never touched)
+    /// seeds the AI-model/instructions fields with real, usable defaults —
+    /// checking the box and running immediately must persist those seeds
+    /// verbatim as `options.llm`, unlike Buzz where the same-looking text is
+    /// a display-only placeholder until edited.
+    #[test]
+    fn seeded_defaults_become_values_on_save() {
+        let prefill = FileTranscriberSettings::default();
+        let mut state = SheetState::from_settings(&prefill, false);
+        state.enable_llm_translation = true; // the only field the user "touches"
+        let request = ImportRequest::Files(vec![PathBuf::from("/a.wav")]);
+
+        let specs = build_specs(&request, &state);
+        assert_eq!(
+            specs[0].1.options.llm,
+            Some(LlmTranslationOptions {
+                model: DEFAULT_LLM_MODEL.to_string(),
+                prompt: DEFAULT_LLM_PROMPT.to_string(),
+            })
+        );
+
+        // And the sticky write-back persists those same seeded strings, not
+        // an empty/unset placeholder (ledger #10's "real value" claim).
+        let mut settings = FileTranscriberSettings::default();
+        state.write_to(&mut settings);
+        assert_eq!(settings.llm_model.as_deref(), Some(DEFAULT_LLM_MODEL));
+        assert_eq!(settings.llm_prompt.as_deref(), Some(DEFAULT_LLM_PROMPT));
+        assert!(settings.enable_llm_translation);
+    }
+
+    #[test]
+    fn default_llm_prompt_matches_the_spec_j8_template_byte_exact() {
+        assert_eq!(
+            DEFAULT_LLM_PROMPT,
+            "You are a professional translator. Translate each text sent to you to \
+             {language}. Do not add any comments or notes — reply with the translation only."
+        );
+    }
+
+    // -- row visibility (pure fns, F-041, Task 14) -----------------------------
+
+    #[test]
+    fn whisper_backend_shows_the_size_combo_and_hf_repo_hides_the_api_key_row() {
+        let state = base_state(); // backend: Backend::Whisper
+        assert!(size_combo_visible(&state));
+        assert!(hf_repo_row_visible(&state));
+        assert!(!api_key_row_visible(&state));
+    }
+
+    #[test]
+    fn api_backend_hides_the_size_combo_and_hf_repo_shows_the_api_key_row() {
+        let mut state = base_state();
+        state.backend = Backend::OpenAiApi;
+        assert!(!size_combo_visible(&state));
+        assert!(!hf_repo_row_visible(&state));
+        assert!(api_key_row_visible(&state));
+    }
+
     /// HUMM_SURFACE §5 queue-path gap: `build_specs` must read
     /// `HUMM_PARAGRAPH_SPLIT_TIME` at spec-build time, exactly like
     /// `humm-cli`'s `run.rs` does, rather than always taking
@@ -857,5 +1368,74 @@ mod tests {
     fn lumii_is_never_listed() {
         assert!(!selectable_model_sizes(false).contains(&ModelSize::Lumii));
         assert!(!selectable_model_sizes(true).contains(&ModelSize::Lumii));
+    }
+
+    // -- Api Key row: seeding + commit (F-041, Task 14) ------------------------
+
+    #[test]
+    fn options_sheet_new_seeds_the_api_key_from_the_secret_store() {
+        use humm_core::secrets::MemorySecretStore;
+
+        let secrets = MemorySecretStore::new();
+        secrets
+            .set(SecretKey::OpenAiApiKey, "sk-seeded-value")
+            .unwrap();
+        let request = ImportRequest::Files(vec![PathBuf::from("/a.wav")]);
+
+        let sheet = OptionsSheet::new(
+            request,
+            &FileTranscriberSettings::default(),
+            false,
+            &secrets,
+        );
+
+        assert_eq!(sheet.state.api_key, "sk-seeded-value");
+        assert_eq!(sheet.modal, None);
+    }
+
+    #[test]
+    fn options_sheet_new_api_key_is_empty_when_nothing_is_stored() {
+        use humm_core::secrets::MemorySecretStore;
+
+        let secrets = MemorySecretStore::new();
+        let request = ImportRequest::Files(vec![PathBuf::from("/a.wav")]);
+
+        let sheet = OptionsSheet::new(
+            request,
+            &FileTranscriberSettings::default(),
+            false,
+            &secrets,
+        );
+
+        assert_eq!(sheet.state.api_key, "");
+    }
+
+    #[test]
+    fn commit_api_key_saves_and_reports_no_modal_for_a_valid_charset() {
+        use humm_core::secrets::MemorySecretStore;
+
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let modal = commit_api_key("sk-Valid123+/=_-", &secrets);
+
+        assert_eq!(modal, None);
+        assert_eq!(
+            secrets.get(SecretKey::OpenAiApiKey).unwrap(),
+            Some("sk-Valid123+/=_-".to_string())
+        );
+    }
+
+    #[test]
+    fn commit_api_key_warns_but_still_saves_for_an_invalid_charset() {
+        use humm_core::secrets::MemorySecretStore;
+
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let modal = commit_api_key("sk-bad key!", &secrets);
+
+        assert_eq!(modal, Some(SheetModal::InvalidKeyCharset));
+        assert_eq!(
+            secrets.get(SecretKey::OpenAiApiKey).unwrap(),
+            Some("sk-bad key!".to_string()),
+            "an invalid-charset key must still be saved (Buzz parity)"
+        );
     }
 }

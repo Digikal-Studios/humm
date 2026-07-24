@@ -562,6 +562,20 @@ impl HummApp {
         self.open_options_sheet(request);
     }
 
+    /// Test-only seam: mutably borrows the open options sheet's live
+    /// [`SheetState`], if one is open — lets a kittest harness force a
+    /// backend-combo selection directly (F-041, Task 14). Driving an
+    /// `egui::ComboBox` selection via clicks has no kittest precedent in
+    /// this workspace (`kittest_recording.rs`'s own `mode_index` seam
+    /// documents the same gap for the recording window's advanced sheet);
+    /// this mirrors that technique for the options sheet.
+    pub fn options_sheet_state_mut_for_test(&mut self) -> Option<&mut SheetState> {
+        self.action_state
+            .options_sheet
+            .as_mut()
+            .map(|sheet| &mut sheet.state)
+    }
+
     /// Whether `settings.models.custom_model_url` is set — gates the
     /// options sheet's model-size combo's "Custom" entry (F-023).
     fn custom_model_available(&self) -> bool {
@@ -604,8 +618,12 @@ impl HummApp {
             settings.file_transcriber.clone()
         };
         let custom_model_available = self.custom_model_available();
-        self.action_state.options_sheet =
-            Some(OptionsSheet::new(request, &prefill, custom_model_available));
+        self.action_state.options_sheet = Some(OptionsSheet::new(
+            request,
+            &prefill,
+            custom_model_available,
+            self.services.secrets.as_ref(),
+        ));
     }
 
     /// Applies the options sheet's close outcome (`views::main_window::show`
@@ -3066,6 +3084,7 @@ impl eframe::App for HummApp {
             custom_model_available,
             yt_dlp_available,
             CURRENT_VERSION,
+            &self.services.secrets,
         );
 
         if let Some(outcome) = result.dialog_outcome {

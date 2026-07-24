@@ -41,6 +41,16 @@
 //! kittest harness can script the outcome and never touch the network
 //! (mirrors `translate_seam.rs`'s `TranslateSpawner` seam, one level
 //! simpler: a single call-and-return rather than a whole worker).
+//!
+//! ## Shared with the options sheet (Task 14)
+//!
+//! The charset check and the commit-to-keyring plumbing now live in
+//! [`crate::views::secret_field`] — this module's [`commit_key`] is a thin
+//! wrapper mapping [`secret_field::CommitOutcome`] onto [`GeneralModal`], and
+//! the key row itself renders via [`secret_field::masked_field_row`]. The
+//! options sheet's own Api Key row (`views/options_sheet.rs`, design spec
+//! §7.2) reuses both rather than re-porting Buzz's
+//! `openai_api_key_line_edit.py`/`BASE64_PATTERN` a second time.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -50,6 +60,7 @@ use humm_core::secrets::{SecretKey, SecretStore};
 use humm_core::settings::{OpenAiSettings, Settings};
 
 use crate::i18n::tr;
+use crate::views::secret_field::{self, CommitOutcome};
 
 /// Signature for the Test button's background key-validation check:
 /// `Fn(OpenAiAuth) -> ValidateOutcome`, run on its own thread ([`start_test`]).
@@ -80,24 +91,11 @@ pub fn stub_validate_fn() -> ValidateFn {
 
 // -- Charset check (Buzz `BASE64_PATTERN`, `:32`) ----------------------------
 
-/// Buzz's exact key-charset pattern (`general_preferences_widget.py:32`).
-const BASE64_CHARSET_PATTERN: &str = r"^[A-Za-z0-9+/=_-]*$";
-
-/// Lazily compiles [`BASE64_CHARSET_PATTERN`] once and reuses it (same
-/// one-`OnceLock` idiom `views/url_dialog.rs`'s `compiled_pattern` uses for
-/// its own fixed, non-user-supplied pattern).
-fn compiled_charset_pattern() -> &'static regex::Regex {
-    static REGEX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    REGEX.get_or_init(|| {
-        regex::Regex::new(BASE64_CHARSET_PATTERN).expect("BASE64_CHARSET_PATTERN is a valid regex")
-    })
-}
-
-/// Whether `s` matches Buzz's base64-charset check
-/// (`on_openai_api_key_focus_out`, `:261-267`). An empty string matches (the
-/// pattern's own `*` quantifier), same as Buzz's regex.
+/// Whether `s` matches Buzz's base64-charset check — re-exported from
+/// [`secret_field`] (moved there, Task 14) so existing callers/tests of this
+/// module don't need to change their import path.
 pub fn is_base64_charset(s: &str) -> bool {
-    compiled_charset_pattern().is_match(s)
+    secret_field::is_base64_charset(s)
 }
 
 // -- Pure field-commit helpers ------------------------------------------------
@@ -279,18 +277,12 @@ pub fn test_button_enabled(state: &GeneralTabState) -> bool {
 /// advisory — "may cause errors" — while a keyring failure means the edit
 /// was not persisted at all).
 pub fn commit_key(state: &mut GeneralTabState, secrets: &Arc<dyn SecretStore>) {
-    let mut modal = if is_base64_charset(&state.key_buffer) {
-        None
-    } else {
-        Some(GeneralModal::InvalidKeyCharset)
+    let outcome = secret_field::commit_secret(secrets, SecretKey::OpenAiApiKey, &state.key_buffer);
+    state.modal = match outcome {
+        CommitOutcome::Saved => None,
+        CommitOutcome::InvalidCharset => Some(GeneralModal::InvalidKeyCharset),
+        CommitOutcome::KeyringSaveFailed => Some(GeneralModal::KeyringSaveFailed),
     };
-
-    if let Err(err) = secrets.set(SecretKey::OpenAiApiKey, &state.key_buffer) {
-        log::warn!("could not save the OpenAI API key to the keyring: {err}");
-        modal = Some(GeneralModal::KeyringSaveFailed);
-    }
-
-    state.modal = modal;
 }
 
 /// Commits the base-URL field: empty → `None`, saved immediately.
@@ -388,29 +380,20 @@ pub fn ui(
 ) {
     drain_test_result(state);
 
-    ui.horizontal(|ui| {
-        ui.label(tr("prefs-general-openai-key-label"));
-        let key_response = ui.add(
-            egui::TextEdit::singleline(&mut state.key_buffer)
-                .password(!state.key_visible)
-                .hint_text(tr("prefs-general-openai-key-placeholder")),
-        );
-        let eye_label = if state.key_visible {
-            tr("prefs-general-key-hide")
-        } else {
-            tr("prefs-general-key-show")
-        };
-        if ui.button(eye_label).clicked() {
-            state.key_visible = !state.key_visible;
-        }
-        // `lost_focus()` alone covers Enter too -- egui's single-line
-        // `TextEdit` surrenders focus on Enter rather than inserting a
-        // newline (same rationale `models_ui.rs`'s custom-URL field
-        // documents for its own `lost_focus()`-only commit).
-        if key_response.lost_focus() {
-            commit_key(state, secrets);
-        }
-    });
+    let key_response = secret_field::masked_field_row(
+        ui,
+        tr("prefs-general-openai-key-label"),
+        &mut state.key_buffer,
+        &mut state.key_visible,
+        tr("prefs-general-openai-key-placeholder"),
+    );
+    // `lost_focus()` alone covers Enter too -- egui's single-line `TextEdit`
+    // surrenders focus on Enter rather than inserting a newline (same
+    // rationale `models_ui.rs`'s custom-URL field documents for its own
+    // `lost_focus()`-only commit).
+    if key_response.lost_focus() {
+        commit_key(state, secrets);
+    }
 
     if ui
         .add_enabled(

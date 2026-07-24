@@ -11,9 +11,11 @@
 //! the Clear-confirm decision, and any toast click). `app.rs` is the sole
 //! consumer of both.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use humm_core::domain::Status;
+use humm_core::secrets::SecretStore;
 
 use crate::i18n::tr;
 use crate::shortcuts::{ShortcutAction, ShortcutMap};
@@ -238,7 +240,10 @@ pub struct ShowResult {
 /// from `Services` (`settings.models.custom_model_url.is_some()` /
 /// `capabilities.yt_dlp`) — this module never reads `Services` directly.
 /// `current_version` is `env!("CARGO_PKG_VERSION")`, threaded in for the
-/// update dialog's "Current version: …" line.
+/// update dialog's "Current version: …" line. `secrets` is threaded
+/// straight through to the options sheet's Api Key row (F-041, Task 14) —
+/// the one piece of `Services` this module passes on without touching
+/// itself, same as `custom_model_available`/`yt_dlp_available`.
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
@@ -251,6 +256,7 @@ pub fn show(
     custom_model_available: bool,
     yt_dlp_available: bool,
     current_version: &str,
+    secrets: &Arc<dyn SecretStore>,
 ) -> ShowResult {
     handle_global_shortcuts(ui, actions, shortcuts, state, yt_dlp_available);
 
@@ -278,8 +284,12 @@ pub fn show(
     let clear_confirmed = show_clear_confirm(ui.ctx(), &mut state.clear_confirm_open);
     let dialog_outcome = rename_notes::ui(ui.ctx(), &mut state.dialog);
     let toast_actions = toasts::ui(ui.ctx(), &mut state.toasts, vm, now);
-    let sheet_outcome =
-        options_sheet::ui(ui.ctx(), &mut state.options_sheet, custom_model_available);
+    let sheet_outcome = options_sheet::ui(
+        ui.ctx(),
+        &mut state.options_sheet,
+        custom_model_available,
+        secrets,
+    );
     let url_dialog_result = url_dialog::ui(ui.ctx(), &mut state.url_dialog);
     update_notice::dialog_ui(ui.ctx(), &mut state.update_notice, current_version);
     show_drop_overlay(ui);

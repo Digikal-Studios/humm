@@ -21,6 +21,7 @@ use humm_core::domain::{
     Backend, DEFAULT_TEMPERATURE, ModelSize, ModelSpec, OutputFormat, TaskKind,
 };
 use humm_core::error::{CoreError, EngineError};
+use humm_core::secrets::{MemorySecretStore, SecretKey, SecretStore};
 use humm_gui::app::HummApp;
 use humm_gui::import::ImportRequest;
 use humm_gui::services::{self, Capabilities, Services, TestDeps};
@@ -66,7 +67,17 @@ impl TranscriptionEngine for FakeEngine {
     }
 }
 
-fn test_services(store: Arc<SqliteStore>, capabilities: Capabilities, dir: &Path) -> Services {
+/// Builds real [`Services`] for the harness (Task 9's original
+/// `test_services`, generalized in Task 14 to accept an explicit `secrets`
+/// store — the options sheet's Api Key row seeds/commits through whatever
+/// store is wired here, so a test asserting on that row needs to control it
+/// directly rather than always getting a fresh, empty double).
+fn test_services_with_secrets(
+    store: Arc<SqliteStore>,
+    capabilities: Capabilities,
+    dir: &Path,
+    secrets: Arc<dyn SecretStore>,
+) -> Services {
     services::init_with(TestDeps {
         store,
         media_dir: dir.join("media"),
@@ -77,7 +88,7 @@ fn test_services(store: Arc<SqliteStore>, capabilities: Capabilities, dir: &Path
         fetcher: None,
         capabilities,
         artifacts: None,
-        secrets: services::default_test_secrets(),
+        secrets,
         translate: services::default_test_translate(),
         llm: None,
         validate: services::default_test_validate(),
@@ -91,8 +102,18 @@ fn harness_with(
     store: Arc<SqliteStore>,
     capabilities: Capabilities,
 ) -> (Harness<'static, HummApp>, tempfile::TempDir) {
+    harness_with_secrets(store, capabilities, services::default_test_secrets())
+}
+
+/// Like [`harness_with`], but with an explicit `secrets` store (Task 14 —
+/// see [`test_services_with_secrets`]).
+fn harness_with_secrets(
+    store: Arc<SqliteStore>,
+    capabilities: Capabilities,
+    secrets: Arc<dyn SecretStore>,
+) -> (Harness<'static, HummApp>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = test_services(store, capabilities, dir.path());
+    let services = test_services_with_secrets(store, capabilities, dir.path(), secrets);
     let harness = HarnessBuilder::default()
         .with_size(egui::Vec2::new(1000.0, 700.0))
         // The default `max_steps` (4) is tuned for a static UI; a real
@@ -218,6 +239,190 @@ fn run_with_srt_checked_enqueues_full_options_closes_the_sheet_and_stays_sticky_
         srt_checkbox.accesskit_node().toggled(),
         Some(egui::accesskit::Toggled::True),
         "SRT must still be checked on reopen (sticky prefs)"
+    );
+}
+
+// -- Task 14: backend selector + Api Key row + LLM translation block ---------
+
+/// Selecting the OpenAI backend hides the size combo and shows the Api Key
+/// row; switching back to Whisper restores it (design spec §7.2 deliverable
+/// A). The backend combo is driven via
+/// [`HummApp::options_sheet_state_mut_for_test`] rather than clicking the
+/// `egui::ComboBox` itself — this workspace has no kittest precedent for
+/// driving a `ComboBox` selection by click (`kittest_recording.rs`'s
+/// `mode_index` seam documents the same gap for the recording window).
+#[test]
+fn api_backend_selection_hides_size_combo_and_shows_api_key_row() {
+    let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
+    let (mut harness, _dir) = harness_with(store, Capabilities::default());
+    harness.run();
+
+    harness
+        .state_mut()
+        .open_options_sheet_for_test(ImportRequest::Files(vec![PathBuf::from("/no/such/a.wav")]));
+    harness.run();
+
+    // Whisper is the default backend: the size combo shows, the Api Key row
+    // doesn't.
+    harness.get_by_label("Model:");
+    assert!(harness.query_by_label("Api Key:").is_none());
+
+    harness
+        .state_mut()
+        .options_sheet_state_mut_for_test()
+        .expect("sheet is open")
+        .backend = Backend::OpenAiApi;
+    harness.run();
+
+    assert!(
+        harness.query_by_label("Model:").is_none(),
+        "the size combo must hide once the API backend is selected"
+    );
+    harness.get_by_label("Api Key:");
+
+    // Switching back to Whisper restores the size combo and hides the row
+    // again.
+    harness
+        .state_mut()
+        .options_sheet_state_mut_for_test()
+        .expect("sheet is open")
+        .backend = Backend::Whisper;
+    harness.run();
+
+    harness.get_by_label("Model:");
+    assert!(harness.query_by_label("Api Key:").is_none());
+}
+
+/// The Advanced section's Hugging Face repo field hides for the same reason
+/// the size combo does (design spec §7.2 deliverable A's decision to match
+/// Buzz's `reset_visible_rows` intent).
+#[test]
+fn api_backend_selection_hides_the_advanced_hf_repo_field() {
+    let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
+    let (mut harness, _dir) = harness_with(store, Capabilities::default());
+    harness.run();
+
+    harness
+        .state_mut()
+        .open_options_sheet_for_test(ImportRequest::Files(vec![PathBuf::from("/no/such/a.wav")]));
+    harness.run();
+    harness.get_by_label("Advanced").click();
+    harness.run();
+
+    harness.get_by_label("Hugging Face model");
+
+    harness
+        .state_mut()
+        .options_sheet_state_mut_for_test()
+        .expect("sheet is open")
+        .backend = Backend::OpenAiApi;
+    harness.run();
+
+    assert!(harness.query_by_label("Hugging Face model").is_none());
+}
+
+/// The Advanced section's "Translation settings" block enable-gates its
+/// AI-model/instructions fields on the checkbox (Buzz
+/// `advanced_settings_dialog.py:89-121`).
+#[test]
+fn llm_block_enable_gates_its_fields() {
+    let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
+    let (mut harness, _dir) = harness_with(store, Capabilities::default());
+    harness.run();
+
+    harness
+        .state_mut()
+        .open_options_sheet_for_test(ImportRequest::Files(vec![PathBuf::from("/no/such/a.wav")]));
+    harness.run();
+    harness.get_by_label("Advanced").click();
+    harness.run();
+
+    let checkbox = harness.get_by_label("Enable AI translation");
+    assert_eq!(
+        checkbox.accesskit_node().toggled(),
+        Some(egui::accesskit::Toggled::False),
+        "unchecked by default (sticky default, design spec §7.2)"
+    );
+
+    let ai_model_label = harness.get_by_label("AI model:");
+    assert!(
+        ai_model_label.accesskit_node().is_disabled(),
+        "the AI-model row must render disabled while unchecked"
+    );
+    let instructions_label = harness.get_by_label("Instructions for AI:");
+    assert!(
+        instructions_label.accesskit_node().is_disabled(),
+        "the instructions row must render disabled while unchecked"
+    );
+
+    harness.get_by_label("Enable AI translation").click();
+    harness.run();
+
+    assert!(
+        !harness
+            .get_by_label("AI model:")
+            .accesskit_node()
+            .is_disabled()
+    );
+    assert!(
+        !harness
+            .get_by_label("Instructions for AI:")
+            .accesskit_node()
+            .is_disabled()
+    );
+}
+
+/// Running with "Enable AI translation" checked (and the seeded defaults
+/// untouched, ledger #10) enqueues a spec whose persisted options carry the
+/// seeded model/prompt — and, critically, never the API key material itself
+/// (design spec §5's acceptance invariant), even though a real key is
+/// sitting in the secret store this whole time.
+#[test]
+fn run_with_llm_enabled_persists_llm_options_and_never_the_key() {
+    const TEST_KEY: &str = "sk-test-dummy-should-never-leak-12345";
+
+    let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
+    let store_for_assert = Arc::clone(&store);
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+    secrets.set(SecretKey::OpenAiApiKey, TEST_KEY).unwrap();
+    let (mut harness, _dir) = harness_with_secrets(store, Capabilities::default(), secrets);
+    harness.run();
+
+    harness
+        .state_mut()
+        .open_options_sheet_for_test(ImportRequest::Files(vec![PathBuf::from("/no/such/a.wav")]));
+    harness.run();
+    harness.get_by_label("Advanced").click();
+    harness.run();
+
+    harness.get_by_label("Enable AI translation").click();
+    harness.run();
+    harness.get_by_label("Run").click();
+    harness.run();
+
+    let rows = wait_for_task_count(&store_for_assert, 1);
+    let spec = store_for_assert
+        .load_task_spec(&rows[0].id)
+        .expect("load_task_spec")
+        .expect("a Run-enqueued task always has a persisted options_json");
+
+    // Re-serialize exactly what `SqliteStore::insert_task` persists as
+    // `options_json` (`serde_json::to_string(&spec)`, `store.rs:1113`) and
+    // prove the key material never made it in -- `LlmTranslationOptions` has
+    // structurally no key field, so this also guards against a future field
+    // addition accidentally carrying one.
+    let options_json = serde_json::to_string(&spec.options).expect("options serialize");
+
+    let llm = spec.options.llm.expect("LLM translation was enabled");
+    assert!(!llm.model.is_empty());
+    assert!(!llm.prompt.is_empty());
+    assert!(
+        options_json.contains("\"llm\""),
+        "persisted options must carry the llm key: {options_json}"
+    );
+    assert!(
+        !options_json.contains(TEST_KEY),
+        "the API key must never appear in persisted options_json: {options_json}"
     );
 }
 

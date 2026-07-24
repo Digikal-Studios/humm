@@ -428,6 +428,31 @@ pub enum Backend {
     OpenAiApi,
 }
 
+impl Backend {
+    /// The wire value persisted in `settings.file_transcriber.backend`
+    /// (F-023 extension, design spec §7.2) — deliberately the same strings
+    /// as the `#[serde]` rename above (`"whisper"`/`"openai_api"`), so the
+    /// settings TOML and `options_json` never disagree on spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Backend::Whisper => "whisper",
+            Backend::OpenAiApi => "openai_api",
+        }
+    }
+}
+
+impl FromStr for Backend {
+    type Err = ParseEnumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "whisper" => Ok(Backend::Whisper),
+            "openai_api" => Ok(Backend::OpenAiApi),
+            other => Err(ParseEnumError(format!("unknown backend: {other:?}"))),
+        }
+    }
+}
+
 /// Which model to run inference with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelSpec {
@@ -826,6 +851,28 @@ mod tests {
     #[test]
     fn source_unknown_string_is_err() {
         assert!(Source::from_str("bogus").is_err());
+    }
+
+    // -- Backend (F-041, design spec §2.1/§7.2) ----------------------------
+
+    const ALL_BACKENDS: [Backend; 2] = [Backend::Whisper, Backend::OpenAiApi];
+
+    #[test]
+    fn backend_round_trips_through_from_str() {
+        for backend in ALL_BACKENDS {
+            assert_eq!(Backend::from_str(backend.as_str()).unwrap(), backend);
+        }
+    }
+
+    #[test]
+    fn backend_as_str_matches_the_serde_wire_values() {
+        assert_eq!(Backend::Whisper.as_str(), "whisper");
+        assert_eq!(Backend::OpenAiApi.as_str(), "openai_api");
+    }
+
+    #[test]
+    fn backend_unknown_string_is_err() {
+        assert!(Backend::from_str("bogus").is_err());
     }
 
     // -- TranscriptionId ---------------------------------------------------

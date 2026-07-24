@@ -117,6 +117,17 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "options-initial-prompt-label",
         "options-hf-repo-label",
         "options-run",
+        // Options sheet -- backend selector + Api Key row + LLM translation
+        // block (F-023 extension, F-041, F-031, Task 14)
+        "options-backend-label",
+        "options-backend-whisper",
+        "options-backend-openai-api",
+        "options-api-key-label",
+        "options-llm-heading",
+        "options-llm-enable",
+        "options-llm-model-label",
+        "options-llm-model-presets-button",
+        "options-llm-prompt-label",
         // Update chip + dialog (views/update_notice.rs, F-006, ADR-015)
         "update-chip-label",
         "update-dialog-title",
