@@ -207,9 +207,10 @@ Parse as `serde_json::Value`, mirroring Buzz `:217-290`:
   SDK model didn't declare" — a plain JSON lookup here.)
 - `words` := top-level `"words"` if present (word-granularity responses).
 - **Without word timestamps:** one `Segment` per element:
-  `start = int(seg.start * 1000) + offset_ms` (f64 seconds → ms,
-  truncation-toward-zero like Python `int()`), same for `end`; text as-is;
-  `translation: ""`.
+  `start = int(seg.start * 1000 + offset_ms)` (f64 seconds → ms,
+  truncation-toward-zero like Python `int()`, applied to the whole sum —
+  corrected during Task 5 — Buzz truncates the sum), same for `end`; text
+  as-is; `translation: ""`.
 - **With word timestamps:** detect a whisper.cpp-server-style response —
   first segment has all three keys `tokens`, `avg_logprob`,
   `no_speech_prob` (Buzz `:234-236`):
@@ -221,9 +222,13 @@ Parse as `serde_json::Value`, mirroring Buzz `:217-290`:
     issue #1798); a word starting with `b", "` appends `b","`, flushes,
     then restarts the buffer from the comma-stripped remainder;
     otherwise append + extend `end`. Times are **centiseconds → ms
-    (`* 10`)**. Final flush per segment.
+    (`* 10`)**, then `offset_ms` added — a deliberate deviation from Buzz,
+    which never applies `offset_ms` in this branch; see deviation ledger
+    item 16 (§11). Final flush per segment.
   - **Standard branch:** one `Segment` per word:
-    `int(word.start * 1000) + offset_ms` etc. (Buzz `:270-279`).
+    `int(word.start * 1000 + offset_ms)` etc. (Buzz `:270-279`; truncation
+    applies to the whole sum — corrected during Task 5 — Buzz truncates the
+    sum).
 - Missing/`null` `start`/`end` default to 0 via the `get_value(...,
   default)` semantics (Buzz `:281-288`).
 
@@ -677,6 +682,11 @@ Recorded as a full ADR in DECISIONS.md; decision summary:
     writes run off the UI thread (M5 rule; Buzz does them on the GUI
     thread).
 15. No third-party-docs info button in the LLM block (§7.2).
+16. The whisper.cpp word-merge branch applies the chunk `offset_ms`; Buzz's
+    never does (`openai_whisper_api_file_transcriber.py:250-268`), silently
+    corrupting the timeline for >25 MiB chunked word-timestamped runs
+    against whisper.cpp-style servers — an accidental defect not ported
+    (house precedent: F-026 delete-gate, ADR-016).
 
 ## 12. Carried tickets disposition
 

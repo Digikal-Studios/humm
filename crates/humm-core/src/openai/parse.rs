@@ -37,9 +37,11 @@ pub fn response_format_for(api_model: &str) -> &'static str {
 /// its whisper.cpp-server word-merge algorithm.
 ///
 /// `offset_ms` is added to every timestamp produced from `seconds * 1000`
-/// paths (chunked large-file transcription's chunk offset, Buzz `:177`) --
-/// **except** inside the whisper.cpp branch, which never references
-/// `offset_ms` in Buzz (`:238-268`); see that branch's own doc comment.
+/// paths (chunked large-file transcription's chunk offset, Buzz `:177`),
+/// **including** inside the whisper.cpp branch -- a deliberate deviation
+/// from Buzz, whose whisper.cpp branch never references `offset_ms`
+/// (`:250-268`); see that branch's own doc comment for the citation and
+/// fix rationale.
 ///
 /// # Errors
 ///
@@ -60,7 +62,7 @@ pub fn parse_response(
     let is_whisper_cpp = segments.first().is_some_and(is_whisper_cpp_segment);
 
     if is_whisper_cpp {
-        Ok(parse_whisper_cpp_words(&segments))
+        Ok(parse_whisper_cpp_words(&segments, offset_ms))
     } else {
         Ok(parse_standard_words(&segments, offset_ms))
     }
@@ -155,23 +157,31 @@ fn parse_standard_words(segments: &[Value], offset_ms: i64) -> Vec<Segment> {
 /// #1798), so Buzz re-merges them into text-run segments via a byte
 /// buffer.
 ///
-/// **No `offset_ms` is applied anywhere in this branch** -- Buzz's
-/// `append_segment` call sites at `:250-268` never reference `offset_ms`
-/// (unlike the standard-word and no-word-timestamps paths at `:275-276`
-/// and `:283-284`, which do). This is very likely an oversight in Buzz
-/// rather than a deliberate choice -- whisper.cpp-server responses are the
-/// only source that hits this branch, and Buzz's chunked-transcription
-/// offset (`:177`) would silently fail to apply to them -- but ground
-/// truth is ground truth: this port preserves the quirk exactly rather
-/// than "fixing" behavior the spec didn't ask us to change. See this
-/// task's report for the citation.
+/// **`offset_ms` is applied here, unlike Buzz.** Buzz's `append_segment`
+/// call sites at `:250-268` never reference `offset_ms` (unlike the
+/// standard-word and no-word-timestamps paths at `:275-276` and
+/// `:283-284`, which do): every `append_segment(result_segments,
+/// txt_buffer, txt_start, txt_end)` call in that range passes only the raw
+/// centisecond `txt_start`/`txt_end`, and `append_segment` itself
+/// (`:19-36`) never adds `offset_ms` either. This is an accidental defect
+/// in Buzz, not a deliberate choice -- whisper.cpp-server responses are
+/// the only source that hits this branch, and Buzz's chunked-transcription
+/// offset (`:177`) silently fails to apply to them, so a >25 MiB file
+/// transcribed with word timestamps against a whisper.cpp-style server has
+/// every chunk after the first land back at the start of the timeline.
+/// House precedent is to fix accidental upstream corruption rather than
+/// port it byte-faithfully (F-026's unported delete-gate bypass, ADR-016's
+/// `--no-playlist`), so this port applies `offset_ms` to
+/// [`append_segment`]'s output after the centisecond `* 10` conversion,
+/// deviating from Buzz on purpose. See deviation ledger item 16
+/// (`docs/superpowers/specs/2026-07-24-m6-cloud-api-llm-design.md` §11).
 ///
 /// `txt_buffer`/`txt_start`/`txt_end` are deliberately **not** reset
 /// between segments (Buzz declares them once, before the outer `for
 /// segment in segments:` loop at `:239-241`, and never clears them inside
 /// it) -- only reassigned by the space/comma branches when a flush
 /// succeeds. This port keeps that same scoping.
-fn parse_whisper_cpp_words(segments: &[Value]) -> Vec<Segment> {
+fn parse_whisper_cpp_words(segments: &[Value], offset_ms: i64) -> Vec<Segment> {
     let mut result = Vec::new();
     let mut buffer: Vec<u8> = Vec::new();
     let mut buf_start = 0.0_f64;
@@ -184,7 +194,9 @@ fn parse_whisper_cpp_words(segments: &[Value]) -> Vec<Segment> {
             let start = num_or(word, "start", 0.0);
             let end = num_or(word, "end", 0.0);
 
-            if txt.starts_with(b" ") && append_segment(&mut result, &buffer, buf_start, buf_end) {
+            if txt.starts_with(b" ")
+                && append_segment(&mut result, &buffer, buf_start, buf_end, offset_ms)
+            {
                 buffer = txt.to_vec();
                 buf_start = start;
                 buf_end = end;
@@ -193,7 +205,7 @@ fn parse_whisper_cpp_words(segments: &[Value]) -> Vec<Segment> {
 
             if txt.starts_with(b", ") {
                 buffer.push(b',');
-                append_segment(&mut result, &buffer, buf_start, buf_end);
+                append_segment(&mut result, &buffer, buf_start, buf_end, offset_ms);
                 buffer = strip_leading_commas(txt);
                 buf_start = start;
                 buf_end = end;
@@ -206,26 +218,28 @@ fn parse_whisper_cpp_words(segments: &[Value]) -> Vec<Segment> {
 
         // Append the last segment (Buzz `:267-268` -- this flush is
         // *inside* the outer per-segment loop, not after it).
-        append_segment(&mut result, &buffer, buf_start, buf_end);
+        append_segment(&mut result, &buffer, buf_start, buf_end, offset_ms);
     }
 
     result
 }
 
-/// Ports `append_segment` (`:19-36`) exactly: an empty buffer is a no-op
-/// success (nothing to append, not an error); a non-empty buffer that
-/// decodes as UTF-8 is pushed as a [`Segment`] (centiseconds `* 10` to ms,
-/// no offset -- see [`parse_whisper_cpp_words`]); a non-empty buffer that
-/// fails to decode returns `false` **without mutating `result` or
-/// `txt`** -- the caller's control flow (not this function) decides
-/// whether to keep accumulating into the same buffer, matching Buzz's
-/// `try/except UnicodeDecodeError` guard against the multi-byte-character
-/// split described in whisper.cpp issue #1798.
+/// Ports `append_segment` (`:19-36`) exactly, plus one deliberate
+/// deviation: an empty buffer is a no-op success (nothing to append, not
+/// an error); a non-empty buffer that decodes as UTF-8 is pushed as a
+/// [`Segment`] (centiseconds `* 10` to ms, **then `offset_ms` added** --
+/// unlike Buzz, see [`parse_whisper_cpp_words`]'s doc comment for why);
+/// a non-empty buffer that fails to decode returns `false` **without
+/// mutating `result` or `txt`** -- the caller's control flow (not this
+/// function) decides whether to keep accumulating into the same buffer,
+/// matching Buzz's `try/except UnicodeDecodeError` guard against the
+/// multi-byte-character split described in whisper.cpp issue #1798.
 fn append_segment(
     result: &mut Vec<Segment>,
     txt: &[u8],
     start_centis: f64,
     end_centis: f64,
+    offset_ms: i64,
 ) -> bool {
     if txt.is_empty() {
         return true;
@@ -234,8 +248,8 @@ fn append_segment(
     match std::str::from_utf8(txt) {
         Ok(text) => {
             result.push(Segment {
-                start: Millis((start_centis * 10.0) as i64),
-                end: Millis((end_centis * 10.0) as i64),
+                start: Millis((start_centis * 10.0) as i64 + offset_ms),
+                end: Millis((end_centis * 10.0) as i64 + offset_ms),
                 text: text.to_string(),
                 translation: String::new(),
             });
@@ -535,11 +549,17 @@ mod tests {
     }
 
     #[test]
-    fn wcpp_branch_offset_ms_is_not_applied() {
-        // Pins the quirk documented on `parse_whisper_cpp_words`: unlike
-        // every other path in this module, the whisper.cpp branch never
-        // references `offset_ms` in Buzz (`:250-268`). A large offset here
-        // must produce the *same* times as offset 0 would.
+    fn wcpp_branch_applies_offset_ms_unlike_buzz() {
+        // Deviation from Buzz: Buzz's whisper.cpp branch never references
+        // `offset_ms` (`openai_whisper_api_file_transcriber.py:250-268`) --
+        // upstream defect not ported; see spec ledger #16
+        // (`docs/superpowers/specs/2026-07-24-m6-cloud-api-llm-design.md`
+        // §11). Left as Buzz has it, a >25 MiB chunked, word-timestamped
+        // transcription against a whisper.cpp-style server would have
+        // every chunk after the first land back at the start of the
+        // timeline. This port applies `offset_ms` here, same as the other
+        // two parse branches: a 30_000ms offset must shift both times by
+        // exactly 30_000ms relative to what offset 0 would produce.
         let body = json!({
             "segments": [wcpp_segment(json!([
                 {"word": "Hello", "start": 0, "end": 50},
@@ -549,8 +569,8 @@ mod tests {
         let segments = parse_response(&body, 30_000, true).expect("parses");
 
         assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].start, Millis(0));
-        assert_eq!(segments[0].end, Millis(500));
+        assert_eq!(segments[0].start, Millis(30_000));
+        assert_eq!(segments[0].end, Millis(30_500));
     }
 
     // -- append_segment's decode-failure guard, exercised directly ----------
@@ -569,6 +589,10 @@ mod tests {
     // Buzz's `append_segment` (`:19-36`) operates on, and is the most
     // faithful reproduction of "two word entries whose bytes split a
     // multi-byte character" available under Rust's `String` invariants.
+    // Put another way: the UTF-8 guard is unreachable from any
+    // `serde_json::Value` (valid UTF-8 by construction), so it's defensive
+    // parity with Buzz's byte-level algorithm, live only for hypothetical
+    // non-JSON byte sources.
 
     #[test]
     fn append_segment_keeps_partial_multibyte_char_undecoded() {
@@ -576,7 +600,7 @@ mod tests {
 
         // 0xC3 alone is the leading byte of a 2-byte UTF-8 sequence (the
         // first half of 'é' = 0xC3 0xA9) -- invalid on its own.
-        let flushed = append_segment(&mut result, &[0xC3], 0.0, 5.0);
+        let flushed = append_segment(&mut result, &[0xC3], 0.0, 5.0, 0);
 
         assert!(!flushed, "a lone leading byte must not decode");
         assert!(result.is_empty());
@@ -592,7 +616,7 @@ mod tests {
         let mut buffer = vec![0xC3];
         buffer.extend_from_slice(&[0xA9]);
 
-        let flushed = append_segment(&mut result, &buffer, 0.0, 5.0);
+        let flushed = append_segment(&mut result, &buffer, 0.0, 5.0, 0);
 
         assert!(flushed);
         assert_eq!(result.len(), 1);
@@ -605,7 +629,7 @@ mod tests {
     fn append_segment_empty_buffer_is_a_no_op_success() {
         let mut result = Vec::new();
 
-        let flushed = append_segment(&mut result, b"", 1.0, 2.0);
+        let flushed = append_segment(&mut result, b"", 1.0, 2.0, 0);
 
         assert!(flushed);
         assert!(result.is_empty());
