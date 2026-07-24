@@ -3423,9 +3423,37 @@ mod tests {
 
     /// TCP (`TestServer::start`) — sandbox-blocked; run with the sandbox
     /// lifted. End-to-end through the runner: a scripted engine emits two
-    /// segments, the translator resolves against a `TestServer` returning a
-    /// numbered-batch body, and the persisted segments carry the per-segment
-    /// translations.
+    /// segments, the translator resolves against a `TestServer`, and the
+    /// persisted segments carry the per-segment translations mapped to the
+    /// *correct* ordinal — not just "some" translation, which a merge bug
+    /// that swapped row0/row1 could still satisfy.
+    ///
+    /// The translator worker's batch composition is nondeterministic by
+    /// design (the worker is already parked in `recv()` when the first
+    /// segment is enqueued, so the second segment may or may not have
+    /// arrived by the time the worker checks for more before dispatching):
+    /// both segments can land in ONE numbered-batch request, or as TWO
+    /// single-item requests. This test scripts the `/chat/completions` route
+    /// with a two-response QUEUE (Task 4's `set_route_for_method`, served in
+    /// call order) and branches on how many requests actually landed,
+    /// asserting composition-appropriate, ordinal-aware expectations either
+    /// way — both branches would catch a swapped merge:
+    ///
+    /// - 1 request (batched): the numbered-batch protocol parses
+    ///   `"[1] uno\n[2] dos"` into exactly `["uno", "dos"]`, zipped with the
+    ///   batch in enqueue order, so row0 must be "uno" and row1 "dos". The
+    ///   single recorded request's user-message content must mention both
+    ///   segment texts.
+    /// - 2 requests (split): the single-item form has no `[N]` parsing — it
+    ///   uses the whole response content verbatim — so the queue's first
+    ///   response (the literal string `"[1] uno\n[2] dos"`) goes to whichever
+    ///   request the worker sent first, and the second response ("SECOND")
+    ///   to whichever it sent second. The worker is a single thread issuing
+    ///   one blocking request at a time, so request arrival order == enqueue
+    ///   order == segment ordinal order: row0 must be the literal
+    ///   `"[1] uno\n[2] dos"` and row1 must be "SECOND". The request bodies
+    ///   are also checked directly: request 0's user content must be segment
+    ///   0's text ("one"), request 1's segment 1's ("two").
     #[test]
     fn file_task_with_llm_stores_per_segment_translations() {
         let server = TestServer::start();
@@ -3433,6 +3461,11 @@ mod tests {
             "POST",
             "/chat/completions",
             Canned::ok(choice_response("[1] uno\n[2] dos")),
+        );
+        server.set_route_for_method(
+            "POST",
+            "/chat/completions",
+            Canned::ok(choice_response("SECOND")),
         );
         let source: Arc<dyn LlmEndpointSource> = Arc::new(FixedEndpoint {
             auth: Some(OpenAiAuth {
@@ -3452,27 +3485,46 @@ mod tests {
         q.enqueue(a, llm_task_spec(h.input_file("a.mp3")), Source::FileImport);
         q.finish().expect("finish");
 
-        // Both segments are translated and persisted per-segment. The
-        // translator's internal batch composition (both segments in one
-        // numbered request vs. two single-item requests) is timing-dependent
-        // by design — the worker is already parked in `recv()` when the first
-        // segment is enqueued — so this asserts each segment carries its own
-        // marker's translation via `contains`, which holds under either
-        // composition: batched, the results are exactly "uno"/"dos"; split,
-        // each single-item response is the verbatim "[1] uno\n[2] dos", which
-        // contains both markers' text.
         let segments = completed_segments(&h, a);
         assert_eq!(segments.len(), 2);
-        assert!(
-            segments[0].translation.contains("uno"),
-            "seg0 translation: {:?}",
-            segments[0].translation
-        );
-        assert!(
-            segments[1].translation.contains("dos"),
-            "seg1 translation: {:?}",
-            segments[1].translation
-        );
+
+        let requests = server.requests();
+        match requests.len() {
+            1 => {
+                // Batched composition (see doc comment): one numbered-batch
+                // request carrying both segment texts.
+                let body: serde_json::Value =
+                    serde_json::from_slice(&requests[0].body).expect("request body is JSON");
+                let user = body["messages"][1]["content"]
+                    .as_str()
+                    .expect("user message content is a string");
+                assert!(user.contains("one"), "batched user content: {user:?}");
+                assert!(user.contains("two"), "batched user content: {user:?}");
+                assert_eq!(segments[0].translation, "uno");
+                assert_eq!(segments[1].translation, "dos");
+            }
+            2 => {
+                // Split composition (see doc comment): two single-item
+                // requests; arrival order == enqueue order == ordinal order.
+                let body0: serde_json::Value =
+                    serde_json::from_slice(&requests[0].body).expect("request 0 body is JSON");
+                let body1: serde_json::Value =
+                    serde_json::from_slice(&requests[1].body).expect("request 1 body is JSON");
+                assert_eq!(
+                    body0["messages"][1]["content"].as_str(),
+                    Some("one"),
+                    "request 0 should carry segment 0's text"
+                );
+                assert_eq!(
+                    body1["messages"][1]["content"].as_str(),
+                    Some("two"),
+                    "request 1 should carry segment 1's text"
+                );
+                assert_eq!(segments[0].translation, "[1] uno\n[2] dos");
+                assert_eq!(segments[1].translation, "SECOND");
+            }
+            n => panic!("expected 1 (batched) or 2 (split) /chat/completions requests, got {n}"),
+        }
     }
 
     /// TCP (`TestServer::start`) — sandbox-blocked; run with the sandbox
