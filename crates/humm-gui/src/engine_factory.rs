@@ -17,15 +17,17 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use humm_core::boundary::TranscriptionEngine;
+use humm_core::boundary::{AudioEncoder, TranscriptionEngine};
 use humm_core::cancel::CancelToken;
-use humm_core::domain::{ModelSize, ModelSpec};
+use humm_core::domain::{Backend, ModelSize, ModelSpec};
 use humm_core::env::vad_disabled_from_env;
 use humm_core::error::{CoreError, EngineError, ModelError};
 use humm_core::models::download::{DownloadProgress, ModelDownloader, ResolvedModel};
 use humm_core::models::registry::local_vad_model_path;
+use humm_core::openai::{OpenAiAuth, OpenAiEngine, OpenAiEngineConfig};
 use humm_core::paths;
 use humm_core::queue::{ArtifactEnsurer, EngineFactory};
+use humm_core::secrets::{SecretKey, SecretStore};
 use humm_core::settings::Settings;
 
 /// Seam over [`ModelDownloader`]'s network-touching methods, so
@@ -202,11 +204,19 @@ impl ArtifactEnsurer for DownloaderEnsurer {
 /// fake without ever constructing a real (network-touching)
 /// [`ModelDownloader`].
 ///
-/// Order (verbatim from the task brief): an explicit `model.hf_repo` always
-/// wins (a HuggingFace-repo task, whatever `model.size` happens to carry);
-/// else [`ModelSize::Custom`] routes to the user's configured custom URL,
-/// failing actionably — and never touching `backend` — if none is
-/// configured; else the ordinary size-indexed path.
+/// Order (verbatim from the task brief): a [`Backend::OpenAiApi`] spec has no
+/// local model to resolve at all and short-circuits to a no-op empty path
+/// (`EngineFactory::create` ignores the resolved path for that backend and
+/// builds an [`OpenAiEngine`] from settings/keyring instead); else an
+/// explicit `model.hf_repo` always wins (a HuggingFace-repo task, whatever
+/// `model.size` happens to carry); else [`ModelSize::Custom`] routes to the
+/// user's configured custom URL, failing actionably — and never touching
+/// `backend` — if none is configured; else the ordinary size-indexed path.
+///
+/// The API short-circuit is defensive: `Runner::run_job` already skips the
+/// whole artifact-ensure phase for `OpenAiApi` (`queue.rs`), so this arm is
+/// never reached in production — it only guarantees that any caller that *does*
+/// route an API spec here never triggers a spurious model download.
 fn route_ensure_model(
     backend: &dyn ModelBackend,
     model: &ModelSpec,
@@ -215,6 +225,10 @@ fn route_ensure_model(
     progress: &mut dyn FnMut(DownloadProgress),
     cancel: &CancelToken,
 ) -> Result<PathBuf, CoreError> {
+    if model.backend == Backend::OpenAiApi {
+        return Ok(PathBuf::new());
+    }
+
     if let Some(repo) = model.hf_repo.as_deref() {
         return backend
             .resolve_hf_repo(repo, coreml, progress, cancel)
@@ -272,28 +286,96 @@ fn route_ensure_vad(
     }
 }
 
-/// [`EngineFactory`] that loads a real [`humm_whisper::WhisperEngine`] from
-/// the model path a [`DownloaderEnsurer`] already resolved for this job.
+/// [`EngineFactory`] that routes on [`ModelSpec::backend`] (design spec §2.1/
+/// §3): [`Backend::Whisper`] loads a real [`humm_whisper::WhisperEngine`] from
+/// the model path a [`DownloaderEnsurer`] already resolved for this job;
+/// [`Backend::OpenAiApi`] builds an [`OpenAiEngine`] from the keyring key +
+/// `[openai]` settings (no local model — `resolved` is ignored, mirroring the
+/// CLI's own `CliEngineFactory`, `humm-cli/src/run.rs`).
 pub struct GuiEngineFactory {
-    /// Whether to allow GPU (Metal/CoreML) acceleration when loading the
-    /// engine — resolved once at startup from `HUMM_FORCE_CPU`
-    /// (`services::init`, mirroring the CLI's own `use_gpu_from_env`).
+    /// Whether to allow GPU (Metal/CoreML) acceleration when loading a local
+    /// [`Backend::Whisper`] engine — resolved once at startup from
+    /// `HUMM_FORCE_CPU` (`services::init`, mirroring the CLI's own
+    /// `use_gpu_from_env`). Ignored for [`Backend::OpenAiApi`].
     pub use_gpu: bool,
+    /// The shared live settings — `openai.{base_url, api_model}` are read
+    /// fresh at [`Backend::OpenAiApi`] engine-construction time (Buzz reads
+    /// its equivalent `QSettings` at transcriber construction too,
+    /// `openai_whisper_api_file_transcriber.py:41-53`).
+    pub settings: Arc<Mutex<Settings>>,
+    /// The secret store the OpenAI API key is read from at
+    /// [`Backend::OpenAiApi`] engine-construction time (the OS keyring in
+    /// production, ADR-012).
+    pub secrets: Arc<dyn SecretStore>,
+    /// The mp3 [`AudioEncoder`] an [`OpenAiEngine`] uploads through (the
+    /// ffmpeg encoder in production; design spec §3.1). Held once and shared
+    /// into every API engine built.
+    pub encoder: Arc<dyn AudioEncoder>,
 }
 
-impl EngineFactory for GuiEngineFactory {
-    /// `resolved` is `None` only if `RunnerDeps::artifacts` is absent —
-    /// unreachable in `services::init`'s real wiring (it always configures a
-    /// [`DownloaderEnsurer`]), so this is a programmer-error guard, not a
-    /// normal-operation path: a `None` here means the artifact-ensure wiring
-    /// itself is missing, not that a download failed (a real download
-    /// failure surfaces as `ensure_model`'s own `Err`, which never reaches
-    /// `create` at all — see `Runner::run_job`).
-    fn create(
-        &mut self,
-        _model: &ModelSpec,
+impl GuiEngineFactory {
+    /// The actionable [`CoreError`] returned when a [`Backend::OpenAiApi`] task
+    /// runs with no OpenAI API key available (keyring empty, or a keyring read
+    /// that failed — both degrade to "no key" per design spec §5). Points the
+    /// user at both the Preferences path and the CLI flag.
+    fn missing_api_key_error() -> CoreError {
+        CoreError::Engine(EngineError::Api {
+            detail: "no OpenAI API key — set one in Preferences → General, or pass \
+                     --openai-token on the CLI"
+                .to_string(),
+        })
+    }
+
+    /// Builds an [`OpenAiEngine`] from the keyring key + `[openai]` settings
+    /// (design spec §3). The key read degrades gracefully: a keyring backend
+    /// error is logged and treated as "no key" (design spec §5), surfacing the
+    /// same actionable [`Self::missing_api_key_error`] as a genuinely absent
+    /// entry — either way there is no key to transcribe with.
+    fn create_openai(&self) -> Result<Box<dyn TranscriptionEngine>, CoreError> {
+        let api_key = match self.secrets.get(SecretKey::OpenAiApiKey) {
+            Ok(Some(key)) if !key.is_empty() => key,
+            Ok(_) => return Err(Self::missing_api_key_error()),
+            Err(err) => {
+                log::warn!("could not read the OpenAI API key from the keyring: {err}");
+                return Err(Self::missing_api_key_error());
+            }
+        };
+
+        let (base_url, api_model) = {
+            let guard = self
+                .settings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                guard.openai.base_url.clone(),
+                guard.openai.api_model.clone(),
+            )
+        };
+
+        let engine = OpenAiEngine::new(
+            OpenAiEngineConfig {
+                auth: OpenAiAuth { base_url, api_key },
+                api_model,
+            },
+            Arc::clone(&self.encoder),
+        );
+        Ok(Box::new(engine) as Box<dyn TranscriptionEngine>)
+    }
+
+    /// Loads a local [`humm_whisper::WhisperEngine`] from the resolved model
+    /// path — [`Backend::Whisper`]'s path, byte-identical to this factory's
+    /// pre-M6 body.
+    fn create_whisper(
+        &self,
         resolved: Option<&Path>,
     ) -> Result<Box<dyn TranscriptionEngine>, CoreError> {
+        // `resolved` is `None` only if `RunnerDeps::artifacts` is absent —
+        // unreachable in `services::init`'s real wiring (it always configures a
+        // [`DownloaderEnsurer`]), so this is a programmer-error guard, not a
+        // normal-operation path: a `None` here means the artifact-ensure wiring
+        // itself is missing, not that a download failed (a real download
+        // failure surfaces as `ensure_model`'s own `Err`, which never reaches
+        // `create` at all — see `Runner::run_job`).
         let Some(path) = resolved else {
             return Err(CoreError::Engine(EngineError::ModelLoad {
                 path: PathBuf::from("(no model path resolved)"),
@@ -308,10 +390,28 @@ impl EngineFactory for GuiEngineFactory {
     }
 }
 
+impl EngineFactory for GuiEngineFactory {
+    /// Routes on [`ModelSpec::backend`]: [`Backend::OpenAiApi`] ignores
+    /// `resolved` and builds an [`OpenAiEngine`] ([`Self::create_openai`]);
+    /// [`Backend::Whisper`] loads a local engine from `resolved`
+    /// ([`Self::create_whisper`]).
+    fn create(
+        &mut self,
+        model: &ModelSpec,
+        resolved: Option<&Path>,
+    ) -> Result<Box<dyn TranscriptionEngine>, CoreError> {
+        match model.backend {
+            Backend::OpenAiApi => self.create_openai(),
+            Backend::Whisper => self.create_whisper(resolved),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use humm_core::domain::Backend;
+    use humm_core::secrets::MemorySecretStore;
+    use humm_media::FfmpegDecoder;
     use pretty_assertions::assert_eq;
     use std::cell::RefCell;
 
@@ -410,6 +510,29 @@ mod tests {
             backend: Backend::Whisper,
             size,
             hf_repo: hf_repo.map(str::to_string),
+        }
+    }
+
+    /// A [`Backend::OpenAiApi`] spec (the size/hf fields are irrelevant to the
+    /// API arm — it never resolves a local model).
+    fn api_spec() -> ModelSpec {
+        ModelSpec {
+            backend: Backend::OpenAiApi,
+            size: ModelSize::Small,
+            hf_repo: None,
+        }
+    }
+
+    /// A [`GuiEngineFactory`] over the given secret store and default
+    /// settings, with a real (but never-invoked here) ffmpeg encoder —
+    /// `OpenAiEngine::new` only stores the encoder `Arc`, so no ffmpeg
+    /// subprocess is ever spawned by these tests.
+    fn factory(secrets: Arc<dyn SecretStore>, settings: Settings) -> GuiEngineFactory {
+        GuiEngineFactory {
+            use_gpu: false,
+            settings: Arc::new(Mutex::new(settings)),
+            secrets,
+            encoder: Arc::new(FfmpegDecoder::new()) as Arc<dyn AudioEncoder>,
         }
     }
 
@@ -701,11 +824,37 @@ mod tests {
         );
     }
 
+    // -- ensure_model: API backend short-circuit ---------------------------------
+
+    #[test]
+    fn ensure_short_circuits_for_api_backend() {
+        let backend = FakeBackend::default();
+        let mut progress = |_: DownloadProgress| panic!("must not be called");
+
+        let result = route_ensure_model(
+            &backend,
+            &api_spec(),
+            None,
+            true,
+            &mut progress,
+            &CancelToken::new(),
+        );
+
+        assert_eq!(
+            result.expect("an API-backend spec short-circuits to a no-op empty path"),
+            PathBuf::new()
+        );
+        assert!(
+            backend.calls.borrow().is_empty(),
+            "an API-backend spec must never touch the download backend"
+        );
+    }
+
     // -- GuiEngineFactory --------------------------------------------------------
 
     #[test]
     fn gui_engine_factory_fails_actionably_without_a_resolved_path() {
-        let mut factory = GuiEngineFactory { use_gpu: false };
+        let mut factory = factory(Arc::new(MemorySecretStore::new()), Settings::default());
         let spec = model(ModelSize::Small, None);
         let err = match factory.create(&spec, None) {
             Ok(_) => panic!("expected a failure without a resolved model path"),
@@ -715,6 +864,52 @@ mod tests {
         assert!(
             message.contains("artifact ensure was not wired"),
             "expected the programmer-error message, got: {message}"
+        );
+    }
+
+    #[test]
+    fn api_arm_missing_key_yields_actionable_error() {
+        // An empty MemorySecretStore — no key stored anywhere.
+        let mut factory = factory(Arc::new(MemorySecretStore::new()), Settings::default());
+        let err = match factory.create(&api_spec(), None) {
+            Ok(_) => panic!("expected a failure with no API key stored"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("Preferences"),
+            "the error must point the user at Preferences, got: {message}"
+        );
+    }
+
+    #[test]
+    fn api_arm_treats_empty_stored_key_as_missing() {
+        let secrets = MemorySecretStore::new();
+        secrets.set(SecretKey::OpenAiApiKey, "").unwrap();
+        let mut factory = factory(Arc::new(secrets), Settings::default());
+        assert!(
+            factory.create(&api_spec(), None).is_err(),
+            "an empty stored key must be treated as absent"
+        );
+    }
+
+    #[test]
+    fn api_arm_builds_engine_with_settings() {
+        let secrets = MemorySecretStore::new();
+        secrets.set(SecretKey::OpenAiApiKey, "sk-test-123").unwrap();
+        let mut factory = factory(Arc::new(secrets), Settings::default());
+
+        // `resolved` is ignored for the API arm (no local model).
+        let engine = factory
+            .create(&api_spec(), None)
+            .expect("engine builds with a key present");
+
+        // A usable OpenAI transcription engine advertises translate support
+        // (design spec §3.4) — enough to prove the returned box is the API
+        // engine, without any network.
+        assert!(
+            engine.capabilities().translate,
+            "the API engine must advertise translate support"
         );
     }
 }

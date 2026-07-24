@@ -104,6 +104,9 @@ fn test_services(store: Arc<SqliteStore>, dir: &Path) -> Services {
         fetcher: None,
         capabilities: Capabilities::default(),
         artifacts: None,
+        secrets: services::default_test_secrets(),
+        translate: services::default_test_translate(),
+        llm: None,
     })
 }
 

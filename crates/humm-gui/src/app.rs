@@ -3380,6 +3380,9 @@ mod shutdown_tests {
             fetcher: None,
             capabilities: Capabilities::default(),
             artifacts: None,
+            secrets: services::default_test_secrets(),
+            translate: services::default_test_translate(),
+            llm: None,
         });
 
         let id = TranscriptionId::new();
@@ -3469,6 +3472,9 @@ mod crash_recovery_tests {
             fetcher: None,
             capabilities: Capabilities::default(),
             artifacts: None,
+            secrets: services::default_test_secrets(),
+            translate: services::default_test_translate(),
+            llm: None,
         });
         HummApp::new_for_test(services)
     }

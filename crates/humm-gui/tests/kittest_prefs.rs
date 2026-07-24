@@ -69,6 +69,9 @@ fn privacy_toggles_persist_to_the_settings_file() {
         fetcher: None,
         capabilities: Capabilities::default(),
         artifacts: None,
+        secrets: services::default_test_secrets(),
+        translate: services::default_test_translate(),
+        llm: None,
     });
     let settings = Arc::clone(&services.settings);
 
@@ -286,6 +289,9 @@ fn update_chip_appears_when_available_notice_is_injected() {
         fetcher: None,
         capabilities: Capabilities::default(),
         artifacts: None,
+        secrets: services::default_test_secrets(),
+        translate: services::default_test_translate(),
+        llm: None,
     });
     // `Services::update_tx` is exposed exactly so a test can drive this
     // hermetically instead of racing a real network check.

@@ -27,21 +27,25 @@ use std::sync::{Arc, Mutex};
 
 use chrono::NaiveDateTime;
 
-use humm_core::boundary::{MediaFetcher, TaskStore};
+use humm_core::boundary::{AudioEncoder, MediaFetcher, TaskStore};
 use humm_core::env::{threads_from_env, use_gpu_from_env};
 use humm_core::error::StoreError;
+use humm_core::openai::LlmEndpointSource;
 use humm_core::paths;
 use humm_core::pipeline::EngineTuning;
 use humm_core::queue::{
     ArtifactEnsurer, EngineFactory, QueueHandle, RunnerDeps, TaskEvent, spawn_task_runner,
 };
+use humm_core::secrets::{MemorySecretStore, SecretStore};
 use humm_core::settings::{Settings, SettingsError};
 use humm_core::telemetry::{Event, NoopTelemetry, PostHogTelemetry, Telemetry, telemetry_enabled};
 use humm_core::update::{self, UpdateInfo};
 use humm_media::{FfmpegDecoder, FfprobeProber, MediaCapabilities, YtDlpFetcher, probe_binaries};
-use humm_store::SqliteStore;
+use humm_store::{KeyringSecretStore, SqliteStore};
 
 use crate::engine_factory::{DownloaderEnsurer, GuiEngineFactory};
+use crate::llm_source::GuiLlmSource;
+use crate::translate_seam::{RealTranslateSpawner, ScriptedTranslateSpawner, TranslateSpawner};
 
 /// ffmpeg/ffprobe/yt-dlp availability, probed once at startup.
 ///
@@ -145,6 +149,20 @@ pub struct Services {
     /// About window's manual check (which reuses [`run_update_check`]) onto
     /// the same channel the startup check reports over.
     pub update_tx: flume::Sender<UpdateNotice>,
+    /// The OpenAI-API-key secret store (F-041/F-031, ADR-012): the OS keyring
+    /// in production ([`init`]), an in-memory double in tests ([`init_with`]).
+    /// The M6 GUI surfaces reach it through `HummApp`'s owned `Services` — the
+    /// Preferences → General key field (Task 13) and the viewer/recording
+    /// Translate gates (Tasks 15/17) read/write it here, the same way
+    /// `HummApp` already reaches [`Self::store`]/[`Self::settings`].
+    pub secrets: Arc<dyn SecretStore>,
+    /// The LLM-translation worker seam (F-031/F-063/F-085, design spec
+    /// §7.3/§7.4): [`crate::translate_seam::RealTranslateSpawner`] in
+    /// production ([`init`]), a scripted double in tests ([`init_with`]). The
+    /// viewer's Translate button (Task 15) and the recording window's
+    /// translation panel (Task 17) spawn workers through this, reached — like
+    /// [`Self::secrets`] — via `HummApp`'s owned `Services`.
+    pub translate: Arc<dyn TranslateSpawner>,
 }
 
 impl Services {
@@ -224,12 +242,26 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
         coreml: cfg!(all(target_os = "macos", target_arch = "aarch64")),
     };
 
+    // The OS-keyring secret store, built once and shared by every consumer of
+    // the OpenAI API key: the engine factory's `Backend::OpenAiApi` arm, the
+    // per-task LLM endpoint source, and (Task 13) the Preferences key field —
+    // all through the one `Arc` (ADR-012, design spec §5).
+    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore::new());
+
     let deps = RunnerDeps {
         store: Arc::clone(&store) as Arc<dyn TaskStore>,
         decoder,
         prober,
         fetcher,
-        engines: Box::new(GuiEngineFactory { use_gpu }),
+        engines: Box::new(GuiEngineFactory {
+            use_gpu,
+            settings: Arc::clone(&settings),
+            secrets: Arc::clone(&secrets),
+            // The ffmpeg mp3 encoder every `Backend::OpenAiApi` engine uploads
+            // through (design spec §3.1) — a stateless handle, so a dedicated
+            // instance here is as cheap as sharing the decoder's.
+            encoder: Arc::new(FfmpegDecoder::new()) as Arc<dyn AudioEncoder>,
+        }),
         tuning: EngineTuning {
             // No fixed VAD path up front: `DownloaderEnsurer::ensure_vad`
             // resolves it per job, since a GUI run has no synchronous
@@ -243,11 +275,14 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
         // makes that safe: the runner ensures the model/VAD as the task's
         // own first phase (module doc, `queue.rs`).
         artifacts: Some(Arc::new(ensurer) as Arc<dyn ArtifactEnsurer>),
-        // F-031 core wiring lands in Task 9; the GUI's env→settings→keyring
-        // `LlmEndpointSource` is wired in a later M6 GUI task. Until then the
-        // options sheet's "Enable AI translation" toggle has no effect on the
-        // file path.
-        llm: None,
+        // The GUI's env→settings→keyring `LlmEndpointSource` (F-031, design
+        // spec §6): resolves the per-task LLM-translation endpoint at task
+        // start, so a file task whose options carry `llm` is translated when a
+        // key is available and silently skips translation otherwise.
+        llm: Some(Arc::new(GuiLlmSource {
+            settings: Arc::clone(&settings),
+            secrets: Arc::clone(&secrets),
+        }) as Arc<dyn LlmEndpointSource>),
     };
     let queue = spawn_task_runner(deps);
     let events = queue.subscribe();
@@ -265,6 +300,8 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
         model_root,
         update_rx,
         update_tx,
+        secrets,
+        translate: Arc::new(RealTranslateSpawner) as Arc<dyn TranslateSpawner>,
     })
 }
 
@@ -443,6 +480,41 @@ pub struct TestDeps {
     /// a fake here to drive `ModelDownloadProgress` events through the real
     /// queue).
     pub artifacts: Option<Arc<dyn ArtifactEnsurer>>,
+    /// The OpenAI-API-key secret store — always an in-memory double in tests
+    /// (`Arc::new(MemorySecretStore::new())` from [`default_test_secrets`]) so
+    /// no test ever touches the real OS keychain (design spec §5). A test that
+    /// needs a pre-seeded key clones the concrete `MemorySecretStore` before
+    /// boxing it here and seeds it directly.
+    pub secrets: Arc<dyn SecretStore>,
+    /// The LLM-translation seam — a [`ScriptedTranslateSpawner`] test double by
+    /// default ([`default_test_translate`]); a test that asserts on the
+    /// translation flow injects its own scripted spawner (holding onto its
+    /// [`ScriptedTranslateSpawner::state`]) here.
+    pub translate: Arc<dyn TranslateSpawner>,
+    /// The per-task LLM endpoint source (F-031). `None` by default — no
+    /// existing kittest enables per-segment file-path translation, so leaving
+    /// it unset keeps the file path's "Enable AI translation" option inert
+    /// exactly as before; a test exercising F-031 injects a
+    /// [`GuiLlmSource`]/fixed source pointed at a mock endpoint.
+    pub llm: Option<Arc<dyn LlmEndpointSource>>,
+}
+
+/// The default test secret store: a fresh, empty in-memory
+/// [`MemorySecretStore`] — never the real OS keyring (design spec §5). Exposed
+/// (not `#[cfg(test)]`) so the `tests/` kittest harnesses, which link the
+/// library's normal build, can fill [`TestDeps::secrets`] without importing
+/// the core secrets module themselves.
+pub fn default_test_secrets() -> Arc<dyn SecretStore> {
+    Arc::new(MemorySecretStore::new())
+}
+
+/// The default test translate seam: a [`ScriptedTranslateSpawner`] with an
+/// identity mapper — neutral (its output equals its input) for harnesses that
+/// spawn a translator but don't assert on the text. A test that wants a
+/// visible transform or to inspect recorded calls constructs its own
+/// [`ScriptedTranslateSpawner`] and injects it instead.
+pub fn default_test_translate() -> Arc<dyn TranslateSpawner> {
+    Arc::new(ScriptedTranslateSpawner::identity())
 }
 
 /// Builds [`Services`] from caller-supplied fakes/temp state — no real
@@ -468,7 +540,7 @@ pub fn init_with(deps: TestDeps) -> Services {
         tuning: EngineTuning::default(),
         media_dir: deps.media_dir,
         artifacts: deps.artifacts,
-        llm: None,
+        llm: deps.llm,
     };
     let queue = spawn_task_runner(runner_deps);
     let events = queue.subscribe();
@@ -484,6 +556,8 @@ pub fn init_with(deps: TestDeps) -> Services {
         model_root: deps.model_root,
         update_rx,
         update_tx,
+        secrets: deps.secrets,
+        translate: deps.translate,
     }
 }
 
@@ -676,6 +750,9 @@ mod tests {
             fetcher: None,
             capabilities: Capabilities::default(),
             artifacts: None,
+            secrets: default_test_secrets(),
+            translate: default_test_translate(),
+            llm: None,
         }
     }
 

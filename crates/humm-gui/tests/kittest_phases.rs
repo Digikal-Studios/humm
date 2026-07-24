@@ -284,6 +284,9 @@ fn download_phases_render_media_then_model_then_complete() {
             gate: model_gate,
             model_path: PathBuf::from("/unused/ggml-small.bin"),
         })),
+        secrets: services::default_test_secrets(),
+        translate: services::default_test_translate(),
+        llm: None,
     });
 
     // Enqueued directly against `services.queue()` *before* `services` moves

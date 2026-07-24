@@ -118,6 +118,9 @@ fn test_services(store: Arc<SqliteStore>, engines: Box<dyn EngineFactory>, dir: 
         fetcher: None,
         capabilities: Capabilities::default(),
         artifacts: None,
+        secrets: services::default_test_secrets(),
+        translate: services::default_test_translate(),
+        llm: None,
     })
 }
 
