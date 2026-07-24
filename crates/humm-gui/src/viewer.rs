@@ -48,6 +48,8 @@ use humm_core::boundary::{
 use humm_core::cancel::CancelToken;
 use humm_core::domain::{Millis, Segment, Status, TranscriptionId};
 use humm_core::error::StoreError;
+use humm_core::openai::{ENV_BASE, ENV_KEY, TranslatorConfig, resolve_endpoint};
+use humm_core::secrets::{SecretKey, SecretStore};
 use humm_core::settings::Settings;
 use humm_core::viewer::edit::{EditOutcome, Field, SegmentTimes, timestamp_edit};
 use humm_core::viewer::search::{
@@ -58,6 +60,8 @@ use humm_core::viewer::timestamp::parse_timestamp;
 use humm_store::{SegmentRow, SqliteStore};
 
 use crate::import::FileDialogs;
+use crate::translate_seam::{TranslateControl, TranslateSpawner};
+use crate::views::options_sheet::{DEFAULT_LLM_MODEL, DEFAULT_LLM_PROMPT};
 
 /// The bundle of adapter handles a viewer window's render closure needs.
 ///
@@ -82,6 +86,13 @@ pub struct ViewerDeps {
     pub audio_output: Arc<dyn AudioOutput>,
     /// Native save dialog for viewer exports (Task 11).
     pub dialogs: Arc<dyn FileDialogs>,
+    /// The OpenAI-API-key secret store (F-085, design spec §7.3): the
+    /// Translate gate's keyring check, and the auth half of the
+    /// lazily-spawned translator's [`TranslatorConfig`].
+    pub secrets: Arc<dyn SecretStore>,
+    /// The LLM-translation worker seam (F-085, design spec §7.3): spawns the
+    /// per-viewer translator on the first Translate click.
+    pub translate: Arc<dyn TranslateSpawner>,
 }
 
 /// The three transcript views (`transcription_view_mode_tool_button.py`,
@@ -450,6 +461,29 @@ impl SearchState {
     }
 }
 
+/// The viewer's Translate gate modals (F-085, design spec §7.3, Buzz
+/// `on_translate_button_clicked`, `transcription_viewer_widget.py:1300-1324`):
+/// which one (if any) [`ViewerVm::on_translate_clicked`] armed this frame.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TranslateModal {
+    /// Gate 1: no key in the keyring. `views/viewer.rs` renders Buzz's exact
+    /// "API Key Required" / "Please enter OpenAI API Key in preferences"
+    /// info modal; its only action is dismiss.
+    ApiKeyRequired,
+    /// Gate 2: the sticky `file_transcriber.llm_model`/`llm_prompt` are
+    /// unconfigured. Seeded from sticky settings (falling back to the
+    /// options sheet's own seeded defaults, [`DEFAULT_LLM_MODEL`]/
+    /// [`DEFAULT_LLM_PROMPT`] — the same "seeded defaults are real values"
+    /// rule, design spec §7.2 ledger #10) — the live buffers the AI-settings
+    /// modal's model-presets/instructions fields edit in place.
+    Settings {
+        /// The AI-model field's live buffer.
+        model: String,
+        /// The instructions field's live buffer.
+        prompt: String,
+    },
+}
+
 /// One open transcript viewer's state.
 ///
 /// Segments are loaded into [`Self::rows`] once at [`Self::open`] and every
@@ -606,6 +640,45 @@ pub struct ViewerVm {
     /// never rendered verbatim" shape `Self::unsaved` uses. Cleared by the
     /// next export attempt, success or failure.
     pub export_error: bool,
+    /// The Translate gate modal armed this frame (F-085, design spec §7.3),
+    /// or `None`. `views/viewer.rs` renders whichever variant is `Some`.
+    pub translate_modal: Option<TranslateModal>,
+    /// The lazily-spawned per-viewer translator's control handle — `None`
+    /// until the first successful Translate click (design spec §7.3 ledger
+    /// #11: created once per viewer, not at open like Buzz). A re-click
+    /// reuses this same control (enqueues again; Buzz's queue serializes).
+    translate_control: Option<Box<dyn TranslateControl>>,
+    /// Receiver for the translator's `(translation, id)` results, `Some`
+    /// once [`Self::translate_control`] is spawned and live for the rest of
+    /// the viewer's lifetime (unlike [`Self::player_rx`], never reset to
+    /// `None` between harvests — a translator keeps producing results across
+    /// many frames, not just one background job). [`Self::harvest_translations`]
+    /// drains it every frame (the `player_rx` pattern, design spec §7.3).
+    translate_rx: Option<Receiver<(String, Option<i64>)>>,
+}
+
+/// Whether the keyring holds a non-blank OpenAI API key — [`ViewerVm::
+/// on_translate_clicked`]'s gate 1 (Buzz `len(self.openai_access_token) ==
+/// 0`, `transcription_viewer_widget.py:1301`). A read error is logged and
+/// treated as absent (the same degrade [`resolve_endpoint`] applies).
+fn keyring_key_present(secrets: &dyn SecretStore) -> bool {
+    match secrets.get(SecretKey::OpenAiApiKey) {
+        Ok(key) => key.is_some_and(|k| !k.is_empty()),
+        Err(err) => {
+            log::error!(
+                "viewer translate: failed reading the OpenAI API key from the keyring: {err}"
+            );
+            false
+        }
+    }
+}
+
+/// `s` trimmed and non-empty, or `None` — the "unconfigured" test
+/// [`ViewerVm::on_translate_clicked`]'s gate 2 applies to `llm_model`/
+/// `llm_prompt` (Buzz `== ""`, `transcription_viewer_widget.py:1309`).
+fn non_blank(s: Option<&str>) -> Option<String> {
+    let trimmed = s.map(str::trim)?;
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 impl ViewerVm {
@@ -672,6 +745,9 @@ impl ViewerVm {
             search: SearchState::new(settings.viewer.find_widget_visible),
             export_flash: None,
             export_error: false,
+            translate_modal: None,
+            translate_control: None,
+            translate_rx: None,
         })
     }
 
@@ -736,6 +812,9 @@ impl ViewerVm {
             search: SearchState::new(false),
             export_flash: None,
             export_error: false,
+            translate_modal: None,
+            translate_control: None,
+            translate_rx: None,
         }
     }
 
@@ -1016,6 +1095,170 @@ impl ViewerVm {
             self.saved_flash = None;
             self.unsaved = true;
         }
+    }
+
+    // -- Translate (F-085, design spec §7.3) -------------------------------
+
+    /// The toolbar Translate button's click handler (Buzz
+    /// `on_translate_button_clicked`, `transcription_viewer_widget.py:
+    /// 1300-1324`), gated in Buzz's exact order:
+    ///
+    /// 1. No key in the keyring → arms [`TranslateModal::ApiKeyRequired`]
+    ///    and stops.
+    /// 2. The sticky `file_transcriber.llm_model`/`llm_prompt` are
+    ///    unconfigured (empty/absent once trimmed) → arms
+    ///    [`TranslateModal::Settings`], seeded from whatever sticky value is
+    ///    present and the options sheet's own seeded defaults otherwise
+    ///    ([`DEFAULT_LLM_MODEL`]/[`DEFAULT_LLM_PROMPT`] — design spec §7.2
+    ///    ledger #10's "seeded defaults are real values" rule applies here
+    ///    too), and stops.
+    /// 3. Both configured → clears any armed modal and runs
+    ///    ([`Self::run_translation`]).
+    ///
+    /// `settings` is a snapshot the caller took *before* this call (never the
+    /// live `Mutex` guard — [`Self::run_translation`] may read the keyring
+    /// via `deps.secrets`, and a lock must never be held across that
+    /// potentially-blocking I/O, the same discipline `GuiLlmSource::
+    /// resolve_with_env` documents). `ctx` seeds the spawned worker's
+    /// `on_result` closure with a repaint handle (only used the first time
+    /// this viewer spawns a translator).
+    pub fn on_translate_clicked(
+        &mut self,
+        deps: &ViewerDeps,
+        settings: &Settings,
+        ctx: &egui::Context,
+    ) {
+        if !keyring_key_present(deps.secrets.as_ref()) {
+            self.translate_modal = Some(TranslateModal::ApiKeyRequired);
+            return;
+        }
+
+        let ft = &settings.file_transcriber;
+        let model = non_blank(ft.llm_model.as_deref());
+        let prompt = non_blank(ft.llm_prompt.as_deref());
+        let (Some(model), Some(prompt)) = (model.clone(), prompt.clone()) else {
+            self.translate_modal = Some(TranslateModal::Settings {
+                model: model.unwrap_or_else(|| DEFAULT_LLM_MODEL.to_string()),
+                prompt: prompt.unwrap_or_else(|| DEFAULT_LLM_PROMPT.to_string()),
+            });
+            return;
+        };
+
+        self.translate_modal = None;
+        self.run_translation(deps, settings, &model, &prompt, ctx);
+    }
+
+    /// Runs a translate pass (Buzz `run_translation`,
+    /// `transcription_viewer_widget.py:1315-1324`): lazily spawns the
+    /// per-viewer translator on the first call (design spec §7.3 ledger #11),
+    /// resolving its endpoint the same env → `settings.openai.base_url` →
+    /// keyring way [`crate::llm_source::GuiLlmSource`] does, then enqueues
+    /// every row — on a re-click, the spawn is skipped (the existing control
+    /// is reused) and every row is enqueued again (Buzz's queue serializes
+    /// re-clicks). A `None` endpoint (defensive — [`Self::on_translate_clicked`]'s
+    /// gate 1 already found a keyring key) logs a warning and enqueues
+    /// nothing rather than spawning a worker doomed to fail auth.
+    fn run_translation(
+        &mut self,
+        deps: &ViewerDeps,
+        settings: &Settings,
+        model: &str,
+        prompt: &str,
+        ctx: &egui::Context,
+    ) {
+        if self.translate_control.is_none() {
+            let env_base = std::env::var(ENV_BASE).ok();
+            let env_key = std::env::var(ENV_KEY).ok();
+            let Some(endpoint) = resolve_endpoint(
+                env_base,
+                env_key,
+                &settings.openai.base_url,
+                deps.secrets.as_ref(),
+            ) else {
+                log::warn!(
+                    "viewer translate ({}): no LLM endpoint resolvable, not spawning a translator",
+                    self.id
+                );
+                return;
+            };
+            let cfg = TranslatorConfig {
+                auth: endpoint.auth,
+                model: model.to_string(),
+                prompt: prompt.to_string(),
+            };
+            let (tx, rx) = mpsc::channel();
+            let repaint_ctx = ctx.clone();
+            let on_result: Box<dyn FnMut(String, Option<i64>) + Send> =
+                Box::new(move |text, id| {
+                    // Only ever push into the channel here — never call back
+                    // into the spawning `TranslateControl` (the scripted test
+                    // double invokes this synchronously from `enqueue` while
+                    // holding its own lock; re-entering it would deadlock).
+                    let _ = tx.send((text, id));
+                    repaint_ctx.request_repaint();
+                });
+            self.translate_control = Some(deps.translate.spawn(cfg, on_result));
+            self.translate_rx = Some(rx);
+        }
+
+        let Some(control) = &self.translate_control else {
+            return;
+        };
+        for row in &self.rows {
+            control.enqueue(row.text.clone(), Some(row.id));
+        }
+    }
+
+    /// Drains every translation result queued since the last frame (the
+    /// `player_rx` pattern, design spec §7.3): a non-empty translation lands
+    /// in the matching row + `has_translations` + the store; an empty
+    /// (errored) result is skipped entirely — no row mutation, no store
+    /// write (ledger #13: an all-error run leaves the Translation column
+    /// hidden rather than Buzz's shown-but-empty column). Call every frame
+    /// from `viewer_ui`; a no-op before any translator has spawned.
+    pub fn harvest_translations(&mut self, deps: &ViewerDeps) {
+        // Taken (not borrowed) for the loop's duration: `apply_translation_result`
+        // needs `&mut self`, which a live `&self.translate_rx` borrow would
+        // forbid. Put back below unless the channel disconnected.
+        let Some(rx) = self.translate_rx.take() else {
+            return;
+        };
+        let mut disconnected = false;
+        loop {
+            match rx.try_recv() {
+                Ok((text, id)) => self.apply_translation_result(deps, text, id),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+        if !disconnected {
+            self.translate_rx = Some(rx);
+        }
+    }
+
+    /// Applies one harvested `(translation, id)` result: skips blank
+    /// translations and ids that no longer match a loaded row (defensive —
+    /// every enqueue from this surface carries `Some(row.id)`), otherwise
+    /// updates memory + `has_translations` and writes through to the store
+    /// via the existing [`Self::write_result`] log-never-propagate path
+    /// (Buzz `update_translation`, `transcription_segments_editor_widget.py:
+    /// 356-363`).
+    fn apply_translation_result(&mut self, deps: &ViewerDeps, text: String, id: Option<i64>) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let Some(id) = id else {
+            return;
+        };
+        let Some(idx) = self.rows.iter().position(|row| row.id == id) else {
+            return;
+        };
+        self.rows[idx].translation = text.clone();
+        self.has_translations = true;
+        self.write_result(deps.store.update_segment_translation(id, &text));
     }
 
     // -- Playback (F-083, spec §2.5) --------------------------------------
@@ -1438,6 +1681,16 @@ impl Drop for ViewerVm {
         // canceled or its send target gone); the `Player`/`FrameStream`/
         // `DriftLog` each stop/flush via their own `Drop`.
         self.decode_cancel.cancel();
+        // Stop the translator, if one was ever spawned (design spec §7.3,
+        // Buzz `closeEvent`'s `self.translator.stop()`, `:1498`) —
+        // `stop_detached` semantics (see `translate_seam::TranslateControl::
+        // stop`'s real impl): non-blocking, so a dropped viewer never hangs
+        // the UI thread on an in-flight request's timeout. The worker still
+        // drains and reports everything already queued; nothing is leaked
+        // beyond that drain.
+        if let Some(control) = self.translate_control.take() {
+            control.stop();
+        }
     }
 }
 
@@ -1525,8 +1778,11 @@ mod tests {
         TranscriptionOptions,
     };
     use humm_core::error::{AudioError, MediaError};
+    use humm_core::secrets::MemorySecretStore;
     use humm_core::viewer::edit::NUDGE_MS;
     use std::path::{Path, PathBuf};
+
+    use crate::translate_seam::ScriptedTranslateSpawner;
 
     // -- fake adapters: never exercised by these VM tests, but ViewerDeps needs
     //    a full set (the real ones are all ZST-ish, but staying test-local keeps
@@ -1603,6 +1859,8 @@ mod tests {
             streamer: Arc::new(FakeStreamer),
             audio_output: Arc::new(FakeOutput),
             dialogs: Arc::new(FakeDialogs),
+            secrets: Arc::new(MemorySecretStore::new()),
+            translate: Arc::new(ScriptedTranslateSpawner::identity()),
         }
     }
 
@@ -2368,6 +2626,340 @@ mod tests {
             "the playhead ran past the old loop end without wrapping (player \
              loop cleared); position was {:?}",
             vm.player_position()
+        );
+    }
+
+    // -- Translate (F-085, design spec §7.3) -------------------------------
+
+    /// The per-item result callback, aliased (the same shape
+    /// `translate_seam`'s own `OnResult` alias exists for) to keep
+    /// [`RecordingTranslateControl`] clippy-quiet (`clippy::type_complexity`).
+    type OnResult = Box<dyn FnMut(String, Option<i64>) + Send>;
+
+    /// A [`TranslateSpawner`] test double richer than [`ScriptedTranslateSpawner`]:
+    /// it records every `spawn` call (so a test can assert lazy-once-only
+    /// creation) and every `enqueue` call's `(text, id)` in order across
+    /// every control it hands out — exactly the introspection the gate-order/
+    /// reuse tests below need. `on_result` fires synchronously from
+    /// `enqueue`, mapped through a caller-supplied function, mirroring
+    /// `ScriptedTranslateSpawner`'s own synchronous-callback contract (so
+    /// `ViewerVm::run_translation`'s "never call back into the control from
+    /// `on_result`" rule is exercised the same way the real scripted double
+    /// exercises it).
+    #[derive(Default)]
+    struct RecordingState {
+        spawn_count: usize,
+        enqueued: Vec<(String, Option<i64>)>,
+        stopped: bool,
+    }
+
+    struct RecordingTranslateSpawner {
+        mapper: Arc<dyn Fn(&str) -> String + Send + Sync>,
+        state: Arc<std::sync::Mutex<RecordingState>>,
+    }
+
+    impl RecordingTranslateSpawner {
+        fn new(mapper: impl Fn(&str) -> String + Send + Sync + 'static) -> Self {
+            RecordingTranslateSpawner {
+                mapper: Arc::new(mapper),
+                state: Arc::new(std::sync::Mutex::new(RecordingState::default())),
+            }
+        }
+
+        fn state(&self) -> Arc<std::sync::Mutex<RecordingState>> {
+            Arc::clone(&self.state)
+        }
+    }
+
+    struct RecordingTranslateControl {
+        mapper: Arc<dyn Fn(&str) -> String + Send + Sync>,
+        on_result: std::sync::Mutex<OnResult>,
+        state: Arc<std::sync::Mutex<RecordingState>>,
+    }
+
+    impl TranslateSpawner for RecordingTranslateSpawner {
+        fn spawn(&self, _cfg: TranslatorConfig, on_result: OnResult) -> Box<dyn TranslateControl> {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .spawn_count += 1;
+            Box::new(RecordingTranslateControl {
+                mapper: Arc::clone(&self.mapper),
+                on_result: std::sync::Mutex::new(on_result),
+                state: Arc::clone(&self.state),
+            })
+        }
+    }
+
+    impl TranslateControl for RecordingTranslateControl {
+        fn enqueue(&self, text: String, id: Option<i64>) {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .enqueued
+                .push((text.clone(), id));
+            let translated = (self.mapper)(&text);
+            let mut on_result = self
+                .on_result
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            on_result(translated, id);
+        }
+
+        fn update_options(&self, _model: String, _prompt: String) {}
+
+        fn stop(self: Box<Self>) {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .stopped = true;
+        }
+    }
+
+    /// `deps` with a caller-chosen `secrets`/`translate` pair — the gate-order
+    /// tests below need to control both independently of the plain `deps()`
+    /// helper's fresh-empty-store defaults.
+    fn deps_with(
+        store: Arc<SqliteStore>,
+        secrets: Arc<dyn SecretStore>,
+        translate: Arc<dyn TranslateSpawner>,
+    ) -> ViewerDeps {
+        ViewerDeps {
+            secrets,
+            translate,
+            ..deps(store)
+        }
+    }
+
+    #[test]
+    fn translate_no_key_arms_key_required_modal_and_never_spawns() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(&store, "/tmp/a.wav", &[seg(0, 1000, "hello", "")]);
+        let spawner = Arc::new(RecordingTranslateSpawner::new(|s| s.to_uppercase()));
+        let deps = deps_with(
+            Arc::clone(&store),
+            Arc::new(MemorySecretStore::new()),
+            Arc::clone(&spawner) as Arc<dyn TranslateSpawner>,
+        );
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+
+        vm.on_translate_clicked(&deps, &Settings::default(), &egui::Context::default());
+
+        assert_eq!(vm.translate_modal, Some(TranslateModal::ApiKeyRequired));
+        assert_eq!(
+            spawner.state().lock().unwrap().spawn_count,
+            0,
+            "no key anywhere must never spawn a translator"
+        );
+    }
+
+    #[test]
+    fn translate_unconfigured_arms_settings_modal_seeded_with_defaults_and_never_spawns() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(&store, "/tmp/a.wav", &[seg(0, 1000, "hello", "")]);
+        let secrets = Arc::new(MemorySecretStore::new());
+        secrets.set(SecretKey::OpenAiApiKey, "sk-test").unwrap();
+        let spawner = Arc::new(RecordingTranslateSpawner::new(|s| s.to_uppercase()));
+        let deps = deps_with(
+            Arc::clone(&store),
+            secrets as Arc<dyn SecretStore>,
+            Arc::clone(&spawner) as Arc<dyn TranslateSpawner>,
+        );
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+
+        // Fresh settings: `file_transcriber.llm_model`/`llm_prompt` are both
+        // unset.
+        vm.on_translate_clicked(&deps, &Settings::default(), &egui::Context::default());
+
+        assert_eq!(
+            vm.translate_modal,
+            Some(TranslateModal::Settings {
+                model: DEFAULT_LLM_MODEL.to_string(),
+                prompt: DEFAULT_LLM_PROMPT.to_string(),
+            })
+        );
+        assert_eq!(
+            spawner.state().lock().unwrap().spawn_count,
+            0,
+            "an unconfigured model/prompt must never spawn a translator"
+        );
+    }
+
+    /// Settings with `file_transcriber.llm_model`/`llm_prompt` both set —
+    /// the gate-3 "configured" fixture every run/reuse test below starts
+    /// from.
+    fn configured_settings() -> Settings {
+        let mut settings = Settings::default();
+        settings.file_transcriber.llm_model = Some("gpt-4o-mini".to_string());
+        settings.file_transcriber.llm_prompt = Some("Translate to French.".to_string());
+        settings
+    }
+
+    #[test]
+    fn translate_configured_spawns_once_and_enqueues_every_row_in_order() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(
+            &store,
+            "/tmp/a.wav",
+            &[
+                seg(0, 1000, "hello", ""),
+                seg(1000, 2000, "world", ""),
+                seg(2000, 3000, "again", ""),
+            ],
+        );
+        let secrets = Arc::new(MemorySecretStore::new());
+        secrets.set(SecretKey::OpenAiApiKey, "sk-test").unwrap();
+        let spawner = Arc::new(RecordingTranslateSpawner::new(|s| s.to_uppercase()));
+        let deps = deps_with(
+            Arc::clone(&store),
+            secrets as Arc<dyn SecretStore>,
+            Arc::clone(&spawner) as Arc<dyn TranslateSpawner>,
+        );
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+        let row_ids: Vec<i64> = vm.rows.iter().map(|row| row.id).collect();
+
+        vm.on_translate_clicked(&deps, &configured_settings(), &egui::Context::default());
+
+        assert_eq!(vm.translate_modal, None, "a configured run arms no modal");
+        let state = spawner.state();
+        let guard = state.lock().unwrap();
+        assert_eq!(guard.spawn_count, 1);
+        assert_eq!(
+            guard.enqueued,
+            vec![
+                ("hello".to_string(), Some(row_ids[0])),
+                ("world".to_string(), Some(row_ids[1])),
+                ("again".to_string(), Some(row_ids[2])),
+            ],
+            "every row enqueued, in row order, with its own id"
+        );
+    }
+
+    #[test]
+    fn translate_second_click_reuses_the_worker_and_enqueues_again() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(
+            &store,
+            "/tmp/a.wav",
+            &[seg(0, 1000, "hello", ""), seg(1000, 2000, "world", "")],
+        );
+        let secrets = Arc::new(MemorySecretStore::new());
+        secrets.set(SecretKey::OpenAiApiKey, "sk-test").unwrap();
+        let spawner = Arc::new(RecordingTranslateSpawner::new(|s| s.to_uppercase()));
+        let deps = deps_with(
+            Arc::clone(&store),
+            secrets as Arc<dyn SecretStore>,
+            Arc::clone(&spawner) as Arc<dyn TranslateSpawner>,
+        );
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+
+        vm.on_translate_clicked(&deps, &configured_settings(), &egui::Context::default());
+        vm.on_translate_clicked(&deps, &configured_settings(), &egui::Context::default());
+
+        let state = spawner.state();
+        let guard = state.lock().unwrap();
+        assert_eq!(
+            guard.spawn_count, 1,
+            "a re-click must reuse the same worker"
+        );
+        assert_eq!(
+            guard.enqueued.len(),
+            4,
+            "a re-click enqueues every row again (2 rows × 2 clicks)"
+        );
+    }
+
+    /// Deliverable D (design spec §7.3, Buzz `closeEvent`'s `self.translator.
+    /// stop()`, `:1498`): dropping a viewer that spawned a translator stops
+    /// it — `stop_detached` semantics, so a dropped/closed viewer never
+    /// leaks a live worker beyond its already-queued drain.
+    #[test]
+    fn drop_stops_a_spawned_translate_control() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(&store, "/tmp/a.wav", &[seg(0, 1000, "hello", "")]);
+        let secrets = Arc::new(MemorySecretStore::new());
+        secrets.set(SecretKey::OpenAiApiKey, "sk-test").unwrap();
+        let spawner = Arc::new(RecordingTranslateSpawner::new(|s| s.to_uppercase()));
+        let deps = deps_with(
+            Arc::clone(&store),
+            secrets as Arc<dyn SecretStore>,
+            Arc::clone(&spawner) as Arc<dyn TranslateSpawner>,
+        );
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+
+        vm.on_translate_clicked(&deps, &configured_settings(), &egui::Context::default());
+        assert_eq!(spawner.state().lock().unwrap().spawn_count, 1);
+        assert!(!spawner.state().lock().unwrap().stopped);
+
+        drop(vm);
+
+        assert!(
+            spawner.state().lock().unwrap().stopped,
+            "dropping the viewer must stop its spawned translator"
+        );
+    }
+
+    #[test]
+    fn translate_harvest_updates_row_and_store_and_raises_has_translations() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(
+            &store,
+            "/tmp/a.wav",
+            &[seg(0, 1000, "hello", ""), seg(1000, 2000, "world", "")],
+        );
+        let secrets = Arc::new(MemorySecretStore::new());
+        secrets.set(SecretKey::OpenAiApiKey, "sk-test").unwrap();
+        let spawner = Arc::new(RecordingTranslateSpawner::new(|s| s.to_uppercase()));
+        let deps = deps_with(
+            Arc::clone(&store),
+            secrets as Arc<dyn SecretStore>,
+            spawner as Arc<dyn TranslateSpawner>,
+        );
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+        assert!(!vm.has_translations);
+
+        vm.on_translate_clicked(&deps, &configured_settings(), &egui::Context::default());
+        // The scripted control invoked `on_result` synchronously from
+        // `enqueue`, so the channel already carries both results — harvest
+        // drains it.
+        vm.harvest_translations(&deps);
+
+        assert!(vm.has_translations);
+        assert_eq!(vm.rows[0].translation, "HELLO");
+        assert_eq!(vm.rows[1].translation, "WORLD");
+        let persisted = store.get_segment_rows(id).expect("reread");
+        assert_eq!(persisted[0].translation, "HELLO");
+        assert_eq!(persisted[1].translation, "WORLD");
+    }
+
+    #[test]
+    fn translate_harvest_skips_empty_translation_without_touching_row_or_store() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(&store, "/tmp/a.wav", &[seg(0, 1000, "hello", "")]);
+        let secrets = Arc::new(MemorySecretStore::new());
+        secrets.set(SecretKey::OpenAiApiKey, "sk-test").unwrap();
+        // Mapper simulates a per-item error: always "" (Buzz's own
+        // `_translate_single` failure return).
+        let spawner = Arc::new(RecordingTranslateSpawner::new(|_s| String::new()));
+        let deps = deps_with(
+            Arc::clone(&store),
+            secrets as Arc<dyn SecretStore>,
+            spawner as Arc<dyn TranslateSpawner>,
+        );
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+
+        vm.on_translate_clicked(&deps, &configured_settings(), &egui::Context::default());
+        vm.harvest_translations(&deps);
+
+        assert!(
+            !vm.has_translations,
+            "an all-error run must leave the Translation column hidden (ledger #13)"
+        );
+        assert_eq!(vm.rows[0].translation, "");
+        let persisted = store.get_segment_rows(id).expect("reread");
+        assert_eq!(
+            persisted[0].translation, "",
+            "an empty translation must never be written to the store"
         );
     }
 }

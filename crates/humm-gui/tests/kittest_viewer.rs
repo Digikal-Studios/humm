@@ -34,6 +34,7 @@ use humm_core::domain::{
 use humm_core::error::{AudioError, CoreError, MediaError};
 use humm_core::export::{DEFAULT_PARAGRAPH_SPLIT, TextKey, write_format};
 use humm_core::queue::EngineFactory;
+use humm_core::secrets::{MemorySecretStore, SecretKey, SecretStore};
 use humm_core::settings::Settings;
 use humm_core::viewer::edit::Field;
 use humm_core::viewer::search::{RowMatch, SEARCH_DEBOUNCE_MS, results_label};
@@ -41,6 +42,7 @@ use humm_gui::app::HummApp;
 use humm_gui::import::FileDialogs;
 use humm_gui::services::{self, Capabilities, Services, TestDeps};
 use humm_gui::shortcuts::ShortcutMap;
+use humm_gui::translate_seam::ScriptedTranslateSpawner;
 use humm_gui::viewer::{CellEditor, EditCol, PlayerState, SearchResults, ViewerDeps, ViewerVm};
 use humm_gui::views::playback_controls;
 use humm_gui::views::resizer::{self, ResizerAction, ResizerVm};
@@ -176,6 +178,8 @@ fn fake_deps(store: Arc<SqliteStore>) -> ViewerDeps {
         streamer: Arc::new(FakeStreamer),
         audio_output: Arc::new(FakeOutput),
         dialogs: Arc::new(FakeDialogs),
+        secrets: Arc::new(MemorySecretStore::new()),
+        translate: Arc::new(ScriptedTranslateSpawner::identity()),
     }
 }
 
@@ -840,6 +844,89 @@ fn export_entry_writes_file_and_toasts() {
         .last_export_folder(id)
         .expect("read last export folder");
     assert_eq!(persisted.as_deref(), Some(export_dir.path()));
+}
+
+// -- F-085 viewer Translate (Task 15, design spec §7.3) ------------------
+
+/// The gate-3 happy path end to end, through the real toolbar Translate
+/// button: a configured sticky `file_transcriber` model/prompt plus a keyed
+/// `MemorySecretStore` reaches `run_translation`, the scripted spawner
+/// uppercases each row synchronously into the harvest channel, and the next
+/// frame's `ViewerVm::harvest_translations` lands every result in the store
+/// and flips `has_translations` — unhiding the Translation table column and
+/// the View menu's Translation entry live, with no viewer reopen (Buzz
+/// `update_translation`/`on_translation_available`).
+#[test]
+fn translate_end_to_end_updates_rows_live() {
+    let segs = [
+        seg(0, 1000, "hello", ""),
+        seg(1000, 2000, "world", ""),
+        seg(2000, 3000, "again", ""),
+    ];
+    let (mut fixture, _dir) = fixture("/tmp/a.wav", &segs);
+    let id = fixture.vm.id;
+
+    let secrets = MemorySecretStore::new();
+    secrets.set(SecretKey::OpenAiApiKey, "sk-test").unwrap();
+    fixture.deps.secrets = Arc::new(secrets) as Arc<dyn SecretStore>;
+    fixture.deps.translate = Arc::new(ScriptedTranslateSpawner::uppercase());
+    {
+        let mut settings = fixture.settings.lock().unwrap();
+        settings.file_transcriber.llm_model = Some("gpt-4o-mini".to_string());
+        settings.file_transcriber.llm_prompt = Some("Translate.".to_string());
+    }
+
+    let mut harness = build_harness(fixture);
+    harness.run();
+
+    // No Translation column/menu entry yet — nothing has translated.
+    assert!(harness.query_by_label_contains("Translation").is_none());
+
+    harness.get_by_label("Translate").click();
+    // One frame runs the click (spawns the translator + enqueues every row,
+    // filling the harvest channel synchronously via the scripted spawner);
+    // the next frame's `harvest_translations` (which runs *before* the
+    // toolbar each frame) drains it.
+    harness.run();
+    harness.run();
+
+    // The Translation table-column header now renders (a `Label`, distinct
+    // from the View menu's `Button` entry of the same text).
+    harness.get(By::new().role(Role::Label).label_contains("Translation"));
+
+    // Every row's translation landed in the store, uppercased.
+    let persisted = harness
+        .state()
+        .deps
+        .store
+        .get_segment_rows(id)
+        .expect("reread");
+    assert_eq!(persisted[0].translation, "HELLO");
+    assert_eq!(persisted[1].translation, "WORLD");
+    assert_eq!(persisted[2].translation, "AGAIN");
+
+    // The View menu's Translation entry is present too.
+    harness.get_by_label("View").click();
+    harness.run();
+    harness.get(By::new().role(Role::Button).label_contains("Translation"));
+}
+
+/// Gate 1 (Buzz `on_translate_button_clicked`,
+/// `transcription_viewer_widget.py:1301-1306`): no key in the keyring →
+/// Buzz's exact "API Key Required" / "Please enter OpenAI API Key in
+/// preferences" info modal, through the real toolbar button. `fake_deps`'s
+/// default `MemorySecretStore` is already empty — no override needed.
+#[test]
+fn translate_without_key_shows_api_key_required_modal() {
+    let (fixture, _dir) = fixture("/tmp/a.wav", &[seg(0, 1000, "hello", "")]);
+    let mut harness = build_harness(fixture);
+    harness.run();
+
+    harness.get_by_label("Translate").click();
+    harness.run();
+
+    harness.get_by_label_contains("API Key Required");
+    harness.get_by_label_contains("Please enter OpenAI API Key in preferences");
 }
 
 // -- F-086 resizer window (Task 12) --------------------------------------

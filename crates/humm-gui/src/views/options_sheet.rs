@@ -65,18 +65,26 @@ const FAVORITE_LANGUAGES_ENV: &str = "HUMM_FAVORITE_LANGUAGES";
 /// The AI-model field's preset picker entries (✚ UX_SPEC J-8, design spec
 /// §7.2) — Buzz has no equivalent preset list, only a literal
 /// `"add-model-id-here"` placeholder in an otherwise-empty field.
-const LLM_MODEL_PRESETS: [&str; 3] = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"];
+///
+/// `pub(crate)`: the viewer's post-hoc Translate AI-settings modal (F-085,
+/// Task 15, design spec §7.3) reuses this same preset list via
+/// [`render_llm_model_prompt_fields`] — "the same model-presets combo +
+/// instructions multiline shapes as [this] block".
+pub(crate) const LLM_MODEL_PRESETS: [&str; 3] = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"];
 
 /// The AI-model field's seeded default: [`LLM_MODEL_PRESETS`]'s first entry
 /// — unlike Buzz's placeholder, this is a real, usable value from the
 /// moment the sheet opens (ledger #10: seeded defaults become real values
-/// on save).
-const DEFAULT_LLM_MODEL: &str = LLM_MODEL_PRESETS[0];
+/// on save). `pub(crate)`: also the viewer's Translate gate 2 seed (F-085,
+/// design spec §7.3) when sticky `file_transcriber.llm_model` is unset.
+pub(crate) const DEFAULT_LLM_MODEL: &str = LLM_MODEL_PRESETS[0];
 
 /// The AI-instructions field's seeded default — the spec's neutral J-8
 /// template, byte-exact (not Buzz's English→Spanish sample). `{language}`
-/// is literal text the user edits, not a Fluent placeable.
-const DEFAULT_LLM_PROMPT: &str = "You are a professional translator. Translate each text sent to \
+/// is literal text the user edits, not a Fluent placeable. `pub(crate)`:
+/// also the viewer's Translate gate 2 seed (F-085, design spec §7.3) when
+/// sticky `file_transcriber.llm_prompt` is unset.
+pub(crate) const DEFAULT_LLM_PROMPT: &str = "You are a professional translator. Translate each text sent to \
      you to {language}. Do not add any comments or notes — reply with the translation only.";
 
 /// The sheet's live combo/checkbox/text-field state — everything needed to
@@ -759,25 +767,44 @@ fn render_llm_translation_block(ui: &mut egui::Ui, state: &mut SheetState) {
     ui.checkbox(&mut state.enable_llm_translation, tr("options-llm-enable"));
 
     ui.add_enabled_ui(state.enable_llm_translation, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(tr("options-llm-model-label"));
-            ui.text_edit_singleline(&mut state.llm_model);
-            egui::ComboBox::from_id_salt("humm-options-llm-model-presets")
-                .selected_text(tr("options-llm-model-presets-button"))
-                .show_ui(ui, |ui| {
-                    for preset in LLM_MODEL_PRESETS {
-                        if ui
-                            .selectable_label(state.llm_model == preset, preset)
-                            .clicked()
-                        {
-                            state.llm_model = preset.to_string();
-                        }
-                    }
-                });
-        });
-        ui.label(tr("options-llm-prompt-label"));
-        ui.text_edit_multiline(&mut state.llm_prompt);
+        render_llm_model_prompt_fields(
+            ui,
+            "humm-options-llm-model-presets",
+            &mut state.llm_model,
+            &mut state.llm_prompt,
+        );
     });
+}
+
+/// The AI-model field (free-text `TextEdit` plus a [`LLM_MODEL_PRESETS`]
+/// picker `ComboBox`) and the instructions textarea — the two widget shapes
+/// this sheet's [`render_llm_translation_block`] and the viewer's post-hoc
+/// Translate AI-settings modal (F-085, Task 15, design spec §7.3) share
+/// verbatim, factored out so both render identically without duplicating
+/// the combo/textarea code. `id_salt` keeps the two call sites' `ComboBox`
+/// ids distinct (the shared-widget convention [`render_model_combo`]/
+/// [`render_task_combo`]/[`render_language_combo`] already follow).
+pub(crate) fn render_llm_model_prompt_fields(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    model: &mut String,
+    prompt: &mut String,
+) {
+    ui.horizontal(|ui| {
+        ui.label(tr("options-llm-model-label"));
+        ui.text_edit_singleline(model);
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text(tr("options-llm-model-presets-button"))
+            .show_ui(ui, |ui| {
+                for preset in LLM_MODEL_PRESETS {
+                    if ui.selectable_label(*model == preset, preset).clicked() {
+                        *model = preset.to_string();
+                    }
+                }
+            });
+    });
+    ui.label(tr("options-llm-prompt-label"));
+    ui.text_edit_multiline(prompt);
 }
 
 /// Renders the options sheet (a no-op returning `None` while `sheet` is

@@ -198,7 +198,6 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "viewer-mode-timestamps",
         "viewer-export",
         "viewer-translate",
-        "viewer-translate-tooltip",
         "viewer-resize",
         "viewer-identify-speakers",
         "viewer-identify-speakers-tooltip",
@@ -229,6 +228,11 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "viewer-speed",
         "viewer-scroll-to-current",
         "viewer-scroll-to-current-tooltip",
+        // Transcript viewer -- Translate (views/viewer.rs, F-085, Task 15,
+        // design spec §7.3)
+        "viewer-translate-key-required-title",
+        "viewer-translate-key-required-body",
+        "viewer-translate-settings-title",
         // Export menu (views/export_menu.rs, F-084)
         "viewer-export-text",
         "viewer-export-translation",
@@ -468,6 +472,20 @@ mod tests {
         assert_eq!(
             tr("prefs-general-test-success-body"),
             "Your API key is valid. humm will use this key to perform Whisper API transcriptions and AI translations."
+        );
+    }
+
+    #[test]
+    fn viewer_translate_key_required_strings_are_buzz_byte_exact() {
+        // Buzz `on_translate_button_clicked`
+        // (`transcription_viewer_widget.py:1303-1306`).
+        assert_eq!(
+            tr("viewer-translate-key-required-title"),
+            "API Key Required"
+        );
+        assert_eq!(
+            tr("viewer-translate-key-required-body"),
+            "Please enter OpenAI API Key in preferences"
         );
     }
 

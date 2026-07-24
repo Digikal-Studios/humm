@@ -242,7 +242,6 @@ viewer-mode-translation = Translation
 viewer-mode-timestamps = Timestamps
 viewer-export = Export
 viewer-translate = Translate
-viewer-translate-tooltip = Translation arrives with the API backend milestone
 viewer-resize = Resize
 viewer-identify-speakers = Identify Speakers
 viewer-identify-speakers-tooltip = Speaker identification arrives in a later release
@@ -270,6 +269,20 @@ viewer-follow-audio-tooltip = Enable/disable following the current audio positio
 viewer-speed = Speed:
 viewer-scroll-to-current = Scroll to Current
 viewer-scroll-to-current-tooltip = Scroll to the currently spoken text
+
+## Transcript viewer -- Translate (views/viewer.rs, F-085, Task 15, design
+## spec §7.3). The key-required title/body are byte-exact ports of Buzz's
+## `on_translate_button_clicked` (`transcription_viewer_widget.py:1303-1306`).
+## viewer-translate-settings-title has no Buzz equivalent: Buzz opens its
+## full Advanced Settings dialog from this gate (whose own title is "Advanced
+## Settings", reused verbatim as recording-advanced-title); this modal shows
+## only the LLM model/prompt fields (options-llm-model-label/
+## options-llm-model-presets-button/options-llm-prompt-label, shared with the
+## options sheet's block), so it gets its own, narrower title instead.
+
+viewer-translate-key-required-title = API Key Required
+viewer-translate-key-required-body = Please enter OpenAI API Key in preferences
+viewer-translate-settings-title = AI Translation Settings
 
 ## Export menu (views/export_menu.rs, F-084)
 ##

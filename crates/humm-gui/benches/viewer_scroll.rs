@@ -76,7 +76,9 @@ use humm_core::boundary::{
 use humm_core::cancel::CancelToken;
 use humm_core::domain::Millis;
 use humm_core::error::{AudioError, MediaError};
+use humm_core::secrets::MemorySecretStore;
 use humm_gui::import::FileDialogs;
+use humm_gui::translate_seam::ScriptedTranslateSpawner;
 use humm_gui::viewer::{ViewerDeps, ViewerVm};
 use humm_gui::views::viewer_table;
 use humm_store::{SegmentRow, SqliteStore};
@@ -218,6 +220,8 @@ fn inert_deps() -> (ViewerDeps, tempfile::TempDir) {
         streamer: Arc::new(InertStreamer),
         audio_output: Arc::new(InertOutput),
         dialogs: Arc::new(InertDialogs),
+        secrets: Arc::new(MemorySecretStore::new()),
+        translate: Arc::new(ScriptedTranslateSpawner::identity()),
     };
     (deps, dir)
 }

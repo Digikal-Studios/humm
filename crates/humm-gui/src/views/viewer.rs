@@ -17,10 +17,14 @@
 //! all driven off the [`ViewerVm`]'s player (the audio master clock). Export
 //! is a live menu ([`crate::views::export_menu`], F-084); Resize opens the
 //! resizer window (F-086 — the button latches `resize_requested`, which
-//! `app.rs` harvests to open/focus the resizer). The viewer-level nudge
-//! shortcuts (⌘←/⌘→/⌘⇧←/⌘⇧→), the playback shortcuts
-//! (⌘P/⌘⇧P/⌘⌥P/⌘G), the "edited · saved" autosave indicator, and the
-//! unsaved-edit warning banner are wired here.
+//! `app.rs` harvests to open/focus the resizer). Translate is live (F-085,
+//! Task 15, design spec §7.3): the toolbar button drives [`ViewerVm::
+//! on_translate_clicked`]'s Buzz-ported gate order, [`show_translate_modals`]
+//! renders whichever gate modal it armed, and [`viewer_ui`] harvests arrived
+//! translations every frame. The viewer-level nudge shortcuts
+//! (⌘←/⌘→/⌘⇧←/⌘⇧→), the playback shortcuts (⌘P/⌘⇧P/⌘⌥P/⌘G), the
+//! "edited · saved" autosave indicator, and the unsaved-edit warning banner
+//! are wired here.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -32,7 +36,8 @@ use humm_core::viewer::edit::{Field, NUDGE_MS};
 
 use crate::i18n::tr;
 use crate::shortcuts::{ShortcutAction, ShortcutMap};
-use crate::viewer::{PlayerState, ViewMode, ViewerDeps, ViewerVm, time_label};
+use crate::viewer::{PlayerState, TranslateModal, ViewMode, ViewerDeps, ViewerVm, time_label};
+use crate::views::options_sheet::render_llm_model_prompt_fields;
 use crate::views::{export_menu, playback_controls, viewer_search, viewer_table};
 
 /// Repaint cadence while playing (spec §2.5): ~60 Hz so the scrubber,
@@ -68,6 +73,10 @@ pub fn viewer_ui(
     // failure). Both are cheap no-ops once the player is Ready/Failed.
     vm.ensure_player_started(deps, ui.ctx());
     vm.poll_player_load(deps);
+    // Drain any translations the (lazily-spawned) translator has produced
+    // since the last frame (design spec §7.3, the `player_rx` pattern) — a
+    // no-op before the first Translate click ever spawns a worker.
+    vm.harvest_translations(deps);
     // Test-only A/V-drift acceptance driver (`HUMM_SMOKE_OPEN_VIEWER`): starts
     // playback once Ready and closes the window at end-of-media. A no-op on
     // every production path (`smoke_autoplay` defaults false). Runs before the
@@ -81,7 +90,8 @@ pub fn viewer_ui(
     consume_nudge_shortcuts(ui, vm, deps, shortcuts);
     consume_playback_shortcuts(ui, vm, shortcuts);
 
-    show_toolbar(ui, vm, deps, shortcuts);
+    show_toolbar(ui, vm, deps, shortcuts, settings);
+    show_translate_modals(ui, vm, deps, settings, settings_path);
     viewer_search::ui(ui, vm, shortcuts);
     persist_find_visibility_if_changed(vm, find_was_visible, settings, settings_path);
     persist_playback_settings_if_changed(vm, settings, settings_path);
@@ -258,12 +268,18 @@ fn consume_mode_shortcuts(ui: &egui::Ui, vm: &mut ViewerVm, shortcuts: &Shortcut
     }
 }
 
-/// The toolbar: View menu (live), Export menu (live, F-084), Find (live,
-/// F-082) then the disabled-stub buttons. The two permanent-tooltip buttons
-/// (Translate → M6 API backend, Identify Speakers → M8) name their
-/// milestone; the remaining this-milestone button (Resize) gets a "lands
-/// later this milestone" tooltip until its task enables it (Task 12).
-fn show_toolbar(ui: &mut egui::Ui, vm: &mut ViewerVm, deps: &ViewerDeps, shortcuts: &ShortcutMap) {
+/// The toolbar: View menu (live), Export menu (live, F-084), Translate
+/// (live, F-085), Find (live, F-082) then the remaining disabled-stub
+/// button. Identify Speakers keeps its permanent "lands in M8" tooltip; the
+/// Translate button used to carry the same shape until this task made it
+/// live.
+fn show_toolbar(
+    ui: &mut egui::Ui,
+    vm: &mut ViewerVm,
+    deps: &ViewerDeps,
+    shortcuts: &ShortcutMap,
+    settings: &Mutex<Settings>,
+) {
     ui.horizontal_wrapped(|ui| {
         ui.menu_button(tr("viewer-view"), |ui| {
             if mode_menu_entry(
@@ -300,7 +316,19 @@ fn show_toolbar(ui: &mut egui::Ui, vm: &mut ViewerVm, deps: &ViewerDeps, shortcu
         });
         ui.separator();
         export_menu::toolbar_menu(ui, vm, deps);
-        disabled_button(ui, tr("viewer-translate"), tr("viewer-translate-tooltip"));
+        // Translate (F-085, design spec §7.3): a click runs the Buzz-ported
+        // gate order (`ViewerVm::on_translate_clicked`) — never blocking, the
+        // click only arms a modal or enqueues onto the (lazily-spawned)
+        // translator. `settings` is snapshotted here, before the call, so no
+        // lock is held across `on_translate_clicked`'s potential keyring read
+        // (the `GuiLlmSource::resolve_with_env` discipline).
+        if ui.button(tr("viewer-translate")).clicked() {
+            let snapshot = settings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            vm.on_translate_clicked(deps, &snapshot, ui.ctx());
+        }
         // Resize (F-086): opens this transcript's resizer window. Enabled this
         // task; the click only latches `resize_requested`, which `app.rs`
         // harvests to open/focus the resizer (Buzz `on_resize_button_clicked`).
@@ -316,6 +344,93 @@ fn show_toolbar(ui: &mut egui::Ui, vm: &mut ViewerVm, deps: &ViewerDeps, shortcu
         show_autosave_indicator(ui, vm);
         export_menu::show_export_flash(ui, vm);
     });
+}
+
+/// Renders whichever Translate gate modal [`ViewerVm::on_translate_clicked`]
+/// armed this frame (F-085, design spec §7.3) — a no-op while
+/// `vm.translate_modal` is `None`.
+///
+/// * [`TranslateModal::ApiKeyRequired`]: Buzz's exact "API Key Required" /
+///   "Please enter OpenAI API Key in preferences" info modal
+///   (`transcription_viewer_widget.py:1303-1306`) — dismiss is its only
+///   action.
+/// * [`TranslateModal::Settings`]: the AI-settings modal — the same
+///   model-presets/instructions field shapes as the options sheet's LLM
+///   block ([`render_llm_model_prompt_fields`], Task 14). OK writes the live
+///   buffers back to sticky `settings.file_transcriber` and re-runs the gate
+///   (Buzz's dialog-accept → `run_translation`); Cancel discards them. Both
+///   close the modal.
+fn show_translate_modals(
+    ui: &mut egui::Ui,
+    vm: &mut ViewerVm,
+    deps: &ViewerDeps,
+    settings: &Mutex<Settings>,
+    settings_path: &Path,
+) {
+    match &mut vm.translate_modal {
+        None => {}
+        Some(TranslateModal::ApiKeyRequired) => {
+            let mut close = false;
+            let modal = egui::Modal::new(egui::Id::new("humm-viewer-translate-key-modal")).show(
+                ui.ctx(),
+                |ui| {
+                    ui.heading(tr("viewer-translate-key-required-title"));
+                    ui.label(tr("viewer-translate-key-required-body"));
+                    if ui.button(tr("dialog-ok")).clicked() {
+                        close = true;
+                    }
+                },
+            );
+            if close || modal.should_close() {
+                vm.translate_modal = None;
+            }
+        }
+        Some(TranslateModal::Settings { model, prompt }) => {
+            let mut ok_clicked = false;
+            let mut cancel_clicked = false;
+            let modal = egui::Modal::new(egui::Id::new("humm-viewer-translate-settings-modal"))
+                .show(ui.ctx(), |ui| {
+                    ui.heading(tr("viewer-translate-settings-title"));
+                    render_llm_model_prompt_fields(
+                        ui,
+                        "humm-viewer-translate-model-presets",
+                        model,
+                        prompt,
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button(tr("dialog-ok")).clicked() {
+                            ok_clicked = true;
+                        }
+                        if ui.button(tr("dialog-cancel")).clicked() {
+                            cancel_clicked = true;
+                        }
+                    });
+                });
+            if ok_clicked {
+                let model = model.clone();
+                let prompt = prompt.clone();
+                let snapshot = {
+                    let mut guard = settings
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    guard.file_transcriber.llm_model = Some(model);
+                    guard.file_transcriber.llm_prompt = Some(prompt);
+                    if let Err(err) = guard.save(settings_path) {
+                        log::warn!("could not persist the viewer AI-translation settings: {err}");
+                    }
+                    guard.clone()
+                };
+                vm.translate_modal = None;
+                // Re-runs the whole gate (Buzz's dialog-accept →
+                // `run_translation`): gate 1 (keyring) trivially still
+                // passes, gate 2 (configured) now passes with what was just
+                // written, so this proceeds straight to the run.
+                vm.on_translate_clicked(deps, &snapshot, ui.ctx());
+            } else if cancel_clicked || modal.should_close() {
+                vm.translate_modal = None;
+            }
+        }
+    }
 }
 
 /// The "edited · saved" autosave indicator: flashes for [`SAVED_FLASH_DURATION`]

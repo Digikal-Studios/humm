@@ -431,6 +431,13 @@ impl HummApp {
             streamer: Arc::new(FfmpegVideoStreamer::new()),
             audio_output: Arc::new(humm_audio::CpalOutput::new()),
             dialogs: Arc::new(RfdFileDialogs),
+            // The Translate button's gate/spawn seam (F-085, design spec
+            // §7.3): the same `secrets`/`translate` `Services` already
+            // threads to the Preferences key field and the file-import
+            // pipeline's LLM endpoint (real keyring + real translator worker
+            // in `init`, in-memory/scripted doubles in `init_with`).
+            secrets: Arc::clone(&services.secrets),
+            translate: Arc::clone(&services.translate),
         });
         // The recording window's adapter bundle (F-060/F-061/F-064, Q-10):
         // `capture`/`model_ensurer`/`engine_factory`/`upload_factory` are
