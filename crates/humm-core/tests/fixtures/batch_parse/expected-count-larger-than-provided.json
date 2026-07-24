@@ -1,0 +1,10 @@
+{
+  "name": "expected-count-larger-than-provided",
+  "response": "[1] Only one translated item",
+  "expected_count": 3,
+  "parsed": [
+    "Only one translated item",
+    "",
+    ""
+  ]
+}

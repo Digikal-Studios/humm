@@ -1,0 +1,10 @@
+{
+  "name": "whitespace-variants",
+  "response": "[1]NoSpaceHere\n[2]  DoubleSpaceHere\n[3]\nNewlineAfterMarker",
+  "expected_count": 3,
+  "parsed": [
+    "NoSpaceHere",
+    "DoubleSpaceHere",
+    "NewlineAfterMarker"
+  ]
+}

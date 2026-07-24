@@ -1,0 +1,10 @@
+{
+  "name": "duplicate-bare-trailing-marker-overwrites",
+  "response": "[3] first value for three\n[1] hello\n[3]",
+  "expected_count": 3,
+  "parsed": [
+    "hello",
+    "",
+    ""
+  ]
+}

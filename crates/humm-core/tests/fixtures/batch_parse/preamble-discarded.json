@@ -1,0 +1,9 @@
+{
+  "name": "preamble-discarded",
+  "response": "Sure, here are the translations:\n[1] Bonjour\n[2] Au revoir",
+  "expected_count": 2,
+  "parsed": [
+    "Bonjour",
+    "Au revoir"
+  ]
+}

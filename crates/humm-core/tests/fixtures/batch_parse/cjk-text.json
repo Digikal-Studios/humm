@@ -1,0 +1,9 @@
+{
+  "name": "cjk-text",
+  "response": "[1] 你好，世界\n[2] これはテストです",
+  "expected_count": 2,
+  "parsed": [
+    "你好，世界",
+    "これはテストです"
+  ]
+}

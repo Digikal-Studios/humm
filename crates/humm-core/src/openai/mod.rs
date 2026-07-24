@@ -3,9 +3,10 @@
 //! ([`validate`]), the pure response-parsing half of the transcription engine
 //! ([`parse`], including its whisper.cpp-server word-merge port), and the
 //! engine itself ([`engine`], the OpenAI-compatible API file-transcription
-//! backend — F-041, design spec §3). The LLM translator
-//! (`openai::translate`, F-031) lands in a later M6 task on top of this
-//! shared plumbing.
+//! backend — F-041, design spec §3), and the LLM translator's batch protocol
+//! ([`translate`], F-031, design spec §4.1 — pure functions only; the
+//! worker thread that drives them over the network lands in a later M6
+//! task).
 //!
 //! The API key travels as an in-memory `String` inside these types only:
 //! constructor argument -> `Authorization` header. It is never
@@ -15,9 +16,11 @@
 pub mod client;
 pub mod engine;
 pub mod parse;
+pub mod translate;
 pub mod validate;
 
 pub use client::{ApiFailure, DEFAULT_BASE_URL, OpenAiAuth, cancelable, effective_base};
 pub use engine::{MAX_CHUNK_SIZE, OpenAiEngine, OpenAiEngineConfig, chunk_plan};
 pub use parse::{parse_response, response_format_for};
+pub use translate::{BATCH_SIZE, batch_system_prompt, combine_numbered, parse_batch_response};
 pub use validate::{ValidateOutcome, validate_key};

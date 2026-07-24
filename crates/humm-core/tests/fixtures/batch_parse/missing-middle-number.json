@@ -1,0 +1,10 @@
+{
+  "name": "missing-middle-number",
+  "response": "[1] First item\n[3] Third item",
+  "expected_count": 3,
+  "parsed": [
+    "First item",
+    "",
+    "Third item"
+  ]
+}

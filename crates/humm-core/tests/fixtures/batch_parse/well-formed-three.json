@@ -1,0 +1,10 @@
+{
+  "name": "well-formed-three",
+  "response": "[1] Hello there\n[2] How are you\n[3] Goodbye",
+  "expected_count": 3,
+  "parsed": [
+    "Hello there",
+    "How are you",
+    "Goodbye"
+  ]
+}

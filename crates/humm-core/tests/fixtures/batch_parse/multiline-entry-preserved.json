@@ -1,0 +1,9 @@
+{
+  "name": "multiline-entry-preserved",
+  "response": "[1] Line one\nLine two\nLine three\n[2] Second item, single line",
+  "expected_count": 2,
+  "parsed": [
+    "Line one\nLine two\nLine three",
+    "Second item, single line"
+  ]
+}

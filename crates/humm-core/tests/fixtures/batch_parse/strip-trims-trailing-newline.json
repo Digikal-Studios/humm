@@ -1,0 +1,8 @@
+{
+  "name": "strip-trims-trailing-newline",
+  "response": "[1] Hello world\n",
+  "expected_count": 1,
+  "parsed": [
+    "Hello world"
+  ]
+}

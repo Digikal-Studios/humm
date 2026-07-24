@@ -1,0 +1,9 @@
+{
+  "name": "trailing-garbage-appended",
+  "response": "[1] First\n[2] Second\nNote: this is extra commentary the model added",
+  "expected_count": 2,
+  "parsed": [
+    "First",
+    "Second\nNote: this is extra commentary the model added"
+  ]
+}

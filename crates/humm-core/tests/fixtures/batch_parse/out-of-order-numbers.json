@@ -1,0 +1,10 @@
+{
+  "name": "out-of-order-numbers",
+  "response": "[2] Second\n[1] First\n[3] Third",
+  "expected_count": 3,
+  "parsed": [
+    "First",
+    "Second",
+    "Third"
+  ]
+}

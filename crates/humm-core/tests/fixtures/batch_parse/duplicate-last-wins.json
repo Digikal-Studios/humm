@@ -1,0 +1,8 @@
+{
+  "name": "duplicate-last-wins",
+  "response": "[1] Original text\n[1] Replacement text",
+  "expected_count": 1,
+  "parsed": [
+    "Replacement text"
+  ]
+}
