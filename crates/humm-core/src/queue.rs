@@ -1105,7 +1105,7 @@ pub fn spawn_task_runner(deps: RunnerDeps) -> QueueHandle {
 mod tests {
     use super::*;
     use crate::boundary::{EngineCaps, EngineOptions, MediaInfo, Pcm, PlaybackPcm};
-    use crate::domain::{Millis, ModelSize, OutputSpec, TranscriptionOptions};
+    use crate::domain::{Backend, Millis, ModelSize, OutputSpec, TranscriptionOptions};
     use crate::error::{ModelError, StoreError};
     use pretty_assertions::assert_eq;
     use std::path::Path;
@@ -1673,6 +1673,7 @@ mod tests {
     fn options_for(size: ModelSize) -> TranscriptionOptions {
         TranscriptionOptions {
             model: ModelSpec {
+                backend: Backend::Whisper,
                 size,
                 hf_repo: None,
             },
@@ -2174,10 +2175,12 @@ mod tests {
             created,
             vec![
                 ModelSpec {
+                    backend: Backend::Whisper,
                     size: ModelSize::Small,
                     hf_repo: None,
                 },
                 ModelSpec {
+                    backend: Backend::Whisper,
                     size: ModelSize::Base,
                     hf_repo: None,
                 },
@@ -2793,10 +2796,12 @@ mod tests {
             created,
             vec![
                 ModelSpec {
+                    backend: Backend::Whisper,
                     size: ModelSize::Small,
                     hf_repo: None,
                 },
                 ModelSpec {
+                    backend: Backend::Whisper,
                     size: ModelSize::Small,
                     hf_repo: None,
                 },
@@ -2853,10 +2858,12 @@ mod tests {
             created,
             vec![
                 ModelSpec {
+                    backend: Backend::Whisper,
                     size: ModelSize::Small,
                     hf_repo: None,
                 },
                 ModelSpec {
+                    backend: Backend::Whisper,
                     size: ModelSize::Small,
                     hf_repo: None,
                 },

@@ -406,15 +406,57 @@ impl FromStr for Source {
 /// Ported verbatim from Buzz's `DEFAULT_WHISPER_TEMPERATURE` (`transcriber.py:15`).
 pub const DEFAULT_TEMPERATURE: [f32; 6] = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0];
 
+/// Which transcription backend a [`ModelSpec`] runs on (F-041, design spec
+/// §2.1): local whisper.cpp inference, or a remote OpenAI-compatible HTTP
+/// API. The queue's engine cache is keyed by `ModelSpec` (including this
+/// field), so the two backends cache their engines independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Backend {
+    /// Local whisper.cpp inference via `humm-whisper`. The default: every
+    /// `options_json` row persisted before M6 has no `backend` key at all,
+    /// and `#[serde(default)]` on [`ModelSpec::backend`] must resolve those
+    /// rows to this variant, since it was the only backend that existed
+    /// then.
+    #[default]
+    Whisper,
+    /// A remote OpenAI-compatible HTTP API (`humm_core::openai::OpenAiEngine`,
+    /// landing in a later M6 task). Wire value `"openai_api"` — the derived
+    /// `snake_case` rule would otherwise split `OpenAiApi` as
+    /// `"open_ai_api"`, so this variant is renamed explicitly.
+    #[serde(rename = "openai_api")]
+    OpenAiApi,
+}
+
 /// Which model to run inference with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelSpec {
+    /// Which backend runs inference for this spec (F-041).
+    /// `#[serde(default)]` resolves every pre-M6 `options_json` row — which
+    /// has no `backend` key — to [`Backend::Whisper`].
+    #[serde(default)]
+    pub backend: Backend,
     /// The model size to load.
     pub size: ModelSize,
     /// Hugging Face repo id, set when the model was selected by repo (`humm
     /// add -m huggingface --hfid <repo>`) rather than by [`ModelSize`];
     /// `None` for the built-in sizes.
     pub hf_repo: Option<String>,
+}
+
+/// LLM-backed translation options for a transcription task (F-031, design
+/// spec §2.1). Presence of a value on [`TranscriptionOptions::llm`] means
+/// "translate each produced segment with this model/prompt"; absence means
+/// no translation happens. Ported from Buzz's `translator.py` batch
+/// protocol (model/prompt shape only) — deliberately has no API key field:
+/// the key travels only through `humm_core::openai` constructor arguments,
+/// never through a serialized domain type (see design spec §2.1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LlmTranslationOptions {
+    /// The model id to request translations from (e.g. `"gpt-4o-mini"`).
+    pub model: String,
+    /// System/instruction prompt steering the translation.
+    pub prompt: String,
 }
 
 /// Full set of options for one transcription run, persisted in full with every
@@ -435,6 +477,12 @@ pub struct TranscriptionOptions {
     pub initial_prompt: String,
     /// Fallback temperature schedule.
     pub temperature: Vec<f32>,
+    /// Optional per-task LLM translation (F-031): presence means "translate
+    /// every produced segment"; `None` means no translation happens.
+    /// `#[serde(default)]` resolves pre-M6 `options_json` rows (no `llm`
+    /// key) to `None`.
+    #[serde(default)]
+    pub llm: Option<LlmTranslationOptions>,
 }
 
 impl Default for TranscriptionOptions {
@@ -447,12 +495,14 @@ impl Default for TranscriptionOptions {
             language: None,
             task: TaskKind::Transcribe,
             model: ModelSpec {
+                backend: Backend::Whisper,
                 size: ModelSize::Small,
                 hf_repo: None,
             },
             word_timestamps: false,
             initial_prompt: String::new(),
             temperature: DEFAULT_TEMPERATURE.to_vec(),
+            llm: None,
         }
     }
 }
@@ -692,12 +742,14 @@ mod tests {
                 language: None,
                 task: TaskKind::Transcribe,
                 model: ModelSpec {
+                    backend: Backend::Whisper,
                     size: ModelSize::Small,
                     hf_repo: None,
                 },
                 word_timestamps: false,
                 initial_prompt: String::new(),
                 temperature: DEFAULT_TEMPERATURE.to_vec(),
+                llm: None,
             }
         );
     }
@@ -869,12 +921,14 @@ mod tests {
                 language: Language::parse("fr"),
                 task: TaskKind::Transcribe,
                 model: ModelSpec {
+                    backend: Backend::Whisper,
                     size: ModelSize::LargeV3Turbo,
                     hf_repo: Some("openai/whisper-large-v3-turbo".to_string()),
                 },
                 word_timestamps: true,
                 initial_prompt: "hello there".to_string(),
                 temperature: vec![0.1, 0.3],
+                llm: None,
             },
             output: OutputSpec {
                 formats: [OutputFormat::Srt, OutputFormat::Vtt].into_iter().collect(),
@@ -891,5 +945,84 @@ mod tests {
 
         let round_tripped: TaskSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(round_tripped, spec);
+    }
+
+    // -- Backend / LlmTranslationOptions (M6 groundwork, F-041, F-031) -----
+
+    #[test]
+    fn backend_default_is_whisper() {
+        assert_eq!(Backend::default(), Backend::Whisper);
+    }
+
+    #[test]
+    fn backend_serializes_to_expected_wire_values() {
+        assert_eq!(
+            serde_json::to_string(&Backend::Whisper).unwrap(),
+            "\"whisper\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Backend::OpenAiApi).unwrap(),
+            "\"openai_api\""
+        );
+    }
+
+    #[test]
+    fn backend_round_trips_through_options_json() {
+        let mut options = TranscriptionOptions::default();
+        options.model.backend = Backend::OpenAiApi;
+
+        let json = serde_json::to_string(&options).unwrap();
+        assert!(json.contains("\"backend\":\"openai_api\""));
+
+        let round_tripped: TranscriptionOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, options);
+        assert_eq!(round_tripped.model.backend, Backend::OpenAiApi);
+    }
+
+    #[test]
+    fn llm_options_round_trip() {
+        let options = TranscriptionOptions {
+            llm: Some(LlmTranslationOptions {
+                model: "gpt-4o-mini".to_string(),
+                prompt: "Translate to English.".to_string(),
+            }),
+            ..TranscriptionOptions::default()
+        };
+
+        let json = serde_json::to_string(&options).unwrap();
+        assert!(json.contains("\"model\":\"gpt-4o-mini\""));
+        assert!(json.contains("\"prompt\":\"Translate to English.\""));
+
+        let round_tripped: TranscriptionOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, options);
+        assert_eq!(
+            round_tripped.llm,
+            Some(LlmTranslationOptions {
+                model: "gpt-4o-mini".to_string(),
+                prompt: "Translate to English.".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn transcription_options_default_has_no_llm_and_whisper_backend() {
+        let opts = TranscriptionOptions::default();
+        assert_eq!(opts.llm, None);
+        assert_eq!(opts.model.backend, Backend::Whisper);
+    }
+
+    #[test]
+    fn options_json_without_backend_or_llm_deserializes_to_whisper_none() {
+        // A real pre-M6 `TaskSpec` shape (captured from this same test's
+        // serializer before the `backend`/`llm` fields existed): no
+        // `"backend"` key on `model`, no `"llm"` key on `options`. Every row
+        // already sitting in a user's SQLite `options_json` column looks
+        // like this — `#[serde(default)]` on both new fields must resolve
+        // it to `Backend::Whisper` / `None`, not fail to deserialize.
+        let pre_m6_json = r#"{"input":{"path":"/audio/sample.mp3"},"options":{"language":"fr","task":"transcribe","model":{"size":"small","hf_repo":null},"word_timestamps":false,"initial_prompt":"","temperature":[0.0,0.2,0.4,0.6,0.8,1.0]},"output":{"formats":["srt"],"directory":null,"file_name_template":null,"paragraph_split":2000}}"#;
+
+        let spec: TaskSpec = serde_json::from_str(pre_m6_json).expect("pre-M6 row deserializes");
+        assert_eq!(spec.options.model.backend, Backend::Whisper);
+        assert_eq!(spec.options.llm, None);
     }
 }

@@ -47,6 +47,9 @@ pub struct Settings {
     pub recording: RecordingSettings,
     /// Live presentation window settings (F-065): display style preferences.
     pub presentation: PresentationSettings,
+    /// OpenAI-compatible API backend and LLM translation endpoint settings
+    /// (F-041, F-031, design spec §9).
+    pub openai: OpenAiSettings,
 }
 
 /// Settings governing model selection (`buzz/model_loader.py` custom-model
@@ -66,6 +69,49 @@ pub struct DownloadSettings {
     /// Cookie file passed through to `yt-dlp` for authenticated downloads
     /// (`HUMM_DOWNLOAD_COOKIEFILE` env var takes precedence over this).
     pub cookie_file: Option<PathBuf>,
+}
+
+/// Settings governing the OpenAI-compatible API backend and LLM translation
+/// endpoint (F-041, F-031, design spec §9): base URL override and the model
+/// id used for the transcription endpoint. humm's mapping of Buzz's
+/// `transcriber/custom-openai-base-url` and `transcriber/openai-api-model`
+/// `QSettings` keys — read at engine-creation time, not cached at startup.
+/// Deliberately has no API key field: the key lives only in the OS keyring
+/// via `SecretStore` (ADR-012), never in this plain TOML file.
+///
+/// `#[derive(Default)]` is deliberately not used: `api_model` must default to
+/// `"whisper-1"`, which `String`'s derived `Default` (empty string) would get
+/// wrong. Same manual-`Default`-plus-field-default pattern as
+/// [`UpdateSettings::check_enabled`]; see that field's doc comment for the
+/// full missing-key-vs-missing-section contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenAiSettings {
+    /// Base URL for the OpenAI-compatible API. `None` uses the client's
+    /// built-in default (`https://api.openai.com/v1`).
+    pub base_url: Option<String>,
+    /// Model id used for the OpenAI-compatible transcription endpoint.
+    /// Defaults to `"whisper-1"`.
+    #[serde(default = "default_openai_api_model")]
+    pub api_model: String,
+}
+
+impl OpenAiSettings {
+    /// Default transcription API model.
+    pub const DEFAULT_API_MODEL: &'static str = "whisper-1";
+}
+
+impl Default for OpenAiSettings {
+    fn default() -> Self {
+        OpenAiSettings {
+            base_url: None,
+            api_model: OpenAiSettings::DEFAULT_API_MODEL.to_string(),
+        }
+    }
+}
+
+fn default_openai_api_model() -> String {
+    OpenAiSettings::DEFAULT_API_MODEL.to_string()
 }
 
 /// Settings governing the update-check feature (F-006, ADR-015).
@@ -170,6 +216,19 @@ pub struct FileTranscriberSettings {
     /// Last-selected export formats (`crate::domain::OutputFormat::as_str`
     /// values).
     pub export_formats: Option<Vec<String>>,
+    /// Last-selected backend (`crate::domain::Backend`'s wire string, e.g.
+    /// `"openai_api"`), or `None` for the default whisper.cpp backend
+    /// (F-041).
+    pub backend: Option<String>,
+    /// Whether AI translation was last enabled in the options sheet
+    /// (F-031). Defaults to `false`.
+    pub enable_llm_translation: bool,
+    /// Last-entered LLM translation model id, if AI translation was
+    /// configured.
+    pub llm_model: Option<String>,
+    /// Last-entered LLM translation prompt, if AI translation was
+    /// configured.
+    pub llm_prompt: Option<String>,
 }
 
 /// Settings governing telemetry opt-out and the anonymous analytics
@@ -397,6 +456,16 @@ pub struct RecordingSettings {
     /// a value < 1.0 triggers the realtime-fit warning.
     #[serde(default = "default_measured_speed")]
     pub measured_speed: BTreeMap<String, f32>,
+    /// Whether live AI translation is enabled (F-063). Defaults to `false`.
+    /// Persisted on window close alongside [`RecordingSettings::llm_model`]
+    /// and [`RecordingSettings::llm_prompt`] (design spec §7.4).
+    pub enable_llm_translation: bool,
+    /// Last-entered LLM translation model id, if live AI translation was
+    /// configured.
+    pub llm_model: Option<String>,
+    /// Last-entered LLM translation prompt, if live AI translation was
+    /// configured.
+    pub llm_prompt: Option<String>,
 }
 
 impl RecordingSettings {
@@ -459,6 +528,9 @@ impl Default for RecordingSettings {
             export_max_entries: Self::DEFAULT_EXPORT_MAX_ENTRIES,
             upload_url: None,
             measured_speed: BTreeMap::new(),
+            enable_llm_translation: false,
+            llm_model: None,
+            llm_prompt: None,
         }
     }
 }
@@ -672,8 +744,8 @@ pub enum SettingsError {
 #[cfg(test)]
 mod tests {
     use super::{
-        PresentationSettings, RecordingSettings, Settings, SettingsError, ViewerGeometry,
-        ViewerSettings,
+        FileTranscriberSettings, OpenAiSettings, PresentationSettings, RecordingSettings, Settings,
+        SettingsError, ViewerGeometry, ViewerSettings,
     };
     use std::path::Path;
 
@@ -713,6 +785,12 @@ mod tests {
         settings.file_transcriber.word_timestamps = Some(true);
         settings.file_transcriber.initial_prompt = Some("proper nouns: Buzz, humm".to_string());
         settings.file_transcriber.export_formats = Some(vec!["srt".to_string(), "vtt".to_string()]);
+        settings.file_transcriber.backend = Some("openai_api".to_string());
+        settings.file_transcriber.enable_llm_translation = true;
+        settings.file_transcriber.llm_model = Some("gpt-4o-mini".to_string());
+        settings.file_transcriber.llm_prompt = Some("Translate to English.".to_string());
+        settings.openai.base_url = Some("https://example.com/v1".to_string());
+        settings.openai.api_model = "whisper-1-custom".to_string();
         settings.privacy.telemetry_enabled = false;
         settings.privacy.user_identifier = Some("11111111-2222-3333-4444-555555555555".to_string());
         settings.viewer.segment_looping_enabled = true;
@@ -952,6 +1030,9 @@ mod tests {
         assert!(rec.export_file_name.is_none());
         assert!(rec.upload_url.is_none());
         assert!(rec.measured_speed.is_empty());
+        assert!(!rec.enable_llm_translation);
+        assert!(rec.llm_model.is_none());
+        assert!(rec.llm_prompt.is_none());
     }
 
     #[test]
@@ -1094,6 +1175,9 @@ mod tests {
         settings.recording.export_file_type = "csv".to_string();
         settings.recording.export_max_entries = 25;
         settings.recording.upload_url = Some("https://example.com/upload".to_string());
+        settings.recording.enable_llm_translation = true;
+        settings.recording.llm_model = Some("gpt-4o-mini".to_string());
+        settings.recording.llm_prompt = Some("Translate to English.".to_string());
         settings
             .recording
             .measured_speed
@@ -1135,6 +1219,24 @@ mod tests {
         );
         assert_eq!(loaded.recording.measured_speed.get("small"), Some(&2.5));
         assert_eq!(loaded.recording.measured_speed.get("base"), Some(&1.1));
+        assert!(loaded.recording.enable_llm_translation);
+        assert_eq!(loaded.recording.llm_model, Some("gpt-4o-mini".to_string()));
+        assert_eq!(
+            loaded.recording.llm_prompt,
+            Some("Translate to English.".to_string())
+        );
+    }
+
+    #[test]
+    fn recording_llm_translation_defaults_apply_when_section_present_but_partial() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "[recording]\nenable_llm_translation = true\n").expect("write file");
+
+        let loaded = Settings::load(&path).expect("load");
+        assert!(loaded.recording.enable_llm_translation);
+        assert!(loaded.recording.llm_model.is_none());
+        assert!(loaded.recording.llm_prompt.is_none());
     }
 
     // PresentationSettings tests
@@ -1218,5 +1320,79 @@ mod tests {
         let loaded = Settings::load(&path).expect("load");
         assert_eq!(loaded.recording, RecordingSettings::default());
         assert_eq!(loaded.presentation, PresentationSettings::default());
+    }
+
+    // -- FileTranscriberSettings LLM/backend fields (M6 groundwork) --------
+
+    #[test]
+    fn file_transcriber_backend_and_llm_fields_default_to_none_and_false() {
+        let ft = FileTranscriberSettings::default();
+        assert!(ft.backend.is_none());
+        assert!(!ft.enable_llm_translation);
+        assert!(ft.llm_model.is_none());
+        assert!(ft.llm_prompt.is_none());
+        // Missing `[file_transcriber]` section entirely also yields exactly these.
+        assert_eq!(Settings::default().file_transcriber, ft);
+    }
+
+    #[test]
+    fn file_transcriber_llm_fields_apply_when_section_present_but_partial() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "[file_transcriber]\nenable_llm_translation = true\n")
+            .expect("write file");
+
+        let loaded = Settings::load(&path).expect("load");
+        assert!(loaded.file_transcriber.enable_llm_translation);
+        assert!(loaded.file_transcriber.backend.is_none());
+        assert!(loaded.file_transcriber.llm_model.is_none());
+        assert!(loaded.file_transcriber.llm_prompt.is_none());
+    }
+
+    // -- OpenAiSettings (M6 groundwork, F-041) ------------------------------
+
+    #[test]
+    fn openai_settings_default_model_is_whisper_1() {
+        let openai = OpenAiSettings::default();
+        assert_eq!(openai.api_model, "whisper-1");
+        assert!(openai.base_url.is_none());
+        // Missing `[openai]` section entirely also yields exactly these.
+        assert_eq!(Settings::default().openai, openai);
+    }
+
+    #[test]
+    fn partial_openai_section_fills_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "[openai]\nbase_url = \"http://localhost:8080/v1\"\n")
+            .expect("write file");
+
+        let loaded = Settings::load(&path).expect("load");
+        assert_eq!(
+            loaded.openai.base_url,
+            Some("http://localhost:8080/v1".to_string())
+        );
+        // `api_model` key absent from an otherwise-present section still
+        // takes its default.
+        assert_eq!(loaded.openai.api_model, "whisper-1");
+    }
+
+    #[test]
+    fn openai_round_trip_all_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+
+        let mut settings = Settings::default();
+        settings.openai.base_url = Some("https://example.com/v1".to_string());
+        settings.openai.api_model = "whisper-1-custom".to_string();
+
+        settings.save(&path).expect("save");
+        let loaded = Settings::load(&path).expect("load");
+
+        assert_eq!(
+            loaded.openai.base_url,
+            Some("https://example.com/v1".to_string())
+        );
+        assert_eq!(loaded.openai.api_model, "whisper-1-custom");
     }
 }

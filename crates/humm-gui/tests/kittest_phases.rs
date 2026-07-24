@@ -26,8 +26,8 @@ use humm_core::boundary::{
 };
 use humm_core::cancel::CancelToken;
 use humm_core::domain::{
-    DEFAULT_TEMPERATURE, Input, ModelSize, ModelSpec, OutputSpec, Source, TaskKind, TaskSpec,
-    TranscriptionId, TranscriptionOptions,
+    Backend, DEFAULT_TEMPERATURE, Input, ModelSize, ModelSpec, OutputSpec, Source, TaskKind,
+    TaskSpec, TranscriptionId, TranscriptionOptions,
 };
 use humm_core::error::{CoreError, EngineError};
 use humm_core::models::download::DownloadProgress;
@@ -210,12 +210,14 @@ fn sample_spec(input: Input) -> TaskSpec {
             language: None,
             task: TaskKind::Transcribe,
             model: ModelSpec {
+                backend: Backend::Whisper,
                 size: ModelSize::Small,
                 hf_repo: None,
             },
             word_timestamps: false,
             initial_prompt: String::new(),
             temperature: DEFAULT_TEMPERATURE.to_vec(),
+            llm: None,
         },
         output: OutputSpec::default(),
     }

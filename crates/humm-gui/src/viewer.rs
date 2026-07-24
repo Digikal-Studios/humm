@@ -1521,7 +1521,8 @@ mod tests {
     };
     use humm_core::cancel::CancelToken;
     use humm_core::domain::{
-        Input, ModelSize, ModelSpec, OutputSpec, Source, TaskKind, TaskSpec, TranscriptionOptions,
+        Backend, Input, ModelSize, ModelSpec, OutputSpec, Source, TaskKind, TaskSpec,
+        TranscriptionOptions,
     };
     use humm_core::error::{AudioError, MediaError};
     use humm_core::viewer::edit::NUDGE_MS;
@@ -1621,12 +1622,14 @@ mod tests {
                 language: None,
                 task: TaskKind::Transcribe,
                 model: ModelSpec {
+                    backend: Backend::Whisper,
                     size: ModelSize::Small,
                     hf_repo: None,
                 },
                 word_timestamps: false,
                 initial_prompt: String::new(),
                 temperature: vec![0.0],
+                llm: None,
             },
             output: OutputSpec::default(),
         }

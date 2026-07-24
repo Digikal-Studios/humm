@@ -426,8 +426,8 @@ mod tests {
     use super::*;
     use humm_core::boundary::TaskStore;
     use humm_core::domain::{
-        DEFAULT_TEMPERATURE, Input, ModelSize, ModelSpec, OutputSpec, Source, Status, TaskKind,
-        TaskSpec, TranscriptionOptions,
+        Backend, DEFAULT_TEMPERATURE, Input, ModelSize, ModelSpec, OutputSpec, Source, Status,
+        TaskKind, TaskSpec, TranscriptionOptions,
     };
     use humm_core::language::Language;
     use pretty_assertions::assert_eq;
@@ -449,12 +449,14 @@ mod tests {
                 language,
                 task: TaskKind::Transcribe,
                 model: ModelSpec {
+                    backend: Backend::Whisper,
                     size: ModelSize::Small,
                     hf_repo: None,
                 },
                 word_timestamps,
                 initial_prompt: String::new(),
                 temperature: DEFAULT_TEMPERATURE.to_vec(),
+                llm: None,
             },
             output: OutputSpec::default(),
         }

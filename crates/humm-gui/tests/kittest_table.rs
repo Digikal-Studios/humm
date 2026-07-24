@@ -19,8 +19,8 @@ use std::sync::Arc;
 use egui_kittest::{Harness, kittest::Queryable};
 use humm_core::boundary::TaskStore;
 use humm_core::domain::{
-    DEFAULT_TEMPERATURE, Input, ModelSize, ModelSpec, OutputSpec, Source, TaskKind, TaskSpec,
-    TranscriptionId, TranscriptionOptions,
+    Backend, DEFAULT_TEMPERATURE, Input, ModelSize, ModelSpec, OutputSpec, Source, TaskKind,
+    TaskSpec, TranscriptionId, TranscriptionOptions,
 };
 use humm_core::error::CoreError;
 use humm_core::queue::EngineFactory;
@@ -50,12 +50,14 @@ fn sample_spec(name_hint: &str) -> TaskSpec {
             language: None,
             task: TaskKind::Transcribe,
             model: ModelSpec {
+                backend: Backend::Whisper,
                 size: ModelSize::Small,
                 hf_repo: None,
             },
             word_timestamps: false,
             initial_prompt: String::new(),
             temperature: DEFAULT_TEMPERATURE.to_vec(),
+            llm: None,
         },
         output: OutputSpec::default(),
     }

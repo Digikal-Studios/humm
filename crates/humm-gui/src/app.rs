@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use humm_core::boundary::{AudioCapture, AudioDecoder, TaskStore};
 use humm_core::cancel::CancelToken;
-use humm_core::domain::{ModelSize, ModelSpec, Segment, Source, Status, TranscriptionId};
+use humm_core::domain::{Backend, ModelSize, ModelSpec, Segment, Source, Status, TranscriptionId};
 use humm_core::env::use_gpu_from_env;
 use humm_core::error::{CoreError, EngineError};
 use humm_core::live::{RecordingMode, SessionConfig, effective_upload_url};
@@ -2246,6 +2246,10 @@ impl HummApp {
         };
 
         let model = ModelSpec {
+            // Live recording via the API backend is deferred (M6 design
+            // spec §0): the recording window keeps its local-engine-only
+            // options group, so this is always whisper.cpp.
+            backend: Backend::Whisper,
             size: options.model_size,
             hf_repo: None,
         };
@@ -2282,6 +2286,10 @@ impl HummApp {
             word_timestamps: false,
             initial_prompt: options.initial_prompt.clone(),
             temperature: humm_core::domain::DEFAULT_TEMPERATURE.to_vec(),
+            // Live translation wiring (F-063) is a later M6 task; this
+            // snapshot's `llm` stays `None` until that task threads
+            // `recording_settings.enable_llm_translation` through.
+            llm: None,
         };
 
         let request = LiveSessionRequest {

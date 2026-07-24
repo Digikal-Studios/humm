@@ -28,8 +28,8 @@ use humm_core::boundary::{
 };
 use humm_core::cancel::CancelToken;
 use humm_core::domain::{
-    Input, Millis, ModelSize, ModelSpec, OutputFormat, OutputSpec, Segment, Source, Status,
-    TaskKind, TaskSpec, TranscriptionId, TranscriptionOptions,
+    Backend, Input, Millis, ModelSize, ModelSpec, OutputFormat, OutputSpec, Segment, Source,
+    Status, TaskKind, TaskSpec, TranscriptionId, TranscriptionOptions,
 };
 use humm_core::error::{AudioError, CoreError, MediaError};
 use humm_core::export::{DEFAULT_PARAGRAPH_SPLIT, TextKey, write_format};
@@ -195,12 +195,14 @@ fn spec_for(file: &str) -> TaskSpec {
             language: None,
             task: TaskKind::Transcribe,
             model: ModelSpec {
+                backend: Backend::Whisper,
                 size: ModelSize::Small,
                 hf_repo: None,
             },
             word_timestamps: false,
             initial_prompt: String::new(),
             temperature: vec![0.0],
+            llm: None,
         },
         output: OutputSpec::default(),
     }

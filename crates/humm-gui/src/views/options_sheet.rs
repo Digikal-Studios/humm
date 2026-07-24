@@ -18,8 +18,8 @@ use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use humm_core::domain::{
-    DEFAULT_TEMPERATURE, Input, Millis, ModelSize, ModelSpec, OutputFormat, OutputSpec, Source,
-    TaskKind, TaskSpec, TranscriptionId, TranscriptionOptions,
+    Backend, DEFAULT_TEMPERATURE, Input, Millis, ModelSize, ModelSpec, OutputFormat, OutputSpec,
+    Source, TaskKind, TaskSpec, TranscriptionId, TranscriptionOptions,
 };
 use humm_core::language::Language;
 use humm_core::settings::FileTranscriberSettings;
@@ -229,12 +229,19 @@ fn build_specs_with_paragraph_split(
         language: state.language,
         task: state.task,
         model: ModelSpec {
+            // Backend selection isn't wired into `SheetState` yet (design
+            // spec §7.2's options-sheet backend/LLM rows are a later M6
+            // task), so every sheet-built spec is whisper.cpp for now.
+            backend: Backend::Whisper,
             size: state.model_size,
             hf_repo: non_empty_trimmed(&state.hf_repo),
         },
         word_timestamps: state.word_timestamps,
         initial_prompt: state.initial_prompt.clone(),
         temperature: DEFAULT_TEMPERATURE.to_vec(),
+        // LLM translation isn't wired into `SheetState` yet either (F-031
+        // options-sheet UI is a later M6 task).
+        llm: None,
     };
     let output = OutputSpec {
         formats: state.formats.clone(),

@@ -41,8 +41,8 @@ use humm_core::boundary::{
 };
 use humm_core::cancel::CancelToken;
 use humm_core::domain::{
-    DEFAULT_TEMPERATURE, Input, ModelSize, ModelSpec, OutputFormat, OutputSpec, Source, TaskSpec,
-    TranscriptionId, TranscriptionOptions,
+    Backend, DEFAULT_TEMPERATURE, Input, ModelSize, ModelSpec, OutputFormat, OutputSpec, Source,
+    TaskSpec, TranscriptionId, TranscriptionOptions,
 };
 use humm_core::env::{threads_from_env, use_gpu_from_env, vad_disabled_from_env};
 use humm_core::error::CoreError;
@@ -189,12 +189,19 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         language,
         task: args.task,
         model: ModelSpec {
+            // `validate_add_args` still rejects `-m openaiapi` (F-041 CLI
+            // wiring is a later M6 task), so every task the CLI enqueues
+            // today is local whisper.cpp.
+            backend: Backend::Whisper,
             size: args.model_size,
             hf_repo: resolved.hf_repo.clone(),
         },
         word_timestamps: args.word_timestamps,
         initial_prompt: args.prompt.clone(),
         temperature: DEFAULT_TEMPERATURE.to_vec(),
+        // No CLI flag yet enables LLM translation (F-031 wiring is a later
+        // M6 task).
+        llm: None,
     };
     let output = OutputSpec {
         formats,

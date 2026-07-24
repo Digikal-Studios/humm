@@ -715,7 +715,8 @@ mod tests {
     use super::*;
     use humm_core::boundary::TaskStore;
     use humm_core::domain::{
-        DEFAULT_TEMPERATURE, Input, ModelSize, OutputSpec, Source, TaskSpec, TranscriptionOptions,
+        Backend, DEFAULT_TEMPERATURE, Input, ModelSize, OutputSpec, Source, TaskSpec,
+        TranscriptionOptions,
     };
     use humm_core::queue::TaskEventKind;
     use pretty_assertions::assert_eq;
@@ -728,12 +729,14 @@ mod tests {
                 language: None,
                 task: TaskKind::Transcribe,
                 model: ModelSpec {
+                    backend: Backend::Whisper,
                     size: ModelSize::Small,
                     hf_repo: None,
                 },
                 word_timestamps: false,
                 initial_prompt: String::new(),
                 temperature: DEFAULT_TEMPERATURE.to_vec(),
+                llm: None,
             },
             output: OutputSpec::default(),
         }
@@ -769,6 +772,7 @@ mod tests {
         let mut spec = sample_spec(Input::Path(PathBuf::from("/tmp/clip.wav")));
         spec.options.task = TaskKind::Translate;
         spec.options.model = ModelSpec {
+            backend: Backend::Whisper,
             size: ModelSize::Small,
             hf_repo: None,
         };
@@ -790,6 +794,7 @@ mod tests {
         let id = TranscriptionId::new();
         let mut spec = sample_spec(Input::Path(PathBuf::from("/tmp/clip.wav")));
         spec.options.model = ModelSpec {
+            backend: Backend::Whisper,
             size: ModelSize::Small,
             hf_repo: Some("openai/whisper-large-v3-turbo".to_string()),
         };

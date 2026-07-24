@@ -17,7 +17,9 @@ use egui_kittest::kittest::NodeT;
 use egui_kittest::{Harness, HarnessBuilder, kittest::Queryable};
 use humm_core::boundary::{EngineCaps, EngineOptions, Pcm, SegmentSink, TranscriptionEngine};
 use humm_core::cancel::CancelToken;
-use humm_core::domain::{DEFAULT_TEMPERATURE, ModelSize, ModelSpec, OutputFormat, TaskKind};
+use humm_core::domain::{
+    Backend, DEFAULT_TEMPERATURE, ModelSize, ModelSpec, OutputFormat, TaskKind,
+};
 use humm_core::error::{CoreError, EngineError};
 use humm_gui::app::HummApp;
 use humm_gui::import::ImportRequest;
@@ -189,6 +191,7 @@ fn run_with_srt_checked_enqueues_full_options_closes_the_sheet_and_stays_sticky_
         assert_eq!(
             spec.options.model,
             ModelSpec {
+                backend: Backend::Whisper,
                 size: ModelSize::Small,
                 hf_repo: None,
             },

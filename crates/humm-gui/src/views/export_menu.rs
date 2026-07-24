@@ -282,7 +282,7 @@ mod tests {
     use super::*;
     use humm_core::boundary::TaskStore;
     use humm_core::domain::{
-        Input, ModelSize, ModelSpec, OutputSpec, Segment, Source, TaskKind, TaskSpec,
+        Backend, Input, ModelSize, ModelSpec, OutputSpec, Segment, Source, TaskKind, TaskSpec,
     };
     use humm_core::export::DEFAULT_PARAGRAPH_SPLIT;
     use humm_core::language::Language;
@@ -295,12 +295,14 @@ mod tests {
                 language: Language::parse("fr"),
                 task: TaskKind::Translate,
                 model: ModelSpec {
+                    backend: Backend::Whisper,
                     size: ModelSize::Medium,
                     hf_repo: None,
                 },
                 word_timestamps: false,
                 initial_prompt: String::new(),
                 temperature: vec![0.0],
+                llm: None,
             },
             output: OutputSpec::default(),
         }

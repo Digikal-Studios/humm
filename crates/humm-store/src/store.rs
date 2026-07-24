@@ -12,8 +12,8 @@ use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
 use humm_core::boundary::TaskStore;
 use humm_core::domain::{
-    DEFAULT_TEMPERATURE, Input, Millis, ModelSize, ModelSpec, OutputFormat, OutputSpec, Segment,
-    Source, Status, TaskKind, TaskSpec, TranscriptionId, TranscriptionOptions,
+    Backend, DEFAULT_TEMPERATURE, Input, Millis, ModelSize, ModelSpec, OutputFormat, OutputSpec,
+    Segment, Source, Status, TaskKind, TaskSpec, TranscriptionId, TranscriptionOptions,
 };
 use humm_core::error::StoreError;
 use humm_core::language::Language;
@@ -754,6 +754,12 @@ impl SqliteStore {
                 .and_then(|s| TaskKind::from_str(s).ok())
                 .unwrap_or(TaskKind::Transcribe),
             model: ModelSpec {
+                // Buzz's restart path never persisted a backend column
+                // (predates F-041 entirely), so a restored row is always
+                // whisper.cpp — matching Buzz's own restart, which hardcodes
+                // AI-translation-equivalent settings off too (see
+                // `enable_llm_translation` -> `llm: None` below).
+                backend: Backend::Whisper,
                 size: whisper_model_size
                     .as_deref()
                     .and_then(|s| ModelSize::from_str(s).ok())
@@ -763,6 +769,10 @@ impl SqliteStore {
             word_timestamps: parse_loose_bool(&word_level_timings),
             initial_prompt: String::new(),
             temperature: DEFAULT_TEMPERATURE.to_vec(),
+            // No `llm` column exists in the legacy per-column schema this
+            // restart path reads from — matching Buzz's own restart, which
+            // hardcodes AI translation off (`transcription_tasks_table_widget.py:762`).
+            llm: None,
         };
 
         // Tolerant, comma-split (Buzz's own restart splits on `','` and
@@ -1410,12 +1420,14 @@ mod tests {
                 language: Language::parse("en"),
                 task: TaskKind::Transcribe,
                 model: ModelSpec {
+                    backend: Backend::Whisper,
                     size: ModelSize::Small,
                     hf_repo: None,
                 },
                 word_timestamps: false,
                 initial_prompt: String::new(),
                 temperature: DEFAULT_TEMPERATURE.to_vec(),
+                llm: None,
             },
             output: OutputSpec {
                 formats: [OutputFormat::Txt, OutputFormat::Srt].into_iter().collect(),
@@ -2530,12 +2542,14 @@ mod tests {
             language: Language::parse("en"),
             task: TaskKind::Transcribe,
             model: ModelSpec {
+                backend: Backend::Whisper,
                 size: ModelSize::Small,
                 hf_repo: None,
             },
             word_timestamps: false,
             initial_prompt: "hello there".to_string(),
             temperature: DEFAULT_TEMPERATURE.to_vec(),
+            llm: None,
         }
     }
 

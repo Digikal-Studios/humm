@@ -814,6 +814,7 @@ pub fn run_live_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use humm_core::domain::Backend;
     use humm_core::settings::RecordingSettings;
     use pretty_assertions::assert_eq;
     use std::sync::Mutex as StdMutex;
@@ -1268,6 +1269,7 @@ mod tests {
         LiveSessionRequest {
             device_id: None,
             model: ModelSpec {
+                backend: Backend::Whisper,
                 size: humm_core::domain::ModelSize::Small,
                 hf_repo: None,
             },

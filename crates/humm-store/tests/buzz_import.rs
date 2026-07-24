@@ -11,8 +11,8 @@ use std::path::Path;
 
 use humm_core::boundary::TaskStore;
 use humm_core::domain::{
-    DEFAULT_TEMPERATURE, Input, Millis, ModelSize, ModelSpec, OutputFormat, OutputSpec, Segment,
-    Source, Status, TaskKind, TaskSpec, TranscriptionId, TranscriptionOptions,
+    Backend, DEFAULT_TEMPERATURE, Input, Millis, ModelSize, ModelSpec, OutputFormat, OutputSpec,
+    Segment, Source, Status, TaskKind, TaskSpec, TranscriptionId, TranscriptionOptions,
 };
 use humm_core::language::Language;
 use humm_store::SqliteStore;
@@ -268,12 +268,14 @@ fn sample_task_spec() -> TaskSpec {
             language: Language::parse("en"),
             task: TaskKind::Transcribe,
             model: ModelSpec {
+                backend: Backend::Whisper,
                 size: ModelSize::Small,
                 hf_repo: None,
             },
             word_timestamps: false,
             initial_prompt: String::new(),
             temperature: DEFAULT_TEMPERATURE.to_vec(),
+            llm: None,
         },
         output: OutputSpec {
             formats: [OutputFormat::Txt].into_iter().collect(),

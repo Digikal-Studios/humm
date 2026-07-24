@@ -311,6 +311,7 @@ impl EngineFactory for GuiEngineFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use humm_core::domain::Backend;
     use pretty_assertions::assert_eq;
     use std::cell::RefCell;
 
@@ -406,6 +407,7 @@ mod tests {
 
     fn model(size: ModelSize, hf_repo: Option<&str>) -> ModelSpec {
         ModelSpec {
+            backend: Backend::Whisper,
             size,
             hf_repo: hf_repo.map(str::to_string),
         }
