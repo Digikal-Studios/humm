@@ -334,6 +334,9 @@ recording-record-button = Record
 recording-stop-button = Stop
 recording-realtime-warning = { $size } transcribed at { $ratio }× realtime last run — live transcription may fall behind
 recording-panel-placeholder = Click Record to begin...
+# Byte-exact Buzz string (`recording_transcriber_widget.py:193`,
+# `translation_text_box.setPlaceholderText(_("Waiting for AI translation..."))`).
+recording-panel-translation-placeholder = Waiting for AI translation...
 recording-model-downloading = Downloading model… { $percent }%
 recording-model-downloading-indeterminate = Downloading model…
 recording-model-loading = Loading model…
@@ -345,17 +348,17 @@ meter-average-volume = Average volume
 ## Recording advanced-settings sheet (views/recording_advanced.rs, F-060, Task 12)
 ##
 ## Byte-exact ports of `advanced_settings_dialog.py`'s labels (`_setup_*_section`,
-## `:59-255`) — the LLM-translation row strings render permanently disabled
-## this milestone (F-063 is M6, spec §2.1.6).
+## `:59-255`) — the LLM-translation block is live as of M6 (F-063, spec §7.4);
+## the AI model/prompt fields reuse the shared options-llm-* strings.
 
 recording-advanced-title = Advanced Settings
 recording-advanced-speech-heading = Speech recognition settings
 recording-advanced-initial-prompt-label = Initial Prompt:
 recording-advanced-translation-heading = Translation settings
 recording-advanced-llm-enable = Enable AI translation
-recording-advanced-llm-tooltip = Live translation arrives with the API backend milestone
-recording-advanced-llm-model-label = AI model:
-recording-advanced-llm-instructions-label = Instructions for AI:
+# The AI model/instructions fields reuse the shared options-llm-* strings
+# (`views::options_sheet::render_llm_model_prompt_fields`), so the recording
+# window has no separate model/instructions label keys of its own.
 recording-advanced-recording-heading = Recording settings
 recording-advanced-silence-threshold-label = Silence threshold:
 recording-advanced-mode-label = Live recording mode:

@@ -609,7 +609,14 @@ pub fn bar_ui(
 
 /// Renders the presentation viewport's content: `panel_text` painted at
 /// `style`'s size/colors over a `style.background_color`-filled panel (Buzz
-/// `update_transcripts`'s `setHtml`, `presentation_window.py:113-136`).
+/// `update_transcripts`'s `setHtml`, `presentation_window.py:113-136`), plus —
+/// when `translation_text` is `Some(non-empty)` (F-063) — a separator and the
+/// **translation** region below it in the same style (Buzz's
+/// `translation_display`, shown only once a translation exists,
+/// `presentation_window.py:39-45,138-163`). The caller passes `None` (or an
+/// empty string) whenever live translation is off or no translation has
+/// arrived yet, so the region simply doesn't appear.
+///
 /// Builds its own [`egui::CentralPanel`] (rather than nesting inside the
 /// caller's own panel, unlike most other view functions in this crate)
 /// because the colored fill must be set on the panel's `Frame` at creation —
@@ -621,7 +628,12 @@ pub fn bar_ui(
 /// `&mut Ui`). Auto-scrolls to the bottom on every call
 /// (`ScrollArea::stick_to_bottom`) — the idiomatic egui equivalent of Buzz's
 /// explicit `moveCursor(End)` after each wholesale-replace update.
-pub fn window_ui(ui: &mut egui::Ui, panel_text: &str, style: &EffectiveStyle) {
+pub fn window_ui(
+    ui: &mut egui::Ui,
+    panel_text: &str,
+    translation_text: Option<&str>,
+    style: &EffectiveStyle,
+) {
     let bg = parse_hex_color(&style.background_color).unwrap_or([255, 255, 255]);
     let fg = parse_hex_color(&style.text_color).unwrap_or([0, 0, 0]);
     let bg_color = egui::Color32::from_rgb(bg[0], bg[1], bg[2]);
@@ -639,6 +651,17 @@ pub fn window_ui(ui: &mut egui::Ui, panel_text: &str, style: &EffectiveStyle) {
                             .color(fg_color)
                             .size(style.font_size_pt as f32),
                     );
+                    // Translation region (Buzz `translation_display`): shown
+                    // only when a translation exists, below the transcript, in
+                    // the same fg/size style.
+                    if let Some(translation) = translation_text.filter(|t| !t.is_empty()) {
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new(translation)
+                                .color(fg_color)
+                                .size(style.font_size_pt as f32),
+                        );
+                    }
                 });
         });
 }

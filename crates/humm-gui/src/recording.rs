@@ -44,6 +44,8 @@ use humm_core::settings::{PresentationSettings, RecordingSettings, Settings};
 
 use crate::import::FileDialogs;
 use crate::live_session::{ActiveSession, LiveEngineFactory, LiveStore, PrepUpdate, UploadFactory};
+use crate::live_translation::LiveTranslator;
+use crate::views::options_sheet::{DEFAULT_LLM_MODEL, DEFAULT_LLM_PROMPT};
 use crate::views::presentation::PresentationVm;
 use crate::views::recording::CopyLabelState;
 use crate::views::recording_advanced::AdvancedSheetState;
@@ -191,6 +193,30 @@ pub struct RecordingOptions {
     /// Chunk size in seconds for append-and-correct mode. Same live-edit
     /// contract as [`Self::silence_threshold`].
     pub transcription_step: f64,
+    /// Whether live LLM translation is enabled (F-063, Buzz
+    /// `enable_llm_translation`). Close-persisted (Buzz `_do_close:1234-1245`
+    /// saves this among the same group as language/task/model/prompt), and
+    /// live-edited by the advanced sheet's translation block — a toggle here
+    /// shows/hides the recording window's translation panel immediately (Buzz
+    /// `:544-547`) and is read at the *next* Record click to decide whether to
+    /// spawn a translator.
+    pub enable_llm_translation: bool,
+    /// The AI model id used for translation (Buzz `llm_model`). Seeded with
+    /// [`crate::views::options_sheet::DEFAULT_LLM_MODEL`] when
+    /// `settings.recording.llm_model` is unset — the "seeded defaults become
+    /// real values on save" rule (ledger #10), so an untouched enabled session
+    /// still has a usable model. Held as a plain `String` (not `Option`, unlike
+    /// the on-disk `settings.recording.llm_model`) so the advanced sheet's
+    /// reused model field ([`crate::views::options_sheet::render_llm_model_prompt_fields`],
+    /// an `&mut String` widget) binds to it directly, exactly as
+    /// `initial_prompt`/`line_separator` do — [`Self::write_to`] adapts back to
+    /// `Option<String>` for storage. An empty (trimmed) value is treated as
+    /// "unconfigured" at Record time (translation is skipped with a warning).
+    pub llm_model: String,
+    /// The AI translation instructions (Buzz `llm_prompt`), seeded with
+    /// [`crate::views::options_sheet::DEFAULT_LLM_PROMPT`] when unset. Same
+    /// `String`/close-persist/seeded-default contract as [`Self::llm_model`].
+    pub llm_prompt: String,
 }
 
 impl RecordingOptions {
@@ -223,6 +249,19 @@ impl RecordingOptions {
             silence_threshold: settings.silence_threshold,
             line_separator: settings.line_separator.clone(),
             transcription_step: settings.transcription_step,
+            enable_llm_translation: settings.enable_llm_translation,
+            // Seeded-defaults-become-values (ledger #10), exactly like the
+            // file-options sheet's `SheetState::from_settings`: an unset
+            // sticky model/prompt resolves to the shared J-8 default here (a
+            // real, usable value), which `write_to` then persists on close.
+            llm_model: settings
+                .llm_model
+                .clone()
+                .unwrap_or_else(|| DEFAULT_LLM_MODEL.to_string()),
+            llm_prompt: settings
+                .llm_prompt
+                .clone()
+                .unwrap_or_else(|| DEFAULT_LLM_PROMPT.to_string()),
         }
     }
 
@@ -242,6 +281,13 @@ impl RecordingOptions {
         settings.silence_threshold = self.silence_threshold;
         settings.line_separator = self.line_separator.clone();
         settings.transcription_step = self.transcription_step;
+        settings.enable_llm_translation = self.enable_llm_translation;
+        // `String` -> `Option<String>` for storage: the in-memory value is
+        // always populated (seeded default), so this always persists a
+        // concrete `Some(..)` (ledger #10), mirroring the file sheet's own
+        // `settings.llm_model = Some(self.llm_model.clone())`.
+        settings.llm_model = Some(self.llm_model.clone());
+        settings.llm_prompt = Some(self.llm_prompt.clone());
     }
 }
 
@@ -451,6 +497,15 @@ pub struct RecordingVm {
     /// most recent [`crate::live_session::SessionMessage::PanelText`] (a
     /// whole-panel replace), applied verbatim.
     pub panel_text: String,
+    /// The read-only **translation** panel text (F-063) — the most recent
+    /// [`crate::live_session::SessionMessage::TranslationPanel`] (a whole-panel
+    /// replace, already mode-dispatched/merged/`strip_newlines`'d by the
+    /// off-UI-thread [`humm_core::live::translation::TranslationApplier`]).
+    /// The recording window's translation panel is shown iff
+    /// [`RecordingOptions::enable_llm_translation`] (live show/hide on toggle,
+    /// Buzz `:544-547`); this text feeds both that panel and, when non-empty,
+    /// the presentation window's translation region.
+    pub translation_panel_text: String,
     /// Whether the presentation options bar (`views::presentation::bar_ui`
     /// — show-window button, text-size/theme/color controls, fullscreen
     /// button) is shown: visible only while recording (Buzz
@@ -499,6 +554,16 @@ pub struct RecordingVm {
     /// Owned by `app.rs`'s harvest (`start`/`stop`/drain) — see
     /// `crate::live_session`'s module doc for the threading split.
     pub(crate) session: Option<ActiveSession>,
+    /// The live-translation worker for this session (F-063), `None` unless the
+    /// last Record click had [`RecordingOptions::enable_llm_translation`] on
+    /// **and** an endpoint resolved. Owned by the VM (not the session thread)
+    /// because it outlives the session: Stop does not kill it (queued items
+    /// keep draining, spec §7.4 lifecycle) — it's stopped only at window close
+    /// ([`Self::close`]) or the next Record click (`app.rs::start_live_session`
+    /// tears down the old one before spawning a fresh worker+applier). The
+    /// advanced sheet forwards mid-session model/prompt edits through it
+    /// ([`LiveTranslator::update_options`]).
+    pub(crate) live_translator: Option<LiveTranslator>,
     /// The current session's store row id, once known — set (idempotently)
     /// whenever a `SessionMessage::TableRefresh` arrives (the same id both
     /// times: right after `insert_live_session` succeeds, and again at
@@ -557,6 +622,7 @@ impl RecordingVm {
             presentation: PresentationVm::from_settings(&settings.presentation),
             copy_label: CopyLabelState::default(),
             panel_text: String::new(),
+            translation_panel_text: String::new(),
             presentation_bar_visible: false,
             copy_bar_visible: false,
             pending_intent: None,
@@ -567,6 +633,7 @@ impl RecordingVm {
             error_dialog: None,
             session: None,
             session_id: None,
+            live_translator: None,
             meter_only_handle: None,
             meter_only_cancel: None,
             meter_only_thread: None,
@@ -624,6 +691,10 @@ impl RecordingVm {
                 self.presentation_bar_visible = true;
                 self.copy_bar_visible = false;
                 self.panel_text.clear();
+                // Fresh translation panel per session (Buzz clears the
+                // translation text box implicitly by rebuilding; humm clears
+                // it here so a prior session's translation never lingers).
+                self.translation_panel_text.clear();
                 self.error_dialog = None;
                 self.prep = None;
                 self.session_id = None;
@@ -718,6 +789,14 @@ impl RecordingVm {
     pub fn close(&mut self, settings: &mut RecordingSettings) {
         self.stop_meter_only_capture();
         self.session = None;
+        // Stop the live-translation worker (Buzz `_do_close:1213-1214`:
+        // `translator.stop()` + non-blocking thread quit) — `LiveTranslator::stop`
+        // is detached, so this never blocks the UI thread on an in-flight
+        // request. `Drop` is the backstop for any path that skips `close`.
+        if let Some(translator) = &self.live_translator {
+            translator.stop();
+        }
+        self.live_translator = None;
         self.options.write_to(settings);
     }
 
@@ -891,6 +970,25 @@ mod tests {
             options.transcription_step,
             RecordingSettings::DEFAULT_TRANSCRIPTION_STEP
         );
+        // F-063: a fresh install has translation off, and the seeded J-8
+        // defaults become the real in-memory model/prompt values (ledger #10).
+        assert!(!options.enable_llm_translation);
+        assert_eq!(options.llm_model, DEFAULT_LLM_MODEL);
+        assert_eq!(options.llm_prompt, DEFAULT_LLM_PROMPT);
+    }
+
+    #[test]
+    fn from_settings_keeps_stored_llm_values_over_the_seeded_defaults() {
+        let settings = RecordingSettings {
+            enable_llm_translation: true,
+            llm_model: Some("gpt-4o".to_string()),
+            llm_prompt: Some("Translate to French.".to_string()),
+            ..Default::default()
+        };
+        let options = RecordingOptions::from_settings(&settings, false);
+        assert!(options.enable_llm_translation);
+        assert_eq!(options.llm_model, "gpt-4o");
+        assert_eq!(options.llm_prompt, "Translate to French.");
     }
 
     #[test]
@@ -923,12 +1021,38 @@ mod tests {
         options.silence_threshold = 0.01;
         options.line_separator = "---".to_string();
         options.transcription_step = 4.2;
+        options.enable_llm_translation = true;
+        options.llm_model = "gpt-4.1-mini".to_string();
+        options.llm_prompt = "Translate to German, terse.".to_string();
 
         let mut settings = RecordingSettings::default();
         options.write_to(&mut settings);
         let round_tripped = RecordingOptions::from_settings(&settings, false);
 
         assert_eq!(round_tripped, options);
+    }
+
+    #[test]
+    fn llm_fields_close_persist_round_trip_through_settings() {
+        // The three F-063 fields ride the same close-persisted group as the
+        // rest of `RecordingOptions` (Buzz `_do_close:1234-1245`): a
+        // write-then-reload preserves them exactly.
+        let mut options = RecordingOptions::from_settings(&RecordingSettings::default(), false);
+        options.enable_llm_translation = true;
+        options.llm_model = "gpt-4o".to_string();
+        options.llm_prompt = "Custom instructions.".to_string();
+
+        let mut settings = RecordingSettings::default();
+        options.write_to(&mut settings);
+
+        assert!(settings.enable_llm_translation);
+        assert_eq!(settings.llm_model.as_deref(), Some("gpt-4o"));
+        assert_eq!(settings.llm_prompt.as_deref(), Some("Custom instructions."));
+
+        let reloaded = RecordingOptions::from_settings(&settings, false);
+        assert_eq!(reloaded.enable_llm_translation, true);
+        assert_eq!(reloaded.llm_model, "gpt-4o");
+        assert_eq!(reloaded.llm_prompt, "Custom instructions.");
     }
 
     // -- realtime_fit_warning_visible -------------------------------------------
@@ -1241,6 +1365,42 @@ mod tests {
         vm.on_device_changed("b".to_string(), &deps);
 
         assert_eq!(vm.selected_device, Some("b".to_string()));
+    }
+
+    /// Carried M5 minor (task G): the `on_device_changed` recording-branch
+    /// guard was untested. While [`RecordingStatus::Recording`], a device
+    /// change updates the selection (defensive — the combo is disabled in the
+    /// UI then) but must **not** restart the meter-only capture: the real
+    /// session owns the shared capture adapter for its lifetime, so a
+    /// meter-only restart here would race two streams onto one device (the
+    /// exact failure `start_meter_only_capture`'s teardown-before-start
+    /// ordering exists to avoid). `on_record_clicked` (Stopped→Recording)
+    /// already tore the meter-only capture down, so its thread handle is
+    /// `None`; this pins that a device change while Recording leaves it `None`.
+    #[test]
+    fn device_changed_while_recording_updates_selection_without_restarting_meter_capture() {
+        let deps = mock_deps(vec![
+            device("a", "Device A", true),
+            device("b", "Device B", false),
+        ]);
+        let mut vm = RecordingVm::open(&deps, &Settings::default());
+        // Open started a meter-only capture (a default device exists).
+        assert!(vm.meter_only_thread.is_some());
+
+        vm.on_record_clicked(&deps); // Stopped -> Recording: tears the meter-only capture down.
+        assert_eq!(vm.status, RecordingStatus::Recording);
+        assert!(
+            vm.meter_only_thread.is_none(),
+            "the Record click stops meter-only capture (the session owns capture now)"
+        );
+
+        vm.on_device_changed("b".to_string(), &deps);
+
+        assert_eq!(vm.selected_device, Some("b".to_string()));
+        assert!(
+            vm.meter_only_thread.is_none(),
+            "a device change while Recording must NOT restart meter-only capture"
+        );
     }
 
     #[test]

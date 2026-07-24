@@ -34,6 +34,7 @@ use humm_core::domain::{ModelSpec, Status, TranscriptionId};
 use humm_core::error::{AudioError, CoreError, EngineError};
 use humm_core::models::download::DownloadProgress;
 use humm_core::queue::{ArtifactEnsurer, EngineFactory};
+use humm_core::secrets::{MemorySecretStore, SecretKey, SecretStore};
 use humm_core::settings::{PresentationSettings, RecordingSettings, Settings};
 use humm_gui::app::HummApp;
 use humm_gui::live_session::{
@@ -41,6 +42,7 @@ use humm_gui::live_session::{
 };
 use humm_gui::recording::{RecordingDeps, RecordingStatus, RecordingVm};
 use humm_gui::services::{self, Capabilities, Services, TestDeps};
+use humm_gui::translate_seam::ScriptedTranslateSpawner;
 use humm_gui::viewer::can_open;
 use humm_gui::viewmodel::TasksVm;
 use humm_gui::views::recording::{CopyLabelState, recording_ui};
@@ -422,7 +424,12 @@ fn advanced_button_click_opens_the_sheet() {
 }
 
 #[test]
-fn disabled_llm_block_renders_with_its_tooltip_target_present() {
+fn advanced_llm_block_is_live_and_the_enable_edit_persists_to_live_options_not_settings() {
+    // F-063: the LLM-translation block is now live (was permanently disabled
+    // in M5). The "Enable AI translation" checkbox is enabled, and toggling it
+    // mutates the *live* `RecordingOptions` (close-persisted, Buzz
+    // `_do_close`) — NOT `settings.recording` immediately (unlike the
+    // mode/export immediate-save fields).
     let mut harness = build_harness(fixture());
     harness.get_by_label("Advanced...").click();
     harness.step();
@@ -430,9 +437,32 @@ fn disabled_llm_block_renders_with_its_tooltip_target_present() {
 
     let checkbox = harness.get_by_label("Enable AI translation");
     assert!(
-        checkbox.accesskit_node().is_disabled(),
-        "F-063 is M6 -- the LLM-translation checkbox renders permanently disabled"
+        !checkbox.accesskit_node().is_disabled(),
+        "the LLM-translation checkbox is live now (F-063)"
     );
+    assert!(!harness.state().vm.options.enable_llm_translation);
+
+    harness.get_by_label("Enable AI translation").click();
+    harness.step();
+    harness.step(); // settle frame -- the same click/render-order lag other tests note.
+
+    assert!(
+        harness.state().vm.options.enable_llm_translation,
+        "toggling the checkbox flips the live RecordingOptions"
+    );
+    assert!(
+        !harness
+            .state()
+            .settings
+            .lock()
+            .unwrap()
+            .recording
+            .enable_llm_translation,
+        "the LLM fields are close-persisted, not immediate-save — settings.recording is untouched until close"
+    );
+
+    // The model/instructions fields are present and enabled (they reuse the
+    // shared options-llm-* strings).
     harness.get_by_label("AI model:");
     harness.get_by_label("Instructions for AI:");
 }
@@ -469,6 +499,63 @@ fn advanced_sheet_mode_dependent_rows_swap_with_the_mode() {
     harness.get_by_label("Transcription step:");
     harness.get_by_label("Hide unconfirmed");
     assert!(harness.query_by_label("Line separator:").is_none());
+}
+
+// -- F-063: translation panel visibility --------------------------------------
+
+#[test]
+fn translation_panel_is_hidden_when_translation_is_disabled() {
+    // Default fixture: `enable_llm_translation` is off — the translation panel
+    // (and its "Waiting for AI translation..." placeholder) must not render.
+    let mut harness = build_harness(fixture());
+    harness.step();
+
+    assert!(!harness.state().vm.options.enable_llm_translation);
+    assert!(
+        harness
+            .query_by(|node: &AccessKitNode<'_>| {
+                node.placeholder() == Some("Waiting for AI translation...")
+            })
+            .is_none(),
+        "the translation panel is hidden while translation is disabled"
+    );
+}
+
+#[test]
+fn translation_panel_shows_with_its_placeholder_when_enabled_live() {
+    // Enabling translation shows the panel immediately (Buzz `:544-547`'s
+    // live show/hide) — its placeholder is the byte-exact Buzz string.
+    let mut fixture = fixture();
+    fixture.vm.options.enable_llm_translation = true;
+    let mut harness = build_harness(fixture);
+    harness.step();
+
+    harness.get_by(|node: &AccessKitNode<'_>| {
+        node.placeholder() == Some("Waiting for AI translation...")
+    });
+}
+
+#[test]
+fn translation_panel_shows_the_translation_text_when_present() {
+    let mut fixture = fixture();
+    fixture.vm.options.enable_llm_translation = true;
+    fixture.vm.translation_panel_text = "la traducción en vivo".to_string();
+    let mut harness = build_harness(fixture);
+    harness.step();
+
+    // The panel is a read-only `TextEdit`, so its text is the node's `value`
+    // (not a `label`) — the same shape as the transcription panel. (The value
+    // appears on both the text-input node and its inner text-run child, so
+    // `query_all` + a count check rather than `get_by`'s exactly-one.)
+    assert!(
+        harness
+            .query_all_by(|node: &AccessKitNode<'_>| {
+                node.value().as_deref() == Some("la traducción en vivo")
+            })
+            .count()
+            >= 1,
+        "the translation panel shows the current translation text"
+    );
 }
 
 #[test]
@@ -1216,4 +1303,318 @@ fn session_thread_panic_recovers_the_window_and_completes_the_store_row() {
     let segments = store.get_segment_rows(row.id).expect("segments");
     assert_eq!(segments.len(), 1, "only the pre-crash utterance landed");
     assert_eq!(segments[0].text, "utterance one");
+}
+
+// -- Task 17: scripted end-to-end live translation (F-063) -------------------
+//
+// The transcript e2e's exact shape (Record -> 2 scripted utterances -> Stop,
+// through a full `HummApp`), plus the live-translation half: a scripted
+// translate spawner mapping `text -> "X:" + text`, a seeded keyring key so the
+// endpoint resolves, and `enable_llm_translation` on. Asserts the translation
+// panel, the `.translated` export bytes, and the persisted per-segment
+// translations — while the transcription panel/segments are unaffected.
+
+#[test]
+fn live_translation_end_to_end_panel_export_and_store() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("humm.sqlite3");
+    let store = Arc::new(SqliteStore::open(&db_path).expect("open store"));
+    let export_dir = dir.path().join("export");
+    std::fs::create_dir_all(&export_dir).expect("mkdir export");
+    let model_path = dir.path().join("fake-model.bin");
+    std::fs::write(&model_path, b"never opened by the scripted engine").expect("write");
+
+    let mut settings = Settings::default();
+    settings.recording.export_enabled = true;
+    settings.recording.export_folder = Some(export_dir.clone());
+    // Translation on, with a configured model (append-below, default separator).
+    settings.recording.enable_llm_translation = true;
+    settings.recording.llm_model = Some("gpt-4o-mini".to_string());
+    settings.recording.llm_prompt = Some("Translate.".to_string());
+
+    // A seeded keyring key so `resolve_endpoint` returns `Some` (the scripted
+    // spawner never touches the network regardless).
+    let secrets = MemorySecretStore::new();
+    secrets
+        .set(SecretKey::OpenAiApiKey, "sk-test")
+        .expect("seed key");
+
+    let services = services::init_with(TestDeps {
+        store: Arc::clone(&store),
+        media_dir: dir.path().join("media"),
+        model_root: dir.path().join("models"),
+        settings,
+        settings_path: dir.path().join("settings.toml"),
+        engines: Box::new(NeverCalledEngineFactory),
+        fetcher: None,
+        capabilities: Capabilities::default(),
+        artifacts: None,
+        secrets: Arc::new(secrets) as Arc<dyn SecretStore>,
+        // The scripted translator: every enqueued transcript comes back as
+        // `"X:" + text`, synchronously on the forwarder thread.
+        translate: Arc::new(ScriptedTranslateSpawner::new(Arc::new(|text: &str| {
+            format!("X:{text}")
+        }))),
+        llm: None,
+        validate: services::default_test_validate(),
+    });
+
+    let mock_capture = Arc::new(Mutex::new(MockCapture::new(vec![0.5; 2 * BATCH_SAMPLES])));
+    let engine_calls = Arc::new(AtomicUsize::new(0));
+
+    let scripted_deps = RecordingDeps {
+        capture: Mutex::new(Box::new(SharedMockCapture(Arc::clone(&mock_capture)))),
+        store: Arc::clone(&store) as Arc<dyn LiveStore>,
+        model_ensurer: Arc::new(InstantEnsurer { model_path }),
+        engine_factory: Arc::new(ScriptedEngineFactory {
+            capture: Arc::clone(&mock_capture),
+            calls: Arc::clone(&engine_calls),
+        }),
+        upload_factory: Arc::new(NeverCalledUploadFactory),
+        dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
+    };
+
+    let mut harness = HarnessBuilder::default()
+        .with_size(egui::Vec2::new(1000.0, 600.0))
+        .build_eframe(move |_cc| {
+            let mut app = HummApp::new_for_test(services);
+            app.set_recording_deps_for_test(scripted_deps);
+            app
+        });
+    harness.step();
+
+    harness.state_mut().open_recording_window_for_test();
+    harness.step();
+    let vm_arc = harness
+        .state()
+        .recording_vm_for_test()
+        .expect("window is open");
+    let deps_arc = harness.state().recording_deps_for_test();
+    assert!(
+        vm_arc
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .options
+            .enable_llm_translation,
+        "the window opened with translation enabled (seeded from settings.recording)"
+    );
+
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    harness.step();
+
+    // Poll until both translations have landed on the translation panel.
+    wait_for(&mut harness, "both translations to land on the panel", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            vm_arc
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .translation_panel_text
+                .contains("X:utterance two")
+        }
+    });
+
+    {
+        let vm = vm_arc.lock().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(
+            vm.translation_panel_text, "X:utterance one\n\nX:utterance two",
+            "translation panel: append-below, default separator, both utterances"
+        );
+        // The transcription panel is unaffected by translation.
+        assert_eq!(
+            vm.panel_text, "utterance one\n\nutterance two",
+            "the transcription panel carries the raw transcripts, not the translations"
+        );
+    }
+
+    // Stop.
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    wait_for(&mut harness, "the session to stop", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            vm_arc.lock().unwrap_or_else(|p| p.into_inner()).status == RecordingStatus::Stopped
+        }
+    });
+
+    // -- Store: each segment carries its `X:`-prefixed translation.
+    let tasks = TasksVm::load(&store);
+    let row = tasks
+        .sorted_rows()
+        .first()
+        .expect("exactly one live session row")
+        .clone();
+    let segments = store.get_segment_rows(row.id).expect("segments");
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0].text, "utterance one");
+    assert_eq!(segments[1].text, "utterance two");
+    assert_eq!(
+        segments[0].translation, "X:utterance one",
+        "segment 0 carries its persisted translation"
+    );
+    assert_eq!(
+        segments[1].translation, "X:utterance two",
+        "segment 1 carries its persisted translation"
+    );
+
+    // -- Export: the `.translated` sibling has exact bytes; the transcript file
+    //    is the un-translated transcripts (both share one filename base).
+    let mut translated: Option<PathBuf> = None;
+    let mut transcript: Option<PathBuf> = None;
+    for entry in std::fs::read_dir(&export_dir).expect("read export dir") {
+        let path = entry.expect("dir entry").path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if name.contains(".translated.") {
+            translated = Some(path);
+        } else {
+            transcript = Some(path);
+        }
+    }
+    let translated = translated.expect("a .translated export file exists");
+    let transcript = transcript.expect("a transcript export file exists");
+    assert_eq!(
+        std::fs::read_to_string(&translated).expect("read translated"),
+        "X:utterance one\n\nX:utterance two\n\n",
+        "translated export: raw translations, append-below separators"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&transcript).expect("read transcript"),
+        "utterance one\n\nutterance two\n\n",
+        "transcript export is untouched by translation"
+    );
+}
+
+#[test]
+fn live_translation_disabled_spawns_no_translator_and_persists_no_translations() {
+    // The negative: translation off means no worker, no `.translated` file, no
+    // per-segment translations — even with a seeded key and scripted spawner
+    // available. Proves the enable flag actually gates the whole wiring.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("humm.sqlite3");
+    let store = Arc::new(SqliteStore::open(&db_path).expect("open store"));
+    let export_dir = dir.path().join("export");
+    std::fs::create_dir_all(&export_dir).expect("mkdir export");
+    let model_path = dir.path().join("fake-model.bin");
+    std::fs::write(&model_path, b"never opened").expect("write");
+
+    let mut settings = Settings::default();
+    settings.recording.export_enabled = true;
+    settings.recording.export_folder = Some(export_dir.clone());
+    settings.recording.enable_llm_translation = false; // off
+
+    let secrets = MemorySecretStore::new();
+    secrets.set(SecretKey::OpenAiApiKey, "sk-test").unwrap();
+
+    let services = services::init_with(TestDeps {
+        store: Arc::clone(&store),
+        media_dir: dir.path().join("media"),
+        model_root: dir.path().join("models"),
+        settings,
+        settings_path: dir.path().join("settings.toml"),
+        engines: Box::new(NeverCalledEngineFactory),
+        fetcher: None,
+        capabilities: Capabilities::default(),
+        artifacts: None,
+        secrets: Arc::new(secrets) as Arc<dyn SecretStore>,
+        translate: Arc::new(ScriptedTranslateSpawner::new(Arc::new(|text: &str| {
+            format!("X:{text}")
+        }))),
+        llm: None,
+        validate: services::default_test_validate(),
+    });
+
+    let mock_capture = Arc::new(Mutex::new(MockCapture::new(vec![0.5; 2 * BATCH_SAMPLES])));
+    let engine_calls = Arc::new(AtomicUsize::new(0));
+    let scripted_deps = RecordingDeps {
+        capture: Mutex::new(Box::new(SharedMockCapture(Arc::clone(&mock_capture)))),
+        store: Arc::clone(&store) as Arc<dyn LiveStore>,
+        model_ensurer: Arc::new(InstantEnsurer { model_path }),
+        engine_factory: Arc::new(ScriptedEngineFactory {
+            capture: Arc::clone(&mock_capture),
+            calls: Arc::clone(&engine_calls),
+        }),
+        upload_factory: Arc::new(NeverCalledUploadFactory),
+        dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
+    };
+
+    let mut harness = HarnessBuilder::default()
+        .with_size(egui::Vec2::new(1000.0, 600.0))
+        .build_eframe(move |_cc| {
+            let mut app = HummApp::new_for_test(services);
+            app.set_recording_deps_for_test(scripted_deps);
+            app
+        });
+    harness.step();
+    harness.state_mut().open_recording_window_for_test();
+    harness.step();
+    let vm_arc = harness
+        .state()
+        .recording_vm_for_test()
+        .expect("window is open");
+    let deps_arc = harness.state().recording_deps_for_test();
+
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    harness.step();
+
+    wait_for(&mut harness, "the second utterance to land", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            vm_arc
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .panel_text
+                .contains("utterance two")
+        }
+    });
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    wait_for(&mut harness, "the session to stop", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            vm_arc.lock().unwrap_or_else(|p| p.into_inner()).status == RecordingStatus::Stopped
+        }
+    });
+
+    assert!(
+        vm_arc
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .translation_panel_text
+            .is_empty(),
+        "no translation panel text without translation"
+    );
+
+    let tasks = TasksVm::load(&store);
+    let row = tasks.sorted_rows().first().expect("one row").clone();
+    let segments = store.get_segment_rows(row.id).expect("segments");
+    assert_eq!(segments.len(), 2);
+    assert!(
+        segments.iter().all(|s| s.translation.is_empty()),
+        "no per-segment translations were persisted"
+    );
+
+    // No `.translated` sibling was written (only the transcript file).
+    let translated_exists = std::fs::read_dir(&export_dir)
+        .expect("read export dir")
+        .filter_map(Result::ok)
+        .any(|e| {
+            e.path()
+                .file_name()
+                .map(|n| n.to_string_lossy().contains(".translated."))
+                .unwrap_or(false)
+        });
+    assert!(
+        !translated_exists,
+        "no .translated file without translation"
+    );
 }

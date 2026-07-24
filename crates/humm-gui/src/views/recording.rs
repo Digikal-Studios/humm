@@ -12,9 +12,10 @@
 //! ([`copy_click_outcome`]/[`CopyLabelState`] below, F-065 §2.7, Task 12),
 //! then the advanced settings sheet (`views::recording_advanced::ui`, an
 //! `egui::Modal` overlay, Task 12) and the error-dialog modal, both rendered
-//! last so they paint over everything above. The translation panel is never
-//! rendered — F-063 is M6, and spec §2.1.6 says the panel itself is absent
-//! this milestone, not merely disabled.
+//! last so they paint over everything above. The **translation panel** (F-063,
+//! spec §7.4) renders directly below the transcription panel, read-only, shown
+//! iff `options.enable_llm_translation` (live show/hide on toggle — Buzz
+//! `:544-547`), with the placeholder `"Waiting for AI translation..."`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -295,7 +296,23 @@ pub fn recording_ui(
             );
         });
 
-    // Translation panel: not rendered (F-063 is M6, spec §2.1.6).
+    // Translation panel (F-063, spec §7.4): read-only, directly below the
+    // transcription panel, shown iff live translation is enabled — a toggle in
+    // the advanced sheet shows/hides it immediately (Buzz `:544-547`, the
+    // `translation_text_box.show()/hide()` on `on_transcription_options_changed`).
+    if vm.options.enable_llm_translation {
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical()
+            .id_salt("humm-recording-translation-panel-scroll")
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut vm.translation_panel_text)
+                        .hint_text(tr("recording-panel-translation-placeholder"))
+                        .desired_width(f32::INFINITY)
+                        .interactive(false),
+                );
+            });
+    }
 
     // Copy actions bar (spec §2.7): hidden until a recording stops.
     if vm.copy_bar_visible {
@@ -310,6 +327,7 @@ pub fn recording_ui(
         &mut vm.advanced_requested,
         &mut vm.advanced_sheet,
         &mut vm.options,
+        vm.live_translator.as_ref(),
         settings,
         settings_path,
         deps.dialogs.as_ref(),

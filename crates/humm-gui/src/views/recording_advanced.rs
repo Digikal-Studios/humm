@@ -4,10 +4,9 @@
 //!
 //! Ported from Buzz `buzz/widgets/transcriber/advanced_settings_dialog.py`:
 //! `_setup_transcription_section`/`_setup_translation_section` (`:59-121`,
-//! the initial-prompt row and the LLM-translation block, which this milestone
-//! renders permanently **disabled** — F-063 is M6, spec §2.1.6) and
-//! `_setup_recording_section` (`:123-255`, the whole recording block) plus
-//! every `on_*_changed` handler (`:298-365`).
+//! the initial-prompt row and the LLM-translation block — live as of M6/F-063,
+//! spec §7.4) and `_setup_recording_section` (`:123-255`, the whole recording
+//! block) plus every `on_*_changed` handler (`:298-365`).
 //!
 //! **Save timing (Buzz-exact, task brief's self-review checklist):**
 //! `initial_prompt`/`silence_threshold`/`line_separator`/`transcription_step`
@@ -23,6 +22,15 @@
 //! `self.settings.set_value(...)` calls in the same handlers) — this
 //! module's [`AdvancedSheetState`] mirrors those for the widget bindings and
 //! [`persist_recording`] writes through on every change.
+//!
+//! The **LLM-translation block** (F-063) is close-persisted like the
+//! initial-prompt row: `enable_llm_translation`/`llm_model`/`llm_prompt` bind
+//! directly to [`crate::recording::RecordingOptions`] and ride
+//! [`crate::recording::RecordingVm::close`]'s save group (Buzz
+//! `_do_close:1234-1245`). When a translator worker is already live (a session
+//! started with translation enabled), a model/prompt edit is additionally
+//! forwarded to it via [`crate::live_translation::LiveTranslator::update_options`]
+//! (Buzz's options-changed signal → translator, `translator.py:36-38`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -32,7 +40,9 @@ use humm_core::settings::{RecordingSettings, Settings};
 
 use crate::i18n::tr;
 use crate::import::FileDialogs;
+use crate::live_translation::LiveTranslator;
 use crate::recording::RecordingOptions;
+use crate::views::options_sheet::render_llm_model_prompt_fields;
 
 // -- Separator escape/unescape (Buzz `repr()[1:-1]` / `unicode_escape`) ------
 
@@ -289,6 +299,7 @@ pub fn ui(
     advanced_requested: &mut bool,
     sheet: &mut Option<AdvancedSheetState>,
     options: &mut RecordingOptions,
+    live_translator: Option<&LiveTranslator>,
     settings: &Mutex<Settings>,
     settings_path: &Path,
     dialogs: &dyn FileDialogs,
@@ -321,7 +332,7 @@ pub fn ui(
 
         ui.add_space(8.0);
         heading(ui, "recording-advanced-translation-heading");
-        translation_block(ui);
+        translation_block(ui, options, live_translator);
 
         ui.add_space(8.0);
         heading(ui, "recording-advanced-recording-heading");
@@ -342,36 +353,67 @@ fn heading(ui: &mut egui::Ui, key: &str) {
     ui.label(egui::RichText::new(tr(key)).strong());
 }
 
-/// The disabled LLM-translation block (spec §2.1.6/§7: F-063 is M6). Every
-/// row renders Buzz's exact labels but permanently disabled (the M3
-/// Record-button precedent) — no state is modeled or persisted since nothing
-/// in this milestone reads it; the text fields bind to per-frame throwaway
-/// buffers purely so the widgets render in their Buzz shape (a disabled,
-/// empty text box), not because any input is ever accepted.
-fn translation_block(ui: &mut egui::Ui) {
-    let mut enabled = false;
-    ui.add_enabled(
-        false,
-        egui::Checkbox::new(&mut enabled, tr("recording-advanced-llm-enable")),
-    )
-    .on_disabled_hover_text(tr("recording-advanced-llm-tooltip"));
+/// The live LLM-translation block (F-063, spec §7.4, Buzz
+/// `advanced_settings_dialog.py:75-121`): the "Enable AI translation"
+/// checkbox, then the AI-model field (reusing the shared combo-seeded free-text
+/// widget [`render_llm_model_prompt_fields`], ✚ J-8) and the instructions
+/// textarea, disabled while the checkbox is off (Buzz's own
+/// `.setEnabled(enable_llm_translation)` on every row below the checkbox).
+///
+/// All three fields bind **directly** to the live [`RecordingOptions`] — they
+/// are close-persisted (they ride `RecordingVm::close`'s save group, module
+/// doc), never immediate-save. When a translator worker is already live
+/// (`live_translator` is `Some`), a model/prompt edit is additionally
+/// forwarded to it via [`LiveTranslator::update_options`] (Buzz's
+/// options-changed signal → translator). The enable toggle needs no forwarding
+/// — Buzz creates the translator only at Record start, so toggling it
+/// mid-session has no live worker to affect (its only live effect is
+/// showing/hiding the translation panel, `views::recording`).
+fn translation_block(
+    ui: &mut egui::Ui,
+    options: &mut RecordingOptions,
+    live_translator: Option<&LiveTranslator>,
+) {
+    ui.checkbox(
+        &mut options.enable_llm_translation,
+        tr("recording-advanced-llm-enable"),
+    );
 
-    ui.horizontal(|ui| {
-        ui.add_enabled(
-            false,
-            egui::Label::new(tr("recording-advanced-llm-model-label")),
+    ui.add_enabled_ui(options.enable_llm_translation, |ui| {
+        let before_model = options.llm_model.clone();
+        let before_prompt = options.llm_prompt.clone();
+        render_llm_model_prompt_fields(
+            ui,
+            "humm-recording-advanced-llm-model-presets",
+            &mut options.llm_model,
+            &mut options.llm_prompt,
         );
-        let mut throwaway = String::new();
-        ui.add_enabled(false, egui::TextEdit::singleline(&mut throwaway));
-    });
-    ui.horizontal(|ui| {
-        ui.add_enabled(
-            false,
-            egui::Label::new(tr("recording-advanced-llm-instructions-label")),
+        // Forward a live model/prompt edit to a running worker (Buzz's
+        // options-changed signal → translator). Compared against the
+        // pre-render snapshot so it fires only on an actual change, not every
+        // frame.
+        forward_llm_edit(
+            live_translator,
+            (&before_model, &before_prompt),
+            (&options.llm_model, &options.llm_prompt),
         );
-        let mut throwaway = String::new();
-        ui.add_enabled(false, egui::TextEdit::multiline(&mut throwaway));
     });
+}
+
+/// Forwards a model/prompt edit to a live translator worker iff it actually
+/// changed and a worker exists (Buzz's options-changed signal → translator,
+/// `translator.py:36-38`). Split out from [`translation_block`] so the
+/// change-detect-then-forward decision is unit-testable without a UI context.
+fn forward_llm_edit(
+    live_translator: Option<&LiveTranslator>,
+    before: (&str, &str),
+    after: (&str, &str),
+) {
+    if before != after
+        && let Some(translator) = live_translator
+    {
+        translator.update_options(after.0.to_string(), after.1.to_string());
+    }
 }
 
 /// The "Recording settings" block: silence threshold, mode + its
@@ -729,5 +771,92 @@ mod tests {
     fn non_empty_path_blanks_to_none() {
         assert_eq!(non_empty_path("  "), None);
         assert_eq!(non_empty_path("/a/b"), Some(PathBuf::from("/a/b")));
+    }
+
+    // -- forward_llm_edit (F-063 mid-session options forwarding) ----------------
+
+    use crate::live_translation::LiveTranslator;
+    use crate::translate_seam::{ScriptedTranslateSpawner, TranslateSpawner};
+    use humm_core::openai::{OpenAiAuth, TranslatorConfig};
+
+    fn scripted_translator() -> (LiveTranslator, ScriptedTranslateSpawner) {
+        let spawner = ScriptedTranslateSpawner::identity();
+        let control = spawner.spawn(
+            TranslatorConfig {
+                auth: OpenAiAuth {
+                    base_url: Some("http://127.0.0.1:0".to_string()),
+                    api_key: "unused".to_string(),
+                },
+                model: "gpt-4o-mini".to_string(),
+                prompt: "Translate.".to_string(),
+            },
+            Box::new(|_text, _id| {}),
+        );
+        (LiveTranslator::new(control), spawner)
+    }
+
+    fn wait_until(message: &str, mut cond: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !cond() {
+            assert!(std::time::Instant::now() < deadline, "timed out: {message}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn forward_llm_edit_forwards_a_changed_model_or_prompt_to_a_live_worker() {
+        let (translator, spawner) = scripted_translator();
+        let state = spawner.state();
+
+        forward_llm_edit(
+            Some(&translator),
+            ("gpt-4o-mini", "Old prompt."),
+            ("gpt-4o", "New prompt."),
+        );
+
+        wait_until("update_options to reach the scripted control", || {
+            !state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .update_options
+                .is_empty()
+        });
+        assert_eq!(
+            state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .update_options,
+            vec![("gpt-4o".to_string(), "New prompt.".to_string())]
+        );
+    }
+
+    #[test]
+    fn forward_llm_edit_is_a_noop_when_nothing_changed() {
+        let (translator, spawner) = scripted_translator();
+        let state = spawner.state();
+
+        forward_llm_edit(
+            Some(&translator),
+            ("gpt-4o-mini", "Same."),
+            ("gpt-4o-mini", "Same."),
+        );
+
+        // Give any (erroneous) forward a chance to land before asserting none did.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .update_options
+                .is_empty(),
+            "an unchanged edit must not forward update_options"
+        );
+    }
+
+    #[test]
+    fn forward_llm_edit_is_a_noop_without_a_live_worker() {
+        // No worker (translation not running this session): a change is fine,
+        // it just has nowhere to forward to — must not panic.
+        forward_llm_edit(None, ("a", "b"), ("c", "d"));
     }
 }

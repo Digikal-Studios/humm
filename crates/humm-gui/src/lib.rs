@@ -16,6 +16,7 @@ pub mod i18n;
 pub mod import;
 pub mod live_fixture;
 pub mod live_session;
+pub mod live_translation;
 pub mod llm_source;
 pub mod logging;
 pub mod models_ui;

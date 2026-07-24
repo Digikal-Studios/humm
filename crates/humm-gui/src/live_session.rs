@@ -73,6 +73,8 @@ use humm_core::models::download::DownloadProgress;
 use humm_store::SqliteStore;
 use humm_whisper::{LiveOptions, WhisperEngine};
 
+use crate::live_translation::TranslationEnqueue;
+
 /// Ring-buffer capacity for the real session's capture: a transient
 /// hand-off buffer between the RT callback and this thread's
 /// [`run_session`] drain loop, sized to comfortably hold the *largest
@@ -290,6 +292,15 @@ pub enum SessionMessage {
     /// replace, not an append (the sender already holds the full text via
     /// its own [`PanelText`]).
     PanelText(String),
+    /// One arrived translation's fully-applied **translation** panel text
+    /// (F-063) -- already `strip_newlines`'d, mode-dispatched, and merged by
+    /// the off-UI-thread [`humm_core::live::translation::TranslationApplier`].
+    /// A whole-panel replace, like [`Self::PanelText`]. Posted by the
+    /// translation worker's `on_result` callback through its own clone of the
+    /// session-message sender (never the session thread) -- late arrivals
+    /// (after Stop, while the window is still open) still land here, since the
+    /// worker is not stopped at session Stop (spec §7.4 lifecycle).
+    TranslationPanel(String),
     /// A genuine failure (Buzz's error-dialog cause, still the raw
     /// message -- `app.rs` wraps it in the byte-exact dialog text, since
     /// [`crate::i18n::tr`] may only run on the UI thread). The loop has
@@ -347,14 +358,31 @@ pub struct LiveSessionRequest {
     /// The session row's name (spec §4: `"Live recording <date>"`, see
     /// [`live_session_name`]).
     pub session_name: String,
-    /// Export setup, or `None` when export is disabled.
-    pub export: Option<ExportSetupRequest>,
+    /// The session's export sink (F-064/F-063), or `None` when export is
+    /// disabled. Built by `app.rs::start_live_session` from
+    /// [`export_request_from_settings`] and wrapped in an `Arc` **there** (not
+    /// created on the session thread) precisely so the F-063 live-translation
+    /// callback — which runs on the translator's worker thread and writes the
+    /// `.translated` sibling — can share the *same* sink instance: one
+    /// [`ExportSink::setup`] means one filename timestamp for both the
+    /// transcript and its `.translated` sibling (two independent setups would
+    /// pick two different `chrono::Local::now()` timestamps, breaking the
+    /// sibling relationship). `ExportSink`'s writers are all `&self` and touch
+    /// disjoint files (transcript vs translated), so the two threads never
+    /// contend. Also matches Buzz, which sets export up on the GUI thread
+    /// (`_init_export_settings` in `start_recording`).
+    pub export_sink: Option<Arc<ExportSink>>,
     /// The effective upload URL, or `None` when upload is disabled (see
     /// [`humm_core::live::effective_upload_url`]).
     pub upload_url: Option<String>,
     /// The shared meter telemetry -- the *same* `Arc` the recording window's
     /// meter widget reads every repaint (spec §2.5).
     pub meter: Arc<MeterSnapshot>,
+    /// The live-translation enqueue handle (F-063), `None` when translation is
+    /// off (or unconfigured / endpoint unresolvable) for this session. Passed
+    /// through to [`SessionApplier::with_translation_enqueue`] so the session
+    /// thread enqueues each accepted utterance for translation.
+    pub translation_enqueue: Option<TranslationEnqueue>,
 }
 
 /// The session-thread handle `RecordingVm` holds while a real session is
@@ -450,12 +478,20 @@ pub fn record_measured_speed(
 /// self`, so the session thread locks `deps.capture` for the session's
 /// lifetime exactly like [`crate::recording::RecordingVm`]'s own meter-only
 /// drain does while stopped.
+///
+/// The `SessionMessage` channel `(tx, rx)` is created by the caller
+/// (`app.rs::start_live_session`) rather than here so the F-063 live-translation
+/// callback can hold its **own** clone of `tx` and post
+/// [`SessionMessage::TranslationPanel`] through the same channel this session's
+/// sink uses — a single drain (`ActiveSession::rx`) then feeds both the
+/// transcript panel and the translation panel.
 pub fn spawn_live_session(
     deps: Arc<crate::recording::RecordingDeps>,
     request: LiveSessionRequest,
+    tx: mpsc::Sender<SessionMessage>,
+    rx: mpsc::Receiver<SessionMessage>,
 ) -> ActiveSession {
     let cancel = CancelToken::new();
-    let (tx, rx) = mpsc::channel();
     let cancel_for_thread = cancel.clone();
     let thread = std::thread::spawn(move || {
         // `run_live_session` takes its sink as `&dyn Fn(SessionMessage)`
@@ -510,12 +546,19 @@ pub struct SessionApplier<'a> {
     store: &'a dyn LiveStore,
     export: Option<&'a ExportSink>,
     upload: Option<&'a dyn LiveUpload>,
+    /// The live-translation enqueue handle (F-063), `None` when translation is
+    /// off for this session. Set via [`Self::with_translation_enqueue`] rather
+    /// than the constructor so the existing (non-translation) call sites and
+    /// unit tests are untouched. Owned (not borrowed) — it's a cheap channel
+    /// closure the UI thread hands off for the session's lifetime.
+    translation_enqueue: Option<TranslationEnqueue>,
 }
 
 impl<'a> SessionApplier<'a> {
     /// Builds a fresh applier (empty panel, empty merge state) for one
     /// session. `session_id` is `None` when `insert_live_session` failed
-    /// (ADR-018: the session proceeds without persistence).
+    /// (ADR-018: the session proceeds without persistence). Live translation
+    /// is off by default — see [`Self::with_translation_enqueue`].
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         mode: RecordingMode,
@@ -536,7 +579,18 @@ impl<'a> SessionApplier<'a> {
             store,
             export,
             upload,
+            translation_enqueue: None,
         }
+    }
+
+    /// Attaches a live-translation enqueue handle (F-063): every accepted
+    /// utterance's raw filtered text is enqueued (tagged with its persisted
+    /// segment row id) for translation, at Buzz's exact placement — after the
+    /// filter/empty-check, before mode dispatch (`on_next_transcription:969-970`).
+    #[must_use]
+    pub fn with_translation_enqueue(mut self, enqueue: TranslationEnqueue) -> Self {
+        self.translation_enqueue = Some(enqueue);
+        self
     }
 
     /// Ported from Buzz's `on_next_transcription` (`:963-1035`): `filter_text`
@@ -571,6 +625,18 @@ impl<'a> SessionApplier<'a> {
         } else {
             (None, None)
         };
+
+        // F-063: enqueue the raw filtered text for translation *before* mode
+        // dispatch (Buzz `on_next_transcription:969-970`: `self.translator.enqueue(text)`
+        // sits right after the filter/empty-check and before any panel/export
+        // work), tagged with the persisted segment row id so the arriving
+        // translation can be written onto that same row. A `None` row id
+        // (store write failed / no session) still enqueues — the translation
+        // just won't be persisted (its panel/export effects still apply),
+        // exactly as Buzz (which has no store) enqueues regardless.
+        if let Some(enqueue) = &self.translation_enqueue {
+            enqueue(filtered.clone(), segment_row_id);
+        }
 
         let display = match self.mode {
             RecordingMode::AppendBelow | RecordingMode::AppendAbove => filtered.clone(),
@@ -638,7 +704,7 @@ fn is_model_ensure_cancellation(err: &CoreError) -> bool {
 /// own stream is already fully torn down.
 pub fn run_live_session(
     deps: &crate::recording::RecordingDeps,
-    request: LiveSessionRequest,
+    mut request: LiveSessionRequest,
     sink: &dyn Fn(SessionMessage),
     cancel: &CancelToken,
 ) {
@@ -700,20 +766,10 @@ pub fn run_live_session(
         }
     };
 
-    let export = request.export.as_ref().map(|cfg| {
-        ExportSink::setup(
-            &cfg.folder,
-            cfg.file_type,
-            cfg.max_entries,
-            &request.separator,
-            request.session_config.mode,
-            cfg.template.as_deref(),
-            request.live_options.task,
-            request.live_options.language.map(|l| l.code()),
-            request.model.size.as_str(),
-            chrono::Local::now().naive_local(),
-        )
-    });
+    // The export sink was built (and its files cleared) by `app.rs` on the UI
+    // thread and shared here via an `Arc` so the F-063 translation callback can
+    // hold the same instance (see `LiveSessionRequest::export_sink`'s doc).
+    let export = request.export_sink.clone();
     let upload: Option<Box<dyn LiveUpload>> = request
         .upload_url
         .clone()
@@ -749,15 +805,19 @@ pub fn run_live_session(
     };
     sink(SessionMessage::Ready);
 
-    let applier = RefCell::new(SessionApplier::new(
+    let mut applier = SessionApplier::new(
         request.session_config.mode,
         request.separator.clone(),
         request.hide_unconfirmed,
         session_id,
         deps.store.as_ref(),
-        export.as_ref(),
+        export.as_deref(),
         upload.as_deref(),
-    ));
+    );
+    if let Some(enqueue) = request.translation_enqueue.take() {
+        applier = applier.with_translation_enqueue(enqueue);
+    }
+    let applier = RefCell::new(applier);
     // Captures the session's final measurement without ever forwarding
     // `LiveEvent::Stopped` to `sink` directly -- see this function's own
     // "Ordering invariant" doc above. `Cell` (not `RefCell`): `LiveMeasurement`
@@ -1067,6 +1127,104 @@ mod tests {
         assert_eq!(out.segment_row_id, None);
     }
 
+    // -- SessionApplier: F-063 translation enqueue ----------------------------
+
+    /// The `(text, id)` pairs a scripted translation enqueue records.
+    type EnqueueLog = Arc<StdMutex<Vec<(String, Option<i64>)>>>;
+
+    #[test]
+    fn apply_text_enqueues_the_filtered_text_tagged_with_the_row_id() {
+        let store = FakeStore::default();
+        let sid = TranscriptionId::new();
+        let enqueued: EnqueueLog = Arc::new(StdMutex::new(Vec::new()));
+        let sink = Arc::clone(&enqueued);
+        let mut applier = SessionApplier::new(
+            RecordingMode::AppendBelow,
+            "\n\n".to_string(),
+            true,
+            Some(sid),
+            &store,
+            None,
+            None,
+        )
+        .with_translation_enqueue(Box::new(move |text, id| {
+            sink.lock().unwrap().push((text, id));
+        }));
+
+        applier.apply_text("  hello  ", Millis(0), Millis(1000));
+        applier.apply_text("world", Millis(1000), Millis(2000));
+
+        // Buzz enqueues the FILTERED text (trimmed), tagged with the inserted
+        // segment row id (ascending) so the arriving translation can be
+        // persisted onto the same row.
+        assert_eq!(
+            *enqueued.lock().unwrap(),
+            vec![
+                ("hello".to_string(), Some(1)),
+                ("world".to_string(), Some(2)),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_text_does_not_enqueue_a_filtered_away_utterance() {
+        let store = FakeStore::default();
+        let sid = TranscriptionId::new();
+        let enqueued: EnqueueLog = Arc::new(StdMutex::new(Vec::new()));
+        let sink = Arc::clone(&enqueued);
+        let mut applier = SessionApplier::new(
+            RecordingMode::AppendBelow,
+            "\n\n".to_string(),
+            true,
+            Some(sid),
+            &store,
+            None,
+            None,
+        )
+        .with_translation_enqueue(Box::new(move |text, id| {
+            sink.lock().unwrap().push((text, id));
+        }));
+
+        // Whitespace-only filters away (Buzz `on_next_transcription:965-967`
+        // returns before the `translator.enqueue`): nothing is enqueued.
+        applier.apply_text("   ", Millis(0), Millis(500));
+
+        assert!(enqueued.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn apply_text_enqueues_even_when_the_store_write_failed() {
+        // A store failure (ADR-018) still enqueues the translation (Buzz
+        // enqueues regardless of persistence — it has no store); the row id
+        // is `None` so the translation just won't be persisted.
+        let store = FakeStore {
+            fail: true,
+            ..Default::default()
+        };
+        let sid = TranscriptionId::new();
+        let enqueued: EnqueueLog = Arc::new(StdMutex::new(Vec::new()));
+        let sink = Arc::clone(&enqueued);
+        let mut applier = SessionApplier::new(
+            RecordingMode::AppendBelow,
+            "\n\n".to_string(),
+            true,
+            Some(sid),
+            &store,
+            None,
+            None,
+        )
+        .with_translation_enqueue(Box::new(move |text, id| {
+            sink.lock().unwrap().push((text, id));
+        }));
+
+        applier.apply_text("hi there", Millis(0), Millis(500));
+
+        assert_eq!(
+            *enqueued.lock().unwrap(),
+            vec![("hi there".to_string(), None)]
+        );
+    }
+
     // -- is_model_ensure_cancellation ----------------------------------------
 
     #[test]
@@ -1345,9 +1503,10 @@ mod tests {
             hide_unconfirmed: true,
             options_snapshot: TranscriptionOptions::default(),
             session_name: "Live recording <test>".to_string(),
-            export: None,
+            export_sink: None,
             upload_url: None,
             meter: Arc::new(MeterSnapshot::new()),
+            translation_enqueue: None,
         }
     }
 

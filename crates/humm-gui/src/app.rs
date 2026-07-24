@@ -15,8 +15,11 @@ use humm_core::cancel::CancelToken;
 use humm_core::domain::{Backend, ModelSize, ModelSpec, Segment, Source, Status, TranscriptionId};
 use humm_core::env::use_gpu_from_env;
 use humm_core::error::{CoreError, EngineError};
-use humm_core::live::{RecordingMode, SessionConfig, effective_upload_url};
+use humm_core::live::{
+    ExportSink, RecordingMode, SessionConfig, TranslationApplier, effective_upload_url,
+};
 use humm_core::models::download::DownloadProgress;
+use humm_core::openai::{ENV_BASE, ENV_KEY, TranslatorConfig, resolve_endpoint};
 use humm_core::queue::{ArtifactEnsurer, QueueHandle, TaskEvent, TaskEventKind};
 use humm_core::settings::{FileTranscriberSettings, GuiSettings, ViewerGeometry};
 use humm_media::{FfmpegDecoder, FfmpegVideoStreamer, FfprobeProber};
@@ -31,6 +34,7 @@ use crate::live_session::{
     self, LiveEngineFactory, LiveEngineSession, LiveSessionRequest, LiveStore, LiveUpload,
     SessionMessage, UploadFactory,
 };
+use crate::live_translation::LiveTranslator;
 use crate::recording::{RecordingDeps, RecordingStatus, RecordingVm};
 use crate::services::{self, Services, UpdateNotice};
 use crate::shortcuts::ShortcutMap;
@@ -2153,7 +2157,17 @@ impl HummApp {
                     vm.presentation.css_override.as_ref(),
                 );
                 let text = vm.panel_text.clone();
-                crate::views::presentation::window_ui(ctx, &text, &style);
+                // F-063: the presentation window shows a translation region
+                // below the transcript once a translation exists and live
+                // translation is enabled (Buzz's `translation_display`, shown
+                // only when non-empty). `window_ui` itself no-ops on `None`/
+                // empty, so the gate here is just the enable flag.
+                let translation = if vm.options.enable_llm_translation {
+                    Some(vm.translation_panel_text.clone())
+                } else {
+                    None
+                };
+                crate::views::presentation::window_ui(ctx, &text, translation.as_deref(), &style);
 
                 if std::mem::take(&mut vm.presentation.focus_requested) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -2273,16 +2287,23 @@ impl HummApp {
     /// genuinely do come from `recording_settings` below, since `settings.recording`
     /// already holds their current value the instant they change.
     fn start_live_session(&mut self, vm_arc: &Arc<Mutex<RecordingVm>>, ctx: &egui::Context) {
-        let (device_id, options, meter) = {
-            let vm = vm_arc
+        let (device_id, options, meter, old_translator) = {
+            let mut vm = vm_arc
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             (
                 vm.selected_device.clone(),
                 vm.options.clone(),
                 Arc::clone(&vm.meter),
+                // A new Record click tears down the previous session's
+                // translator first (fresh worker + applier per session,
+                // spec §7.4 lifecycle).
+                vm.live_translator.take(),
             )
         };
+        if let Some(old) = old_translator {
+            old.stop();
+        }
         let recording_settings = {
             let settings = self
                 .services
@@ -2320,12 +2341,50 @@ impl HummApp {
             silence_threshold: options.silence_threshold,
             initial_prompt: options.initial_prompt.clone(),
         };
-        let export = live_session::export_request_from_settings(&recording_settings);
+        // Build the export sink here (UI thread) and wrap it in an `Arc` so the
+        // F-063 translation callback can share the *same* instance — one setup,
+        // one filename timestamp for both the transcript and its `.translated`
+        // sibling (`LiveSessionRequest::export_sink`'s doc). Matches Buzz's own
+        // GUI-thread `_init_export_settings`.
+        let export_sink: Option<Arc<ExportSink>> =
+            live_session::export_request_from_settings(&recording_settings).map(|cfg| {
+                Arc::new(ExportSink::setup(
+                    &cfg.folder,
+                    cfg.file_type,
+                    cfg.max_entries,
+                    &options.line_separator,
+                    mode,
+                    cfg.template.as_deref(),
+                    options.task,
+                    options.language.map(|l| l.code()),
+                    model.size.as_str(),
+                    chrono::Local::now().naive_local(),
+                ))
+            });
         let upload_url = effective_upload_url(
             std::env::var("HUMM_UPLOAD_URL").ok().as_deref(),
             recording_settings.upload_url.as_deref(),
         );
         let session_name = live_session::live_session_name(chrono::Local::now().naive_local());
+
+        // F-063 live-translation wiring: build the worker (and its enqueue
+        // handle) iff translation is enabled, a model is configured, and an
+        // endpoint resolves — otherwise record proceeds untranslated with a
+        // warning (Buzz would construct a client with an empty key and fail
+        // every request). The `SessionMessage` channel is created here so the
+        // translation callback (running on the worker thread) can post
+        // `TranslationPanel` through the same channel the session's own sink
+        // uses; the UI's single per-frame drain then feeds both panels.
+        let (session_tx, session_rx) = mpsc::channel::<SessionMessage>();
+        let (translation_enqueue, live_translator, llm_snapshot) = self.build_live_translation(
+            &options,
+            mode,
+            &recording_settings,
+            export_sink.clone(),
+            &session_tx,
+            ctx,
+        );
+
         let options_snapshot = humm_core::domain::TranscriptionOptions {
             language: options.language,
             task: options.task,
@@ -2333,10 +2392,10 @@ impl HummApp {
             word_timestamps: false,
             initial_prompt: options.initial_prompt.clone(),
             temperature: humm_core::domain::DEFAULT_TEMPERATURE.to_vec(),
-            // Live translation wiring (F-063) is a later M6 task; this
-            // snapshot's `llm` stays `None` until that task threads
-            // `recording_settings.enable_llm_translation` through.
-            llm: None,
+            // Record what translation this session actually ran with (the same
+            // checked+non-empty-model gate the file path uses), so the
+            // persisted options honestly reflect the run.
+            llm: llm_snapshot,
         };
 
         let request = LiveSessionRequest {
@@ -2349,17 +2408,136 @@ impl HummApp {
             hide_unconfirmed: recording_settings.hide_unconfirmed,
             options_snapshot,
             session_name,
-            export,
+            export_sink,
             upload_url,
             meter,
+            translation_enqueue,
         };
 
-        let session = live_session::spawn_live_session(Arc::clone(&self.recording_deps), request);
+        let session = live_session::spawn_live_session(
+            Arc::clone(&self.recording_deps),
+            request,
+            session_tx,
+            session_rx,
+        );
         let mut vm = vm_arc
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         vm.session = Some(session);
+        vm.live_translator = live_translator;
         ctx.request_repaint();
+    }
+
+    /// Builds this session's live-translation worker (F-063, spec §7.4),
+    /// returning `(enqueue_handle, live_translator, llm_snapshot)`. All three
+    /// are `None` when translation is off, the AI model is unconfigured (empty
+    /// once trimmed — a warning is logged), or no LLM endpoint resolves (env →
+    /// `settings.openai.base_url` → keyring — the same precedence
+    /// [`crate::llm_source::GuiLlmSource`] and the viewer's Translate use); in
+    /// every such case the recording simply proceeds untranslated.
+    ///
+    /// The worker's `on_result` callback runs on the translator's own worker
+    /// thread (never the UI thread — M5's hard rule): for each arrived
+    /// translation it applies the [`TranslationApplier`] (panel + `.translated`
+    /// export), persists the raw translation onto the segment row when a row id
+    /// is known, and posts the new translation-panel text through `session_tx`.
+    /// It only ever pushes into channels / does direct work — it **never**
+    /// calls back into the translate control (the scripted seam invokes it
+    /// synchronously from `enqueue`; re-entering the control there would
+    /// deadlock).
+    fn build_live_translation(
+        &self,
+        options: &crate::recording::RecordingOptions,
+        mode: RecordingMode,
+        recording_settings: &humm_core::settings::RecordingSettings,
+        export_sink: Option<Arc<ExportSink>>,
+        session_tx: &mpsc::Sender<SessionMessage>,
+        ctx: &egui::Context,
+    ) -> (
+        Option<crate::live_translation::TranslationEnqueue>,
+        Option<LiveTranslator>,
+        Option<humm_core::domain::LlmTranslationOptions>,
+    ) {
+        if !options.enable_llm_translation {
+            return (None, None, None);
+        }
+        let model = options.llm_model.trim().to_string();
+        if model.is_empty() {
+            log::warn!(
+                "live translation enabled but no AI model configured — recording without translation"
+            );
+            return (None, None, None);
+        }
+
+        let endpoint = {
+            let env_base = std::env::var(ENV_BASE).ok();
+            let env_key = std::env::var(ENV_KEY).ok();
+            let settings_base = {
+                let settings = self
+                    .services
+                    .settings
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                settings.openai.base_url.clone()
+            };
+            resolve_endpoint(
+                env_base,
+                env_key,
+                &settings_base,
+                self.services.secrets.as_ref(),
+            )
+        };
+        let Some(endpoint) = endpoint else {
+            log::warn!(
+                "live translation enabled but no LLM endpoint resolvable (no key in env/keyring) — recording without translation"
+            );
+            return (None, None, None);
+        };
+
+        let prompt = options.llm_prompt.clone();
+        let cfg = TranslatorConfig {
+            auth: endpoint.auth,
+            model: model.clone(),
+            prompt: prompt.clone(),
+        };
+
+        // The applier + shared export sink + store handle + session sender +
+        // repaint handle the worker thread's `on_result` owns for the session's
+        // lifetime. `TranslationApplier` is the translation-side twin of the
+        // transcript `SessionApplier`, seeded with the same mode/separator/
+        // hide-unconfirmed values (spec §7.4).
+        let mut applier = TranslationApplier::new(
+            mode,
+            options.line_separator.clone(),
+            recording_settings.hide_unconfirmed,
+        );
+        let store = Arc::clone(&self.services.store);
+        let tx = session_tx.clone();
+        let repaint_ctx = ctx.clone();
+        let on_result: Box<dyn FnMut(String, Option<i64>) + Send> =
+            Box::new(move |raw: String, id: Option<i64>| {
+                // Runs on the translator worker thread. Only channel sends /
+                // direct applier+store work here — never a call back into the
+                // control (seam re-entrancy rule).
+                let Some(panel) = applier.apply(&raw, export_sink.as_deref()) else {
+                    // Empty translation: no store write, no panel (Buzz
+                    // `on_next_translation:1038-1039`).
+                    return;
+                };
+                if let Some(row_id) = id
+                    && let Err(err) = store.update_segment_translation(row_id, &raw)
+                {
+                    log::warn!("live translation: store write failed for segment {row_id}: {err}");
+                }
+                let _ = tx.send(SessionMessage::TranslationPanel(panel));
+                repaint_ctx.request_repaint();
+            });
+
+        let control = self.services.translate.spawn(cfg, on_result);
+        let translator = LiveTranslator::new(control);
+        let enqueue = translator.enqueue_handle();
+        let llm_snapshot = humm_core::domain::LlmTranslationOptions { model, prompt };
+        (Some(enqueue), Some(translator), Some(llm_snapshot))
     }
 
     /// Drains the active session's [`SessionMessage`] channel (non-blocking
@@ -2443,6 +2621,15 @@ impl HummApp {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 vm.panel_text = text;
+            }
+            SessionMessage::TranslationPanel(text) => {
+                // F-063: a late arrival (after Stop, while the window is still
+                // open) still lands here — the translation worker is not
+                // stopped at session Stop (spec §7.4 lifecycle).
+                let mut vm = vm_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                vm.translation_panel_text = text;
             }
             SessionMessage::Error(cause) => {
                 let mut vm = vm_arc

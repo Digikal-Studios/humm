@@ -18,12 +18,14 @@ use humm_gui::views::presentation::{EffectiveStyle, window_ui};
 
 struct Fixture {
     panel_text: String,
+    translation_text: Option<String>,
     style: EffectiveStyle,
 }
 
 fn fixture(panel_text: &str) -> Fixture {
     Fixture {
         panel_text: panel_text.to_string(),
+        translation_text: None,
         style: EffectiveStyle {
             text_color: "#000000".to_string(),
             background_color: "#ffffff".to_string(),
@@ -35,7 +37,12 @@ fn fixture(panel_text: &str) -> Fixture {
 fn build_harness(fixture: Fixture) -> Harness<'static, Fixture> {
     Harness::new_ui_state(
         |ui, fixture: &mut Fixture| {
-            window_ui(ui, &fixture.panel_text, &fixture.style);
+            window_ui(
+                ui,
+                &fixture.panel_text,
+                fixture.translation_text.as_deref(),
+                &fixture.style,
+            );
         },
         fixture,
     )
@@ -87,4 +94,52 @@ fn renders_empty_panel_text_without_panicking() {
     let mut harness = build_harness(fixture(""));
     harness.step();
     // No crash, no stale content -- nothing more to assert for an empty panel.
+}
+
+// -- F-063: translation region ------------------------------------------------
+
+#[test]
+fn renders_the_translation_region_below_the_transcript_when_non_empty() {
+    let mut fixture = fixture("the transcript");
+    fixture.translation_text = Some("la transcripción".to_string());
+    let mut harness = build_harness(fixture);
+    harness.step();
+
+    // Both the transcript and its translation are present (Buzz's stacked
+    // transcript_display + translation_display).
+    harness.get_by_label("the transcript");
+    harness.get_by_label("la transcripción");
+}
+
+#[test]
+fn omits_the_translation_region_when_none_or_empty() {
+    // `None` (translation off) and `Some("")` (enabled but nothing arrived
+    // yet) both render just the transcript — Buzz shows `translation_display`
+    // only once a non-empty translation exists.
+    for translation in [None, Some(String::new())] {
+        let mut fixture = fixture("only the transcript");
+        fixture.translation_text = translation;
+        let mut harness = build_harness(fixture);
+        harness.step();
+
+        harness.get_by_label("only the transcript");
+    }
+}
+
+#[test]
+fn updates_the_translation_region_wholesale_on_every_update() {
+    let mut fixture = fixture("transcript");
+    fixture.translation_text = Some("first translation".to_string());
+    let mut harness = build_harness(fixture);
+    harness.step();
+    harness.get_by_label("first translation");
+
+    harness.state_mut().translation_text = Some("first translation second translation".to_string());
+    harness.step();
+
+    harness.get_by_label("first translation second translation");
+    assert!(
+        harness.query_by_label("first translation").is_none(),
+        "the translation region is replaced wholesale, like the transcript"
+    );
 }
