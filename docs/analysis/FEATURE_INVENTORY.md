@@ -97,8 +97,9 @@ Preferences tab: enable, input folder, output folder, delete-processed-files, pl
 - Source: `buzz/widgets/transcription_task_folder_watcher.py`, `buzz/widgets/preferences_dialog/folder_watch_preferences_widget.py`, `buzz/transcriber/file_transcriber.py:155-170`.
 
 ### F-031 — LLM translation (during transcription)
-If enabled in options: each produced segment is queued to a `Translator` calling an OpenAI-compatible `chat.completions` (model + system-prompt configurable; batched 10 segments with `[N]` markers parsed back; env overrides `BUZZ_TRANSLATION_API_*`). Translations stored per segment (DB `translation` column) and exportable.
-- Source: `buzz/translator.py`, `buzz/transcriber/transcriber.py:153-155`.
+The `Translator` machinery: an OpenAI-compatible `chat.completions` worker (model + system-prompt configurable in the options' Advanced dialog; batched 10 segments with `[N]` markers parsed back, missing/malformed markers degrade to `""`; env overrides `BUZZ_TRANSLATION_API_KEY`/`BUZZ_TRANSLATION_API_BASE_URl` — the trailing-lowercase-`l` typo is upstream's; base URL/key otherwise from the custom-base-URL setting + keyring). Translations stored per segment (DB `translation` column) and exportable.
+- **Analysis correction (M6 spec §1):** an earlier pass claimed Buzz feeds each file-transcription segment to the `Translator` during the task. It does not — v1.4.5's only two `enqueue` sites are the live recording widget (F-063) and the viewer's Translate button (F-085); the file options sheet's "Enable AI translation" checkbox is persisted but consumed by nothing on the file path (and the restart path hardcodes it off, `transcription_tasks_table_widget.py:762`). humm's F-031 deliberately wires the file path for real (per-segment translation during the task, stored per segment) — a ✚ improvement making the UI's promise true, with the batching/prompt/error machinery still ported verbatim; see `docs/superpowers/specs/2026-07-24-m6-cloud-api-llm-design.md` §1 and its ledger #1.
+- Source: `buzz/translator.py`, `buzz/transcriber/transcriber.py:153-155`, `buzz/widgets/recording_transcriber_widget.py:963-970`, `buzz/widgets/transcription_viewer/transcription_viewer_widget.py:1318-1324`.
 
 ---
 
