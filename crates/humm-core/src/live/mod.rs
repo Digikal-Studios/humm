@@ -14,13 +14,15 @@
 //!   `merge_text_no_overlap`, `MergeState`) and display-mode panel
 //!   application (`PanelText`), F-062.
 //! - [`export`] -- the live TXT/CSV export writers, filename templating,
-//!   retry policy, and the upload-URL client (F-064, spec §2.4). A later
-//!   milestone task adds `session` (the orchestration loop, spec §3) to this
-//!   same module tree.
+//!   retry policy, and the upload-URL client (F-064, spec §2.4).
+//! - [`session`] -- the recording-session orchestration loop: drains the
+//!   capture ring into [`chunker`], decides skip-vs-transcribe with a
+//!   rolling prompt, and emits [`session::LiveEvent`]s (F-061, spec §3).
 
 pub mod chunker;
 pub mod export;
 pub mod merge;
+pub mod session;
 
 pub use chunker::{Batch, Chunker};
 pub use export::{
@@ -31,6 +33,9 @@ pub use export::{
 pub use merge::{
     MergeState, PanelText, filter_text, find_common_part, merge_text_no_overlap,
     no_space_between_sentences,
+};
+pub use session::{
+    Clock, EngineFn, LiveEvent, LiveMeasurement, RealClock, SessionConfig, run_session,
 };
 
 /// Which of Buzz's three live-transcript display strategies is in effect.
