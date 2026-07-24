@@ -15,7 +15,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use humm_core::boundary::{AudioDecoder, FetchProgress, MediaFetcher, MediaProber, VideoStreamer};
+use humm_core::boundary::{
+    AudioDecoder, AudioEncoder, FetchProgress, MediaFetcher, MediaProber, Pcm, SAMPLE_RATE,
+    VideoStreamer,
+};
 use humm_core::cancel::CancelToken;
 use humm_core::domain::Millis;
 use humm_core::error::MediaError;
@@ -63,6 +66,21 @@ fn write_sine_wav(path: &Path, freq_hz: f64, seconds: f64, sample_rate: u32, amp
     buf.extend_from_slice(&samples);
 
     std::fs::write(path, buf).expect("write sine wav");
+}
+
+/// Synthesizes a mono 16 kHz `f32` sine [`Pcm`] directly in memory, for the
+/// `AudioEncoder` contract tests below — these don't need a Buzz fixture or
+/// an on-disk audio file, just decoded PCM shaped the way the transcription
+/// pipeline would hand it to `encode_mp3`.
+fn synth_sine_pcm(freq_hz: f64, seconds: f64, amplitude: f64) -> Pcm {
+    let num_samples = (seconds * f64::from(SAMPLE_RATE)).round() as usize;
+    let samples: Vec<f32> = (0..num_samples)
+        .map(|i| {
+            let t = i as f64 / f64::from(SAMPLE_RATE);
+            (amplitude * (2.0 * std::f64::consts::PI * freq_hz * t).sin()) as f32
+        })
+        .collect();
+    Pcm::new(samples)
 }
 
 /// Resolves the ffmpeg binary the same way `FfmpegDecoder::new`/
@@ -538,6 +556,89 @@ fn probe_and_stream_fractional_29_97_fps() {
             "timestamps should be strictly ascending at 29.97 fps: {timestamps:?}"
         );
     }
+}
+
+// --- `AudioEncoder` contract tests (F-041, M6 design spec §3.1) -----------
+
+#[test]
+#[ignore = "requires ffmpeg + Buzz testdata"]
+fn encode_mp3_duration_matches_pcm() {
+    let pcm = synth_sine_pcm(440.0, 3.0, 0.5);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dest = dir.path().join("encoded.mp3");
+
+    let encoder = FfmpegDecoder::new();
+    let cancel = CancelToken::new();
+    encoder
+        .encode_mp3(&pcm, &dest, &cancel)
+        .expect("encode should succeed");
+
+    let prober = FfprobeProber::new();
+    let info = prober.probe(&dest).expect("probe should succeed");
+    let duration = info.duration.expect("duration should be known");
+
+    let expected_ms = 3000i64;
+    assert!(
+        (duration.0 - expected_ms).abs() <= 100,
+        "expected ~{expected_ms}ms duration (±100ms), got {}ms",
+        duration.0
+    );
+}
+
+#[test]
+#[ignore = "requires ffmpeg + Buzz testdata"]
+fn encode_mp3_round_trips_through_decode() {
+    let pcm = synth_sine_pcm(440.0, 3.0, 0.5);
+    let input_len = pcm.len();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dest = dir.path().join("encoded.mp3");
+
+    let encoder = FfmpegDecoder::new();
+    let cancel = CancelToken::new();
+    encoder
+        .encode_mp3(&pcm, &dest, &cancel)
+        .expect("encode should succeed");
+
+    let decoder = FfmpegDecoder::new();
+    let decoded = decoder
+        .decode(&dest, &cancel)
+        .expect("decode should succeed");
+
+    let tolerance = (input_len as f64 * 0.05).ceil() as i64;
+    let diff = (decoded.len() as i64 - input_len as i64).abs();
+    assert!(
+        diff <= tolerance,
+        "expected sample count within ±5% of {input_len}, got {} (diff {diff}, tolerance {tolerance})",
+        decoded.len()
+    );
+}
+
+#[test]
+#[ignore = "requires ffmpeg + Buzz testdata"]
+fn encode_mp3_cancel_kills_promptly() {
+    let pcm = synth_sine_pcm(440.0, 3.0, 0.5);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dest = dir.path().join("encoded.mp3");
+
+    let encoder = FfmpegDecoder::new();
+    let cancel = CancelToken::new();
+    cancel.cancel();
+
+    let start = Instant::now();
+    let err = encoder
+        .encode_mp3(&pcm, &dest, &cancel)
+        .expect_err("pre-canceled encode should be canceled");
+    let elapsed = start.elapsed();
+
+    assert!(matches!(err, MediaError::Canceled));
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "cancellation took too long: {elapsed:?}"
+    );
+    assert!(
+        !dest.exists() || std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) == 0,
+        "dest should be absent or empty after a pre-canceled encode, found {dest:?}"
+    );
 }
 
 // --- yt-dlp `MediaFetcher` contract tests (F-022, ADR-016) ---

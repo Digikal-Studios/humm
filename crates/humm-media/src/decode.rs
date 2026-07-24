@@ -36,6 +36,13 @@ impl FfmpegDecoder {
             binary: path.into(),
         }
     }
+
+    /// The resolved ffmpeg binary path/name, for other adapters in this
+    /// crate (`encode.rs`'s `AudioEncoder` impl) that reuse the same binary
+    /// resolution rather than duplicating `new`/`with_binary`.
+    pub(crate) fn binary(&self) -> &Path {
+        &self.binary
+    }
 }
 
 impl Default for FfmpegDecoder {

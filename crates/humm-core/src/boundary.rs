@@ -390,6 +390,19 @@ pub trait AudioDecoder: Send + Sync {
     -> Result<PlaybackPcm, MediaError>;
 }
 
+/// Encodes decoded PCM to a compressed audio file. Implemented by the ffmpeg
+/// subprocess adapter (`humm-media`); used by the OpenAI API transcription
+/// engine (Milestone 6) to prepare an mp3 upload from already-decoded
+/// [`Pcm`] instead of Buzz's re-encode of the original file
+/// (`openai_whisper_api_file_transcriber.py:65-94`) — mechanism deviation
+/// with identical outcome, since Whisper-family APIs downmix/resample to
+/// 16 kHz mono anyway (M6 design spec §3.1, deviations ledger #2).
+pub trait AudioEncoder: Send + Sync {
+    /// Encodes `pcm` (16 kHz mono `f32`) to an mp3 file at `dest`, checking
+    /// `cancel` cooperatively.
+    fn encode_mp3(&self, pcm: &Pcm, dest: &Path, cancel: &CancelToken) -> Result<(), MediaError>;
+}
+
 /// Probes container/stream metadata. Implemented by the ffprobe subprocess
 /// adapter.
 pub trait MediaProber: Send + Sync {
