@@ -85,13 +85,15 @@ pub enum LiveEvent {
         /// Samples remaining in the accumulation queue after the cut.
         queue_len: usize,
     },
-    /// The engine call failed. The loop has already stopped (Buzz:
-    /// `result is None: return`); a [`LiveEvent::Stopped`] follows
-    /// immediately.
+    /// The engine call failed for a genuine reason (not a cancellation --
+    /// `Err(`[`EngineError::Canceled`]`)` ends the loop silently instead, no
+    /// `Error` event, so a plain Stop landing mid-call never surfaces as an
+    /// error). The loop has already stopped (Buzz: `result is None:
+    /// return`); a [`LiveEvent::Stopped`] follows immediately.
     Error(String),
-    /// The loop has exited -- via cancellation or after an
-    /// [`LiveEvent::Error`] -- and will not run again. Emitted exactly
-    /// once, always last.
+    /// The loop has exited -- via cancellation (including a canceled
+    /// in-flight engine call), or after a genuine [`LiveEvent::Error`] --
+    /// and will not run again. Emitted exactly once, always last.
     Stopped {
         /// This session's realtime measurement (spec §2.8), or `None` if
         /// no batch was ever successfully transcribed this session.
@@ -230,9 +232,14 @@ fn idle_pause(sleeper: &dyn Sleeper, cancel: &CancelToken) {
 ///    skips it (RMS below `config.silence_threshold`: no engine call, no
 ///    `Text`, idle-paused same as an empty queue) or transcribes it with
 ///    the rolling prompt (starts at `config.initial_prompt`, becomes each
-///    successful call's output). An engine error emits
+///    successful call's output). A genuine engine error emits
 ///    [`LiveEvent::Error`] and ends the loop (Buzz: `result is None:
-///    return`).
+///    return`) -- but `Err(`[`EngineError::Canceled`]`)` ends the loop
+///    *silently*, no `Error` event: that variant is what a canceled
+///    in-flight call returns (see below), and a plain Stop must not look
+///    like a failure to the GUI. Buzz draws the same distinction
+///    (`recording_transcriber.py:356-359`: `if self.is_running: ...emit
+///    error...` else swallow it).
 /// 3. If no batch is ready: idle-pauses the same way.
 ///
 /// Whatever ends the loop -- cancellation or an error -- a single
@@ -313,6 +320,13 @@ pub fn run_session(
                     end: batch.end_ms,
                 });
             }
+            // A cancel-caused failure is not a genuine error -- Buzz's own
+            // transcriber distinguishes the two the same way
+            // (`recording_transcriber.py:356-359`: `if self.is_running:
+            // ...error...` else an empty, silent result). `EngineError` is
+            // `#[non_exhaustive]`, so this still needs a catch-all arm for
+            // any future variant, which is treated as a genuine error.
+            Err(EngineError::Canceled) => break,
             Err(err) => {
                 sink(LiveEvent::Error(err.to_string()));
                 break;
@@ -759,6 +773,61 @@ mod tests {
                     queue_len: 0
                 },
                 LiveEvent::Error("inference failed: boom".to_string()),
+                LiveEvent::Stopped { measurement: None },
+            ]
+        );
+    }
+
+    /// A canceled in-flight engine call (`EngineError::Canceled` -- what
+    /// `WhisperEngine::transcribe_live` returns whenever the shared
+    /// `CancelToken` fires mid-call, i.e. on every ordinary Stop that lands
+    /// while a batch is transcribing) must end the loop *silently*: no
+    /// `Error` event, just the unconditional `Stopped`. Buzz draws the same
+    /// distinction (`recording_transcriber.py:356-359`).
+    #[test]
+    fn engine_canceled_error_ends_the_loop_without_an_error_event() {
+        let (mut producer, consumer) = ring(100_000);
+        for _ in 0..80_000 {
+            producer.push(0.5).unwrap();
+        }
+
+        let mut engine_calls = 0usize;
+        let mut engine = |_samples: &[f32], _prompt: &str| {
+            engine_calls += 1;
+            Err(EngineError::Canceled)
+        };
+
+        let cancel = CancelToken::new();
+        let events: RefCell<Vec<LiveEvent>> = RefCell::new(Vec::new());
+        let sink = |event: LiveEvent| events.borrow_mut().push(event);
+
+        let meter = MeterSnapshot::new();
+        let cfg = config(RecordingMode::AppendBelow, 3.5);
+
+        run_session(
+            consumer,
+            &mut engine,
+            &meter,
+            &sink,
+            &cancel,
+            &cfg,
+            &RealClock,
+            &NoopSleeper,
+        );
+
+        assert_eq!(engine_calls, 1);
+        let events = events.into_inner();
+        assert!(
+            !events.iter().any(|e| matches!(e, LiveEvent::Error(_))),
+            "a canceled in-flight call must not surface as Error: {events:?}"
+        );
+        assert_eq!(
+            events,
+            vec![
+                LiveEvent::MeterBatch {
+                    rms: 0.5,
+                    queue_len: 0
+                },
                 LiveEvent::Stopped { measurement: None },
             ]
         );
