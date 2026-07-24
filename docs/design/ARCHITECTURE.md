@@ -90,12 +90,25 @@ pub trait SegmentSink {
     fn on_progress(&mut self, fraction: f32);
 }
 
-/// Live audio capture. Impl: cpal + rubato.
+/// Live audio capture (M5 as-built, ADR-005/ADR-021; `humm-audio::CpalCapture`).
+/// `device_id` (not a whole `&AudioDevice`, the original sketch's shape) is
+/// the stable name-based id `AudioCapture::devices()` itself returns —
+/// `None` requests the system default. The adapter resamples/downmixes
+/// inside the capture callback so `sink` always sees 16 kHz mono f32
+/// regardless of the device's native config (ADR-005's fallback path).
+/// `meter` is the shared [`MeterSnapshot`] the caller reads from every
+/// repaint; ownership of its three fields is split by writer, not shared:
+/// the capture adapter writes only `current_rms` per RT callback, while
+/// `average_rms`/`queue_len` are the session/chunker layer's own fields
+/// (Buzz's two-signal split — `RecordingAmplitudeListener` vs. the
+/// transcriber's own `queue_size_changed`/average signal — realized here as
+/// two independent writers instead of one shared, ambiguous owner).
 pub trait AudioCapture: Send {
-    fn devices(&self) -> Vec<AudioDevice>;
-    fn start(&mut self, dev: &AudioDevice, sink: RingProducer<f32>) -> Result<CaptureHandle, AudioError>;
-    // 16 kHz mono f32 guaranteed at the producer; resampling inside the adapter.
+    fn devices(&self) -> Result<Vec<AudioDevice>, AudioError>;
+    fn start(&mut self, device_id: Option<&str>, sink: rtrb::Producer<f32>,
+              meter: Arc<MeterSnapshot>) -> Result<Box<dyn CaptureHandle>, AudioError>;
 }
+pub trait CaptureHandle: Send { fn stop(self: Box<Self>); }
 
 /// Deferred-ML boundaries (designed now, implemented in late milestones — Q-3/Q-5):
 pub trait SpeechIsolator: Send + Sync { /* demucs-equivalent vocal isolation */ }
@@ -115,7 +128,7 @@ Adapter obligations (Standing Policy): startup probe (`ffmpeg -version`, `yt-dlp
 | Inference (whisper-rs) | one dedicated OS thread per running task; cancellation via whisper.cpp abort callback checking `CancelToken` | blocking, CPU/GPU-bound, long-lived; async buys nothing |
 | Task queue | `TaskRunner` thread owning a FIFO (parity: one transcription at a time); commands in via `flume` channel, `TaskEvent`s out via broadcast channel | serialized execution is a feature (GPU contention); channels replace Qt signals |
 | HTTP + subprocess I/O (model downloads, yt-dlp, OpenAI API, translator, telemetry, update check) | single shared **tokio** multi-thread runtime owned by `CoreServices`; `tokio::process` for subprocess streaming | genuinely concurrent I/O; reqwest streams; kill-on-cancel |
-| Audio capture | cpal's real-time callback thread → lock-free SPSC ring buffer (`rtrb`) → chunker thread (RMS silence-cut port of Buzz's algorithm) | never allocate/lock in the audio callback |
+| Audio capture (M5 as-built, ADR-021) | cpal's real-time callback thread (`CpalCapture`, `humm-audio`) → lock-free SPSC ring buffer (`rtrb`) → **one session thread per active recording**, owning `humm_core::live::session::run_session` (drains the ring into `live::chunker`'s accumulation queue, runs the silence-cut/skip state machine, calls the loaded `WhisperEngine` synchronously per chunk, emits `LiveEvent`s over an `mpsc` the GUI drains each frame). While the recording window is open but **not** recording, the same capture adapter instead feeds a lighter drain-and-discard thread (`humm-gui::recording::MeterOnlyDrain`, Buzz's `RecordingAmplitudeListener` parity — 1 s RMS accumulation, no chunker) — starting a real recording tears this down first (two capture streams on one device are avoided, spec §1.1) | never allocate/lock in the audio callback; the session thread is the one place chunker state, the engine, and export/upload/store writes all live, so a Stop's cooperative cancel has exactly one thread to wait on |
 | Playback (M4 as-built, ADR-019) | cpal output stream whose **fill callback reads straight from the whole-file in-memory `PlaybackPcm`** (no feeder thread / no `rtrb` ring — there is no I/O-bound producer to decouple, so all playback logic runs inside the fill closure); position published via one packed `{generation, frame}` `AtomicU64` (the A/V master clock), seeks published by a single CAS so a lost seek is impossible; **varispeed by linear interpolation** over a fractional source cursor (sample-exact frame accounting the loop-wrap + A/V clock depend on — rubato's priming delay would offset the clock, so rubato is used only for device-rate conversion inside `CpalOutput`) | sample-accurate seek/loop without a media framework; pitch-shifting varispeed that actually works (Buzz's was mute) |
 | GUI | eframe event loop; subscribes to `TaskEvent` receivers; `Context::request_repaint()` on event arrival | zero idle CPU, no polling |
 | CLI | blocks on the same core APIs; renders events to stderr progress + `--json` lines | identical core path as GUI (parity by construction) |

@@ -14,6 +14,7 @@ pub mod events;
 pub mod format;
 pub mod i18n;
 pub mod import;
+pub mod live_fixture;
 pub mod live_session;
 pub mod logging;
 pub mod models_ui;

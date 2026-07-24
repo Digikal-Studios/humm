@@ -8,11 +8,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use humm_core::boundary::{AudioCapture, TaskStore};
+use humm_core::boundary::{AudioCapture, AudioDecoder, TaskStore};
 use humm_core::cancel::CancelToken;
-use humm_core::domain::{ModelSpec, Segment, Source, Status, TranscriptionId};
+use humm_core::domain::{ModelSize, ModelSpec, Segment, Source, Status, TranscriptionId};
 use humm_core::env::use_gpu_from_env;
 use humm_core::error::{CoreError, EngineError};
 use humm_core::live::{RecordingMode, SessionConfig, effective_upload_url};
@@ -26,6 +26,7 @@ use crate::engine_factory::DownloaderEnsurer;
 use crate::events::{self, SharedEventQueue};
 use crate::i18n::tr;
 use crate::import::{FileDialogs, ImportRequest, RfdFileDialogs, scan_folder};
+use crate::live_fixture::FixtureCapture;
 use crate::live_session::{
     self, LiveEngineFactory, LiveEngineSession, LiveSessionRequest, LiveStore, LiveUpload,
     SessionMessage, UploadFactory,
@@ -219,6 +220,14 @@ pub struct HummApp {
     /// `Some` once armed, used to detect when its window has auto-closed at
     /// end-of-media so the app itself can then shut down cleanly.
     smoke_viewer_id: Option<TranscriptionId>,
+    /// `HUMM_SMOKE_LIVE_FIXTURE`'s own state machine
+    /// ([`HummApp::apply_smoke_live_fixture_tick`], spec §8 acceptance item
+    /// 1): `None` until the hook opens the recording window and clicks
+    /// Record (the recording window's own `RecordingVm` — reachable via
+    /// `self.recording` — is the source of truth for whether a session is
+    /// still active; this only remembers *when* Record was clicked and
+    /// whether Stop has been latched yet).
+    smoke_live_fixture_state: Option<SmokeLiveFixtureState>,
 }
 
 impl HummApp {
@@ -245,6 +254,8 @@ impl HummApp {
                 .ok()
                 .as_deref(),
             std::env::var("HUMM_SMOKE_OPEN_VIEWER").ok().as_deref(),
+            std::env::var("HUMM_SMOKE_LIVE_FIXTURE").ok().as_deref(),
+            std::env::var("HUMM_SMOKE_LIVE_SECONDS").ok().as_deref(),
         );
         let use_gpu = use_gpu_from_env(std::env::var("HUMM_FORCE_CPU").ok().as_deref());
         // Mirrors `services::init`'s own `DownloaderEnsurer` construction
@@ -257,12 +268,51 @@ impl HummApp {
             settings: Arc::clone(&services.settings),
             coreml: cfg!(all(target_os = "macos", target_arch = "aarch64")),
         });
+        // `HUMM_SMOKE_LIVE_FIXTURE` (M5 Task 14, spec §8 item 1): swap the
+        // real `CpalCapture` for a `FixtureCapture` decoded from the given
+        // media path — see that module's doc for why (a real mic open hangs
+        // on an unanswered TCC prompt in this environment; the live
+        // realtime-fit acceptance run needs *some* wall-clock-paced audio
+        // source feeding the real session). Everything else about this
+        // build stays the real production path (real model ensurer, real
+        // engine factory, real store) — only the capture adapter changes.
+        // A decode failure (bad path, no ffmpeg) logs and falls back to the
+        // real `CpalCapture`, leaving the app otherwise unaffected; the
+        // corresponding `apply_smoke_live_fixture_tick` no-ops whenever
+        // `smoke_hooks.live_fixture` is `None`, which
+        // `smoke_hooks_from_env`'s own contract guarantees here too (a
+        // failed decode never sets it, see below).
+        let mut smoke_hooks = smoke_hooks;
+        let capture: Box<dyn AudioCapture> = match &smoke_hooks.live_fixture {
+            Some(path) => match FfmpegDecoder::new().decode(path, &CancelToken::new()) {
+                Ok(pcm) => {
+                    let samples = pcm.samples().to_vec();
+                    log::info!(
+                        "HUMM_SMOKE_LIVE_FIXTURE: decoded {} samples (~{:.1}s at 16 kHz) from {}",
+                        samples.len(),
+                        samples.len() as f64 / f64::from(humm_core::boundary::SAMPLE_RATE),
+                        path.display()
+                    );
+                    Box::new(FixtureCapture::new(samples))
+                }
+                Err(err) => {
+                    log::warn!(
+                        "HUMM_SMOKE_LIVE_FIXTURE: could not decode {}: {err} — falling back to \
+                         the real microphone capture (the smoke hook will not fire)",
+                        path.display()
+                    );
+                    smoke_hooks.live_fixture = None;
+                    Box::new(humm_audio::CpalCapture::new())
+                }
+            },
+            None => Box::new(humm_audio::CpalCapture::new()),
+        };
         Self::build(
             services,
             Some(event_queue),
             argv_import,
             smoke_hooks,
-            Box::new(humm_audio::CpalCapture::new()),
+            capture,
             model_ensurer,
             Arc::new(live_session::RealLiveEngineFactory) as Arc<dyn LiveEngineFactory>,
             Arc::new(live_session::RealUploadFactory) as Arc<dyn UploadFactory>,
@@ -454,6 +504,7 @@ impl HummApp {
             smoke_frame_count: 0,
             smoke_viewer_opened: false,
             smoke_viewer_id: None,
+            smoke_live_fixture_state: None,
         }
     }
 
@@ -1071,6 +1122,121 @@ impl HummApp {
         } else {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+    }
+
+    /// Drives the `HUMM_SMOKE_LIVE_FIXTURE` acceptance hook (spec §8 item 1,
+    /// M5 Task 14): a no-op whenever `smoke_hooks.live_fixture` is `None`
+    /// (unset, or a decode failure already cleared it in [`Self::new`]).
+    /// Otherwise, a small state machine — mirrors
+    /// [`Self::apply_smoke_open_viewer_once`]'s one-shot-then-poll shape,
+    /// but this hook has three phases instead of two because a live
+    /// recording session, unlike opening a viewer, needs an explicit
+    /// Stop before it can close:
+    ///
+    /// 1. **First call**: opens the recording window exactly like the
+    ///    toolbar Record button / Ctrl+R would
+    ///    ([`Self::open_recording_window`]), forces the model size to
+    ///    [`ModelSize::Small`] (the acceptance run's own requirement,
+    ///    spec §8 item 1 — independent of whatever `settings.recording`
+    ///    happens to have persisted), then calls
+    ///    [`crate::recording::RecordingVm::on_record_clicked`] — the exact
+    ///    function the real button's click handler calls — which latches
+    ///    `StartRequested`; [`Self::harvest_recording_intent`] (already
+    ///    called every root frame) spawns the real session moments later.
+    /// 2. **While recording**: once `smoke_hooks.live_fixture_seconds` has
+    ///    elapsed since the click, calls `on_record_clicked` a second time
+    ///    (Recording → Stopping, the same function a Stop click uses) —
+    ///    exactly one stop request is ever latched
+    ///    (`SmokeLiveFixtureState::StopRequested` guards it).
+    /// 3. **Waiting for Stopped**: once the real session's `Stopped`
+    ///    message has flowed through [`Self::finish_live_session`] and
+    ///    restored [`crate::recording::RecordingStatus::Stopped`], sets
+    ///    `close_requested` directly (the same field a real window-close
+    ///    while stopped would set) so [`Self::harvest_recording_close`]
+    ///    (already called every root frame) persists sticky prefs and drops
+    ///    the window on its own next pass; once `self.recording` is gone,
+    ///    requests a normal root-viewport close so the process exits
+    ///    cleanly, matching [`Self::apply_smoke_viewer_tick`]'s own
+    ///    "wait for the child to actually close, then close the root"
+    ///    shape.
+    ///
+    /// `ctx.request_repaint()` is called on every branch short of the final
+    /// close (same rationale as [`Self::apply_smoke_auto_close`]'s own doc
+    /// comment: this deliberately defeats zero-idle-CPU, but only while this
+    /// hook is active).
+    fn apply_smoke_live_fixture_tick(&mut self, ctx: &egui::Context) {
+        let Some(seconds) = (self.smoke_hooks.live_fixture.is_some())
+            .then_some(self.smoke_hooks.live_fixture_seconds)
+        else {
+            return;
+        };
+
+        let Some(state) = self.smoke_live_fixture_state else {
+            self.open_recording_window();
+            let Some(vm_arc) = self.recording.clone() else {
+                log::warn!("HUMM_SMOKE_LIVE_FIXTURE: recording window failed to open");
+                return;
+            };
+            {
+                let mut vm = vm_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                vm.options.model_size = ModelSize::Small;
+                vm.on_record_clicked(&self.recording_deps);
+                // Also opens the presentation window as a real OS window for
+                // the run's duration (F-065 windowed evidence, spec §8 item
+                // 1's neighboring acceptance concern) — equivalent to a
+                // "Show" click on the presentation bar, which only renders
+                // while recording (`presentation_bar_visible`, just set true
+                // by `on_record_clicked` above).
+                vm.presentation.open = true;
+            }
+            log::info!("HUMM_SMOKE_LIVE_FIXTURE: Record clicked (small model), {seconds}s window");
+            self.smoke_live_fixture_state = Some(SmokeLiveFixtureState {
+                started: Instant::now(),
+                stop_requested: false,
+            });
+            ctx.request_repaint();
+            return;
+        };
+
+        let Some(vm_arc) = self.recording.clone() else {
+            // The window has already closed (the third phase below just
+            // finished it) — request the app shutdown that phase deferred
+            // to this next tick.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        };
+
+        if !state.stop_requested {
+            if state.started.elapsed() >= Duration::from_secs(u64::from(seconds)) {
+                log::info!("HUMM_SMOKE_LIVE_FIXTURE: {seconds}s window elapsed, requesting stop");
+                vm_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .on_record_clicked(&self.recording_deps);
+                self.smoke_live_fixture_state = Some(SmokeLiveFixtureState {
+                    stop_requested: true,
+                    ..state
+                });
+            }
+            ctx.request_repaint();
+            return;
+        }
+
+        let stopped = vm_arc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .status
+            == RecordingStatus::Stopped;
+        if stopped {
+            log::info!("HUMM_SMOKE_LIVE_FIXTURE: session stopped, closing recording window");
+            vm_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .close_requested = true;
+        }
+        ctx.request_repaint();
     }
 
     /// Drains `services.update_rx` and applies every [`UpdateNotice`] this
@@ -1852,6 +2018,11 @@ impl HummApp {
                         &settings_path,
                     );
                 });
+                // `HUMM_SMOKE_METER_FRAME_LOG` acceptance instrumentation
+                // (M5 Task 14 item 5): one sample per actual redraw of this
+                // deferred viewport — a no-op unless the hook is armed (see
+                // `RecordingVm::record_meter_frame`'s own doc).
+                vm.record_meter_frame();
                 if std::mem::take(&mut vm.focus_requested) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
@@ -2696,13 +2867,26 @@ impl UploadFactory for UnwiredUploadFactory {
     }
 }
 
+/// Default `HUMM_SMOKE_LIVE_FIXTURE` recording window, used whenever
+/// `HUMM_SMOKE_LIVE_SECONDS` is unset/invalid: long enough to be a genuine
+/// "windowed multi-minute run" (spec §8 acceptance item 1) and, at the
+/// fixture pacing thread's real wall-clock rate, to loop past a ~2-minute
+/// fixture (Buzz's `audio-long.mp3`) at least once.
+const DEFAULT_LIVE_FIXTURE_SECONDS: u32 = 200;
+
 /// Environment-gated smoke-test hooks (see the `smoke_hooks` field doc on
 /// [`HummApp`]): parsed once, at construction, from
 /// `HUMM_SMOKE_OPEN_WINDOWS`/`HUMM_SMOKE_AUTO_CLOSE_FRAMES`/
-/// `HUMM_SMOKE_OPEN_VIEWER`. Exist solely so the `gui-manual` windowed smokes
-/// (`docs/gui-manual/M3.md` item 35, `docs/gui-manual/M4.md`'s A/V-drift run)
-/// can run without OS input injection — test-only, unstable, documented as
-/// such in `docs/HUMM_SURFACE.md` §5.1.
+/// `HUMM_SMOKE_OPEN_VIEWER`/`HUMM_SMOKE_LIVE_FIXTURE`/
+/// `HUMM_SMOKE_LIVE_SECONDS`. Exist solely so the `gui-manual` windowed
+/// smokes (`docs/gui-manual/M3.md` item 35, `docs/gui-manual/M4.md`'s
+/// A/V-drift run, `docs/gui-manual/M5.md`'s live realtime-fit run) can run
+/// without OS input injection — test-only, unstable, documented as such in
+/// `docs/HUMM_SURFACE.md` §5.1.
+///
+/// See also [`SmokeLiveFixtureState`], the small state machine
+/// [`HummApp::apply_smoke_live_fixture_tick`] drives once `live_fixture`
+/// below is `Some`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct SmokeHooks {
     /// `HUMM_SMOKE_OPEN_WINDOWS` was set to any non-empty value.
@@ -2715,9 +2899,22 @@ struct SmokeHooks {
     /// close the app once playback finishes (the A/V-drift acceptance run,
     /// F-083). `None` when unset or empty.
     open_viewer: Option<PathBuf>,
+    /// `HUMM_SMOKE_LIVE_FIXTURE` = a media path: the live realtime-fit
+    /// acceptance hook (spec §8 item 1, M5 Task 14). `None` when unset,
+    /// empty, **or** the path failed to decode at construction (`Self::new`
+    /// clears it on a decode error rather than leaving a dangling hook that
+    /// would never fire) — so by the time [`HummApp::apply_smoke_live_fixture_tick`]
+    /// ever sees `Some`, the paired `FixtureCapture` is already wired into
+    /// `recording_deps.capture` with real, decoded samples.
+    live_fixture: Option<PathBuf>,
+    /// `HUMM_SMOKE_LIVE_SECONDS` parsed as a positive `u32`, the recording
+    /// window's duration before the hook auto-stops it —
+    /// [`DEFAULT_LIVE_FIXTURE_SECONDS`] when unset, empty, zero, or
+    /// unparseable. Only consulted when `live_fixture` is `Some`.
+    live_fixture_seconds: u32,
 }
 
-/// Pure parse of the three smoke-hook env values into a [`SmokeHooks`]. Takes
+/// Pure parse of the five smoke-hook env values into a [`SmokeHooks`]. Takes
 /// `Option<&str>` (the already-`std::env::var(..).ok()`'d value) rather than
 /// reading the environment itself, so it's directly unit-testable without
 /// mutating real process-global env state.
@@ -2725,6 +2922,8 @@ fn smoke_hooks_from_env(
     open: Option<&str>,
     close: Option<&str>,
     open_viewer: Option<&str>,
+    live_fixture: Option<&str>,
+    live_fixture_seconds: Option<&str>,
 ) -> SmokeHooks {
     let open_windows = open.is_some_and(|value| !value.is_empty());
     let auto_close_frames = close
@@ -2733,11 +2932,33 @@ fn smoke_hooks_from_env(
     let open_viewer = open_viewer
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
+    let live_fixture = live_fixture
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let live_fixture_seconds = live_fixture_seconds
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|&secs| secs > 0)
+        .unwrap_or(DEFAULT_LIVE_FIXTURE_SECONDS);
     SmokeHooks {
         open_windows,
         auto_close_frames,
         open_viewer,
+        live_fixture,
+        live_fixture_seconds,
     }
+}
+
+/// The `HUMM_SMOKE_LIVE_FIXTURE` hook's own progress
+/// ([`HummApp::apply_smoke_live_fixture_tick`]): `started` is when
+/// `on_record_clicked` was called (Record), so the tick knows when
+/// `smoke_hooks.live_fixture_seconds` has elapsed; `stop_requested` guards
+/// against latching a second Stop intent while waiting for the session's
+/// `Stopped` acknowledgement. `Copy` (both fields are) so the tick can read
+/// it out of `Option<SmokeLiveFixtureState>` without borrowing `self`.
+#[derive(Debug, Clone, Copy)]
+struct SmokeLiveFixtureState {
+    started: Instant,
+    stop_requested: bool,
 }
 
 /// Builds a minimal file-import [`humm_core::domain::TaskSpec`] for the
@@ -2788,6 +3009,7 @@ impl eframe::App for HummApp {
         self.apply_smoke_open_viewer_once(Instant::now());
         self.apply_smoke_auto_close(ui.ctx());
         self.apply_smoke_viewer_tick(ui.ctx());
+        self.apply_smoke_live_fixture_tick(ui.ctx());
         self.drain_pending_argv_import();
         self.drain_update_notices();
         self.drain_app_events();
@@ -2928,24 +3150,24 @@ mod tests {
 
     #[test]
     fn smoke_hooks_from_env_open_nonempty_sets_open_windows_true() {
-        assert!(smoke_hooks_from_env(Some("1"), None, None).open_windows);
-        assert!(smoke_hooks_from_env(Some("anything"), None, None).open_windows);
+        assert!(smoke_hooks_from_env(Some("1"), None, None, None, None).open_windows);
+        assert!(smoke_hooks_from_env(Some("anything"), None, None, None, None).open_windows);
     }
 
     #[test]
     fn smoke_hooks_from_env_open_empty_or_absent_leaves_open_windows_false() {
-        assert!(!smoke_hooks_from_env(None, None, None).open_windows);
-        assert!(!smoke_hooks_from_env(Some(""), None, None).open_windows);
+        assert!(!smoke_hooks_from_env(None, None, None, None, None).open_windows);
+        assert!(!smoke_hooks_from_env(Some(""), None, None, None, None).open_windows);
     }
 
     #[test]
     fn smoke_hooks_from_env_close_positive_integer_parses_to_some() {
         assert_eq!(
-            smoke_hooks_from_env(None, Some("5"), None).auto_close_frames,
+            smoke_hooks_from_env(None, Some("5"), None, None, None).auto_close_frames,
             Some(5)
         );
         assert_eq!(
-            smoke_hooks_from_env(None, Some("1"), None).auto_close_frames,
+            smoke_hooks_from_env(None, Some("1"), None, None, None).auto_close_frames,
             Some(1)
         );
     }
@@ -2953,7 +3175,7 @@ mod tests {
     #[test]
     fn smoke_hooks_from_env_close_zero_is_none() {
         assert_eq!(
-            smoke_hooks_from_env(None, Some("0"), None).auto_close_frames,
+            smoke_hooks_from_env(None, Some("0"), None, None, None).auto_close_frames,
             None
         );
     }
@@ -2961,7 +3183,7 @@ mod tests {
     #[test]
     fn smoke_hooks_from_env_close_garbage_is_none() {
         assert_eq!(
-            smoke_hooks_from_env(None, Some("not-a-number"), None).auto_close_frames,
+            smoke_hooks_from_env(None, Some("not-a-number"), None, None, None).auto_close_frames,
             None
         );
     }
@@ -2969,11 +3191,11 @@ mod tests {
     #[test]
     fn smoke_hooks_from_env_close_absent_or_empty_is_none() {
         assert_eq!(
-            smoke_hooks_from_env(None, None, None).auto_close_frames,
+            smoke_hooks_from_env(None, None, None, None, None).auto_close_frames,
             None
         );
         assert_eq!(
-            smoke_hooks_from_env(None, Some(""), None).auto_close_frames,
+            smoke_hooks_from_env(None, Some(""), None, None, None).auto_close_frames,
             None
         );
     }
@@ -2981,11 +3203,53 @@ mod tests {
     #[test]
     fn smoke_hooks_from_env_open_viewer_nonempty_is_some_path_empty_is_none() {
         assert_eq!(
-            smoke_hooks_from_env(None, None, Some("/tmp/av-drift.mp4")).open_viewer,
+            smoke_hooks_from_env(None, None, Some("/tmp/av-drift.mp4"), None, None).open_viewer,
             Some(PathBuf::from("/tmp/av-drift.mp4"))
         );
-        assert_eq!(smoke_hooks_from_env(None, None, Some("")).open_viewer, None);
-        assert_eq!(smoke_hooks_from_env(None, None, None).open_viewer, None);
+        assert_eq!(
+            smoke_hooks_from_env(None, None, Some(""), None, None).open_viewer,
+            None
+        );
+        assert_eq!(
+            smoke_hooks_from_env(None, None, None, None, None).open_viewer,
+            None
+        );
+    }
+
+    #[test]
+    fn smoke_hooks_from_env_live_fixture_nonempty_is_some_path_empty_is_none() {
+        assert_eq!(
+            smoke_hooks_from_env(None, None, None, Some("/tmp/audio-long.mp3"), None).live_fixture,
+            Some(PathBuf::from("/tmp/audio-long.mp3"))
+        );
+        assert_eq!(
+            smoke_hooks_from_env(None, None, None, Some(""), None).live_fixture,
+            None
+        );
+        assert_eq!(
+            smoke_hooks_from_env(None, None, None, None, None).live_fixture,
+            None
+        );
+    }
+
+    #[test]
+    fn smoke_hooks_from_env_live_fixture_seconds_defaults_and_parses() {
+        assert_eq!(
+            smoke_hooks_from_env(None, None, None, None, None).live_fixture_seconds,
+            DEFAULT_LIVE_FIXTURE_SECONDS
+        );
+        assert_eq!(
+            smoke_hooks_from_env(None, None, None, None, Some("0")).live_fixture_seconds,
+            DEFAULT_LIVE_FIXTURE_SECONDS
+        );
+        assert_eq!(
+            smoke_hooks_from_env(None, None, None, None, Some("not-a-number")).live_fixture_seconds,
+            DEFAULT_LIVE_FIXTURE_SECONDS
+        );
+        assert_eq!(
+            smoke_hooks_from_env(None, None, None, None, Some("45")).live_fixture_seconds,
+            45
+        );
     }
 }
 

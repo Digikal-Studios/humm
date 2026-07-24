@@ -44,3 +44,4 @@ Marked "Currently unused, but kept for future reference" in source. Treating as 
 
 ## Q-10 — Live-session persistence
 Buzz does not save live-recording transcripts to the DB (J-5 ⚠). Parity says "don't have to"; UX_SPEC will likely add saving as an improvement. Confirm this addition is wanted. — *Status: RESOLVED — improvement approved by user 2026-07-20 (design in Phase 1 UX_SPEC)*
+— *Shipped M5: `insert_live_session`/`append_live_segment`/`complete_live_session` + the live-aware stale-flip special case (ADR-021, `docs/analysis/PARITY_MATRIX.md` F-060/F-061 rows). Confirmed in the Task 14 windowed acceptance run — a live session's row survived a full process restart and remained openable.*

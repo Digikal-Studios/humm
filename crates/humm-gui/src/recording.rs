@@ -27,10 +27,12 @@
 //! never touches `queue_len` either (only a real recording's chunker does),
 //! so this drain leaves it untouched (always 0 in meter-only mode).
 
+use std::io::{BufWriter, Write};
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use humm_core::boundary::{AudioCapture, AudioDevice, CaptureHandle, MeterSnapshot, SAMPLE_RATE};
 use humm_core::cancel::CancelToken;
@@ -54,6 +56,65 @@ const RING_CAPACITY: usize = SAMPLE_RATE as usize;
 /// own listener is callback-driven and has no equivalent constant; this is
 /// the polling-loop price of humm's ring-buffer threading model, spec §1.1).
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// The env-gated meter-repaint-cadence log (`HUMM_SMOKE_METER_FRAME_LOG`, M5
+/// Task 14 acceptance item 5): appends one epoch-millisecond line every time
+/// the recording window actually redraws while
+/// [`RecordingStatus::Recording`] (the meter is animating — spec §2.5's
+/// ~30 ms repaint-while-visible cadence, `views::audio_meter`) — the
+/// consecutive-line deltas *are* the observed frame-to-frame interval, so a
+/// windowed run's cadence/jank can be computed from this file after the
+/// fact, the same after-the-run-parse shape as [`crate::viewer::DriftLog`]
+/// (which this mirrors byte-for-byte in structure). Buffered, flushed on
+/// drop; absent unless the env var points at a writable path.
+pub(crate) struct MeterFrameLog {
+    writer: BufWriter<std::fs::File>,
+}
+
+impl MeterFrameLog {
+    /// Opens (create-or-append) a frame log at `path`, or `None` if it
+    /// cannot be opened. Split from [`Self::from_env`] (mirrors
+    /// [`crate::viewer::DriftLog::open`]'s own split) so a unit test can
+    /// exercise the write/flush path against a temp file without mutating
+    /// real process env.
+    pub(crate) fn open(path: &Path) -> Option<Self> {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+            .map(|file| MeterFrameLog {
+                writer: BufWriter::new(file),
+            })
+    }
+
+    /// Opens the frame log named by `HUMM_SMOKE_METER_FRAME_LOG`, or `None`
+    /// when the var is unset/empty or the path cannot be opened.
+    fn from_env() -> Option<Self> {
+        let path = std::env::var_os("HUMM_SMOKE_METER_FRAME_LOG")?;
+        if path.is_empty() {
+            return None;
+        }
+        Self::open(Path::new(&path))
+    }
+
+    /// Appends one line: milliseconds since the Unix epoch (best-effort — a
+    /// write error is dropped rather than crashing the recording window;
+    /// this is test-only instrumentation).
+    pub(crate) fn record_now(&mut self) {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let _ = writeln!(self.writer, "{millis}");
+    }
+}
+
+impl Drop for MeterFrameLog {
+    fn drop(&mut self) {
+        let _ = self.writer.flush();
+    }
+}
 
 /// Buzz `RecordingTranscriberWidget.RecordingStatus` (`:88-90`), extended
 /// with a third, humm-only [`RecordingStatus::Stopping`] state: Buzz encodes
@@ -452,6 +513,12 @@ pub struct RecordingVm {
     meter_only_handle: Option<Box<dyn CaptureHandle>>,
     meter_only_cancel: Option<CancelToken>,
     meter_only_thread: Option<JoinHandle<()>>,
+    /// `HUMM_SMOKE_METER_FRAME_LOG` acceptance instrumentation (M5 Task 14,
+    /// spec §8 item 5) — opened on Record, flushed (via [`MeterFrameLog`]'s
+    /// `Drop`) on Stop. `None` for the entire lifetime of every ordinary
+    /// (non-smoke) run, since the env var is never set outside a Task 14
+    /// windowed acceptance invocation.
+    meter_frame_log: Option<MeterFrameLog>,
 }
 
 impl RecordingVm {
@@ -503,6 +570,7 @@ impl RecordingVm {
             meter_only_handle: None,
             meter_only_cancel: None,
             meter_only_thread: None,
+            meter_frame_log: None,
         };
         vm.start_meter_only_capture(deps);
         vm
@@ -560,12 +628,31 @@ impl RecordingVm {
                 self.prep = None;
                 self.session_id = None;
                 self.pending_intent = Some(RecordingIntent::StartRequested);
+                self.meter_frame_log = MeterFrameLog::from_env();
             }
             RecordingStatus::Recording => {
                 self.status = RecordingStatus::Stopping;
                 self.pending_intent = Some(RecordingIntent::StopRequested);
             }
             RecordingStatus::Stopping => {}
+        }
+    }
+
+    /// Records one meter-repaint-cadence sample (`HUMM_SMOKE_METER_FRAME_LOG`,
+    /// M5 Task 14 acceptance item 5) — a no-op unless the log is armed
+    /// (`Self::meter_frame_log`, only ever `Some` during a
+    /// `HUMM_SMOKE_LIVE_FIXTURE` windowed acceptance run) **and**
+    /// [`Self::status`] is [`RecordingStatus::Recording`] (the meter is
+    /// actually animating then — spec §2.5). Called once per actual
+    /// recording-window redraw from `app.rs::show_recording_viewport`'s
+    /// deferred-viewport closure, i.e. at the window's own real repaint
+    /// cadence, not once per root frame.
+    pub(crate) fn record_meter_frame(&mut self) {
+        if self.status != RecordingStatus::Recording {
+            return;
+        }
+        if let Some(log) = &mut self.meter_frame_log {
+            log.record_now();
         }
     }
 
@@ -603,6 +690,7 @@ impl RecordingVm {
         self.copy_bar_visible = true;
         self.prep = None;
         self.start_meter_only_capture(deps);
+        self.meter_frame_log = None; // flushes via MeterFrameLog::Drop
         self.presentation.flush_pending_save(presentation_settings)
     }
 
@@ -711,6 +799,48 @@ mod tests {
             name: name.to_string(),
             is_default,
         }
+    }
+
+    // -- MeterFrameLog ----------------------------------------------------------
+
+    #[test]
+    fn meter_frame_log_writes_one_line_per_record_and_flushes_on_drop() {
+        // Mirrors `viewer::tests::drift_log_writes_pairs_when_env_set`'s own
+        // "inject the path, don't mutate real process env" shape.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("meter-frames.log");
+        {
+            let mut log = MeterFrameLog::open(&path).expect("open meter frame log");
+            log.record_now();
+            log.record_now();
+        } // drop flushes the buffered writer
+        let lines: Vec<i64> = std::fs::read_to_string(&path)
+            .expect("read")
+            .lines()
+            .map(|line| line.parse().expect("epoch millis line"))
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1] >= lines[0]);
+    }
+
+    #[test]
+    fn record_meter_frame_only_writes_while_recording() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("meter-frames.log");
+        let deps = mock_deps(vec![device("a", "Device A", true)]);
+        let mut vm = RecordingVm::open(&deps, &Settings::default());
+        vm.meter_frame_log = MeterFrameLog::open(&path);
+
+        // Stopped: no-op.
+        vm.record_meter_frame();
+        // Recording: writes.
+        vm.status = RecordingStatus::Recording;
+        vm.record_meter_frame();
+        vm.record_meter_frame();
+        vm.meter_frame_log = None; // flush
+
+        let written = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(written.lines().count(), 2);
     }
 
     // -- default_device_selection ---------------------------------------------

@@ -141,6 +141,9 @@ upload, F-064).
 | `HUMM_SMOKE_OPEN_WINDOWS` / `HUMM_SMOKE_AUTO_CLOSE_FRAMES` | Test-only, unstable — smoke-test hooks, not user surface. Drive the `docs/gui-manual/M3.md` windowed multi-window/clean-shutdown smoke under a controller with no OS input-injection access (`app.rs`'s `SmokeHooks`): the first opens the About/Preferences viewports on the first frame; the second requests a normal window close after that many frames. |
 | `HUMM_SMOKE_OPEN_VIEWER` | Test-only, unstable — A/V-drift acceptance hook, not user surface (`app.rs`'s `SmokeHooks`, F-083). Set to a media-file path: on the first frame humm seeds a completed transcript row for it, opens its viewer through the normal open path, auto-starts playback once the player is ready, and requests a clean app shutdown once playback reaches end-of-media (`ViewerVm::smoke_autoplay`/`drive_smoke_playback`) — the deferred-viewport analogue of `HUMM_SMOKE_OPEN_WINDOWS`, so the windowed 10-min A/V-drift run (`docs/gui-manual/M4.md`, `docs/benchmarks/M4.md`) runs without OS input injection. Pair with `HUMM_SMOKE_AV_DRIFT_LOG` to capture the pairs. Unset or empty ⇒ inert. |
 | `HUMM_SMOKE_AV_DRIFT_LOG` | Test-only, unstable — A/V-sync acceptance instrumentation, not user surface (F-083, `viewer.rs`'s `DriftLog`). When set to a writable file path and the open transcript is video, the viewer appends one `audio_ms,frame_ts_ms` CSV line per rendered video frame (audio position = master clock vs. the displayed frame's presentation timestamp). Feeds the windowed 10-min ±50 ms p95 drift check in the Task 14 gui-manual run over a generated `testsrc2`+`sine` fixture. Unset or empty ⇒ no log. |
+| `HUMM_SMOKE_LIVE_FIXTURE` | Test-only, unstable — live realtime-fit acceptance hook, not user surface (M5 Task 14, spec §8 item 1, `app.rs`'s `SmokeHooks`). Set to a media-file path: on construction humm decodes it once via the real `AudioDecoder` (ffmpeg) and swaps the recording window's capture adapter for `humm_gui::live_fixture::FixtureCapture` (a wall-clock-paced, looping stand-in feeding the same `rtrb`/`MeterSnapshot` boundary a real device would) instead of `CpalCapture` — the workaround for this environment's standing microphone-TCC blocker (`.superpowers/sdd/task-5-report.md`), so the acceptance run still exercises the real recording window, the real `WhisperEngine`, and real fixture audio, just not a real microphone. On the first frame the hook opens the recording window, forces the model size to `small`, and clicks Record; after `HUMM_SMOKE_LIVE_SECONDS` it clicks Stop, then closes the window and the app once the session's `Stopped` acknowledgement lands. A decode failure logs a warning, falls back to the real `CpalCapture`, and leaves the hook permanently inert for that run (never blocks ordinary use). Unset or empty ⇒ inert. |
+| `HUMM_SMOKE_LIVE_SECONDS` | Test-only, unstable — companion to `HUMM_SMOKE_LIVE_FIXTURE` (M5 Task 14): how many seconds the hook records before clicking Stop. Parsed as a positive `u32`; unset, empty, zero, or unparseable falls back to 200 s (long enough to be a genuine "windowed multi-minute run" and to loop past a ~2-minute fixture at least once). Ignored when `HUMM_SMOKE_LIVE_FIXTURE` is unset. |
+| `HUMM_SMOKE_METER_FRAME_LOG` | Test-only, unstable — meter-repaint-cadence acceptance instrumentation, not user surface (M5 Task 14, spec §8 item 5, `recording.rs`'s `MeterFrameLog`). When set to a writable file path, the recording window appends one epoch-millisecond line every time it actually redraws while `RecordingStatus::Recording` (the meter is animating) — consecutive-line deltas are the observed frame-to-frame interval, the same after-the-run-parse shape as `HUMM_SMOKE_AV_DRIFT_LOG`. Unset or empty ⇒ no log. |
 
 ## 6. File locations (macOS defaults shown)
 
@@ -206,6 +209,45 @@ than opened (forward-compat guard). Resizer-created rows
 the only writers of `status`/`progress` outside the queue — those rows never
 enter the queue, so ADR-018's "queue owns status transitions" invariant (scoped
 to queue-executed tasks) is preserved.
+
+### 6.2 Recording & presentation settings (`[recording]`/`[presentation]`)
+
+Live recording (F-060..F-065, M5) adds two `settings.toml` sections, saved via
+the same diff-on-change pattern as `[viewer]` — `mode`/`hide_unconfirmed`/every
+export field/`upload_url` save **immediately** (Buzz's own `on_*_changed`
+handlers write straight through); `language`/`task`/`model_size`/
+`initial_prompt`/`silence_threshold`/`line_separator`/`transcription_step` are
+mutated live on the shared `RecordingOptions` object and only persisted when
+the recording window closes (Buzz's `_do_close`/`closeEvent` save, spec §6).
+
+`[recording]`:
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `language` / `task` / `model_size` / `initial_prompt` | `Option<String>` | `None` | Sticky options-group prefill, same resolution rule as the file-transcriber sheet. |
+| `silence_threshold` | f32 | `0.0025` | RMS floor below which a batch is skipped. Clamped `0.0..=1.0` on load. |
+| `line_separator` | String | `"\n\n"` | Separator between append-below/append-above utterances (stored literal; the advanced sheet edits it escaped). |
+| `transcription_step` | f64 | `3.5` | Append-and-correct chunk size (seconds). Clamped `2.0..=5.0` on load. |
+| `mode` | usize | `0` | Display mode index (0 = Append below, 1 = Append above, 2 = Append and correct — Buzz `RecordingTranscriberMode` declaration order; UX_SPEC §6). |
+| `hide_unconfirmed` | bool | `true` | Hide the last (unconfirmed) utterance's tail in append-and-correct mode. |
+| `export_enabled` | bool | `false` | Live TXT/CSV export on/off. |
+| `export_folder` / `export_file_name` | `Option<...>` | `None` | Export directory / custom filename template; `None` folder disables export for the session even if `export_enabled`. |
+| `export_file_type` | String | `"txt"` | `"txt"` or `"csv"`. |
+| `export_max_entries` | u32 | `0` | `0` = keep all entries; else cap, range `0..=99` (clamped on load). |
+| `upload_url` | `Option<String>` | `None` | ✚ Advanced-sheet upload URL field; `HUMM_UPLOAD_URL` env still wins (§5.1). |
+| `measured_speed` | `BTreeMap<String, f32>` | `{}` | ✚ Per-model-size measured realtime ratio (spec §2.8), keyed by model-size wire string, last-run-wins; a value `< 1.0` drives the inline realtime-fit warning. |
+
+`[presentation]`:
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `text_size` | u32 | `24` | Presentation-window font size (pt). Clamped `10..=100` on load; the bar's spinbox range is the same. |
+| `theme` | String | `"light"` | `"light"` / `"dark"` / `"custom"`. |
+| `text_color` / `background_color` | String (hex) | `"#000000"` / `"#FFFFFF"` | Custom-theme colors; invalid hex falls back to these defaults (✚, Buzz has no such fallback). |
+
+The presentation window's user-stylesheet override
+(`<config_dir>/presentation_style.css`, §6 above) is a file, not a setting —
+listed in the file-locations table.
 
 ## 7. First-run migration
 
