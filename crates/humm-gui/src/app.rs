@@ -3113,11 +3113,12 @@ impl eframe::App for HummApp {
     /// `humm-gui` doesn't enable the `glow` feature, so this is the
     /// zero-argument signature). Performs the graceful, bounded shutdown
     /// `services.rs`'s `Services` struct doc documents: cancel every in-
-    /// flight/pending task, then wait for the runner to actually drain and
-    /// stop, so each canceled task's terminal store write lands before the
-    /// process exits rather than being cut off mid-write by a bare process
-    /// kill. A no-op if the queue was somehow already taken (defensive only
-    /// — `on_exit` fires at most once per process).
+    /// flight/pending task, then wait — up to [`SHUTDOWN_DRAIN_TIMEOUT`]
+    /// (ADR-022) — for the runner to actually drain and stop, so each
+    /// canceled task's terminal store write lands before the process exits
+    /// rather than being cut off mid-write by a bare process kill. A no-op
+    /// if the queue was somehow already taken (defensive only — `on_exit`
+    /// fires at most once per process).
     fn on_exit(&mut self) {
         if let Some(queue) = self.services.queue.take() {
             shutdown_queue(queue);
@@ -3125,20 +3126,41 @@ impl eframe::App for HummApp {
     }
 }
 
+/// The GUI shutdown timeout for [`shutdown_queue`]'s `finish_within` call
+/// (ADR-022, design spec §8) — belt-and-braces only: cancellation is prompt
+/// by design, so 5 s is ample margin for a well-behaved runner to actually
+/// drain, not a budget shutdown expects to spend.
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// The shutdown sequence itself, factored out of [`HummApp::on_exit`] so it
 /// has its own directly callable, directly testable seam: `cancel_all()`
 /// trips every in-flight/pending task's cancel token and marks every pending
-/// task canceled without ever starting it; `finish()` then signals "no more
-/// enqueues" and blocks until the runner thread has drained (including
-/// writing the now-canceled in-flight task's terminal store row) and
-/// stopped. `QueueHandle::finish`'s own contract already turns a runner-
-/// thread panic into a logged defect rather than a propagated error — this
-/// only adds a log line for the (believed unreachable) case its `Result`
-/// comes back `Err` some other way.
+/// task canceled without ever starting it; `finish_within` then signals "no
+/// more enqueues" and blocks — up to [`SHUTDOWN_DRAIN_TIMEOUT`] — until the
+/// runner thread has drained (including writing the now-canceled in-flight
+/// task's terminal store row) and stopped.
+///
+/// This is `finish_within`, not the unbounded `finish()`: ADR-022's
+/// belt-and-braces for app exit. Ordinary cancellation is prompt (a task's
+/// cancel token is checked cooperatively at every phase boundary, and every
+/// blocking `openai::*` HTTP call cancels in under a second via
+/// `cancelable`'s request-thread detach — design spec §8), so the drain
+/// should finish almost immediately; the timeout exists only to guarantee
+/// process exit is never held hostage by an engine bug that ignores
+/// cancellation. `Ok(true)` (drained in time) is silent, same as `finish()`
+/// used to be; `Ok(false)` (still running at the deadline) is logged — the
+/// runner thread is deliberately leaked at that point (see
+/// `QueueHandle::finish_within`'s own doc comment for why leaking is
+/// sound) and the process exits anyway.
 fn shutdown_queue(queue: QueueHandle) {
     queue.cancel_all();
-    if let Err(err) = queue.finish() {
-        log::error!("queue shutdown sequence failed: {err}");
+    match queue.finish_within(SHUTDOWN_DRAIN_TIMEOUT) {
+        Ok(true) => {}
+        Ok(false) => log::error!(
+            "queue did not drain within {} s at shutdown — exiting anyway",
+            SHUTDOWN_DRAIN_TIMEOUT.as_secs()
+        ),
+        Err(err) => log::error!("queue shutdown sequence failed: {err}"),
     }
 }
 

@@ -101,14 +101,20 @@ pub enum UpdateNotice {
 /// (hence [`Option`] rather than a bare [`QueueHandle`] — `eframe::App::
 /// on_exit` only hands back `&mut self`, so the handle must be *taken*, not
 /// consumed by value from a borrow) and runs `queue.cancel_all()` then
-/// `queue.finish()`. Cancellation is prompt by design (a task's cancel token
-/// is checked cooperatively at every phase boundary — decode, download,
-/// engine inference — and `finish` itself waits for the runner to actually
-/// drain and stop), so this is a *graceful, bounded* shutdown: the store gets
-/// each in-flight task's terminal `canceled` write before the process exits,
-/// not a bare `SIGKILL` mid-write. The stale-task flip (`apply_stale_flip`,
+/// `queue.finish_within(SHUTDOWN_DRAIN_TIMEOUT)` (`app.rs`'s
+/// `shutdown_queue`; ADR-022). Cancellation is prompt by design (a task's
+/// cancel token is checked cooperatively at every phase boundary — decode,
+/// download, engine inference — and every blocking `openai::*` HTTP call
+/// cancels in under a second via `cancelable`'s request-thread detach), so
+/// this is a *graceful, bounded* shutdown: the store gets each in-flight
+/// task's terminal `canceled` write before the process exits, not a bare
+/// `SIGKILL` mid-write. `finish_within`'s own timeout is the last-resort
+/// backstop within that: if a wedged engine ever ignores cancellation, the
+/// runner thread is deliberately leaked (logged) and the process exits
+/// anyway rather than hanging forever — see `QueueHandle::finish_within`'s
+/// doc comment for why that's sound. The stale-task flip (`apply_stale_flip`,
 /// next launch) remains the sole backstop for the case this policy can't
-/// cover — a `SIGKILL`/crash that never reaches `on_exit` at all.
+/// cover at all — a `SIGKILL`/crash that never reaches `on_exit`.
 pub struct Services {
     /// Loaded settings, shared so views can read/mutate and persist changes
     /// (`Settings::save` at `settings_path`).

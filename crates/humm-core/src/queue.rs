@@ -57,8 +57,9 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use crate::boundary::{
     AudioDecoder, FetchProgress, MediaFetcher, MediaProber, SegmentSink, TaskStore,
@@ -447,6 +448,72 @@ impl QueueHandle {
             Err(_) => {
                 log::error!("task runner thread panicked");
                 Ok(())
+            }
+        }
+    }
+
+    /// Signals "no more enqueues" and waits for the runner to drain, exactly
+    /// like [`Self::finish`] — except bounded by `timeout` rather than
+    /// waiting forever: the belt-and-braces for app exit (ADR-022) that lets
+    /// a wedged engine/pipeline never block process shutdown.
+    ///
+    /// [`Self::finish`] stays unbounded on purpose (it is the CLI's own
+    /// execution mechanism — enqueue N, drain all; a timeout there would
+    /// truncate legitimate work). `finish_within` exists for callers that
+    /// only want a bounded *exit* guarantee, e.g. GUI shutdown after
+    /// [`Self::cancel_all`].
+    ///
+    /// Mechanism: send [`Command::Finish`] and drop the command sender (same
+    /// as [`Self::finish`]), then hand the (unbounded) `join.join()` to a
+    /// small waiter thread that signals an `mpsc` channel with its result;
+    /// this call blocks only on that channel's `recv_timeout(timeout)` —
+    /// the same "watcher thread + bounded channel recv" shape
+    /// [`crate::openai::client::cancelable`] uses to bound a blocking HTTP
+    /// call (ADR-022).
+    ///
+    /// - **Drained within `timeout`:** returns `Ok(true)`. A runner panic is
+    ///   still logged as a defect and still reported `Ok` — the same
+    ///   contract [`Self::finish`] has (the runner has, in fact, stopped
+    ///   either way).
+    /// - **Still running at `timeout`:** logs `log::error!` naming the
+    ///   timeout, then returns `Ok(false)`. **Both the runner thread and the
+    ///   waiter thread are deliberately leaked** — neither is joined or
+    ///   aborted. Leaking is sound here: process exit reclaims every OS
+    ///   thread regardless of whether anything ever joined it, and every
+    ///   blocking request an engine makes through
+    ///   [`crate::openai::client::cancelable`] has its own bounded
+    ///   per-request timeout (ADR-022) — so even a genuinely wedged runner
+    ///   thread eventually finishes its current step and exits quietly on
+    ///   its own, just after this call has already returned control to the
+    ///   caller.
+    pub fn finish_within(self, timeout: Duration) -> Result<bool, CoreError> {
+        let QueueHandle { commands, join, .. } = self;
+        let _ = commands.send(Command::Finish);
+        drop(commands);
+
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = join.join();
+            // The receiver may already be gone (we timed out and returned
+            // control to the caller already) — expected and fine, not an
+            // error worth handling.
+            let _ = done_tx.send(result);
+        });
+
+        match done_rx.recv_timeout(timeout) {
+            Ok(Ok(())) => Ok(true),
+            Ok(Err(_)) => {
+                log::error!("task runner thread panicked");
+                Ok(true)
+            }
+            Err(_) => {
+                log::error!(
+                    "queue did not drain within {timeout:?} — leaking the runner thread \
+                     deliberately so app exit is never blocked by a wedged engine (ADR-022); \
+                     every engine request has its own bounded timeout, so the thread will exit \
+                     quietly on its own once that elapses"
+                );
+                Ok(false)
             }
         }
     }
@@ -3690,5 +3757,78 @@ mod tests {
                 .any(|c| matches!(c, StoreCall::Completed(x, _) if *x == a))
         );
         assert_eq!(h.resolved_calls(), vec![None]);
+    }
+
+    // -- finish_within (ADR-022) ----------------------------------------
+
+    #[test]
+    fn finish_within_returns_true_when_drained() {
+        let (q, _h) = build(Cfg::default());
+        assert!(matches!(q.finish_within(Duration::from_secs(2)), Ok(true)));
+    }
+
+    #[test]
+    fn finish_within_returns_true_after_tasks_complete() {
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            ..Cfg::default()
+        });
+        let a = TranscriptionId::new();
+        q.enqueue(a, path_task(h.input_file("a.mp3")), Source::FileImport);
+
+        assert!(matches!(q.finish_within(Duration::from_secs(2)), Ok(true)));
+        assert!(
+            h.store_calls()
+                .iter()
+                .any(|c| matches!(c, StoreCall::Completed(x, _) if *x == a))
+        );
+    }
+
+    /// The case `finish_within` exists for (ADR-022): the engine blocks on
+    /// a never-signaled channel — a scripted stand-in for a wedged
+    /// `transcribe` call — so the runner thread can never drain. The call
+    /// must still return `Ok(false)` on its own bounded deadline, well
+    /// inside a generous wall-clock bound, rather than waiting on the
+    /// engine's.
+    ///
+    /// `engine_ctrl` is deliberately **never released**: the runner thread
+    /// stays parked on the gate for the rest of the test (this is the
+    /// point — a leaked thread parked on a channel recv is exactly what
+    /// "deliberately leaked" means), and the test never joins it either
+    /// directly or indirectly. `engine_ctrl` going out of scope at the end
+    /// of the test drops its `proceed_tx`, which will eventually unblock
+    /// the parked engine call in the background (a disconnected `recv` on
+    /// the gate's channel, same as any other dropped sender) — harmless,
+    /// since by then this test has already made its assertions and the
+    /// process-wide store/decoder/etc. the leaked thread still touches are
+    /// kept alive by its own `Arc` clones, not by anything this test scope
+    /// owns.
+    #[test]
+    fn finish_within_times_out_on_wedged_engine() {
+        let (engine_ctrl, engine_gate) = gate();
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Block(engine_gate)],
+            ..Cfg::default()
+        });
+        let a = TranscriptionId::new();
+        q.enqueue(a, path_task(h.input_file("a.mp3")), Source::FileImport);
+        // Don't return until the engine has actually entered and blocked —
+        // otherwise a slow scheduler could dequeue the task *after*
+        // `finish_within` already gave up, which would not exercise the
+        // wedged case at all.
+        engine_ctrl.wait_entered();
+
+        let start = std::time::Instant::now();
+        let result = q.finish_within(Duration::from_millis(200));
+        let elapsed = start.elapsed();
+
+        assert!(matches!(result, Ok(false)));
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "finish_within took {elapsed:?} to give up — expected well under 5s"
+        );
     }
 }
