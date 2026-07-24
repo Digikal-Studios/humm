@@ -59,6 +59,11 @@ pub struct ActionState {
     /// Set by the toolbar/File-menu import buttons/shortcuts; consumed by
     /// `app.rs` right after `show` returns (`HummApp::drain_pending_import`).
     pub pending_import: PendingImportRequest,
+    /// Set by the toolbar Record button / Ctrl+R (F-004/F-060): `app.rs`
+    /// opens (or focuses) the live-recording window on the next drain,
+    /// mirroring `about_requested`/`preferences_requested`'s own one-shot
+    /// flag shape.
+    pub record_requested: bool,
     /// Set by Help → "About humm"; a no-op stub this task — Task 11 builds
     /// the About window.
     pub about_requested: bool,
@@ -314,14 +319,15 @@ fn show_drop_overlay(ui: &mut egui::Ui) {
         });
 }
 
-/// Consumes the five Task-8 global shortcuts (⌘X/⌘S/⌘O/⌘U/⌘,), routing each
-/// to the same effect its toolbar/menu counterpart has. ⌘X/⌘S push onto
-/// `actions` (the same accumulator the toolbar buttons use) rather than
-/// acting directly — `app.rs`'s single drain loop re-gates both (defense in
-/// depth), so a shortcut can never bypass the enablement rule a click
-/// would've been subject to.
+/// Consumes the six global shortcuts (⌘R/⌘X/⌘S/⌘O/⌘U/⌘, — ⌘R added F-004/
+/// F-060, Task 10; the other five are Task 8's), routing each to the same
+/// effect its toolbar/menu counterpart has. ⌘X/⌘S push onto `actions` (the
+/// same accumulator the toolbar buttons use) rather than acting directly —
+/// `app.rs`'s single drain loop re-gates both (defense in depth), so a
+/// shortcut can never bypass the enablement rule a click would've been
+/// subject to.
 ///
-/// A no-op while [`ActionState::modal_open`] is true: none of these five
+/// A no-op while [`ActionState::modal_open`] is true: none of these
 /// shortcuts are consumed at all in that case (not even to discard them),
 /// so a modal's own text field still receives the raw key event normally
 /// (e.g. ⌘X actually cuts text instead of being swallowed as "Cancel
@@ -342,6 +348,9 @@ fn handle_global_shortcuts(
         return;
     }
     ui.input_mut(|input| {
+        if input.consume_shortcut(&shortcuts.get(ShortcutAction::OpenRecordWindow)) {
+            state.record_requested = true;
+        }
         if input.consume_shortcut(&shortcuts.get(ShortcutAction::StopTranscription)) {
             actions.push(TableAction::CancelSelected);
         }
@@ -425,12 +434,13 @@ fn show_menu_bar(
     });
 }
 
-/// The toolbar (design spec §3.3): Record (disabled) · New File
-/// Transcription · New URL Transcription · Open Transcript (enabled when the
-/// selection is non-empty and every selected row is completed/skipped — F-004,
-/// emits [`TableAction::OpenSelected`]) · Cancel Transcription · Clear History
-/// · Update Available chip (F-006, hidden while `state.update_notice.info` is
-/// `None`).
+/// The toolbar (design spec §3.3): Record (F-004/F-060, unconditionally
+/// enabled — Buzz parity, `main_window.py`'s own Record toolbar button is
+/// never gated) · New File Transcription · New URL Transcription · Open
+/// Transcript (enabled when the selection is non-empty and every selected row
+/// is completed/skipped — F-004, emits [`TableAction::OpenSelected`]) ·
+/// Cancel Transcription · Clear History · Update Available chip (F-006,
+/// hidden while `state.update_notice.info` is `None`).
 ///
 /// "New URL Transcription" is disabled with a tooltip when
 /// `yt_dlp_available` is `false` (Policy rule 6).
@@ -443,8 +453,9 @@ fn show_toolbar(
 ) {
     let enablement = toolbar_enablement(&vm.selected_statuses());
     ui.horizontal(|ui| {
-        ui.add_enabled(false, egui::Button::new(tr("toolbar-record")))
-            .on_disabled_hover_text(tr("toolbar-record-tooltip"));
+        if ui.button(tr("toolbar-record")).clicked() {
+            state.record_requested = true;
+        }
         ui.separator();
         if ui.button(tr("toolbar-new-file")).clicked() {
             state.pending_import = PendingImportRequest::File;

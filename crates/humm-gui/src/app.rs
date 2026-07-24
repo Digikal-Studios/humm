@@ -10,7 +10,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use humm_core::boundary::TaskStore;
+use humm_core::boundary::{AudioCapture, TaskStore};
 use humm_core::domain::{Segment, Source, Status, TranscriptionId};
 use humm_core::queue::{QueueHandle, TaskEvent, TaskEventKind};
 use humm_core::settings::{FileTranscriberSettings, GuiSettings, ViewerGeometry};
@@ -19,6 +19,7 @@ use humm_media::{FfmpegDecoder, FfmpegVideoStreamer, FfprobeProber};
 use crate::events::{self, SharedEventQueue};
 use crate::i18n::tr;
 use crate::import::{FileDialogs, ImportRequest, RfdFileDialogs, scan_folder};
+use crate::recording::{RecordingDeps, RecordingStatus, RecordingVm};
 use crate::services::{self, Services, UpdateNotice};
 use crate::shortcuts::ShortcutMap;
 use crate::viewer::{ViewerDeps, ViewerVm};
@@ -118,6 +119,21 @@ pub struct HummApp {
     /// The adapter bundle every viewer window shares (built once from the real
     /// ffmpeg/cpal/rfd adapters). Cloned into each deferred-viewport closure.
     viewer_deps: Arc<ViewerDeps>,
+    /// The live-recording window (F-060), single instance — `None` until
+    /// opened via the toolbar Record button or Ctrl+R
+    /// (`self.action_state.record_requested`), then a deferred egui viewport
+    /// (`Self::show_recording_viewport`), mirroring the viewer/resizer
+    /// windows' own `Arc<Mutex<_>>` shape.
+    recording: Option<Arc<Mutex<RecordingVm>>>,
+    /// The recording window's adapter bundle (F-060): the audio-capture
+    /// seam, real (`humm_audio::CpalCapture`) in [`Self::new`], scripted
+    /// (`humm_audio::MockCapture`) in [`Self::new_for_test`] — a real
+    /// `CpalCapture::start` opens an actual input stream, which no test in
+    /// this workspace may ever touch (the same "fakeable in tests" rule
+    /// `viewer_deps`'s decoder/prober/streamer/audio_output already follow,
+    /// just injected at construction here since [`AudioCapture::start`]
+    /// needs `&mut self`).
+    recording_deps: Arc<RecordingDeps>,
     /// GUI-internal event channel (design spec §1.2): resize/merge workers
     /// (Task 12) send [`AppEvent`]s that the app drains each frame. The sender
     /// is clonable into those workers; dormant until Task 12 wires a sender.
@@ -212,7 +228,13 @@ impl HummApp {
                 .as_deref(),
             std::env::var("HUMM_SMOKE_OPEN_VIEWER").ok().as_deref(),
         );
-        Self::build(services, Some(event_queue), argv_import, smoke_hooks)
+        Self::build(
+            services,
+            Some(event_queue),
+            argv_import,
+            smoke_hooks,
+            Box::new(humm_audio::CpalCapture::new()),
+        )
     }
 
     /// Builds the app directly from injected [`Services`], for kittest
@@ -235,7 +257,21 @@ impl HummApp {
         // Never reads `HUMM_SMOKE_*` (final-review fix 8): a test harness
         // always gets the hooks' inert default, regardless of what happens
         // to be set in the process environment this test runs under.
-        Self::build(services, None, Vec::new(), SmokeHooks::default())
+        //
+        // Never gets a real `CpalCapture` either, for the same reason: a
+        // real capture's `start` opens an actual input stream, which no
+        // kittest may touch (see `HummApp::recording_deps`'s own doc
+        // comment). `MockCapture::new(Vec::new())` is a scripted, threadless,
+        // hardware-free stand-in that still lists its own default "Mock
+        // Microphone" device, so device-selection/meter-only-capture logic
+        // is still exercised end to end.
+        Self::build(
+            services,
+            None,
+            Vec::new(),
+            SmokeHooks::default(),
+            Box::new(humm_audio::MockCapture::new(Vec::new())),
+        )
     }
 
     /// Shared constructor body: loads the task table's view-model from
@@ -246,6 +282,7 @@ impl HummApp {
         event_queue: Option<SharedEventQueue>,
         pending_argv_import: Vec<PathBuf>,
         smoke_hooks: SmokeHooks,
+        capture: Box<dyn AudioCapture>,
     ) -> Self {
         let (gui_settings, stored_available_version) = {
             let settings = services
@@ -284,6 +321,15 @@ impl HummApp {
             audio_output: Arc::new(humm_audio::CpalOutput::new()),
             dialogs: Arc::new(RfdFileDialogs),
         });
+        // The recording window's adapter bundle (F-060): `capture` is real
+        // (`CpalCapture`) or scripted (`MockCapture`) per the constructor
+        // that called `build` (`Self::new`/`Self::new_for_test`) — see
+        // `recording_deps`'s own field doc for why the real/fake split
+        // happens at injection here rather than being always-real like
+        // `viewer_deps`.
+        let recording_deps = Arc::new(RecordingDeps {
+            capture: Mutex::new(capture),
+        });
         let (app_event_tx, app_event_rx) = mpsc::channel();
 
         // Chip persistence across sessions (binding decision, Buzz-equivalent):
@@ -320,6 +366,8 @@ impl HummApp {
             viewers: BTreeMap::new(),
             resizers: BTreeMap::new(),
             viewer_deps,
+            recording: None,
+            recording_deps,
             app_event_tx,
             app_event_rx,
             action_state: ActionState {
@@ -1184,6 +1232,31 @@ impl HummApp {
         }
     }
 
+    /// Opens the live-recording window (F-060/F-004), or focuses it if
+    /// already open (single instance — the viewer/resizer windows' own
+    /// deviation #1 shape). Triggered by the toolbar Record button or Ctrl+R
+    /// (`action_state.record_requested`, drained in [`eframe::App::ui`]).
+    /// [`RecordingVm::open`] never fails outright (Buzz parity: the window
+    /// always opens, even with no input devices — see its own doc comment).
+    fn open_recording_window(&mut self) {
+        if let Some(existing) = &self.recording {
+            existing
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .focus_requested = true;
+            return;
+        }
+        let vm = {
+            let settings = self
+                .services
+                .settings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            RecordingVm::open(&self.recording_deps, &settings)
+        };
+        self.recording = Some(Arc::new(Mutex::new(vm)));
+    }
+
     /// Executes one resizer action harvested from a resizer window (F-086).
     /// Extend/Resize run synchronously (fast, pure) and return the affected id;
     /// Merge starts a worker thread and returns `None` (its completion arrives
@@ -1651,6 +1724,105 @@ impl HummApp {
         }
     }
 
+    /// Renders the live-recording window as a deferred egui viewport (F-060,
+    /// mirroring [`Self::show_viewer_viewports`]/[`Self::show_resizer_viewports`]),
+    /// a no-op while [`Self::recording`] is `None`. Reads
+    /// `settings.models.custom_model_url`/`settings.recording.measured_speed`
+    /// fresh every render (both are cheap, read-only per-frame lookups —
+    /// [`crate::views::recording::recording_ui`] never locks `Settings`
+    /// itself, matching `options_sheet::ui`'s own convention).
+    ///
+    /// A close request while [`RecordingStatus::Stopped`] latches
+    /// `close_requested` for [`Self::harvest_recording_close`]; while
+    /// [`RecordingStatus::Recording`] it is vetoed
+    /// (`ViewportCommand::CancelClose`) — Task 10's scope stops at the UI
+    /// state machine (see `recording.rs`'s module doc): there is no real
+    /// session thread yet whose finish this could wait for (spec §2.1's
+    /// "defer the close" gate), so the safest interim behavior is simply not
+    /// closing while (nominally) recording rather than silently discarding
+    /// it.
+    fn show_recording_viewport(&mut self, ctx: &egui::Context) {
+        let Some(vm_arc) = &self.recording else {
+            return;
+        };
+        let vm_for_cb = Arc::clone(vm_arc);
+        let deps = Arc::clone(&self.recording_deps);
+        let settings = Arc::clone(&self.services.settings);
+
+        ctx.show_viewport_deferred(
+            egui::ViewportId::from_hash_of(("recording",)),
+            egui::ViewportBuilder::default()
+                .with_title(tr("recording-window-title"))
+                .with_inner_size([700.0, 600.0]),
+            move |ctx, _class| {
+                let mut vm = vm_for_cb
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let (custom_model_available, measured_speed) = {
+                    let settings = settings
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    (
+                        settings.models.custom_model_url.is_some(),
+                        settings.recording.measured_speed.clone(),
+                    )
+                };
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    crate::views::recording::recording_ui(
+                        ui,
+                        &mut vm,
+                        &deps,
+                        custom_model_available,
+                        &measured_speed,
+                    );
+                });
+                if std::mem::take(&mut vm.focus_requested) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                if ctx.input(|input| input.viewport().close_requested()) {
+                    if vm.status == RecordingStatus::Stopped {
+                        vm.close_requested = true;
+                    } else {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    }
+                }
+            },
+        );
+    }
+
+    /// Harvests a stopped-state close request from the recording window
+    /// (Buzz `_do_close`): persists the sticky prefs
+    /// ([`RecordingVm::close`] writes `settings.recording`'s language/task/
+    /// model/initial-prompt fields) and drops the window. A save failure is
+    /// logged, not fatal (the same non-fatal-settings-write contract as
+    /// [`Self::persist_layout_if_changed`]).
+    fn harvest_recording_close(&mut self) {
+        let Some(vm_arc) = &self.recording else {
+            return;
+        };
+        let should_close = vm_arc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .close_requested;
+        if !should_close {
+            return;
+        }
+        if let Some(vm_arc) = self.recording.take() {
+            let mut vm = vm_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut settings = self
+                .services
+                .settings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            vm.close(&mut settings.recording);
+            if let Err(err) = settings.save(&self.services.settings_path) {
+                log::warn!("could not persist recording sticky prefs: {err}");
+            }
+        }
+    }
+
     /// Persists `geometry` as the shared viewer geometry
     /// (`settings.viewer.geometry`) if it differs from what is stored — the
     /// same diff-on-change, non-fatal-on-save-failure contract as
@@ -1742,6 +1914,32 @@ impl HummApp {
     /// Whether the task table's view-model currently has a row for `id`.
     pub fn has_task_row_for_test(&self, id: TranscriptionId) -> bool {
         self.tasks.sorted_rows().iter().any(|row| row.id == id)
+    }
+
+    // -- Test seams (F-060 recording window) ---------------------------------
+    // The recording window is a deferred OS viewport an `egui_kittest` Harness
+    // cannot reach into (the viewer/resizer windows' own constraint); these
+    // seams let an integration test drive open/focus/close without touching
+    // real OS viewport plumbing. `HummApp::new_for_test` always wires a
+    // `MockCapture` (never `CpalCapture`), so exercising these seams never
+    // touches real audio hardware.
+
+    /// Opens (or focuses) the live-recording window — the same effect the
+    /// toolbar Record button / Ctrl+R has once `action_state.record_requested`
+    /// is drained.
+    pub fn open_recording_window_for_test(&mut self) {
+        self.open_recording_window();
+    }
+
+    /// The live recording view-model, so a test can drive its Record/Stop
+    /// click or read its state directly. `None` while the window is closed.
+    pub fn recording_vm_for_test(&self) -> Option<Arc<Mutex<RecordingVm>>> {
+        self.recording.as_ref().map(Arc::clone)
+    }
+
+    /// Whether the recording window is currently open.
+    pub fn is_recording_window_open_for_test(&self) -> bool {
+        self.recording.is_some()
     }
 }
 
@@ -1955,6 +2153,10 @@ impl eframe::App for HummApp {
             }
             self.preferences_open = true;
         }
+        if self.action_state.record_requested {
+            self.action_state.record_requested = false;
+            self.open_recording_window();
+        }
         if self.about_open {
             self.show_about_viewport(ui.ctx());
         }
@@ -1963,6 +2165,8 @@ impl eframe::App for HummApp {
         }
         self.show_viewer_viewports(ui.ctx());
         self.show_resizer_viewports(ui.ctx(), now);
+        self.show_recording_viewport(ui.ctx());
+        self.harvest_recording_close();
 
         self.persist_layout_if_changed();
     }

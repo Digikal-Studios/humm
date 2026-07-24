@@ -353,69 +353,80 @@ fn summary_text(state: &SheetState) -> String {
     format!("Whisper \u{b7} {model_part} \u{b7} {language_part} \u{b7} {formats_part}")
 }
 
-fn render_model_combo(ui: &mut egui::Ui, state: &mut SheetState, custom_available: bool) {
+/// The model-size combo row, shared verbatim by the options sheet and the
+/// recording window (Buzz: both share one `TranscriptionOptionsGroupBox`,
+/// `show_recording_settings` just adds rows — the size combo itself is
+/// identical either way). `id_salt` keeps the two call sites' widget ids
+/// distinct (they can render in the same frame — the sheet is a modal over
+/// the main window, the recording window is a separate viewport).
+pub(crate) fn render_model_combo(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    model_size: &mut ModelSize,
+    custom_available: bool,
+) {
     ui.horizontal(|ui| {
         ui.label(tr("options-model-label"));
-        egui::ComboBox::from_id_salt("humm-options-model-size")
-            .selected_text(title_case(state.model_size.as_str()))
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text(title_case(model_size.as_str()))
             .show_ui(ui, |ui| {
                 for size in selectable_model_sizes(custom_available) {
-                    ui.selectable_value(&mut state.model_size, size, title_case(size.as_str()));
+                    ui.selectable_value(model_size, size, title_case(size.as_str()));
                 }
             });
     });
 }
 
-fn render_task_combo(ui: &mut egui::Ui, state: &mut SheetState) {
+/// The task combo row, shared by the options sheet and the recording window
+/// (see [`render_model_combo`]'s doc comment for why/how these are shared).
+pub(crate) fn render_task_combo(ui: &mut egui::Ui, id_salt: &str, task: &mut TaskKind) {
     ui.horizontal(|ui| {
         ui.label(tr("options-task-label"));
-        let selected = match state.task {
+        let selected = match *task {
             TaskKind::Translate => tr("task-translate"),
             TaskKind::Transcribe => tr("task-transcribe"),
         };
-        egui::ComboBox::from_id_salt("humm-options-task")
+        egui::ComboBox::from_id_salt(id_salt)
             .selected_text(selected)
             .show_ui(ui, |ui| {
                 // Buzz order: Translate first, Transcribe second.
-                ui.selectable_value(&mut state.task, TaskKind::Translate, tr("task-translate"));
-                ui.selectable_value(&mut state.task, TaskKind::Transcribe, tr("task-transcribe"));
+                ui.selectable_value(task, TaskKind::Translate, tr("task-translate"));
+                ui.selectable_value(task, TaskKind::Transcribe, tr("task-transcribe"));
             });
     });
 }
 
-fn render_language_combo(ui: &mut egui::Ui, state: &mut SheetState) {
+/// The language combo row, shared by the options sheet and the recording
+/// window (see [`render_model_combo`]'s doc comment for why/how these are
+/// shared) — including the `HUMM_FAVORITE_LANGUAGES` favorites block.
+pub(crate) fn render_language_combo(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    language: &mut Option<Language>,
+) {
     ui.horizontal(|ui| {
         ui.label(tr("options-language-label"));
-        let selected = state
-            .language
+        let selected = language
             .map(|language| language.english_name().to_string())
             .unwrap_or_else(|| tr("language-detect"));
-        egui::ComboBox::from_id_salt("humm-options-language")
+        egui::ComboBox::from_id_salt(id_salt)
             .selected_text(selected)
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut state.language, None, tr("language-detect"));
+                ui.selectable_value(language, None, tr("language-detect"));
 
                 let favorites = favorite_languages();
                 if !favorites.is_empty() {
                     ui.add_enabled(false, egui::Button::new("-------"));
-                    for language in &favorites {
-                        ui.selectable_value(
-                            &mut state.language,
-                            Some(*language),
-                            language.english_name(),
-                        );
+                    for favorite in &favorites {
+                        ui.selectable_value(language, Some(*favorite), favorite.english_name());
                     }
                     ui.add_enabled(false, egui::Button::new("-------"));
                 }
 
                 let mut all: Vec<Language> = Language::all().to_vec();
                 all.sort_by_key(|language| language.english_name());
-                for language in all {
-                    ui.selectable_value(
-                        &mut state.language,
-                        Some(language),
-                        language.english_name(),
-                    );
+                for candidate in all {
+                    ui.selectable_value(language, Some(candidate), candidate.english_name());
                 }
             });
     });
@@ -504,9 +515,14 @@ pub fn ui(
         ui.label(summary_text(state));
         ui.separator();
 
-        render_model_combo(ui, state, custom_model_available);
-        render_task_combo(ui, state);
-        render_language_combo(ui, state);
+        render_model_combo(
+            ui,
+            "humm-options-model-size",
+            &mut state.model_size,
+            custom_model_available,
+        );
+        render_task_combo(ui, "humm-options-task", &mut state.task);
+        render_language_combo(ui, "humm-options-language", &mut state.language);
         ui.checkbox(&mut state.word_timestamps, tr("options-word-timestamps"));
 
         let mut extract_speech = false;

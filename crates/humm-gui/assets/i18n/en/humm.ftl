@@ -32,10 +32,9 @@ table-menu-notes = Add/Edit Notes
 task-transcribe = Transcribe
 task-translate = Translate to English
 
-## Toolbar (views/main_window.rs, F-004)
+## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = Record
-toolbar-record-tooltip = Live recording arrives in a later release
 toolbar-new-file = New File Transcription
 toolbar-new-url = New URL Transcription
 toolbar-open-transcript = Open Transcript
@@ -272,3 +271,21 @@ resizer-merge-disabled-tooltip = Available only if word level timings were enabl
 resizer-merging = Merging…
 resizer-merge-error = The merge could not run:
 resizer-save-error = The changes could not be saved:
+
+## Live-recording window (views/recording.rs, views/audio_meter.rs, F-060)
+##
+## Buzz-parity strings are byte-exact ports of
+## `recording_transcriber_widget.py`/`record_button.py`/`audio_meter_widget.py`.
+
+recording-window-title = Live Recording
+recording-model-load-note = First time use of a model may take up to several minutest to load.
+recording-advanced-button = Advanced...
+recording-microphone-label = Microphone:
+recording-record-button = Record
+recording-stop-button = Stop
+recording-realtime-warning = { $size } transcribed at { $ratio }× realtime last run — live transcription may fall behind
+recording-presentation-bar-placeholder = Presentation options arrive in a later task
+recording-panel-placeholder = Click Record to begin...
+recording-copy-bar-placeholder = Copy actions arrive in a later task
+meter-average-volume = Average volume
+meter-queue = Queue

@@ -16,6 +16,7 @@ pub mod i18n;
 pub mod import;
 pub mod logging;
 pub mod models_ui;
+pub mod recording;
 pub mod services;
 pub mod shortcuts;
 pub mod viewer;

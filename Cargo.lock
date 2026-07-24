@@ -2361,6 +2361,7 @@ dependencies = [
  "pretty_assertions",
  "regex",
  "rfd",
+ "rtrb",
  "rusqlite",
  "tempfile",
  "thiserror 2.0.19",

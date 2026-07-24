@@ -3,11 +3,13 @@
 //! services hold state, views are pure render functions of it).
 
 pub mod about;
+pub mod audio_meter;
 pub mod export_menu;
 pub mod main_window;
 pub mod options_sheet;
 pub mod playback_controls;
 pub mod preferences;
+pub mod recording;
 pub mod rename_notes;
 pub mod resizer;
 pub mod task_table;

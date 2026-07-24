@@ -45,9 +45,8 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "table-menu-notes",
         "task-transcribe",
         "task-translate",
-        // Toolbar (F-004, Task 8)
+        // Toolbar (F-004, Task 8; Record unlocked F-004/F-060, Task 10)
         "toolbar-record",
-        "toolbar-record-tooltip",
         "toolbar-new-file",
         "toolbar-new-url",
         "toolbar-open-transcript",
@@ -227,6 +226,19 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "resizer-merging",
         "resizer-merge-error",
         "resizer-save-error",
+        // Live-recording window (views/recording.rs, views/audio_meter.rs, F-060)
+        "recording-window-title",
+        "recording-model-load-note",
+        "recording-advanced-button",
+        "recording-microphone-label",
+        "recording-record-button",
+        "recording-stop-button",
+        "recording-realtime-warning",
+        "recording-presentation-bar-placeholder",
+        "recording-panel-placeholder",
+        "recording-copy-bar-placeholder",
+        "meter-average-volume",
+        "meter-queue",
     ]
 }
 
