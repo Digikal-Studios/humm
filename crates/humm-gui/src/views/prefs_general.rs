@@ -195,7 +195,6 @@ fn modal_title_and_body(modal: &GeneralModal) -> (String, String) {
 
 /// The General tab's live state, held in
 /// [`crate::views::preferences::PreferencesState`].
-#[derive(Debug)]
 pub struct GeneralTabState {
     /// The API key field's live text — seeded from [`SecretStore::get`] at
     /// construction, committed back to the store on focus-out/Enter
@@ -239,6 +238,20 @@ impl GeneralTabState {
             base_url_buffer: openai.base_url.clone().unwrap_or_default(),
             api_model_buffer: openai.api_model.clone(),
         }
+    }
+}
+
+impl std::fmt::Debug for GeneralTabState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeneralTabState")
+            .field("key_buffer", &"«redacted»")
+            .field("key_visible", &self.key_visible)
+            .field("test_running", &self.test_running)
+            .field("test_rx", &self.test_rx)
+            .field("modal", &self.modal)
+            .field("base_url_buffer", &self.base_url_buffer)
+            .field("api_model_buffer", &self.api_model_buffer)
+            .finish()
     }
 }
 
@@ -682,6 +695,36 @@ mod tests {
         assert_eq!(
             settings.lock().unwrap().openai.api_model,
             "whisper-1-custom"
+        );
+    }
+
+    // -- Debug redaction --------------------------------------------------
+
+    #[test]
+    fn debug_redacts_key_buffer() {
+        let state = GeneralTabState {
+            key_buffer: "sk-super-secret-value".to_string(),
+            key_visible: false,
+            test_running: false,
+            test_rx: None,
+            modal: None,
+            base_url_buffer: String::new(),
+            api_model_buffer: String::new(),
+        };
+
+        let debug_output = format!("{state:?}");
+
+        assert!(
+            !debug_output.contains("sk-super-secret-value"),
+            "Debug output must not contain the key material, got: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("«redacted»"),
+            "Debug output must contain the redaction marker, got: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("GeneralTabState"),
+            "Debug output must contain the struct name, got: {debug_output}"
         );
     }
 }
