@@ -34,6 +34,7 @@
 //! `_load_segments_and_settings`/`reset_view`
 //! (`transcription_viewer_widget.py:78-143,1078-1145`).
 
+use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -496,6 +497,16 @@ pub struct ViewerVm {
     pub title: String,
     /// Every segment row, in ascending id order (display order).
     pub rows: Vec<SegmentRow>,
+    /// `row.id -> rows` index, for the translation-harvest lookup
+    /// (`apply_translation_result`) that used to be an O(n)
+    /// `rows.iter().position(...)` scan per translated segment. Built once
+    /// alongside `rows` ([`row_index_for`]) and rebuilt whenever `rows` is
+    /// wholesale replaced ([`Self::reload_segments`]) — row identity never
+    /// changes any other way in this milestone (in-place field edits keep
+    /// the same `id`/position; nothing else inserts, removes, or reorders
+    /// rows), so no other call site needs to invalidate it. An internal
+    /// detail, not part of the public view-model surface.
+    row_index: HashMap<i64, usize>,
     /// Whether any segment carries a non-blank translation — gates the
     /// Translation view/column/export entries. Recomputed when a translation
     /// cell edit lands (Task 8+).
@@ -681,6 +692,21 @@ fn non_blank(s: Option<&str>) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// Builds [`ViewerVm::row_index`] (`row.id -> position in rows`) from a
+/// freshly-loaded/reloaded row list — the O(1) lookup
+/// [`ViewerVm::apply_translation_result`] uses instead of an O(n) scan.
+/// Later duplicate ids (impossible in practice — `transcription_segment.id`
+/// is a SQLite row id — but harmless if it ever happened) keep the
+/// *first* occurrence's index, matching `Vec::iter().position(...)`'s own
+/// first-match semantics.
+fn row_index_for(rows: &[SegmentRow]) -> HashMap<i64, usize> {
+    let mut index = HashMap::with_capacity(rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        index.entry(row.id).or_insert(i);
+    }
+    index
+}
+
 impl ViewerVm {
     /// Loads `id`'s transcript into a fresh viewer view-model: reads its
     /// segment rows once, derives the window title from the input file's
@@ -703,10 +729,12 @@ impl ViewerVm {
         let title = file.as_deref().map(file_basename).unwrap_or_default();
         let has_translations = rows.iter().any(|row| !row.translation.trim().is_empty());
         let playback_rate = settings.viewer.playback_rate;
+        let row_index = row_index_for(&rows);
         Ok(ViewerVm {
             id,
             title,
             rows,
+            row_index,
             has_translations,
             mode: ViewMode::Timestamps,
             text_body: String::new(),
@@ -770,10 +798,12 @@ impl ViewerVm {
     #[doc(hidden)]
     pub fn for_bench(rows: Vec<SegmentRow>) -> Self {
         let has_translations = rows.iter().any(|row| !row.translation.trim().is_empty());
+        let row_index = row_index_for(&rows);
         ViewerVm {
             id: TranscriptionId::new(),
             title: "bench".to_string(),
             rows,
+            row_index,
             has_translations,
             mode: ViewMode::Timestamps,
             text_body: String::new(),
@@ -828,11 +858,15 @@ impl ViewerVm {
     /// is left untouched — only the segment-derived state is recomputed:
     /// [`Self::rows`], [`Self::has_translations`], and (if
     /// [`Self::mode`] is [`ViewMode::Text`]/[`ViewMode::Translation`])
-    /// [`Self::text_body`]. Any in-progress row selection or inline edit is
+    /// [`Self::text_body`] — and [`Self::row_index`], rebuilt from scratch
+    /// since a wholesale segment replace can renumber every row's id. Any
+    /// in-progress row selection or inline edit is
     /// dropped, since the old row indices may no longer correspond to
     /// anything meaningful once the underlying segments have been
-    /// wholesale replaced; a [`ViewMode::Translation`] view falls back to
-    /// [`ViewMode::Timestamps`] if the reload no longer has any
+    /// wholesale replaced; [`Self::unsaved`] is cleared too — the reload
+    /// just re-read the store, so it is authoritative and no local edit can
+    /// still be diverging from it. A [`ViewMode::Translation`] view falls
+    /// back to [`ViewMode::Timestamps`] if the reload no longer has any
     /// translations (mirrors [`Self::set_mode`]'s own gate). A read
     /// failure is logged and leaves the viewer showing its last-known
     /// (now possibly stale) rows rather than clearing them outright.
@@ -840,9 +874,14 @@ impl ViewerVm {
         match store.get_segment_rows(self.id) {
             Ok(rows) => {
                 self.has_translations = rows.iter().any(|row| !row.translation.trim().is_empty());
+                self.row_index = row_index_for(&rows);
                 self.rows = rows;
                 self.selected = None;
                 self.editing = None;
+                // The reload is authoritative (it just re-read the store),
+                // so no local edit can still be diverging from it -- any
+                // "unsaved" state from before this reload no longer applies.
+                self.unsaved = false;
                 if self.mode == ViewMode::Translation && !self.has_translations {
                     self.mode = ViewMode::Timestamps;
                 }
@@ -1277,11 +1316,12 @@ impl ViewerVm {
 
     /// Applies one harvested `(translation, id)` result: skips blank
     /// translations and ids that no longer match a loaded row (defensive —
-    /// every enqueue from this surface carries `Some(row.id)`), otherwise
-    /// updates memory + `has_translations` and writes through to the store
-    /// via the existing [`Self::write_result`] log-never-propagate path
-    /// (Buzz `update_translation`, `transcription_segments_editor_widget.py:
-    /// 356-363`).
+    /// every enqueue from this surface carries `Some(row.id)`; the lookup
+    /// is [`Self::row_index`]'s O(1) map, not a `rows.iter().position(...)`
+    /// scan), otherwise updates memory + `has_translations` and writes
+    /// through to the store via the existing [`Self::write_result`]
+    /// log-never-propagate path (Buzz `update_translation`,
+    /// `transcription_segments_editor_widget.py:356-363`).
     fn apply_translation_result(&mut self, deps: &ViewerDeps, text: String, id: Option<i64>) {
         if text.trim().is_empty() {
             return;
@@ -1289,7 +1329,7 @@ impl ViewerVm {
         let Some(id) = id else {
             return;
         };
-        let Some(idx) = self.rows.iter().position(|row| row.id == id) else {
+        let Some(&idx) = self.row_index.get(&id) else {
             return;
         };
         self.rows[idx].translation = text.clone();
@@ -1992,6 +2032,8 @@ mod tests {
         let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
         assert_eq!(vm.rows.len(), 1);
         assert!(vm.has_translations);
+        // An in-progress local edit the reload must supersede.
+        vm.unsaved = true;
 
         // Simulate the auto-resizer's `replace_task_segments` write landing
         // underneath this already-open viewer.
@@ -2014,6 +2056,10 @@ mod tests {
         assert!(
             !vm.has_translations,
             "replace_segments drops translations (Buzz parity) -- must be recomputed"
+        );
+        assert!(
+            !vm.unsaved,
+            "the store reload is authoritative -- no local edit can still be diverging from it"
         );
     }
 
@@ -3043,6 +3089,89 @@ mod tests {
         let persisted = store.get_segment_rows(id).expect("reread");
         assert_eq!(persisted[0].translation, "HELLO");
         assert_eq!(persisted[1].translation, "WORLD");
+    }
+
+    /// `apply_translation_result`'s lookup is `Self::row_index`'s O(1)
+    /// `id -> position` map, not a `rows.iter().position(...)` scan — feed
+    /// results in reverse-id order (rather than `harvest_translations`'
+    /// own always-row-order enqueue, which would pass even with a stale
+    /// position-based shortcut) to prove each one actually routes to *its*
+    /// row rather than landing by coincidence of arrival order.
+    #[test]
+    fn translate_result_out_of_order_lands_on_the_row_matching_its_id() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(
+            &store,
+            "/tmp/a.wav",
+            &[
+                seg(0, 1000, "hello", ""),
+                seg(1000, 2000, "world", ""),
+                seg(2000, 3000, "again", ""),
+            ],
+        );
+        let deps = deps(Arc::clone(&store));
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+        let ids = row_ids(&store, id);
+
+        vm.apply_translation_result(&deps, "THREE".to_string(), Some(ids[2]));
+        vm.apply_translation_result(&deps, "ONE".to_string(), Some(ids[0]));
+        vm.apply_translation_result(&deps, "TWO".to_string(), Some(ids[1]));
+
+        assert_eq!(vm.rows[0].translation, "ONE");
+        assert_eq!(vm.rows[1].translation, "TWO");
+        assert_eq!(vm.rows[2].translation, "THREE");
+    }
+
+    /// `Self::row_index` is rebuilt (not just left stale) by
+    /// `reload_segments`: replacing a single-row transcript with three rows
+    /// and then addressing all three post-reload ids, out of order, must
+    /// land each result on its own row — a map that was left at its
+    /// pre-reload size (one entry) would silently miss two of these three
+    /// lookups.
+    #[test]
+    fn translate_result_after_reload_uses_the_rebuilt_row_index() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(&store, "/tmp/a.wav", &[seg(0, 1000, "hello", "")]);
+        let deps = deps(Arc::clone(&store));
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+        assert_eq!(vm.rows.len(), 1);
+
+        store
+            .replace_segments(
+                id,
+                &[
+                    Segment {
+                        start: Millis(0),
+                        end: Millis(500),
+                        text: "one".into(),
+                        translation: String::new(),
+                    },
+                    Segment {
+                        start: Millis(500),
+                        end: Millis(1000),
+                        text: "two".into(),
+                        translation: String::new(),
+                    },
+                    Segment {
+                        start: Millis(1000),
+                        end: Millis(1500),
+                        text: "three".into(),
+                        translation: String::new(),
+                    },
+                ],
+            )
+            .expect("replace");
+        vm.reload_segments(&store);
+        assert_eq!(vm.rows.len(), 3);
+        let ids: Vec<i64> = vm.rows.iter().map(|row| row.id).collect();
+
+        vm.apply_translation_result(&deps, "THREE".to_string(), Some(ids[2]));
+        vm.apply_translation_result(&deps, "ONE".to_string(), Some(ids[0]));
+        vm.apply_translation_result(&deps, "TWO".to_string(), Some(ids[1]));
+
+        assert_eq!(vm.rows[0].translation, "ONE");
+        assert_eq!(vm.rows[1].translation, "TWO");
+        assert_eq!(vm.rows[2].translation, "THREE");
     }
 
     #[test]

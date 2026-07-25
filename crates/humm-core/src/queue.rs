@@ -654,6 +654,22 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "unknown panic payload".to_string())
 }
 
+/// Whether a hook's own `error` should be folded into the aggregated
+/// `PostProcessed.errors` list — `None` (dropped) whenever `cancel` is
+/// tripped *by the time the hook returns*: design spec §2.2's ai_summary
+/// cancellation (`cancelable`, acknowledged sub-second) is a user-initiated
+/// interruption, not a hook failure, so it must never surface as one — the
+/// same way a between-hooks cancellation never even attempts the next
+/// hook, let alone records an error for it not running. `cancel` is
+/// re-checked *after* the call (not just before, which
+/// `Runner::run_on_complete_chain`'s own gate already does) because the
+/// cancellation this guards against can land *while* the hook's request is
+/// still in flight — the whole reason `cancel` wasn't already tripped when
+/// the call started.
+fn hook_error_after_cancel_check(error: Option<String>, cancel: &CancelToken) -> Option<String> {
+    if cancel.is_canceled() { None } else { error }
+}
+
 /// Throttles [`TaskEventKind::ModelDownloadProgress`] emission across one
 /// job's whole artifact-ensure phase (module doc): [`Runner::ensure_artifacts`]
 /// builds a fresh instance per job and feeds it every
@@ -797,6 +813,30 @@ struct Runner {
     finishing: bool,
     /// The cached engine and the model it was built for.
     engine_cache: Option<(ModelSpec, Box<dyn TranscriptionEngine>)>,
+}
+
+/// RAII guard clearing the shared "current task" slot (`Runner::current`)
+/// on drop — belt-and-braces for `Runner::run_task`'s whole terminal-write
+/// region (the `mark_*` store write, the terminal event, and the
+/// `on_complete` hook chain): even if something in that region panicked,
+/// the slot would still be cleared as the unwind passes through this
+/// guard's `Drop`, rather than leaking a permanent "task `id` is current"
+/// entry that would make every later `cancel`/`cancel_all` call target a
+/// task that no longer exists (and, being current, may never dequeue
+/// again). In practice this should never actually fire on a panic: every
+/// individual hook call inside `Runner::run_on_complete_chain` is already
+/// contained in its own `catch_unwind`, so a hook panicking can't reach
+/// here — this guard exists for the region's *other* code (the `mark_*`
+/// store writes, `emit`), which was never wrapped in `catch_unwind` even
+/// before M7 and isn't specifically hardened by this milestone either; it
+/// is cheap enough to add unconditionally rather than carefully arguing
+/// that exposure is unchanged.
+struct CurrentGuard<'a>(&'a Runner);
+
+impl Drop for CurrentGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set_current(None);
+    }
 }
 
 impl Runner {
@@ -981,58 +1021,9 @@ impl Runner {
             }
         };
 
-        match terminal {
-            Terminal::Completed(outcome, ctx) => {
-                if let Err(err) = self.store.mark_completed(&id, &outcome.segments) {
-                    self.store_write_failed(id, "mark_completed", &err);
-                }
-                self.emit(TaskEvent {
-                    task_id: id,
-                    kind: TaskEventKind::Completed {
-                        written: outcome.written,
-                    },
-                });
-                // `on_complete` hook chain (F-116/F-111/F-113, design spec
-                // §2.1): only when a config source was configured at all
-                // *and* it produced a snapshot (`run_job` always snapshots
-                // whenever `self.postproc.is_some()`, so `None` here means
-                // no source was configured — every pre-M7 caller and any
-                // test double that doesn't need hooks).
-                if let Some(cfg) = ctx.postproc {
-                    self.run_on_complete_chain(
-                        id,
-                        &ctx.input_path,
-                        &outcome.segments,
-                        spec.options.word_timestamps,
-                        spec.options.language.map(Language::code),
-                        cfg,
-                        &token,
-                    );
-                }
-            }
-            Terminal::Canceled => self.write_canceled(id),
-            Terminal::Failed(message) => {
-                if let Err(err) = self.store.mark_failed(&id, &message) {
-                    self.store_write_failed(id, "mark_failed", &err);
-                }
-                self.emit(TaskEvent {
-                    task_id: id,
-                    kind: TaskEventKind::Failed { message },
-                });
-            }
-            Terminal::Skipped(segments) => {
-                if let Err(err) = self.store.mark_skipped(&id, &segments) {
-                    self.store_write_failed(id, "mark_skipped", &err);
-                }
-                self.emit(TaskEvent {
-                    task_id: id,
-                    kind: TaskEventKind::Skipped,
-                });
-            }
-        }
-
-        // Cleared only now (rather than right after the pipeline itself
-        // returned): the `on_complete` hook chain above may still be
+        // `current` is cleared by `_current_guard`'s `Drop` at the end of
+        // this block (rather than right after the pipeline itself
+        // returned): the `on_complete` hook chain below may still be
         // running an interruptible hook (ai_summary's request), and
         // `QueueHandle::cancel`/`cancel_all`'s prompt-cancel fast path only
         // trips a token it finds in `current` — clearing this any earlier
@@ -1040,8 +1031,56 @@ impl Runner {
         // nothing until this task's `id` is next dequeued (which, for a
         // task that already reached a terminal state, is never), defeating
         // design spec §2.2's "cancel mid-summary is acked sub-second"
-        // promise.
-        self.set_current(None);
+        // promise. The guard (rather than a bare call after the match)
+        // means the slot is cleared even if something in this block
+        // panics — see `CurrentGuard`'s own doc comment.
+        {
+            let _current_guard = CurrentGuard(&*self);
+            match terminal {
+                Terminal::Completed(outcome, ctx) => {
+                    if let Err(err) = self.store.mark_completed(&id, &outcome.segments) {
+                        self.store_write_failed(id, "mark_completed", &err);
+                    }
+                    self.emit(TaskEvent {
+                        task_id: id,
+                        kind: TaskEventKind::Completed {
+                            written: outcome.written,
+                        },
+                    });
+                    // `on_complete` hook chain (F-116/F-111/F-113, design
+                    // spec §2.1) — a no-op when no config source was
+                    // configured at all (`ctx.postproc: None`, checked
+                    // inside `run_on_complete_chain` itself).
+                    self.run_on_complete_chain(
+                        id,
+                        &ctx,
+                        &outcome.segments,
+                        spec.options.word_timestamps,
+                        spec.options.language.map(Language::code),
+                        &token,
+                    );
+                }
+                Terminal::Canceled => self.write_canceled(id),
+                Terminal::Failed(message) => {
+                    if let Err(err) = self.store.mark_failed(&id, &message) {
+                        self.store_write_failed(id, "mark_failed", &err);
+                    }
+                    self.emit(TaskEvent {
+                        task_id: id,
+                        kind: TaskEventKind::Failed { message },
+                    });
+                }
+                Terminal::Skipped(segments) => {
+                    if let Err(err) = self.store.mark_skipped(&id, &segments) {
+                        self.store_write_failed(id, "mark_skipped", &err);
+                    }
+                    self.emit(TaskEvent {
+                        task_id: id,
+                        kind: TaskEventKind::Skipped,
+                    });
+                }
+            }
+        }
 
         // Consume the id from the canceled-set at terminal time. `cancel(id)`
         // always sends `Command::Cancel(id)` over the channel — even for the
@@ -1213,37 +1252,52 @@ impl Runner {
     /// order **auto_resize → summary → docx** (ledger #L2 — resizer first
     /// so `docx`, which re-reads the store, sees the resize; `summary`
     /// reads the in-memory `outcome_segments`, which resizing never
-    /// textually changes). Each hook is individually gated on its own
-    /// `enabled` flag — the same convention every hook module's own `run`
-    /// already follows for its *other* settings — and every hook's failure
-    /// is contained into `errors`, never escalated (Buzz's per-plugin
-    /// `try`/`except`, `manager.py:136-148`): a hook failing never fails
-    /// the task, which already reached `Completed` before this chain ever
-    /// starts.
+    /// textually changes). `ctx.postproc` being `None` (no
+    /// [`RunnerDeps::postproc`] source configured for this run at all) is a
+    /// silent no-op, exactly like every hook being individually disabled.
+    /// Each hook is individually gated on its own `enabled` flag — the same
+    /// convention every hook module's own `run` already follows for its
+    /// *other* settings.
     ///
-    /// `cancel` is checked *between* hooks (never introduced mid-hook): a
-    /// cancellation observed there skips every hook from that point on, but
-    /// the task's own status is untouched (it is already `Completed`) and
-    /// the aggregated event below still reports whatever ran before the
-    /// cancellation — design spec §2.2's "surviving hooks are skipped, and
-    /// the task stays `Completed`".
+    /// `cancel` is checked before *every* hook, including the first
+    /// (symmetric with the between-hooks checks: a cancellation landed in
+    /// the tiny window between the pipeline returning `Completed` and this
+    /// chain actually starting must skip `auto_resize` too, not just
+    /// `summary`/`docx`). A cancellation observed there skips every hook
+    /// from that point on, but the task's own status is untouched (it is
+    /// already `Completed`) and the aggregated event below still reports
+    /// whatever ran before the cancellation — design spec §2.2's
+    /// "surviving hooks are skipped, and the task stays `Completed`". A
+    /// cancellation that lands *during* `summary`'s own in-flight request
+    /// (rather than between hooks) is handled by
+    /// [`hook_error_after_cancel_check`]: it is likewise not folded into
+    /// `errors` — a user-initiated interruption is not a hook failure.
+    ///
+    /// Each hook call is individually wrapped in `catch_unwind`: a
+    /// panicking hook is contained exactly like `run_job`'s own panic
+    /// containment (`panic_message`) — logged, folded into `errors` as an
+    /// actionable message — and the chain continues to the *next* hook
+    /// (Buzz's per-plugin `try`/`except` keeps going after a plugin
+    /// failure, `manager.py:136-148`) rather than unwinding into
+    /// `Runner::run_task` and taking down the whole runner thread.
     ///
     /// Emits exactly one [`TaskEventKind::PostProcessed`], and only when at
     /// least one hook is actually enabled (design spec §2.3: "iff at least
-    /// one hook is enabled") — a `cfg` with every hook disabled emits
-    /// nothing at all, matching the T2 contract that this event is
-    /// additive and optional.
-    #[allow(clippy::too_many_arguments)]
+    /// one hook is enabled") — a `cfg` with every hook disabled (or no
+    /// `cfg` at all) emits nothing, matching the T2 contract that this
+    /// event is additive and optional.
     fn run_on_complete_chain(
         &self,
         id: TranscriptionId,
-        input_path: &Path,
+        ctx: &PostCompleteContext,
         outcome_segments: &[Segment],
         word_timestamps: bool,
         language: Option<&str>,
-        cfg: PostprocConfig,
         cancel: &CancelToken,
     ) {
+        let Some(cfg) = ctx.postproc.as_ref() else {
+            return;
+        };
         if !(cfg.resize.enabled || cfg.summary.enabled || cfg.docx.enabled) {
             return;
         }
@@ -1253,45 +1307,69 @@ impl Runner {
         let mut written: Vec<PathBuf> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
 
-        if cfg.resize.enabled {
-            let result = postproc::auto_resize::run(
-                &cfg,
-                &id,
-                word_timestamps,
-                language,
-                self.store.as_ref(),
-            );
-            segments_replaced = result.replaced;
-            if let Some(err) = result.error {
-                errors.push(err);
+        if !cancel.is_canceled() && cfg.resize.enabled {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                postproc::auto_resize::run(cfg, &id, word_timestamps, language, self.store.as_ref())
+            })) {
+                Ok(result) => {
+                    segments_replaced = result.replaced;
+                    if let Some(err) = result.error {
+                        errors.push(err);
+                    }
+                }
+                Err(payload) => {
+                    let msg = panic_message(&*payload);
+                    log::error!("transcript resizer hook panicked for task {id}: {msg}");
+                    errors.push(format!("transcript resizer panicked: {msg}"));
+                }
             }
         }
 
         if !cancel.is_canceled() && cfg.summary.enabled {
-            let result = postproc::summary::run(
-                &cfg,
-                outcome_segments,
-                input_path,
-                self.store.as_ref(),
-                &id,
-                cancel,
-            );
-            notes_updated = result.notes_updated;
-            if let Some(path) = result.file_written {
-                written.push(path);
-            }
-            if let Some(err) = result.error {
-                errors.push(err);
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                postproc::summary::run(
+                    cfg,
+                    outcome_segments,
+                    &ctx.input_path,
+                    self.store.as_ref(),
+                    &id,
+                    cancel,
+                )
+            })) {
+                Ok(result) => {
+                    notes_updated = result.notes_updated;
+                    if let Some(path) = result.file_written {
+                        written.push(path);
+                    }
+                    if let Some(err) = hook_error_after_cancel_check(result.error, cancel) {
+                        errors.push(err);
+                    }
+                }
+                Err(payload) => {
+                    let msg = panic_message(&*payload);
+                    log::error!("AI Summary hook panicked for task {id}: {msg}");
+                    errors.push(format!("AI Summary panicked: {msg}"));
+                }
             }
         }
 
         if !cancel.is_canceled() && cfg.docx.enabled {
-            let result = postproc::docx::run(&cfg, &id, input_path, self.store.as_ref());
-            if let Some(path) = result.written {
-                written.push(path);
-            }
-            if let Some(err) = result.error {
-                errors.push(err);
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                postproc::docx::run(cfg, &id, &ctx.input_path, self.store.as_ref())
+            })) {
+                Ok(result) => {
+                    if let Some(path) = result.written {
+                        written.push(path);
+                    }
+                    if let Some(err) = result.error {
+                        errors.push(err);
+                    }
+                }
+                Err(payload) => {
+                    let msg = panic_message(&*payload);
+                    log::error!("Export to DOCX hook panicked for task {id}: {msg}");
+                    errors.push(format!("Export to DOCX panicked: {msg}"));
+                }
             }
         }
 
@@ -1559,6 +1637,11 @@ mod tests {
         segments: Arc<Mutex<Vec<Segment>>>,
         // See `Cfg::replace_gate`'s doc comment.
         replace_gate: Option<Gate>,
+        // When true, `replace_task_segments` panics *before* touching any
+        // mutex (so the panic never poisons `calls`/`segments` for a later
+        // task sharing this same `FakeStore`) — exercises the
+        // `on_complete` chain's own panic containment.
+        panic_in_replace_task_segments: bool,
     }
 
     impl FakeStore {
@@ -1671,6 +1754,9 @@ mod tests {
             id: &TranscriptionId,
             segs: &[Segment],
         ) -> Result<(), StoreError> {
+            if self.panic_in_replace_task_segments {
+                panic!("replace_task_segments boom");
+            }
             self.record(StoreCall::ReplaceSegments(*id, segs.to_vec()));
             *self.segments.lock().expect("segments lock") = segs.to_vec();
             if let Some(g) = &self.replace_gate {
@@ -2016,6 +2102,8 @@ mod tests {
         // released — lets a test land an external `cancel()` exactly
         // between the resize hook finishing and the next hook starting.
         replace_gate: Option<Gate>,
+        // See `FakeStore::panic_in_replace_task_segments`'s doc comment.
+        panic_in_replace_task_segments: bool,
     }
 
     fn build(cfg: Cfg) -> (QueueHandle, Harness) {
@@ -2037,6 +2125,7 @@ mod tests {
             canceled_gate: cfg.canceled_gate,
             segments: Arc::new(Mutex::new(cfg.initial_segments)),
             replace_gate: cfg.replace_gate,
+            panic_in_replace_task_segments: cfg.panic_in_replace_task_segments,
         };
         let decoder = FakeDecoder {
             pcm: Pcm::new(vec![0.0; 16_000]),
@@ -4682,5 +4771,181 @@ mod tests {
             errors.is_empty(),
             "skipped hooks contribute no errors: {errors:?}"
         );
+    }
+
+    /// A cancel landed *before* the chain even starts (the tiny window
+    /// between `run_job` returning `Completed` and `run_on_complete_chain`
+    /// running its first gate) must skip every hook, including resize —
+    /// symmetry with the between-hooks checks (design spec §2.2). Uses
+    /// `completed_gate` (fires inside `mark_completed`, strictly before the
+    /// `Completed` event and the hook chain) rather than `replace_gate`
+    /// (which fires *inside* resize, too late to test "before the first
+    /// hook").
+    #[test]
+    fn cancel_before_chain_starts_skips_every_hook() {
+        let (control, gate) = gate();
+        let cfg = postproc_cfg_with_hooks(
+            AutoResizeSettings {
+                enabled: true,
+                ..AutoResizeSettings::default()
+            },
+            AiSummarySettings {
+                enabled: true,
+                api_url: Some("this is not a url".to_string()),
+                ..AiSummarySettings::default()
+            },
+            ExportDocxSettings {
+                enabled: true,
+                ..ExportDocxSettings::default()
+            },
+        );
+
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hello world")],
+            }],
+            postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+            initial_segments: vec![seg("hello there.")],
+            completed_gate: Some(gate),
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let input = h.input_file("clip.mp3");
+        let a = TranscriptionId::new();
+        q.enqueue(a, word_timestamped_task(input), Source::FileImport);
+
+        // Blocked inside `mark_completed` -- strictly before the `Completed`
+        // event and before the hook chain's first gate check even runs.
+        control.wait_entered();
+        q.cancel(a);
+        control.release();
+
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        let (notes_updated, segments_replaced, written, errors) = post_processed_for(&events, a);
+        assert!(
+            !segments_replaced,
+            "resize must be skipped when already canceled before the chain starts"
+        );
+        assert!(!notes_updated);
+        assert!(written.is_empty());
+        assert!(errors.is_empty());
+
+        let calls = h.store_calls();
+        assert!(
+            !calls.iter().any(|c| matches!(
+                c,
+                StoreCall::SegmentsFor(_) | StoreCall::ReplaceSegments(..)
+            )),
+            "resize must never touch the store when already canceled: {calls:?}"
+        );
+    }
+
+    /// A hook that panics (a defect this milestone didn't anticipate, e.g.
+    /// a misbehaving `TaskStore`) is contained exactly like `run_job`'s own
+    /// panic containment: the panic message lands in the aggregated
+    /// event's `errors`, the runner thread survives, `current` is cleared
+    /// (a subsequently enqueued task still runs to completion), and the
+    /// panicking task itself still ends up `Completed` (it already was
+    /// before the chain started).
+    #[test]
+    fn on_complete_chain_hook_panic_is_contained_runner_survives_and_next_task_runs() {
+        let cfg = postproc_cfg_with_hooks(
+            AutoResizeSettings {
+                enabled: true,
+                ..AutoResizeSettings::default()
+            },
+            AiSummarySettings::default(), // disabled: isolates the panic to resize
+            ExportDocxSettings::default(), // disabled
+        );
+
+        let (q, h) = build(Cfg {
+            scripts: vec![
+                EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![seg("hello world")],
+                },
+                EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![seg("second task")],
+                },
+            ],
+            postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+            initial_segments: vec![seg("hello there.")],
+            panic_in_replace_task_segments: true,
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+
+        let input_a = h.input_file("clip.mp3");
+        let a = TranscriptionId::new();
+        q.enqueue(a, word_timestamped_task(input_a), Source::FileImport);
+
+        // Task b has `word_timestamps: false` (plain `path_task`), so its
+        // own resize hook exits at gate 1 before ever calling
+        // `replace_task_segments` -- it must complete normally, proving the
+        // runner thread survived task a's hook panic.
+        let input_b = h.input_file("clip2.mp3");
+        let b = TranscriptionId::new();
+        q.enqueue(b, path_task(input_b), Source::FileImport);
+
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        let (_, segments_replaced, written, errors) = post_processed_for(&events, a);
+        assert!(
+            !segments_replaced,
+            "the panicking write must not be counted as a successful replace"
+        );
+        assert!(written.is_empty());
+        assert_eq!(
+            errors.len(),
+            1,
+            "the panic must be the only recorded error: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("replace_task_segments boom"),
+            "the panic payload's message should be actionable: {errors:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. })),
+            "task a must still end up Completed -- it already was before the chain ran"
+        );
+
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == b && matches!(e.kind, TaskEventKind::Completed { .. })),
+            "task b must still run to completion -- the runner thread must have survived \
+             task a's hook panic: {events:?}"
+        );
+    }
+
+    // -- `hook_error_after_cancel_check` (F-111 cancel-mid-hook semantics) --
+
+    #[test]
+    fn hook_error_after_cancel_check_drops_the_error_once_canceled() {
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        assert_eq!(
+            hook_error_after_cancel_check(Some("boom".to_string()), &cancel),
+            None,
+            "a cancellation observed after the hook call is not a hook failure"
+        );
+        assert_eq!(hook_error_after_cancel_check(None, &cancel), None);
+    }
+
+    #[test]
+    fn hook_error_after_cancel_check_keeps_the_error_when_not_canceled() {
+        let cancel = CancelToken::new();
+        assert_eq!(
+            hook_error_after_cancel_check(Some("boom".to_string()), &cancel),
+            Some("boom".to_string())
+        );
+        assert_eq!(hook_error_after_cancel_check(None, &cancel), None);
     }
 }
