@@ -1,27 +1,87 @@
-//! Fluent-backed string catalog (F-008 scaffold).
+//! Fluent-backed string catalog, locale registry, and negotiation (F-008a).
 //!
 //! Every user-visible string in `humm-gui` is a key resolved through
 //! [`tr`]/[`tr_args`] rather than an inline literal — Buzz's gettext catalog
-//! (`buzz/locale.py`) ported to Fluent (ADR-014). Only the `en` catalog is
-//! embedded this milestone; locale negotiation (Buzz's 15 UI locales,
-//! `buzz-notes-options-shortcuts-telemetry.md` §F-008) lands with the locale
-//! ports in a later milestone. Until then the bundle is always English.
+//! (`buzz/locale.py`) ported to Fluent (ADR-014). This module owns three
+//! things:
+//!
+//! - [`AVAILABLE_LOCALES`]: the registry of embedded catalogs. Only `en_US`
+//!   is embedded this milestone (Task 12 appends `de_DE`/`es_ES`/`zh_CN`, one
+//!   array element + one `include_str!` each) — the app still renders
+//!   English end to end, but through the same switchable machinery every
+//!   later locale will use.
+//! - [`negotiate`]/[`negotiate_in`]: Buzz's own gettext fallback chain
+//!   (`buzz/locale.py:15-21`) reimplemented over the registry — exact code
+//!   match, then language-prefix match, then `en_US`.
+//! - [`set_locale`]: live, process-wide locale switching. A global
+//!   generation counter plus an active-locale index; each thread's
+//!   `thread_local` bundle lazily rebuilds the next time it's asked to
+//!   resolve a key, comparing its own cached generation against the shared
+//!   counter. This is what makes switching visible from egui's
+//!   deferred-viewport render threads (each owns its own bundle/thread) as
+//!   well as the main UI thread, without any thread ever reaching into
+//!   another's state directly.
 //!
 //! [`FluentBundle`] is not `Sync` (its default memoizer uses interior
-//! mutability that isn't thread-safe), so it cannot live in a plain `static`.
-//! egui itself is single-threaded (all `tr`/`tr_args` calls happen from the
-//! UI thread that owns the `egui::Context`), so a `thread_local!` is the
-//! right tool: no cross-thread sharing is ever needed, and each thread that
-//! happens to call `tr` (only ever one, in practice) gets its own bundle,
-//! built once and reused.
+//! mutability that isn't thread-safe), so it cannot live in a plain `static`
+//! shared across threads — hence the thread-local-plus-generation design
+//! above, rather than a single shared bundle behind a lock.
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fluent::{FluentArgs, FluentBundle, FluentResource, FluentValue};
-use unic_langid::langid;
+
+/// One embedded UI-locale catalog: a Buzz locale code, the BCP-47 language
+/// tag Fluent/`unic-langid` needs, and the catalog source itself.
+///
+/// Buzz's own vocabulary is the 15 codes in `ui_locales`
+/// (`general_preferences_widget.py:34-50`) — humm's registry uses the same
+/// codes as its wire values (parity with `settings.ui.locale`).
+#[derive(Clone, Copy)]
+pub struct LocaleEntry {
+    /// The Buzz UI-locale code (e.g. `"en_US"`, `"de_DE"`, or a bare
+    /// language code like `"nl"` for the handful of Buzz locales with no
+    /// region) — the value stored in `settings.ui.locale` and passed to
+    /// [`set_locale`].
+    pub buzz_code: &'static str,
+    /// The BCP-47 language tag `unic_langid`/Fluent resolve plural rules and
+    /// bidi direction from (e.g. `"en-US"`) — not always a trivial
+    /// underscore-to-hyphen rewrite of `buzz_code` (Buzz's bare `"nl"`/`"ru"`
+    /// codes still need a real language tag here), so it's tracked
+    /// separately rather than derived.
+    pub langid: &'static str,
+    /// The embedded `.ftl` catalog source (`include_str!`) for this locale.
+    pub ftl: &'static str,
+}
+
+impl std::fmt::Debug for LocaleEntry {
+    // A hand-written impl rather than `#[derive(Debug)]` so a failed
+    // assertion in a test never dumps an entire embedded catalog's text
+    // (hundreds of lines) to the test output — only its size.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocaleEntry")
+            .field("buzz_code", &self.buzz_code)
+            .field("langid", &self.langid)
+            .field("ftl", &format_args!("<{} bytes>", self.ftl.len()))
+            .finish()
+    }
+}
 
 /// The embedded English Fluent catalog source.
 const EN_FTL: &str = include_str!("../assets/i18n/en/humm.ftl");
+
+/// The locale registry: every catalog embedded into this binary. Starts
+/// with just `en_US`; Task 12 appends `de_DE`/`es_ES`/`zh_CN` entries (one
+/// array element + one `include_str!` each — the registry is designed so
+/// that's the *entire* diff a new locale needs here). Index `0` is always
+/// `en_US` — both [`negotiate_in`]'s final fallback and
+/// [`ACTIVE_LOCALE_INDEX`]'s initial value depend on that.
+pub static AVAILABLE_LOCALES: &[LocaleEntry] = &[LocaleEntry {
+    buzz_code: "en_US",
+    langid: "en-US",
+    ftl: EN_FTL,
+}];
 
 /// Every catalog key `humm-gui` actually references from view code, asserted
 /// resolvable by this module's unit test (the F-008 "matrix method": unit
@@ -30,6 +90,10 @@ const EN_FTL: &str = include_str!("../assets/i18n/en/humm.ftl");
 /// nothing catching it.
 pub fn all_keys_used() -> &'static [&'static str] {
     &[
+        // Locale display names (i18n::display_name, F-008a) -- one key per
+        // AVAILABLE_LOCALES entry; Task 12 adds the rest as each catalog
+        // ports.
+        "locale-name-en-us",
         "hero-drop",
         "hero-import-button",
         "table-col-file-name",
@@ -327,25 +391,238 @@ pub fn all_keys_used() -> &'static [&'static str] {
     ]
 }
 
-thread_local! {
-    static BUNDLE: RefCell<FluentBundle<FluentResource>> = RefCell::new(build_bundle());
+/// Bumped by [`set_locale`] on *every* call — not only when the negotiated
+/// locale actually differs from whatever was previously active. Each
+/// thread's cached bundle just compares its own last-seen value against
+/// this counter and rebuilds whenever they differ (see the `BUNDLE`
+/// `thread_local!` below), so an extra bump from a same-locale call costs at
+/// most one redundant rebuild per thread that happens to call `tr` before
+/// the next real switch — cheap, and never wrong — in exchange for not
+/// having to compare against the previously *resolved* entry (an extra
+/// atomic load) just to skip that one redundant rebuild.
+static GENERATION: AtomicUsize = AtomicUsize::new(0);
+
+/// Index into [`AVAILABLE_LOCALES`] for the currently active locale. An
+/// index rather than a `RwLock<&'static LocaleEntry>`/`AtomicPtr` because
+/// `AVAILABLE_LOCALES` is a fixed compile-time table that never shrinks,
+/// grows, or reorders at runtime — so a plain `AtomicUsize`, written only by
+/// [`set_locale`] (which only ever stores an index it just found *in*
+/// `AVAILABLE_LOCALES`), is already sound: no value it can hold is ever
+/// out of bounds. Starts at `0`, `AVAILABLE_LOCALES[0]`'s `en_US` — matching
+/// this milestone's "always English" behavior with no `set_locale` call
+/// required at all.
+static ACTIVE_LOCALE_INDEX: AtomicUsize = AtomicUsize::new(0);
+
+/// Pure locale-negotiation core: resolves `requested` against `locales`
+/// using Buzz's own gettext fallback chain
+/// (`buzz/locale.py:15-21` — `gettext.translation(..., languages=[...],
+/// fallback=True)`, whose default expansion tries the full
+/// `<lang>_<REGION>` code, then the bare `<lang>`, before giving up). In
+/// order:
+///
+/// 1. Exact `buzz_code` match (case-sensitive — Buzz's own codes are
+///    canonical, e.g. `"de_DE"`, so a stored `settings.ui.locale` value or a
+///    combo selection always compares exactly).
+/// 2. Language-prefix match: the first entry in `locales` whose own
+///    language subtag (the part before `_`, or the whole code for a bare
+///    language like Buzz's `"nl"`/`"ru"`) equals `requested`'s language
+///    subtag, compared case-insensitively — env-derived requests
+///    ([`locale_from_env_vars`]'s `LANG`/`LC_ALL` values) aren't guaranteed
+///    canonical casing the way a stored Buzz code is. This single rule
+///    covers both of Buzz's remaining cases: a bare language request
+///    (`"de"`) and a regional request whose exact region isn't ported
+///    (`"de_AT"` when only `"de_DE"` is embedded) both resolve by matching
+///    on the shared `"de"` language subtag.
+/// 3. `locales[0]` — production's `AVAILABLE_LOCALES[0]` is `en_US`, and
+///    Buzz's own untranslated source strings *are* American English, so
+///    this is also Buzz's effective fallback when no catalog matches.
+///
+/// Takes an explicit `locales` slice (rather than reading
+/// [`AVAILABLE_LOCALES`] directly) so tests can exercise the
+/// language-prefix/bare-language rules against a synthetic multi-locale
+/// registry before Task 12 actually ports `de`/`es`/`zh` — [`negotiate`] is
+/// the real entry point, and just delegates here with `AVAILABLE_LOCALES`.
+///
+/// `locales` must be non-empty (true of `AVAILABLE_LOCALES` always, since it
+/// always carries at least `en_US`).
+fn negotiate_in<'a>(locales: &'a [LocaleEntry], requested: Option<&str>) -> &'a LocaleEntry {
+    let fallback = &locales[0];
+    let Some(requested) = requested else {
+        return fallback;
+    };
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return fallback;
+    }
+    if let Some(entry) = locales.iter().find(|entry| entry.buzz_code == requested) {
+        return entry;
+    }
+    let requested_lang = language_subtag(requested);
+    if let Some(entry) = locales
+        .iter()
+        .find(|entry| language_subtag(entry.buzz_code).eq_ignore_ascii_case(requested_lang))
+    {
+        return entry;
+    }
+    fallback
 }
 
-fn build_bundle() -> FluentBundle<FluentResource> {
-    let resource = FluentResource::try_new(EN_FTL.to_string()).unwrap_or_else(|(_, errors)| {
+/// The language subtag of a locale code — everything before the first `_`,
+/// or the whole string for a bare language code with no region (Buzz's own
+/// `ui_locales` table has entries with no region at all, e.g. `"nl"`/`"ru"`
+/// — `general_preferences_widget.py:38,46`).
+fn language_subtag(code: &str) -> &str {
+    code.split('_').next().unwrap_or(code)
+}
+
+/// The real negotiation entry point: [`negotiate_in`] against
+/// [`AVAILABLE_LOCALES`]. Called once at startup (`HummApp::new`, design
+/// spec §9.1) with
+/// `settings.ui.locale.as_deref().or(system_locale.as_deref())`, and will be
+/// called again from the (Task 11) General-tab language combo whenever the
+/// user picks a different entry.
+pub fn negotiate(requested: Option<&str>) -> &'static LocaleEntry {
+    negotiate_in(AVAILABLE_LOCALES, requested)
+}
+
+/// Switches the process-wide active locale to whatever `buzz_code`
+/// negotiates to (never panics on an unknown code — [`negotiate`]'s own
+/// `en_US` fallback absorbs it) and bumps [`GENERATION`] so every thread's
+/// cached bundle rebuilds the next time it calls [`tr`]/[`tr_args`] —
+/// including egui's deferred-viewport render threads, each of which owns
+/// its own `BUNDLE` thread-local and only ever compares/rebuilds lazily,
+/// never reaching across threads itself.
+///
+/// See [`GENERATION`]'s own doc for why this bumps on every call rather than
+/// only when the resolved locale actually changes.
+pub fn set_locale(buzz_code: &str) {
+    let entry = negotiate(Some(buzz_code));
+    if let Some(index) = AVAILABLE_LOCALES
+        .iter()
+        .position(|candidate| candidate.buzz_code == entry.buzz_code)
+    {
+        ACTIVE_LOCALE_INDEX.store(index, Ordering::SeqCst);
+    }
+    GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+/// The currently active locale entry — [`ACTIVE_LOCALE_INDEX`] read through
+/// [`AVAILABLE_LOCALES`]. The `min` clamp is defensive only: every write to
+/// `ACTIVE_LOCALE_INDEX` goes through [`set_locale`], which only ever stores
+/// an index it just found *in* `AVAILABLE_LOCALES`, so this can never
+/// actually be out of range.
+fn active_entry() -> &'static LocaleEntry {
+    let index = ACTIVE_LOCALE_INDEX.load(Ordering::SeqCst);
+    &AVAILABLE_LOCALES[index.min(AVAILABLE_LOCALES.len() - 1)]
+}
+
+/// Resolves `buzz_code`'s human-readable display name via its own
+/// `locale-name-<code>` Fluent key (e.g. `"en_US"` → `locale-name-en-us`),
+/// translated through the *currently active* bundle — mirrors Buzz's
+/// `ui_locales` dict (`general_preferences_widget.py:34-50`), whose values
+/// are themselves wrapped in `_()`, so the combo's own entries are localized
+/// into whichever UI language is currently active rather than fixed to
+/// English. Falls through [`tr`]'s own missing-key echo if a locale's
+/// `locale-name-*` key hasn't landed yet (Task 12 adds one key per newly
+/// ported catalog, in the same commit as that catalog).
+pub fn display_name(buzz_code: &str) -> String {
+    let key = format!(
+        "locale-name-{}",
+        buzz_code.to_ascii_lowercase().replace('_', "-")
+    );
+    tr(&key)
+}
+
+/// Detects the process's env-derived locale, approximating Buzz's own
+/// `QLocale().name()` lookup (`locale.py:15-16`) on a platform/toolkit that
+/// has no such native call: `LC_ALL` wins over `LANG` (POSIX precedence),
+/// and the codeset suffix (e.g. the `.UTF-8` in `en_US.UTF-8`) is dropped,
+/// leaving a bare locale id (`en_US`). `None` when neither is set or both
+/// are blank.
+///
+/// Shared by two callers: `services::fire_launch_telemetry`'s
+/// `system_locale` telemetry field (promoted here from `services.rs` —
+/// same function, same behavior, just relocated) and this module's own
+/// startup locale negotiation (`HummApp::new`, design spec §9.1) as the
+/// system-locale fallback used when `settings.ui.locale` is `None`.
+///
+/// Platform note (documented deviation, design spec §9.1): on macOS, GUI
+/// apps launched from Finder/Dock don't inherit the user's shell
+/// `LC_ALL`/`LANG` — those only apply to terminal-launched processes —
+/// whereas Buzz's `QLocale()` reads the OS's System Settings › Language &
+/// Region preference directly, regardless of how the app was launched.
+/// humm has no native equivalent lookup yet, so a typical macOS GUI launch
+/// sees both vars unset and this returns `None`, which [`negotiate`]'s own
+/// `en_US` fallback then resolves — acceptable for now since `en_US` is the
+/// only catalog embedded until Task 12 anyway.
+pub fn locale_from_env_vars(lc_all: Option<&str>, lang: Option<&str>) -> Option<String> {
+    parse_locale(lc_all).or_else(|| parse_locale(lang))
+}
+
+/// Parses one raw locale env value (e.g. `"en_US.UTF-8"`) down to its locale
+/// id alone (`"en_US"`) by dropping everything from the first `.` onward
+/// (the codeset suffix POSIX locale strings carry) — `None` for an absent or
+/// blank value.
+fn parse_locale(raw: Option<&str>) -> Option<String> {
+    let trimmed = raw?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.split('.').next().unwrap_or(trimmed).to_string())
+}
+
+fn build_bundle(entry: &LocaleEntry) -> FluentBundle<FluentResource> {
+    let resource = FluentResource::try_new(entry.ftl.to_string()).unwrap_or_else(|(_, errors)| {
         // The embedded catalog is compiled into the binary; a parse failure
-        // here means `humm.ftl` itself is malformed, which is a build-time
-        // defect, not a runtime condition callers can recover from. Panicking
-        // at first use (rather than silently serving an empty bundle, which
-        // would make every `tr()` call fall back to its own key name) makes
-        // the defect impossible to miss.
-        panic!("humm.ftl failed to parse: {errors:?}");
+        // here means that locale's `.ftl` itself is malformed, which is a
+        // build-time defect, not a runtime condition callers can recover
+        // from. Panicking at first use (rather than silently serving an
+        // empty bundle, which would make every `tr()` call fall back to its
+        // own key name) makes the defect impossible to miss.
+        panic!(
+            "{} catalog ({}) failed to parse: {errors:?}",
+            entry.buzz_code, entry.langid
+        );
     });
-    let mut bundle = FluentBundle::new(vec![langid!("en-US")]);
+    let langid: unic_langid::LanguageIdentifier = entry.langid.parse().unwrap_or_else(|err| {
+        panic!(
+            "{}'s langid {:?} is not a valid Unicode language identifier: {err}",
+            entry.buzz_code, entry.langid
+        );
+    });
+    let mut bundle = FluentBundle::new(vec![langid]);
+    bundle.add_resource(resource).unwrap_or_else(|_| {
+        panic!(
+            "{} catalog ({}) has a duplicate message id",
+            entry.buzz_code, entry.langid
+        );
+    });
     bundle
-        .add_resource(resource)
-        .expect("humm.ftl has no duplicate message ids");
-    bundle
+}
+
+thread_local! {
+    /// `(generation, bundle)` — the [`GENERATION`] value this thread's
+    /// bundle was built at, alongside the bundle itself. [`tr_args`]
+    /// compares this against the live `GENERATION` counter on every call and
+    /// rebuilds from [`active_entry`] whenever they differ. This is how a
+    /// [`set_locale`] call made on one thread (typically the UI thread)
+    /// becomes visible on every other thread that calls `tr`/`tr_args`
+    /// (egui's deferred-viewport render threads included) — each thread
+    /// only ever reads its own cache and the shared counter, never another
+    /// thread's bundle directly.
+    static BUNDLE: RefCell<(usize, FluentBundle<FluentResource>)> = RefCell::new({
+        let generation = GENERATION.load(Ordering::SeqCst);
+        (generation, build_bundle(active_entry()))
+    });
+}
+
+/// Test-only peek at the calling thread's cached bundle generation — lets
+/// the `set_locale_*` tests below observe the lazy per-thread rebuild
+/// directly rather than only inferring it indirectly through resolved text
+/// (which, with only `en_US` ever registered, never itself changes).
+#[cfg(test)]
+fn thread_bundle_generation() -> usize {
+    BUNDLE.with(|cell| cell.borrow().0)
 }
 
 /// Resolves `key` to its English text, or `key` itself if the catalog has no
@@ -359,8 +636,13 @@ pub fn tr(key: &str) -> String {
 /// Like [`tr`], but resolves Fluent placeables (`{ $name }`) from `args`
 /// (name, value pairs).
 pub fn tr_args(key: &str, args: &[(&str, &str)]) -> String {
-    BUNDLE.with(|bundle| {
-        let bundle = bundle.borrow();
+    BUNDLE.with(|cell| {
+        let mut cached = cell.borrow_mut();
+        let current_generation = GENERATION.load(Ordering::SeqCst);
+        if cached.0 != current_generation {
+            *cached = (current_generation, build_bundle(active_entry()));
+        }
+        let bundle = &cached.1;
         let Some(message) = bundle.get_message(key) else {
             return key.to_string();
         };
@@ -386,6 +668,29 @@ pub fn tr_args(key: &str, args: &[(&str, &str)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use unic_langid::langid;
+
+    /// Serializes the handful of tests below that mutate the shared global
+    /// locale state (`GENERATION`/`ACTIVE_LOCALE_INDEX`, via [`set_locale`])
+    /// against each other — the test harness runs `#[test]` functions
+    /// concurrently by default, and two of these tests intentionally
+    /// observe that global state changing under them, which would be racy
+    /// against each other without this. Every other test in this module
+    /// only ever *reads* through `tr`/`tr_args`/`display_name`, which stays
+    /// safe to interleave freely: with only `en_US` ever registered,
+    /// negotiation can never resolve anywhere but index `0` no matter how
+    /// many times `set_locale` is called concurrently, so those tests are
+    /// unaffected by this lock or by each other.
+    static LOCALE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn locale(buzz_code: &'static str, langid: &'static str) -> LocaleEntry {
+        LocaleEntry {
+            buzz_code,
+            langid,
+            ftl: "",
+        }
+    }
 
     #[test]
     fn every_registered_key_resolves_to_something_other_than_itself() {
@@ -525,5 +830,149 @@ mod tests {
         assert!(rendered.starts_with("Hello, "));
         assert!(rendered.contains("humm"));
         assert!(rendered.ends_with('!'));
+    }
+
+    // -- negotiate_in / negotiate --------------------------------------------
+
+    #[test]
+    fn negotiate_exact_match() {
+        let registry = [
+            locale("en_US", "en-US"),
+            locale("de_DE", "de-DE"),
+            locale("zh_CN", "zh-CN"),
+        ];
+        assert_eq!(negotiate_in(&registry, Some("zh_CN")).buzz_code, "zh_CN");
+    }
+
+    #[test]
+    fn negotiate_language_prefix_from_regional_request() {
+        let registry = [locale("en_US", "en-US"), locale("de_DE", "de-DE")];
+        // "de_AT" isn't itself registered, but its language ("de") matches
+        // the registered "de_DE" -- Buzz's own fallback for an unavailable
+        // regional variant (`locale.py:15-21`).
+        assert_eq!(negotiate_in(&registry, Some("de_AT")).buzz_code, "de_DE");
+    }
+
+    #[test]
+    fn negotiate_bare_language_request() {
+        let registry = [locale("en_US", "en-US"), locale("de_DE", "de-DE")];
+        assert_eq!(negotiate_in(&registry, Some("de")).buzz_code, "de_DE");
+    }
+
+    #[test]
+    fn negotiate_unknown_falls_back_en() {
+        let registry = [locale("en_US", "en-US"), locale("de_DE", "de-DE")];
+        assert_eq!(negotiate_in(&registry, Some("xx_YY")).buzz_code, "en_US");
+        assert_eq!(negotiate_in(&registry, None).buzz_code, "en_US");
+    }
+
+    #[test]
+    fn negotiate_case_insensitive_language() {
+        let registry = [locale("en_US", "en-US"), locale("de_DE", "de-DE")];
+        assert_eq!(negotiate_in(&registry, Some("DE_at")).buzz_code, "de_DE");
+        assert_eq!(negotiate_in(&registry, Some("DE")).buzz_code, "de_DE");
+    }
+
+    // -- set_locale / generation ----------------------------------------------
+
+    #[test]
+    fn set_locale_rebuilds_bundle_on_same_thread() {
+        let _guard = LOCALE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = GENERATION.load(Ordering::SeqCst);
+        set_locale("en_US");
+        let after_first_call = GENERATION.load(Ordering::SeqCst);
+        assert!(
+            after_first_call > before,
+            "set_locale must bump the generation counter"
+        );
+        // Documented semantics (see `GENERATION`'s own doc comment): a
+        // second call bumps again even though it resolves to the same
+        // locale already active.
+        set_locale("en_US");
+        let after_second_call = GENERATION.load(Ordering::SeqCst);
+        assert!(
+            after_second_call > after_first_call,
+            "a second set_locale call bumps the generation again, per-call, \
+             not per-distinct-value"
+        );
+        // Same-thread lazy rebuild: this thread's cached bundle must catch
+        // up to the latest generation the moment `tr` is next called.
+        let _ = tr("hero-drop");
+        assert_eq!(
+            thread_bundle_generation(),
+            after_second_call,
+            "tr() must rebuild this thread's cached bundle to the latest generation"
+        );
+    }
+
+    #[test]
+    fn set_locale_visible_from_second_thread() {
+        let _guard = LOCALE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let (proceed_tx, proceed_rx) = std::sync::mpsc::channel::<()>();
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<(String, usize, usize)>();
+
+        let worker = std::thread::spawn(move || {
+            // Touch `tr` first, priming this thread's own bundle/generation
+            // before the main thread ever calls `set_locale`.
+            let _ = tr("hero-drop");
+            let before_generation = thread_bundle_generation();
+            ready_tx
+                .send(())
+                .expect("main thread is waiting to receive ready");
+            proceed_rx
+                .recv()
+                .expect("main thread sends proceed after its own set_locale call");
+            let after_text = tr("hero-drop");
+            let after_generation = thread_bundle_generation();
+            result_tx
+                .send((after_text, before_generation, after_generation))
+                .expect("main thread is waiting to receive the result");
+        });
+
+        ready_rx
+            .recv()
+            .expect("worker thread signals ready before any set_locale call");
+        let global_before = GENERATION.load(Ordering::SeqCst);
+        set_locale("en_US");
+        let global_after = GENERATION.load(Ordering::SeqCst);
+        proceed_tx
+            .send(())
+            .expect("worker thread is waiting to proceed");
+        worker.join().expect("worker thread panicked");
+        let (after_text, before_generation, after_generation) =
+            result_rx.recv().expect("worker thread sent its result");
+
+        assert!(global_after > global_before);
+        // The second thread's own cached generation must have moved past
+        // what it was primed with, proving the generation bump `set_locale`
+        // made on the *main* thread became visible on the *worker* thread
+        // purely through that thread's own next `tr` call -- no direct
+        // cross-thread bundle access ever happens, which is exactly the
+        // deferred-viewport render-thread contract this module must uphold.
+        assert!(
+            after_generation > before_generation,
+            "the worker thread's cached generation must advance after the \
+             main thread's set_locale call"
+        );
+        assert!(after_generation >= global_after);
+        // With only `en_US` ever registered, the resolved text is stable
+        // across the switch -- proving no corruption/staleness snuck in
+        // under the cross-thread rebuild, even though the *value* itself
+        // doesn't change yet (Task 12's catalogs are what make this
+        // assertion interesting on text content, not just generation
+        // bookkeeping).
+        assert_eq!(after_text, "Drop media here, or ⌘O");
+    }
+
+    // -- display_name -----------------------------------------------------------
+
+    #[test]
+    fn display_name_en() {
+        assert_eq!(display_name("en_US"), "English");
     }
 }

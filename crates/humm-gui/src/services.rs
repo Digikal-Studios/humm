@@ -46,6 +46,7 @@ use humm_media::{FfmpegDecoder, FfprobeProber, MediaCapabilities, YtDlpFetcher, 
 use humm_store::{KeyringSecretStore, SqliteStore};
 
 use crate::engine_factory::{DownloaderEnsurer, GuiEngineFactory};
+use crate::i18n::locale_from_env_vars;
 use crate::llm_source::GuiLlmSource;
 use crate::translate_seam::{RealTranslateSpawner, ScriptedTranslateSpawner, TranslateSpawner};
 use crate::views::prefs_general::{ValidateFn, real_validate_fn, stub_validate_fn};
@@ -777,27 +778,6 @@ fn ensure_user_identifier(settings: &Arc<Mutex<Settings>>, settings_path: &Path)
         log::warn!("could not persist the telemetry user identifier: {err}");
     }
     id
-}
-
-/// Resolves the `locale` property [`Event::app_launched`] sends, from the
-/// `LC_ALL`/`LANG` environment variables in that precedence order (glibc/
-/// POSIX locale-resolution order; `LC_ALL` always wins when set). Pure — the
-/// real env reads happen only at [`fire_launch_telemetry`]'s call site, so
-/// this is independently testable against synthetic values.
-pub fn locale_from_env_vars(lc_all: Option<&str>, lang: Option<&str>) -> Option<String> {
-    parse_locale(lc_all).or_else(|| parse_locale(lang))
-}
-
-/// Parses one raw locale env value (e.g. `"en_US.UTF-8"`) down to its locale
-/// id alone (`"en_US"`) by dropping everything from the first `.` onward
-/// (the codeset suffix POSIX locale strings carry) — `None` for an absent or
-/// blank value.
-fn parse_locale(raw: Option<&str>) -> Option<String> {
-    let trimmed = raw?.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed.split('.').next().unwrap_or(trimmed).to_string())
 }
 
 #[cfg(test)]

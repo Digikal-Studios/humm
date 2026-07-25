@@ -29,7 +29,7 @@ use humm_whisper::LiveOptions;
 use crate::engine_factory::DownloaderEnsurer;
 use crate::events::{self, SharedEventQueue};
 use crate::folder_watch::{FolderWatchService, FolderWatchSnapshot, ReconcileAction};
-use crate::i18n::tr;
+use crate::i18n::{self, tr};
 use crate::import::{FileDialogs, ImportRequest, RfdFileDialogs, scan_folder};
 use crate::live_fixture::FixtureCapture;
 use crate::live_session::{
@@ -300,6 +300,35 @@ impl HummApp {
         services: Services,
         argv_import: Vec<PathBuf>,
     ) -> Self {
+        // Locale negotiation (F-008a, design spec §9.1): resolved exactly
+        // once here, after `services::init` has already loaded
+        // `settings.toml` but before this constructor returns an app for
+        // eframe to ever paint a first frame — so that very first frame
+        // already renders through the negotiated bundle. Buzz's own
+        // equivalent (`locale.py:15-16`) reads `QLocale().name()`, which on
+        // macOS surfaces the OS's System Settings › Language & Region
+        // preference regardless of how the app was launched; humm's
+        // env-based fallback (`i18n::locale_from_env_vars`) only sees
+        // `LC_ALL`/`LANG`, which a Finder/Dock-launched macOS GUI process
+        // essentially never has set (documented platform difference,
+        // design spec §9.1) — in practice this resolves to `en_US` on a
+        // typical macOS launch whenever `settings.ui.locale` is also
+        // unset, which is a fine outcome for now since `en_US` is the only
+        // catalog embedded until Task 12 anyway.
+        let requested_locale = {
+            let settings = services
+                .settings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            settings.ui.locale.clone()
+        };
+        let system_locale = i18n::locale_from_env_vars(
+            std::env::var("LC_ALL").ok().as_deref(),
+            std::env::var("LANG").ok().as_deref(),
+        );
+        let negotiated = i18n::negotiate(requested_locale.as_deref().or(system_locale.as_deref()));
+        i18n::set_locale(negotiated.buzz_code);
+
         let event_queue = events::spawn_event_pump(services.events.clone(), cc.egui_ctx.clone());
         // Smoke-test hooks (see `SmokeHooks`'s doc comment): read from real
         // process env only on this, the real construction path — never in

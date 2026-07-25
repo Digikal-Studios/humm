@@ -1,9 +1,17 @@
 ## humm-gui — English (en) catalog.
 ##
 ## Every user-visible string in humm-gui is keyed here and resolved through
-## `i18n::tr`/`i18n::tr_args` (F-008 scaffold — locale negotiation lands with
-## locale ports in a later milestone; this catalog is the only one loaded for
-## now). Keys are kebab-case, grouped by the view that renders them.
+## `i18n::tr`/`i18n::tr_args`. Locale negotiation and live switching land
+## this milestone (F-008a); only this `en` catalog is embedded so far --
+## Task 12 ports `de`/`es`/`zh` catalogs alongside it. Keys are kebab-case,
+## grouped by the view that renders them.
+
+## Locale display names (i18n::display_name, F-008a) -- one key per
+## i18n::AVAILABLE_LOCALES entry; Task 12 adds the rest as each catalog
+## ports. Source: Buzz's `ui_locales` dict values
+## (general_preferences_widget.py:34-50).
+
+locale-name-en-us = English
 
 ## Empty-state hero (views/main_window.rs)
 
