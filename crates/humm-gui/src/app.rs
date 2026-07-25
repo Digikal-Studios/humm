@@ -847,7 +847,32 @@ impl HummApp {
             TaskEventKind::StoreWriteFailed { .. } => {
                 self.action_state.banner.on_store_write_failed();
             }
+            // `TasksVm::apply` (just before this call) already refreshed the
+            // row from the store, covering the notes column; this covers
+            // the one thing a row refresh can't: an *open viewer* still
+            // showing the pre-resize segments in memory (design spec §2.3).
+            TaskEventKind::PostProcessed { .. }
+                if postprocessed_should_reload_viewer(&event.kind) =>
+            {
+                self.reload_viewer_segments_if_open(event.task_id);
+            }
             _ => {}
+        }
+    }
+
+    /// Reloads `id`'s open viewer's segments from the store, if one is
+    /// open — a no-op otherwise (most completed tasks have no viewer open
+    /// at all). Driven by [`TaskEventKind::PostProcessed`]'s
+    /// `segments_replaced` flag via [`postprocessed_should_reload_viewer`]:
+    /// the auto-resizer hook can replace a task's persisted segments after
+    /// transcription completes, and an already-open viewer would otherwise
+    /// keep showing the pre-resize rows until closed and reopened.
+    fn reload_viewer_segments_if_open(&mut self, id: TranscriptionId) {
+        if let Some(vm_arc) = self.viewers.get(&id) {
+            let mut vm = vm_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            vm.reload_segments(&self.services.store);
         }
     }
 
@@ -3031,6 +3056,25 @@ fn retry_allowed(status: Status) -> bool {
     matches!(status, Status::Failed | Status::Canceled | Status::Skipped)
 }
 
+/// Whether a drained [`TaskEventKind`] should reload an open viewer's
+/// segments (design spec §2.3: the auto-resizer hook can replace a task's
+/// persisted segments after transcription completes, and an already-open
+/// viewer must not keep showing the stale, pre-resize rows). Pure and free
+/// of any `HummApp` state — `egui_kittest` cannot drive a real deferred
+/// viewport, so this is the seam that makes the *decision* testable without
+/// one; [`HummApp::reload_viewer_segments_if_open`] is the (untested here)
+/// side-effecting half that actually touches a `ViewerVm` when this returns
+/// `true`.
+fn postprocessed_should_reload_viewer(kind: &TaskEventKind) -> bool {
+    matches!(
+        kind,
+        TaskEventKind::PostProcessed {
+            segments_replaced: true,
+            ..
+        }
+    )
+}
+
 /// The [`egui::ViewportBuilder`] for a viewer window: `title`, min size
 /// 800×500, and either the captured shared geometry (`geometry`, position
 /// applied only when both coordinates are known) or the 1000×800 default
@@ -3449,6 +3493,35 @@ mod tests {
         assert!(!retry_allowed(Status::Completed));
         assert!(!retry_allowed(Status::Queued));
         assert!(!retry_allowed(Status::InProgress));
+    }
+
+    #[test]
+    fn postprocessed_should_reload_viewer_only_when_segments_replaced() {
+        assert!(postprocessed_should_reload_viewer(
+            &TaskEventKind::PostProcessed {
+                notes_updated: false,
+                segments_replaced: true,
+                written: vec![],
+                errors: vec![],
+            }
+        ));
+        assert!(!postprocessed_should_reload_viewer(
+            &TaskEventKind::PostProcessed {
+                notes_updated: true,
+                segments_replaced: false,
+                written: vec![PathBuf::from("/tmp/x.docx")],
+                errors: vec!["boom".to_string()],
+            }
+        ));
+    }
+
+    #[test]
+    fn postprocessed_should_reload_viewer_ignores_other_event_kinds() {
+        assert!(!postprocessed_should_reload_viewer(&TaskEventKind::Started));
+        assert!(!postprocessed_should_reload_viewer(&TaskEventKind::Skipped));
+        assert!(!postprocessed_should_reload_viewer(
+            &TaskEventKind::Completed { written: vec![] }
+        ));
     }
 
     #[test]

@@ -4,18 +4,16 @@
 //! (`export_docx/plugin.py:91-124`, whole file read for context) — the OOXML
 //! writer itself lives in [`crate::export::docx::write_docx`].
 //!
-//! [`run`] is built and unit-tested standalone in this task (M7 Task 6) —
-//! nothing calls it from the queue yet. The `on_complete` hook chain that
-//! actually invokes it after a completed task (gated on
-//! [`crate::settings::ExportDocxSettings::enabled`], the same way
-//! [`crate::postproc::skip::check`] is gated on `cfg.skip.enabled` by its
+//! [`run`] was built and unit-tested standalone in Task 6 — Task 7 wires it
+//! into `crate::queue::Runner::run_on_complete_chain`'s `on_complete` hook
+//! chain (gated on [`crate::settings::ExportDocxSettings::enabled`], the same
+//! way [`crate::postproc::skip::check`] is gated on `cfg.skip.enabled` by its
 //! *caller* rather than internally, and exactly like
-//! [`crate::postproc::summary::run`]) lands in a later M7 task (design spec
-//! §2.1). Fixed hook order (design spec §2.1, ledger #L2): `transcript_resizer
-//! → ai_summary → export_docx` — this hook re-reads segments from the store
-//! rather than taking them as a parameter (unlike `summary::run`) precisely
-//! so it observes the resizer's replacement, if any, when Task 7 wires the
-//! chain.
+//! [`crate::postproc::summary::run`]), last in the fixed hook order (design
+//! spec §2.1, ledger #L2): `transcript_resizer → ai_summary → export_docx` —
+//! this hook re-reads segments from the store rather than taking them as a
+//! parameter (unlike `summary::run`) precisely so it observes the resizer's
+//! replacement, if any.
 
 use std::path::{Path, PathBuf};
 
@@ -246,6 +244,14 @@ mod tests {
 
         fn set_task_notes(&self, _id: &TranscriptionId, _notes: &str) -> Result<(), StoreError> {
             unreachable!("run() never sets task notes")
+        }
+
+        fn replace_task_segments(
+            &self,
+            _id: &TranscriptionId,
+            _segs: &[Segment],
+        ) -> Result<(), StoreError> {
+            unreachable!("run() never replaces segments (that's postproc::auto_resize's job)")
         }
     }
 

@@ -330,7 +330,11 @@ impl TasksVm {
     /// - [`TaskEventKind::PostProcessed`]: refreshes the row from `store`
     ///   too — a hook may have updated notes or replaced segments (design
     ///   spec §2.3: "the GUI refreshes the row ... on it", mirroring Buzz's
-    ///   `refresh_row`-after-hooks). No hook chain produces this event yet.
+    ///   `refresh_row`-after-hooks); this refresh alone covers the notes
+    ///   column (`row_vm_from_task_row` re-reads `TaskRow::notes`). An
+    ///   open viewer's own segment reload (on `segments_replaced`) is a
+    ///   separate concern `HummApp::react_to_event` handles — this
+    ///   view-model has no notion of open viewer windows.
     /// - [`TaskEventKind::StoreWriteFailed`]: logged, not reflected in any
     ///   row (ADR-018 — the run continues regardless of this write's
     ///   outcome, so there is no row state to correct).

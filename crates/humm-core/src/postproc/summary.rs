@@ -4,13 +4,12 @@
 //! `{stem}.summary.txt` file. Ported from `ai_summary/plugin.py`'s
 //! `AISummaryPlugin.on_complete` (`:96-168`, whole file read for context).
 //!
-//! [`run`] is built and unit-tested standalone in this task (M7 Task 5) —
-//! nothing calls it from the queue yet. The `on_complete` hook chain that
-//! actually invokes it after a completed task (gated on
-//! [`crate::settings::AiSummarySettings::enabled`], the same way
-//! [`crate::postproc::skip::check`] is gated on `cfg.skip.enabled` by its
-//! *caller* rather than internally) lands in a later M7 task (design spec
-//! §2.1).
+//! [`run`] was built and unit-tested standalone in Task 5 — Task 7 wires it
+//! into `crate::queue::Runner::run_on_complete_chain`'s `on_complete` hook
+//! chain (gated on [`crate::settings::AiSummarySettings::enabled`], the same
+//! way [`crate::postproc::skip::check`] is gated on `cfg.skip.enabled` by its
+//! *caller* rather than internally), second in the fixed **auto_resize →
+//! summary → docx** order (design spec §2.1).
 //!
 //! Buzz's `_write_file` prefers `task.file_path or task.original_file_path`
 //! (`plugin.py:157`) — the second alternative exists in Buzz only for the
@@ -360,6 +359,14 @@ mod tests {
                 .expect("notes lock")
                 .push((*id, notes.to_string()));
             Ok(())
+        }
+
+        fn replace_task_segments(
+            &self,
+            _id: &TranscriptionId,
+            _segs: &[Segment],
+        ) -> Result<(), StoreError> {
+            unreachable!("run() never replaces segments (that's postproc::auto_resize's job)")
         }
     }
 

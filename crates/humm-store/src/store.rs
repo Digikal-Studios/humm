@@ -1532,6 +1532,18 @@ impl TaskStore for SqliteStore {
         // silently turn this into infinite recursion.
         self.update_transcription_notes(id, notes)
     }
+
+    fn replace_task_segments(
+        &self,
+        id: &TranscriptionId,
+        segs: &[Segment],
+    ) -> Result<(), StoreError> {
+        // Delegates to the distinctly-named (and differently-shaped --
+        // by-value `id`) inherent method above, the same
+        // `find_completed_by_file_name`/`segments_for`/`set_task_notes`
+        // pattern this whole `impl` follows.
+        self.replace_segments(*id, segs)
+    }
 }
 
 #[cfg(test)]

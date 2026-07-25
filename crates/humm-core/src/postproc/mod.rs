@@ -1,9 +1,11 @@
 //! Post-processing hook seams (ADR-010: four native features, not a plugin
-//! mechanism) — the pre-run `check_skip` seam (F-115, [`skip`]) plus, in a
-//! later milestone task, the post-run `on_complete` hook chain (F-111
-//! ai_summary, F-113 export_docx, F-116 transcript_resizer). Design:
-//! `docs/superpowers/specs/2026-07-25-m7-completeness-design.md` §2, §4.
+//! mechanism) — the pre-run `check_skip` seam (F-115, [`skip`]) and the
+//! post-run `on_complete` hook chain (F-116 [`auto_resize`], F-111
+//! [`summary`], F-113 [`docx`] — dispatched, in that fixed order, by
+//! `crate::queue::Runner::run_on_complete_chain`). Design:
+//! `docs/superpowers/specs/2026-07-25-m7-completeness-design.md` §2, §4, §5.
 
+pub mod auto_resize;
 pub mod docx;
 pub mod skip;
 pub mod summary;

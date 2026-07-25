@@ -68,10 +68,11 @@ use crate::boundary::{
 use crate::cancel::CancelToken;
 use crate::domain::{Backend, Input, ModelSpec, Segment, Source, TaskSpec, TranscriptionId};
 use crate::error::{CoreError, EngineError, MediaError, ModelError, StoreError};
+use crate::language::Language;
 use crate::models::download::DownloadProgress;
 use crate::openai::LlmEndpointSource;
 use crate::pipeline::{EngineTuning, JobOutcome, run_file_job};
-use crate::postproc::{self, PostprocConfigSource};
+use crate::postproc::{self, PostprocConfig, PostprocConfigSource};
 
 /// The message emitted to yt-dlp-less URL tasks: exactly this string is
 /// written to the store and carried on the `Failed` event.
@@ -163,13 +164,13 @@ pub enum TaskEventKind {
     /// seam in `run_job` (design spec §2.1).
     Skipped,
     /// A post-processing hook chain ran after the task completed (F-110's
-    /// `on_complete` hook seam, driving the F-111 `ai_summary`, F-113
-    /// `export_docx`, and F-116 `transcript_resizer` built-ins) and is
-    /// reporting its combined outcome — mirrors Buzz's `refresh_row`-after-
-    /// hooks (`main_window.py:453-477`). Emitted once, after `Completed`,
-    /// **iff** at least one hook is enabled; never emitted for a task with
-    /// no enabled hooks. No hook chain is wired to produce this event yet
-    /// (a later milestone task adds the dispatch).
+    /// `on_complete` hook seam, driving the F-116 `transcript_resizer`,
+    /// F-111 `ai_summary`, and F-113 `export_docx` built-ins, in that fixed
+    /// order — [`Runner::run_on_complete_chain`]) and is reporting its
+    /// combined outcome — mirrors Buzz's `refresh_row`-after-hooks
+    /// (`main_window.py:453-477`). Emitted once, after `Completed`, **iff**
+    /// at least one hook is enabled; never emitted for a task with no
+    /// enabled hooks.
     PostProcessed {
         /// Whether a hook updated the task's notes (e.g. `ai_summary`).
         notes_updated: bool,
@@ -568,8 +569,16 @@ struct PendingTask {
 
 /// How a task's run ended, before it is written to the store.
 enum Terminal {
-    /// Succeeded, with the pipeline outcome (segments + written files).
-    Completed(JobOutcome),
+    /// Succeeded, with the pipeline outcome (segments + written files) and
+    /// the extra data [`Runner::run_task`]'s `on_complete` hook chain needs
+    /// (see [`PostCompleteContext`]). Boxed: [`PostprocConfig`] (nested
+    /// inside `PostCompleteContext`) is large enough that an unboxed second
+    /// field would make every other `Terminal` variant pay for its size
+    /// (`clippy::large_enum_variant`) — this is the common case (`None`
+    /// whenever no [`RunnerDeps::postproc`] source is configured), and it's
+    /// paid once per completed task either way, so the extra indirection
+    /// costs nothing observable.
+    Completed(JobOutcome, Box<PostCompleteContext>),
     /// Canceled (cooperatively) during the run.
     Canceled,
     /// Failed, with an actionable message.
@@ -579,6 +588,30 @@ enum Terminal {
     /// `segments` are the task's transcript, copied from wherever the check
     /// found them (a result file or a prior completed row).
     Skipped(Vec<Segment>),
+}
+
+/// Data [`Runner::run_job`] computes for a task that completes
+/// successfully, needed by [`Runner::run_task`]'s `on_complete` hook chain
+/// (F-116/F-111/F-113, design spec §2.1) after the pipeline has already
+/// returned control to it:
+///
+/// - `input_path`: the resolved local input path — a URL task's *fetched*
+///   file, not the original `TaskSpec::input`. `run_job` already computed
+///   this once (as `job.input`) to run the pipeline; threading it here
+///   avoids re-deriving it (which would otherwise need a fresh store read
+///   for URL tasks, since nothing else persists it for `run_task` to see).
+/// - `postproc`: the [`PostprocConfig`] snapshot taken once for this task
+///   (design spec §2.4), reused here rather than re-snapshotted in
+///   `run_task` — [`PostprocConfig`]'s own doc comment promises one
+///   consistent settings view per task across *both* hook seams
+///   (`check_skip` above in `run_job`, `on_complete` here), even if the
+///   user edits Preferences while this task is mid-run. `None` exactly
+///   when [`RunnerDeps::postproc`] is `None` (every pre-M7 caller, and any
+///   test double that doesn't need hooks) — the chain then never runs, as
+///   if this field didn't exist.
+struct PostCompleteContext {
+    input_path: PathBuf,
+    postproc: Option<PostprocConfig>,
 }
 
 /// `true` if `error` represents cancellation rather than a genuine failure.
@@ -947,10 +980,9 @@ impl Runner {
                 ))
             }
         };
-        self.set_current(None);
 
         match terminal {
-            Terminal::Completed(outcome) => {
+            Terminal::Completed(outcome, ctx) => {
                 if let Err(err) = self.store.mark_completed(&id, &outcome.segments) {
                     self.store_write_failed(id, "mark_completed", &err);
                 }
@@ -960,6 +992,23 @@ impl Runner {
                         written: outcome.written,
                     },
                 });
+                // `on_complete` hook chain (F-116/F-111/F-113, design spec
+                // §2.1): only when a config source was configured at all
+                // *and* it produced a snapshot (`run_job` always snapshots
+                // whenever `self.postproc.is_some()`, so `None` here means
+                // no source was configured — every pre-M7 caller and any
+                // test double that doesn't need hooks).
+                if let Some(cfg) = ctx.postproc {
+                    self.run_on_complete_chain(
+                        id,
+                        &ctx.input_path,
+                        &outcome.segments,
+                        spec.options.word_timestamps,
+                        spec.options.language.map(Language::code),
+                        cfg,
+                        &token,
+                    );
+                }
             }
             Terminal::Canceled => self.write_canceled(id),
             Terminal::Failed(message) => {
@@ -981,6 +1030,18 @@ impl Runner {
                 });
             }
         }
+
+        // Cleared only now (rather than right after the pipeline itself
+        // returned): the `on_complete` hook chain above may still be
+        // running an interruptible hook (ai_summary's request), and
+        // `QueueHandle::cancel`/`cancel_all`'s prompt-cancel fast path only
+        // trips a token it finds in `current` — clearing this any earlier
+        // would make a cancel sent *during* the hook chain silently do
+        // nothing until this task's `id` is next dequeued (which, for a
+        // task that already reached a terminal state, is never), defeating
+        // design spec §2.2's "cancel mid-summary is acked sub-second"
+        // promise.
+        self.set_current(None);
 
         // Consume the id from the canceled-set at terminal time. `cancel(id)`
         // always sends `Command::Cancel(id)` over the channel — even for the
@@ -1044,26 +1105,35 @@ impl Runner {
             output: spec.output.clone(),
         };
 
+        // A single [`PostprocConfig`] snapshot for this whole task (design
+        // spec §2.4), taken once here — iff a config source is configured
+        // at all — and reused for *both* hook seams: the F-115 `check_skip`
+        // gate right below, and (threaded into `Terminal::Completed` via
+        // [`PostCompleteContext`]) the `on_complete` chain `run_task` runs
+        // after this job returns. One snapshot per task means the whole
+        // chain sees one consistent settings view even if the user edits
+        // Preferences mid-run — re-snapshotting separately in `run_task`
+        // would let a mid-run edit apply inconsistently between the two
+        // seams.
+        let postproc_cfg = self.postproc.as_ref().map(|source| source.snapshot());
+
         // F-115 `check_skip` seam (design spec §2.1): after input resolution
         // (a URL task's `job.input` is by now the fetched local file) and
         // before artifact-ensure/engine-build — Buzz's own ordering
         // (`file_transcriber_queue_worker.py:208-230`), which runs the check
-        // right after `mark_started`/`Started` too. A snapshot is taken once
-        // per task iff a config source is configured at all; the hook chain
-        // then dispatches on `cfg.skip.enabled` — no source (`None`) or a
-        // disabled hook leaves this job's behavior byte-for-byte unchanged.
-        if let Some(postproc) = self.postproc.as_ref() {
-            let cfg = postproc.snapshot();
-            if cfg.skip.enabled
-                && let Some(segments) = postproc::skip::check(
-                    &cfg.skip,
-                    &job.input,
-                    job.output.directory.as_deref(),
-                    self.store.as_ref(),
-                )
-            {
-                return Terminal::Skipped(segments);
-            }
+        // right after `mark_started`/`Started` too. Dispatches on
+        // `cfg.skip.enabled` — no source (`None`) or a disabled hook leaves
+        // this job's behavior byte-for-byte unchanged.
+        if let Some(cfg) = postproc_cfg.as_ref()
+            && cfg.skip.enabled
+            && let Some(segments) = postproc::skip::check(
+                &cfg.skip,
+                &job.input,
+                job.output.directory.as_deref(),
+                self.store.as_ref(),
+            )
+        {
+            return Terminal::Skipped(segments);
         }
 
         // When an ArtifactEnsurer is configured (GUI), ensure the model/VAD
@@ -1126,9 +1196,114 @@ impl Runner {
         self.engine_cache = Some((model, engine));
 
         match result {
-            Ok(outcome) => Terminal::Completed(outcome),
+            Ok(outcome) => Terminal::Completed(
+                outcome,
+                Box::new(PostCompleteContext {
+                    input_path: job.input,
+                    postproc: postproc_cfg,
+                }),
+            ),
             Err(err) => classify(err),
         }
+    }
+
+    /// Runs the `on_complete` post-processing hook chain for one
+    /// just-completed task (F-116/F-111/F-113, design spec §2.1/§2.2),
+    /// entirely synchronously on this (the queue runner) thread: fixed
+    /// order **auto_resize → summary → docx** (ledger #L2 — resizer first
+    /// so `docx`, which re-reads the store, sees the resize; `summary`
+    /// reads the in-memory `outcome_segments`, which resizing never
+    /// textually changes). Each hook is individually gated on its own
+    /// `enabled` flag — the same convention every hook module's own `run`
+    /// already follows for its *other* settings — and every hook's failure
+    /// is contained into `errors`, never escalated (Buzz's per-plugin
+    /// `try`/`except`, `manager.py:136-148`): a hook failing never fails
+    /// the task, which already reached `Completed` before this chain ever
+    /// starts.
+    ///
+    /// `cancel` is checked *between* hooks (never introduced mid-hook): a
+    /// cancellation observed there skips every hook from that point on, but
+    /// the task's own status is untouched (it is already `Completed`) and
+    /// the aggregated event below still reports whatever ran before the
+    /// cancellation — design spec §2.2's "surviving hooks are skipped, and
+    /// the task stays `Completed`".
+    ///
+    /// Emits exactly one [`TaskEventKind::PostProcessed`], and only when at
+    /// least one hook is actually enabled (design spec §2.3: "iff at least
+    /// one hook is enabled") — a `cfg` with every hook disabled emits
+    /// nothing at all, matching the T2 contract that this event is
+    /// additive and optional.
+    #[allow(clippy::too_many_arguments)]
+    fn run_on_complete_chain(
+        &self,
+        id: TranscriptionId,
+        input_path: &Path,
+        outcome_segments: &[Segment],
+        word_timestamps: bool,
+        language: Option<&str>,
+        cfg: PostprocConfig,
+        cancel: &CancelToken,
+    ) {
+        if !(cfg.resize.enabled || cfg.summary.enabled || cfg.docx.enabled) {
+            return;
+        }
+
+        let mut notes_updated = false;
+        let mut segments_replaced = false;
+        let mut written: Vec<PathBuf> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+
+        if cfg.resize.enabled {
+            let result = postproc::auto_resize::run(
+                &cfg,
+                &id,
+                word_timestamps,
+                language,
+                self.store.as_ref(),
+            );
+            segments_replaced = result.replaced;
+            if let Some(err) = result.error {
+                errors.push(err);
+            }
+        }
+
+        if !cancel.is_canceled() && cfg.summary.enabled {
+            let result = postproc::summary::run(
+                &cfg,
+                outcome_segments,
+                input_path,
+                self.store.as_ref(),
+                &id,
+                cancel,
+            );
+            notes_updated = result.notes_updated;
+            if let Some(path) = result.file_written {
+                written.push(path);
+            }
+            if let Some(err) = result.error {
+                errors.push(err);
+            }
+        }
+
+        if !cancel.is_canceled() && cfg.docx.enabled {
+            let result = postproc::docx::run(&cfg, &id, input_path, self.store.as_ref());
+            if let Some(path) = result.written {
+                written.push(path);
+            }
+            if let Some(err) = result.error {
+                errors.push(err);
+            }
+        }
+
+        self.emit(TaskEvent {
+            task_id: id,
+            kind: TaskEventKind::PostProcessed {
+                notes_updated,
+                segments_replaced,
+                written,
+                errors,
+            },
+        });
     }
 
     /// Ensures `model` (and the VAD model) via `ensurer`, emitting a
@@ -1355,6 +1530,14 @@ mod tests {
         Failed(TranscriptionId, String),
         Canceled(TranscriptionId),
         Skipped(TranscriptionId, Vec<Segment>),
+        /// `segments_for` — the `on_complete` chain's own reads (the
+        /// auto-resizer's initial read, and `export_docx`'s post-resize
+        /// re-read): recorded so a queue-level test can observe ordering.
+        SegmentsFor(TranscriptionId),
+        /// `replace_task_segments` — the auto-resizer's write.
+        ReplaceSegments(TranscriptionId, Vec<Segment>),
+        /// `set_task_notes` — the ai_summary hook's `save_to_notes` write.
+        SetNotes(TranscriptionId, String),
     }
 
     struct FakeStore {
@@ -1369,6 +1552,13 @@ mod tests {
         fail_requeue: bool,
         completed_gate: Option<Gate>,
         canceled_gate: Option<Gate>,
+        // Backing store for `segments_for`/`replace_task_segments`, so a
+        // resize hook's write is actually visible to a later `segments_for`
+        // read in the *same* chain (e.g. `export_docx`'s post-resize
+        // re-read) — the on_complete chain-order tests depend on this.
+        segments: Arc<Mutex<Vec<Segment>>>,
+        // See `Cfg::replace_gate`'s doc comment.
+        replace_gate: Option<Gate>,
     }
 
     impl FakeStore {
@@ -1466,14 +1656,27 @@ mod tests {
             Ok(None)
         }
 
-        fn segments_for(&self, _id: &TranscriptionId) -> Result<Vec<Segment>, StoreError> {
-            Ok(Vec::new())
+        fn segments_for(&self, id: &TranscriptionId) -> Result<Vec<Segment>, StoreError> {
+            self.record(StoreCall::SegmentsFor(*id));
+            Ok(self.segments.lock().expect("segments lock").clone())
         }
 
-        fn set_task_notes(&self, _id: &TranscriptionId, _notes: &str) -> Result<(), StoreError> {
-            // No queue-level test exercises the ai_summary hook (that's
-            // `postproc::summary`'s own unit tests) -- unreachable here.
-            unreachable!("queue tests never call set_task_notes")
+        fn set_task_notes(&self, id: &TranscriptionId, notes: &str) -> Result<(), StoreError> {
+            self.record(StoreCall::SetNotes(*id, notes.to_string()));
+            Ok(())
+        }
+
+        fn replace_task_segments(
+            &self,
+            id: &TranscriptionId,
+            segs: &[Segment],
+        ) -> Result<(), StoreError> {
+            self.record(StoreCall::ReplaceSegments(*id, segs.to_vec()));
+            *self.segments.lock().expect("segments lock") = segs.to_vec();
+            if let Some(g) = &self.replace_gate {
+                g.wait();
+            }
+            Ok(())
         }
     }
 
@@ -1804,6 +2007,15 @@ mod tests {
         ensurer: Option<Arc<dyn ArtifactEnsurer>>,
         llm: Option<Arc<dyn LlmEndpointSource>>,
         postproc: Option<Arc<dyn PostprocConfigSource>>,
+        // Seeds `FakeStore`'s `segments_for`/`replace_task_segments` backing
+        // store — the on_complete chain tests plant word-timestamped rows
+        // here for the auto-resizer to read.
+        initial_segments: Vec<Segment>,
+        // Blocks inside `FakeStore::replace_task_segments` (after it has
+        // recorded the call and updated the backing segments) until
+        // released — lets a test land an external `cancel()` exactly
+        // between the resize hook finishing and the next hook starting.
+        replace_gate: Option<Gate>,
     }
 
     fn build(cfg: Cfg) -> (QueueHandle, Harness) {
@@ -1823,6 +2035,8 @@ mod tests {
             fail_requeue: cfg.fail_requeue,
             completed_gate: cfg.completed_gate,
             canceled_gate: cfg.canceled_gate,
+            segments: Arc::new(Mutex::new(cfg.initial_segments)),
+            replace_gate: cfg.replace_gate,
         };
         let decoder = FakeDecoder {
             pcm: Pcm::new(vec![0.0; 16_000]),
@@ -1904,6 +2118,25 @@ mod tests {
             summary_api_key: None,
             docx: ExportDocxSettings::default(),
             resize: AutoResizeSettings::default(),
+            paragraph_split: Millis(2000),
+        }
+    }
+
+    /// A [`PostprocConfig`] with [`PostprocConfig::skip`] disabled (no
+    /// on_complete-chain test below plants a sibling result file) and the
+    /// three post-hooks set to the caller's values — the on_complete chain
+    /// tests' own counterpart to [`postproc_cfg_with_skip`].
+    fn postproc_cfg_with_hooks(
+        resize: AutoResizeSettings,
+        summary: AiSummarySettings,
+        docx: ExportDocxSettings,
+    ) -> PostprocConfig {
+        PostprocConfig {
+            skip: SkipSettings::default(),
+            summary,
+            summary_api_key: Some("sk-test".to_string()),
+            docx,
+            resize,
             paragraph_split: Millis(2000),
         }
     }
@@ -4100,5 +4333,354 @@ mod tests {
                 .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
         );
         assert_eq!(h.created.lock().expect("created").len(), 1);
+    }
+
+    // -- `on_complete` hook chain (F-116/F-111/F-113, design spec §2.1) -----
+
+    /// Extracts the [`TaskEventKind::PostProcessed`] payload for `id` from a
+    /// drained event stream, panicking if none is present.
+    fn post_processed_for(
+        events: &[TaskEvent],
+        id: TranscriptionId,
+    ) -> (bool, bool, Vec<PathBuf>, Vec<String>) {
+        events
+            .iter()
+            .find_map(|e| {
+                if e.task_id != id {
+                    return None;
+                }
+                match &e.kind {
+                    TaskEventKind::PostProcessed {
+                        notes_updated,
+                        segments_replaced,
+                        written,
+                        errors,
+                    } => Some((
+                        *notes_updated,
+                        *segments_replaced,
+                        written.clone(),
+                        errors.clone(),
+                    )),
+                    _ => None,
+                }
+            })
+            .expect("a PostProcessed event was expected but none was found")
+    }
+
+    /// A word-timestamped [`TaskSpec`] over `input` (every on_complete-chain
+    /// test needs `word_timestamps: true` for the auto-resizer's own gate 1
+    /// to pass).
+    fn word_timestamped_task(input: PathBuf) -> TaskSpec {
+        let mut spec = path_task(input);
+        spec.options.word_timestamps = true;
+        spec
+    }
+
+    /// `resize` replaces the store's segments *before* `docx` re-reads them
+    /// (design spec §2.1's whole reason for the fixed order): observed via
+    /// the store-call sequence — resize's own `segments_for` read, then its
+    /// `replace_task_segments` write, then docx's *separate* `segments_for`
+    /// re-read — never the other way around.
+    #[test]
+    fn on_complete_chain_runs_resize_before_docx_rereads_segments() {
+        let out_dir = tempfile::tempdir().expect("out tempdir");
+        let cfg = postproc_cfg_with_hooks(
+            AutoResizeSettings {
+                enabled: true,
+                ..AutoResizeSettings::default()
+            },
+            AiSummarySettings::default(), // disabled: not part of this test
+            ExportDocxSettings {
+                enabled: true,
+                output_folder: Some(out_dir.path().to_path_buf()),
+                ..ExportDocxSettings::default()
+            },
+        );
+
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hello world")],
+            }],
+            postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+            initial_segments: vec![seg("hello there.")],
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let input = h.input_file("clip.mp3");
+        let a = TranscriptionId::new();
+        q.enqueue(a, word_timestamped_task(input), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        let (_, segments_replaced, written, errors) = post_processed_for(&events, a);
+        assert!(segments_replaced, "resize should have replaced segments");
+        assert_eq!(
+            written.len(),
+            1,
+            "docx should have written one file: {written:?}"
+        );
+        assert!(
+            errors.is_empty(),
+            "neither hook should have failed: {errors:?}"
+        );
+
+        let calls = h.store_calls();
+        let segments_for_positions: Vec<usize> = calls
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| matches!(c, StoreCall::SegmentsFor(x) if *x == a))
+            .map(|(i, _)| i)
+            .collect();
+        let replace_position = calls
+            .iter()
+            .position(|c| matches!(c, StoreCall::ReplaceSegments(x, _) if *x == a))
+            .expect("resize should have called replace_task_segments");
+
+        assert_eq!(
+            segments_for_positions.len(),
+            2,
+            "resize reads once and docx re-reads once: {calls:?}"
+        );
+        assert!(
+            segments_for_positions[0] < replace_position,
+            "resize's own read must precede its own write: {calls:?}"
+        );
+        assert!(
+            replace_position < segments_for_positions[1],
+            "docx's re-read must observe resize's write, not race ahead of it: {calls:?}"
+        );
+    }
+
+    /// One `PostProcessed` event aggregates all three hooks' independent
+    /// outcomes: the auto-resizer's `segments_replaced`, `export_docx`'s
+    /// `written` path, and a genuine (network-free) ai_summary failure in
+    /// `errors` — simultaneously. The summary failure is produced by a
+    /// syntactically invalid `api_url` (`"this is not a url"`): `reqwest`
+    /// rejects it while building the request, entirely offline (no socket
+    /// is ever opened), matching this task's "network-free" requirement
+    /// while still exercising a *real* `postproc::summary::run` failure
+    /// path (not a fake/mocked one).
+    #[test]
+    fn post_processed_event_aggregates_resize_summary_docx_outcomes() {
+        let out_dir = tempfile::tempdir().expect("out tempdir");
+        let cfg = postproc_cfg_with_hooks(
+            AutoResizeSettings {
+                enabled: true,
+                ..AutoResizeSettings::default()
+            },
+            AiSummarySettings {
+                enabled: true,
+                api_url: Some("this is not a url".to_string()),
+                ..AiSummarySettings::default()
+            },
+            ExportDocxSettings {
+                enabled: true,
+                output_folder: Some(out_dir.path().to_path_buf()),
+                ..ExportDocxSettings::default()
+            },
+        );
+
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hello world")],
+            }],
+            postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+            initial_segments: vec![seg("hello there.")],
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let input = h.input_file("clip.mp3");
+        let a = TranscriptionId::new();
+        q.enqueue(a, word_timestamped_task(input), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        let (notes_updated, segments_replaced, written, errors) = post_processed_for(&events, a);
+        assert!(segments_replaced, "resize should have replaced segments");
+        assert_eq!(
+            written.len(),
+            1,
+            "docx should still have written its file: {written:?}"
+        );
+        assert!(
+            !notes_updated,
+            "summary errored before reaching the notes write"
+        );
+        assert_eq!(
+            errors.len(),
+            1,
+            "summary's malformed-URL failure should be the only recorded error: {errors:?}"
+        );
+    }
+
+    /// A `cfg` with every post-hook disabled must emit no `PostProcessed`
+    /// event at all (design spec §2.3/T2 contract) — even though a
+    /// `PostprocConfigSource` is configured.
+    #[test]
+    fn no_hooks_enabled_emits_no_post_processed_event() {
+        let cfg = postproc_cfg_with_hooks(
+            AutoResizeSettings::default(), // enabled: false
+            AiSummarySettings::default(),  // enabled: false
+            ExportDocxSettings::default(), // enabled: false
+        );
+
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hello world")],
+            }],
+            postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let input = h.input_file("clip.mp3");
+        let a = TranscriptionId::new();
+        q.enqueue(a, path_task(input), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::PostProcessed { .. })),
+            "no hook enabled must never emit PostProcessed: {events:?}"
+        );
+    }
+
+    /// `Completed` always precedes `PostProcessed` in the event stream
+    /// (design spec §2.1: hooks run *after* `mark_completed`+`Completed`).
+    #[test]
+    fn completed_always_precedes_post_processed() {
+        let cfg = postproc_cfg_with_hooks(
+            AutoResizeSettings {
+                enabled: true,
+                ..AutoResizeSettings::default()
+            },
+            AiSummarySettings::default(),
+            ExportDocxSettings::default(),
+        );
+
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hello world")],
+            }],
+            postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+            initial_segments: vec![seg("hello there.")],
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let input = h.input_file("clip.mp3");
+        let a = TranscriptionId::new();
+        q.enqueue(a, word_timestamped_task(input), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        let completed_pos = events
+            .iter()
+            .position(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
+            .expect("Completed expected");
+        let post_pos = events
+            .iter()
+            .position(|e| e.task_id == a && matches!(e.kind, TaskEventKind::PostProcessed { .. }))
+            .expect("PostProcessed expected");
+        assert!(
+            completed_pos < post_pos,
+            "Completed must precede PostProcessed: {events:?}"
+        );
+    }
+
+    /// A cancel landed *between* hooks (right after resize's write, before
+    /// summary would start) skips every remaining hook, but the aggregated
+    /// event still reports resize's own result — and the task's status
+    /// stays `Completed` (it already was, design spec §2.2). Also proves
+    /// `current` must stay populated through the whole hook chain: this
+    /// only passes because `QueueHandle::cancel`'s prompt-cancel fast path
+    /// can still find and trip this task's token *while a hook is running*.
+    #[test]
+    fn cancel_between_hooks_skips_remaining_hooks_but_keeps_resize_result() {
+        let out_dir = tempfile::tempdir().expect("out tempdir");
+        let (control, gate) = gate();
+        let cfg = postproc_cfg_with_hooks(
+            AutoResizeSettings {
+                enabled: true,
+                ..AutoResizeSettings::default()
+            },
+            AiSummarySettings {
+                enabled: true,
+                // A syntactically invalid URL: if the cancel-between-hooks
+                // check ever regressed and let this hook run anyway, it
+                // would fail offline rather than actually reaching the
+                // network — defense in depth, not the behavior under test.
+                api_url: Some("this is not a url".to_string()),
+                ..AiSummarySettings::default()
+            },
+            ExportDocxSettings {
+                enabled: true,
+                output_folder: Some(out_dir.path().to_path_buf()),
+                ..ExportDocxSettings::default()
+            },
+        );
+
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hello world")],
+            }],
+            postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+            initial_segments: vec![seg("hello there.")],
+            replace_gate: Some(gate),
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let input = h.input_file("clip.mp3");
+        let a = TranscriptionId::new();
+        q.enqueue(a, word_timestamped_task(input), Source::FileImport);
+
+        // The runner is now blocked inside resize's `replace_task_segments`
+        // -- `current` still names this task (design spec §2.2's whole
+        // point), so this reaches the token directly rather than merely
+        // queuing a canceled-set entry nothing would consume until a next
+        // dequeue that never comes.
+        control.wait_entered();
+        q.cancel(a);
+        control.release();
+
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. })),
+            "the task must stay Completed -- it already was before the hook chain ran"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Canceled)),
+            "a cancel mid-chain must not retroactively cancel the already-completed task"
+        );
+        let (notes_updated, segments_replaced, written, errors) = post_processed_for(&events, a);
+        assert!(
+            segments_replaced,
+            "resize already finished before the cancel was observed"
+        );
+        assert!(
+            written.is_empty(),
+            "docx must be skipped after the cancel: {written:?}"
+        );
+        assert!(!notes_updated, "summary must be skipped after the cancel");
+        assert!(
+            errors.is_empty(),
+            "skipped hooks contribute no errors: {errors:?}"
+        );
     }
 }

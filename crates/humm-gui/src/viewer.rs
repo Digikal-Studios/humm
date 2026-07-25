@@ -818,6 +818,42 @@ impl ViewerVm {
         }
     }
 
+    /// Reloads this viewer's segment rows from the store — the narrowest
+    /// seam for the M7 `PostProcessed` reaction (design spec §2.3: an
+    /// open viewer reloads its segments when a post-processing hook's
+    /// `segments_replaced` fires, e.g. the auto-resizer replacing this
+    /// transcript's persisted segments out from under an already-open
+    /// window). Unlike a fresh [`Self::open`], every other piece of UI
+    /// state (player position, playback controls, splitter fractions, …)
+    /// is left untouched — only the segment-derived state is recomputed:
+    /// [`Self::rows`], [`Self::has_translations`], and (if
+    /// [`Self::mode`] is [`ViewMode::Text`]/[`ViewMode::Translation`])
+    /// [`Self::text_body`]. Any in-progress row selection or inline edit is
+    /// dropped, since the old row indices may no longer correspond to
+    /// anything meaningful once the underlying segments have been
+    /// wholesale replaced; a [`ViewMode::Translation`] view falls back to
+    /// [`ViewMode::Timestamps`] if the reload no longer has any
+    /// translations (mirrors [`Self::set_mode`]'s own gate). A read
+    /// failure is logged and leaves the viewer showing its last-known
+    /// (now possibly stale) rows rather than clearing them outright.
+    pub fn reload_segments(&mut self, store: &SqliteStore) {
+        match store.get_segment_rows(self.id) {
+            Ok(rows) => {
+                self.has_translations = rows.iter().any(|row| !row.translation.trim().is_empty());
+                self.rows = rows;
+                self.selected = None;
+                self.editing = None;
+                if self.mode == ViewMode::Translation && !self.has_translations {
+                    self.mode = ViewMode::Timestamps;
+                }
+                self.refresh_text_body();
+            }
+            Err(err) => {
+                log::warn!("viewer: could not reload segments for {}: {err}", self.id);
+            }
+        }
+    }
+
     /// Switches the active view mode and recomputes [`Self::text_body`] for the
     /// Text/Translation modes (Buzz `on_view_mode_changed` → `reset_view`).
     ///
@@ -1943,6 +1979,83 @@ mod tests {
         assert!(
             !vm2.has_translations,
             "only whitespace translations must not count as translations"
+        );
+    }
+
+    // -- reload_segments (M7 Task 7: F-116 auto-resizer's viewer reload) ----
+
+    #[test]
+    fn reload_segments_replaces_rows_and_recomputes_has_translations() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(&store, "/tmp/a.wav", &[seg(0, 1000, "hello", "hola")]);
+        let deps = deps(Arc::clone(&store));
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+        assert_eq!(vm.rows.len(), 1);
+        assert!(vm.has_translations);
+
+        // Simulate the auto-resizer's `replace_task_segments` write landing
+        // underneath this already-open viewer.
+        store
+            .replace_segments(
+                id,
+                &[Segment {
+                    start: Millis(0),
+                    end: Millis(500),
+                    text: "resized".into(),
+                    translation: String::new(),
+                }],
+            )
+            .expect("replace");
+
+        vm.reload_segments(&store);
+
+        assert_eq!(vm.rows.len(), 1);
+        assert_eq!(vm.rows[0].text, "resized");
+        assert!(
+            !vm.has_translations,
+            "replace_segments drops translations (Buzz parity) -- must be recomputed"
+        );
+    }
+
+    #[test]
+    fn reload_segments_drops_selection_and_falls_back_from_translation_mode() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let id = seed(
+            &store,
+            "/tmp/a.wav",
+            &[
+                seg(0, 1000, "hello", "hola"),
+                seg(1000, 2000, "world", "mundo"),
+            ],
+        );
+        let deps = deps(Arc::clone(&store));
+        let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
+        vm.selected = Some(1);
+        vm.set_mode(ViewMode::Translation);
+        assert_eq!(vm.mode, ViewMode::Translation);
+
+        // Replace with segments carrying no translations at all -- the
+        // reload must recompute `has_translations` to false and fall back
+        // out of Translation mode, the same gate `set_mode` itself applies.
+        store
+            .replace_segments(
+                id,
+                &[Segment {
+                    start: Millis(0),
+                    end: Millis(500),
+                    text: "resized".into(),
+                    translation: String::new(),
+                }],
+            )
+            .expect("replace");
+
+        vm.reload_segments(&store);
+
+        assert_eq!(vm.selected, None, "stale row selection must be dropped");
+        assert_eq!(
+            vm.mode,
+            ViewMode::Timestamps,
+            "Translation mode must fall back once has_translations goes false"
         );
     }
 

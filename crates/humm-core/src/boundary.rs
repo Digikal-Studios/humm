@@ -606,6 +606,32 @@ pub trait TaskStore: Send + Sync {
     /// become infinite recursion if the inherent method is later renamed or
     /// inlined.
     fn set_task_notes(&self, id: &TranscriptionId, notes: &str) -> Result<(), StoreError>;
+
+    /// Replaces every persisted segment for `id` with `segs` — the
+    /// trait-level counterpart of `SqliteStore::replace_segments` (F-086's
+    /// resize/merge in-place save path), needed so
+    /// [`crate::postproc::auto_resize::run`] (F-116, design spec §5) can
+    /// reach it through the same store handle
+    /// [`crate::queue::RunnerDeps::store`] already holds, without
+    /// `humm-core` depending on `humm-store` for the concrete type.
+    /// Translations are dropped (forced to `""`) on every inserted row —
+    /// Buzz's `replace_transcription_segments` does the same
+    /// unconditionally (`transcription_service.py:81-92`), so this is not a
+    /// humm-side deviation.
+    ///
+    /// Named `replace_task_segments` rather than reusing
+    /// `SqliteStore::replace_segments`'s own name verbatim: that inherent
+    /// method already exists (with a by-value `id: TranscriptionId`
+    /// parameter, unlike every other trait method's `&TranscriptionId`) —
+    /// giving the trait method a distinct name, the same
+    /// [`Self::find_completed_by_file_name`]/[`Self::segments_for`]/
+    /// [`Self::set_task_notes`] precedent, means the two can never be
+    /// silently conflated or turn a rename into infinite recursion.
+    fn replace_task_segments(
+        &self,
+        id: &TranscriptionId,
+        segs: &[Segment],
+    ) -> Result<(), StoreError>;
 }
 
 #[cfg(test)]
