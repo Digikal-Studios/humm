@@ -322,8 +322,15 @@ impl TasksVm {
     /// - [`TaskEventKind::SegmentAdded`]: no-op (`RowVm` doesn't track
     ///   segment text).
     /// - Terminal ([`TaskEventKind::Completed`]/[`TaskEventKind::Failed`]/
-    ///   [`TaskEventKind::Canceled`]): refreshes the row from `store` (the
-    ///   authoritative terminal `status`/`time_ended`/`error_message`).
+    ///   [`TaskEventKind::Canceled`]/[`TaskEventKind::Skipped`]): refreshes
+    ///   the row from `store` (the authoritative terminal
+    ///   `status`/`time_ended`/`error_message`) — `Skipped` needs the same
+    ///   store round-trip since `mark_skipped` is what actually writes the
+    ///   row's terminal state (no dispatch produces this event yet).
+    /// - [`TaskEventKind::PostProcessed`]: refreshes the row from `store`
+    ///   too — a hook may have updated notes or replaced segments (design
+    ///   spec §2.3: "the GUI refreshes the row ... on it", mirroring Buzz's
+    ///   `refresh_row`-after-hooks). No hook chain produces this event yet.
     /// - [`TaskEventKind::StoreWriteFailed`]: logged, not reflected in any
     ///   row (ADR-018 — the run continues regardless of this write's
     ///   outcome, so there is no row state to correct).
@@ -365,7 +372,9 @@ impl TasksVm {
             TaskEventKind::SegmentAdded(_) => {}
             TaskEventKind::Completed { .. }
             | TaskEventKind::Failed { .. }
-            | TaskEventKind::Canceled => {
+            | TaskEventKind::Canceled
+            | TaskEventKind::Skipped
+            | TaskEventKind::PostProcessed { .. } => {
                 self.refresh_from_store(ev.task_id, store);
             }
             TaskEventKind::StoreWriteFailed { operation, detail } => {

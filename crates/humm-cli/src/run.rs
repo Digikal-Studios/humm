@@ -601,7 +601,9 @@ impl EngineFactory for CliEngineFactory {
 
 /// Drains the event stream until every enqueued task has reached a terminal
 /// state (the runner stays alive until `finish`), rendering each event, and
-/// returns the exit code: any canceled → 130; else any failed → 2; else 0.
+/// returns the exit code: any canceled → 130; else any failed → 2; else 0
+/// (`Skipped` counts toward the `0` arm, same as `Completed` — Buzz treats a
+/// skip as completion, `main_window.py:435-443`).
 fn drain_and_render(
     events: &flume::Receiver<TaskEvent>,
     enqueued: &[TranscriptionId],
@@ -624,6 +626,9 @@ fn drain_and_render(
                 }
                 match &event.kind {
                     TaskEventKind::Completed { .. } => {
+                        remaining.remove(&event.task_id);
+                    }
+                    TaskEventKind::Skipped => {
                         remaining.remove(&event.task_id);
                     }
                     TaskEventKind::Failed { .. } => {
@@ -772,8 +777,36 @@ impl<'a> HumanRenderer<'a> {
                     eprintln!("warning: history not recorded ({operation}): {detail}");
                 }
             }
+            TaskEventKind::Skipped => {
+                // A terminal state, same footing as `Completed`/`Failed`
+                // above: always printed, never gated by `--quiet` (quiet
+                // only suppresses progress/warning lines).
+                self.line.finish();
+                let label = self.label(&event.task_id);
+                eprintln!("{}", skipped_line(&label));
+            }
+            TaskEventKind::PostProcessed { errors, .. } => {
+                // Follows `Completed`, which already finished the progress
+                // line — nothing to do here but report hook failures, if
+                // any (never fails the task itself). A warning line, so
+                // `--quiet` suppresses it like `StoreWriteFailed`'s.
+                if self.quiet {
+                    return;
+                }
+                for err in errors {
+                    eprintln!("warning: post-processing: {err}");
+                }
+            }
         }
     }
+}
+
+/// The stderr line printed for a `Skipped` event's terminal state, human
+/// mode: `<label>  skipped (already transcribed)` — the progress line's own
+/// `<label>  NN%` convention, but for a task that never ran (F-115; Buzz
+/// counts a skip toward "quit on complete", `main_window.py:435-443`).
+fn skipped_line(label: &str) -> String {
+    format!("{label}  skipped (already transcribed)")
 }
 
 /// Throttled single-line progress renderer: rewrites the same terminal line via
@@ -895,6 +928,16 @@ enum JsonEvent<'a> {
         operation: &'a str,
         detail: &'a str,
     },
+    Skipped {
+        task_id: String,
+    },
+    PostProcessed {
+        task_id: String,
+        notes_updated: bool,
+        segments_replaced: bool,
+        written: Vec<String>,
+        errors: &'a [String],
+    },
 }
 
 /// Maps a [`TaskEvent`] to its [`JsonEvent`] and prints it as one line on
@@ -936,6 +979,19 @@ fn emit_json(event: &TaskEvent, labels: &HashMap<TranscriptionId, String>) {
             task_id,
             operation,
             detail,
+        },
+        TaskEventKind::Skipped => JsonEvent::Skipped { task_id },
+        TaskEventKind::PostProcessed {
+            notes_updated,
+            segments_replaced,
+            written,
+            errors,
+        } => JsonEvent::PostProcessed {
+            task_id,
+            notes_updated: *notes_updated,
+            segments_replaced: *segments_replaced,
+            written: written.iter().map(|p| p.display().to_string()).collect(),
+            errors,
         },
         TaskEventKind::ModelDownloadProgress { .. } => {
             // Unreachable by construction (see `HumanRenderer::on_event`'s
@@ -1062,6 +1118,21 @@ mod tests {
                 operation,
                 detail,
             },
+            TaskEventKind::Skipped => JsonEvent::Skipped {
+                task_id: task_id_str,
+            },
+            TaskEventKind::PostProcessed {
+                notes_updated,
+                segments_replaced,
+                written,
+                errors,
+            } => JsonEvent::PostProcessed {
+                task_id: task_id_str,
+                notes_updated: *notes_updated,
+                segments_replaced: *segments_replaced,
+                written: written.iter().map(|p| p.display().to_string()).collect(),
+                errors,
+            },
             TaskEventKind::ModelDownloadProgress { .. } => {
                 // `emit_json` never reaches its own matching arm for this
                 // variant either (see its comment) — no test exercises this
@@ -1182,6 +1253,62 @@ mod tests {
                 ""
             ),
             r#"{"event":"store_write_failed","task_id":"550e8400-e29b-41d4-a716-446655440000","operation":"mark_started","detail":"database query failed: boom"}"#
+        );
+    }
+
+    #[test]
+    fn json_skipped_matches_schema() {
+        assert_eq!(
+            json_for(TaskEventKind::Skipped, ID, ""),
+            r#"{"event":"skipped","task_id":"550e8400-e29b-41d4-a716-446655440000"}"#
+        );
+    }
+
+    #[test]
+    fn json_post_processed_matches_schema() {
+        assert_eq!(
+            json_for(
+                TaskEventKind::PostProcessed {
+                    notes_updated: true,
+                    segments_replaced: false,
+                    written: vec![PathBuf::from("/out.docx")],
+                    errors: vec!["summary: timed out".to_string()],
+                },
+                ID,
+                ""
+            ),
+            r#"{"event":"post_processed","task_id":"550e8400-e29b-41d4-a716-446655440000","notes_updated":true,"segments_replaced":false,"written":["/out.docx"],"errors":["summary: timed out"]}"#
+        );
+    }
+
+    #[test]
+    fn json_post_processed_empty_written_and_errors() {
+        assert_eq!(
+            json_for(
+                TaskEventKind::PostProcessed {
+                    notes_updated: false,
+                    segments_replaced: true,
+                    written: vec![],
+                    errors: vec![],
+                },
+                ID,
+                ""
+            ),
+            r#"{"event":"post_processed","task_id":"550e8400-e29b-41d4-a716-446655440000","notes_updated":false,"segments_replaced":true,"written":[],"errors":[]}"#
+        );
+    }
+
+    // -- Human-mode rendering (Step 2) ----------------------------------------
+
+    #[test]
+    fn skipped_line_reports_already_transcribed() {
+        // `HumanRenderer::on_event` has no injectable writer (it prints
+        // directly to stdout/stderr), so this pins the exact terminal-line
+        // text it emits for `Skipped` via the same pure helper `on_event`
+        // calls, rather than capturing process-wide stderr.
+        assert_eq!(
+            skipped_line("clip.mp3"),
+            "clip.mp3  skipped (already transcribed)"
         );
     }
 

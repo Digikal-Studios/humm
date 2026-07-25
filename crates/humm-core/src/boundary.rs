@@ -556,6 +556,18 @@ pub trait TaskStore: Send + Sync {
     /// Marks the task `canceled` and sets `time_ended`. No segments are
     /// persisted.
     fn mark_canceled(&self, id: &TranscriptionId) -> Result<(), StoreError>;
+
+    /// Marks the task `skipped`, sets `time_ended`, and persists `segments`
+    /// as the task's transcript with every translation forced to `""` —
+    /// mirrors [`Self::mark_completed`]'s shape, but for a task whose input
+    /// was found already transcribed rather than one that actually ran
+    /// (Buzz's `update_transcription_as_skipped`,
+    /// `transcription_service.py:62-73`, which hardcodes
+    /// `translation=''` regardless of what the segment carries).
+    /// `Status::Skipped` is a terminal state alternative to `Completed`, not
+    /// a failure: Buzz counts a skip toward "quit on complete"
+    /// (`main_window.py:435-443`).
+    fn mark_skipped(&self, id: &TranscriptionId, segments: &[Segment]) -> Result<(), StoreError>;
 }
 
 #[cfg(test)]

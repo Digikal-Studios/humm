@@ -613,6 +613,66 @@ impl SqliteStore {
             .map_err(query_error)
     }
 
+    /// Finds the newest (`time_queued` descending) `completed` task whose
+    /// `file` column's **basename** matches `name` — Buzz's
+    /// `find_completed_transcription_by_filename`
+    /// (`skip_already_transcribed/plugin.py:163-166` calls it with
+    /// `os.path.basename(file_path)`; the DAO itself matches `file` against
+    /// `%/<name>` or an exact `<name>`, `transcription_dao.py:336-351`).
+    ///
+    /// The basename comparison is done on the `file` column's *tail* via
+    /// `substr`/`length` rather than a `LIKE` pattern built from `name`, so a
+    /// filename containing SQL wildcard characters (`%`, `_`) is compared
+    /// literally instead of being reinterpreted as a pattern: the trailing
+    /// `length(name)` characters of `file` must equal `name` exactly, and
+    /// either `file` is exactly `name` (no directory component at all) or
+    /// the character immediately before that tail is a path separator (`/`
+    /// or `\`, so a Windows-produced row still basename-matches on any
+    /// host). No index is added on `file` for this lookup — deliberately:
+    /// this table is personal-transcription-history scale (a full scan of a
+    /// few thousand rows costs nothing worth an index for).
+    pub fn find_completed_by_file_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<TranscriptionId>, StoreError> {
+        let conn = self.lock()?;
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT id FROM transcription \
+                 WHERE status = ?1 \
+                   AND file IS NOT NULL \
+                   AND length(file) >= length(?2) \
+                   AND substr(file, -length(?2)) = ?2 \
+                   AND (length(file) = length(?2) \
+                        OR substr(file, length(file) - length(?2), 1) IN ('/', '\\')) \
+                 ORDER BY time_queued DESC \
+                 LIMIT 1",
+                params![Status::Completed.as_str(), name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(query_error)?;
+        raw.map(|raw| {
+            TranscriptionId::parse(&raw).ok_or_else(|| StoreError::Corrupt {
+                detail: format!("invalid task id {raw:?}"),
+            })
+        })
+        .transpose()
+    }
+
+    /// Reports whether any task — regardless of status — has `file` exactly
+    /// equal to `path`'s displayed form. An exact-path existence check, not
+    /// a basename search (contrast [`Self::find_completed_by_file_name`]).
+    pub fn has_task_for_file(&self, path: &Path) -> Result<bool, StoreError> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM transcription WHERE file = ?1)",
+            params![path.display().to_string()],
+            |row| row.get(0),
+        )
+        .map_err(query_error)
+    }
+
     /// Sets a task's user-assigned display name. Ported from Buzz's
     /// `TranscriptionDAO.update_transcription_name`
     /// (`transcription_dao.py:269-284`), which raises when the row doesn't
@@ -1408,6 +1468,32 @@ impl TaskStore for SqliteStore {
         .map_err(query_error)?;
         Ok(())
     }
+
+    fn mark_skipped(&self, id: &TranscriptionId, segments: &[Segment]) -> Result<(), StoreError> {
+        let now = now_iso();
+        let mut conn = self.lock()?;
+        let tx = conn.transaction().map_err(query_error)?;
+        tx.execute(
+            "UPDATE transcription SET status = ?1, time_ended = ?2 WHERE id = ?3",
+            params![Status::Skipped.as_str(), now, id.to_string()],
+        )
+        .map_err(query_error)?;
+        for segment in segments {
+            // The translation column is the literal empty string, not
+            // `segment.translation` — Buzz hardcodes `translation=''` here
+            // (`transcription_service.py:62-73`) regardless of what the
+            // segment itself carries.
+            tx.execute(
+                "INSERT INTO transcription_segment \
+                 (start_time, end_time, text, translation, transcription_id) \
+                 VALUES (?1, ?2, ?3, '', ?4)",
+                params![segment.start.0, segment.end.0, segment.text, id.to_string()],
+            )
+            .map_err(query_error)?;
+        }
+        tx.commit().map_err(query_error)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1688,6 +1774,150 @@ mod tests {
         assert_eq!(stored, segments);
         assert_eq!(stored[0].translation, "one");
         assert_eq!(stored[1].translation, "");
+    }
+
+    #[test]
+    fn mark_skipped_sets_status_time_and_segments() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        store
+            .create_task(&id, &sample_task_spec(), Source::FileImport)
+            .expect("create");
+
+        let segments = vec![
+            Segment {
+                start: Millis(0),
+                end: Millis(1000),
+                text: "uno".to_string(),
+                // Even a segment carrying a translation must be persisted
+                // with an empty one: Buzz hardcodes `translation=''` for
+                // skipped rows regardless of what the segment itself holds
+                // (`transcription_service.py:62-73`).
+                translation: "one".to_string(),
+            },
+            Segment {
+                start: Millis(1000),
+                end: Millis(2000),
+                text: "dos".to_string(),
+                translation: String::new(),
+            },
+        ];
+        store.mark_skipped(&id, &segments).expect("skipped");
+
+        let row = store.get_task(&id).expect("get").expect("present");
+        assert_eq!(row.status, Status::Skipped);
+        assert!(row.time_ended.is_some());
+
+        let stored = store.get_segments(&id).expect("segments");
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].text, "uno");
+        assert_eq!(stored[0].translation, "");
+        assert_eq!(stored[1].text, "dos");
+        assert_eq!(stored[1].translation, "");
+    }
+
+    #[test]
+    fn find_completed_by_file_name_matches_basename_newest_first() {
+        let store = SqliteStore::open_in_memory().expect("open");
+
+        let mut spec_a = sample_task_spec();
+        spec_a.input = Input::Path(PathBuf::from("/dir/a/x.mp3"));
+        let older = TranscriptionId::new();
+        store
+            .create_task(&older, &spec_a, Source::FileImport)
+            .expect("create older");
+        store.mark_completed(&older, &[]).expect("complete older");
+
+        let mut spec_b = sample_task_spec();
+        spec_b.input = Input::Path(PathBuf::from("/dir/b/x.mp3"));
+        let newer = TranscriptionId::new();
+        store
+            .create_task(&newer, &spec_b, Source::FileImport)
+            .expect("create newer");
+        store.mark_completed(&newer, &[]).expect("complete newer");
+
+        // Force a deterministic ordering independent of wall-clock
+        // resolution: rewrite time_queued directly (same pattern as
+        // `list_tasks_orders_by_time_queued_descending`).
+        {
+            let conn = store.conn.lock().expect("lock");
+            conn.execute(
+                "UPDATE transcription SET time_queued = '2020-01-01T00:00:00' WHERE id = ?1",
+                params![older.to_string()],
+            )
+            .expect("update older");
+            conn.execute(
+                "UPDATE transcription SET time_queued = '2021-01-01T00:00:00' WHERE id = ?1",
+                params![newer.to_string()],
+            )
+            .expect("update newer");
+        }
+
+        let found = store
+            .find_completed_by_file_name("x.mp3")
+            .expect("query")
+            .expect("found");
+        assert_eq!(found, newer);
+    }
+
+    #[test]
+    fn find_completed_ignores_non_completed() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut spec = sample_task_spec();
+        spec.input = Input::Path(PathBuf::from("/dir/a/x.mp3"));
+        let id = TranscriptionId::new();
+        store
+            .create_task(&id, &spec, Source::FileImport)
+            .expect("create");
+
+        // Still `queued` — not a match.
+        assert_eq!(
+            store.find_completed_by_file_name("x.mp3").expect("query"),
+            None
+        );
+
+        // `failed` — still not a match.
+        store.mark_failed(&id, "boom").expect("fail");
+        assert_eq!(
+            store.find_completed_by_file_name("x.mp3").expect("query"),
+            None
+        );
+    }
+
+    #[test]
+    fn has_task_for_file_exact_path_only() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut spec = sample_task_spec();
+        spec.input = Input::Path(PathBuf::from("/dir/a/x.mp3"));
+        let id = TranscriptionId::new();
+        store
+            .create_task(&id, &spec, Source::FileImport)
+            .expect("create");
+
+        assert!(
+            store
+                .has_task_for_file(Path::new("/dir/a/x.mp3"))
+                .expect("exact match")
+        );
+        assert!(
+            !store
+                .has_task_for_file(Path::new("/dir/b/x.mp3"))
+                .expect("different dir doesn't match")
+        );
+        assert!(
+            !store
+                .has_task_for_file(Path::new("/dir/a/y.mp3"))
+                .expect("different name doesn't match")
+        );
+
+        // "Any status" — still true once the task is terminal, not just
+        // while queued.
+        store.mark_failed(&id, "boom").expect("fail");
+        assert!(
+            store
+                .has_task_for_file(Path::new("/dir/a/x.mp3"))
+                .expect("still matches after status change")
+        );
     }
 
     #[test]

@@ -150,6 +150,36 @@ pub enum TaskEventKind {
         /// The failure's diagnostic detail (the store error's message).
         detail: String,
     },
+    /// The task was skipped without running: a post-processing hook (F-115,
+    /// `skip_already_transcribed`) found the input already transcribed, and
+    /// the found segments are the task's transcript. A terminal state,
+    /// parity-wise equivalent to `Completed` — Buzz counts a skip toward
+    /// "quit on complete" (`main_window.py:435-443`) and this crate's CLI
+    /// counts it toward exit-code success. [`TaskStore::mark_skipped`] is
+    /// this event's store counterpart. No hook is wired to produce this
+    /// event yet (a later milestone task adds the dispatch).
+    Skipped,
+    /// A post-processing hook chain ran after the task completed (F-110's
+    /// `on_complete` hook seam, driving the F-111 `ai_summary`, F-113
+    /// `export_docx`, and F-116 `transcript_resizer` built-ins) and is
+    /// reporting its combined outcome — mirrors Buzz's `refresh_row`-after-
+    /// hooks (`main_window.py:453-477`). Emitted once, after `Completed`,
+    /// **iff** at least one hook is enabled; never emitted for a task with
+    /// no enabled hooks. No hook chain is wired to produce this event yet
+    /// (a later milestone task adds the dispatch).
+    PostProcessed {
+        /// Whether a hook updated the task's notes (e.g. `ai_summary`).
+        notes_updated: bool,
+        /// Whether a hook replaced the task's persisted segments (e.g. the
+        /// auto-resizer).
+        segments_replaced: bool,
+        /// Additional export files written by a hook (e.g. `export_docx`),
+        /// in hook-run order.
+        written: Vec<PathBuf>,
+        /// One message per hook failure; a hook failure never fails the
+        /// task itself.
+        errors: Vec<String>,
+    },
 }
 
 /// A [`TaskEventKind`] tagged with the task it belongs to.
@@ -1271,6 +1301,7 @@ mod tests {
         Completed(TranscriptionId, Vec<Segment>),
         Failed(TranscriptionId, String),
         Canceled(TranscriptionId),
+        Skipped(TranscriptionId, Vec<Segment>),
     }
 
     struct FakeStore {
@@ -1361,6 +1392,15 @@ mod tests {
             if let Some(g) = &self.canceled_gate {
                 g.wait();
             }
+            Ok(())
+        }
+
+        fn mark_skipped(
+            &self,
+            id: &TranscriptionId,
+            segments: &[Segment],
+        ) -> Result<(), StoreError> {
+            self.record(StoreCall::Skipped(*id, segments.to_vec()));
             Ok(())
         }
     }

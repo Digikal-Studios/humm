@@ -75,6 +75,8 @@ One JSON object per line on **stdout**; nothing else is written to stdout in
 {"event":"failed","task_id":"550e8400-e29b-41d4-a716-446655440000","error":"..."}
 {"event":"canceled","task_id":"550e8400-e29b-41d4-a716-446655440000"}
 {"event":"store_write_failed","task_id":"550e8400-e29b-41d4-a716-446655440000","operation":"mark_started","detail":"..."}
+{"event":"skipped","task_id":"550e8400-e29b-41d4-a716-446655440000"}
+{"event":"post_processed","task_id":"550e8400-e29b-41d4-a716-446655440000","notes_updated":true,"segments_replaced":false,"written":["/out.docx"],"errors":[]}
 ```
 
 Per task the order is `queued` → `started` → (`download_progress`* for URL
@@ -85,6 +87,17 @@ size is unknown. `store_write_failed` is out of band and additive (ADR-018): a
 history write (`operation` names the store method, e.g. `mark_started`) failed
 and is logged, but the run is unaffected — it may appear anywhere in a task's
 sequence and never changes it.
+
+`skipped` (F-115, additive) is a terminal-state alternative to `completed`: a
+task whose input was found already transcribed never actually ran, and its
+found segments become its transcript (`TaskStore::mark_skipped`) — it counts
+toward exit-code success exactly like `completed` (§4; Buzz treats a skip as
+completion too, `main_window.py:435-443`). `post_processed` (F-110/F-111/
+F-113/F-115/F-116, additive) always **follows** a `completed` event (never a
+`skipped` one) and is emitted once, only when at least one post-processing
+hook is enabled; `errors` lists one message per hook failure (a hook failure
+never fails the task). Neither event has a producer yet in this milestone —
+they're reserved vocabulary the post-processing features to come will emit.
 
 LLM translation (F-031) adds **no new `--json` event** in M6 — the schema
 above is unchanged: `humm add` has no LLM-translation flag (`humm-cli`'s
@@ -101,8 +114,13 @@ Human mode instead prints, to **stderr**, a per-task progress line
 and a URL download phase line `downloading <url>  NN%`; written export paths go
 to **stdout** (one per line); failures print `error: <input>: <cause>` to
 stderr; a `store_write_failed` event prints `warning: history not recorded
-(<operation>): <detail>` to stderr. `--quiet` suppresses the progress and
-warning lines only.
+(<operation>): <detail>` to stderr. A `skipped` event's terminal line is
+`<input>  skipped (already transcribed)`, to stderr, in the same slot a
+`completed`/`failed` terminal line occupies. A `post_processed` event prints
+nothing unless its `errors` array is non-empty, in which case each prints
+`warning: post-processing: <cause>` to stderr. `--quiet` suppresses the
+progress and warning lines only (`post_processed`'s warnings included;
+`skipped`'s terminal line is not suppressed, same as `completed`/`failed`).
 
 ## 4. Exit codes
 
