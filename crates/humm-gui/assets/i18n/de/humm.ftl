@@ -217,6 +217,7 @@ prefs-title = Einstellungen
 prefs-tab-general = Allgemein
 prefs-tab-models = Modelle
 prefs-tab-shortcuts = Tastenkombinationen
+prefs-tab-folder-watch = Ordner überwachen
 prefs-tab-privacy = Datenschutz
 
 ## Preferences General tab, complete (views/prefs_general.rs, F-100,
@@ -303,6 +304,22 @@ prefs-shortcuts-press = Tastenkombination drücken…
 prefs-shortcuts-clear-tooltip = Auf Standard zurücksetzen
 prefs-shortcuts-conflict = Kollidiert mit { $other }
 prefs-shortcuts-reset = Auf Standardeinstellungen zurücksetzen
+
+## Preferences Folder Watch tab (views/prefs_folder_watch.rs, F-030c, design
+## spec §8.4). Row labels/Browse are Buzz's own de_DE translations
+## (`folder_watch_preferences_widget.py`), used verbatim.
+## `prefs-fw-disposition-note` is a ✚ humm-only addition (design spec §3.4,
+## no Buzz source) -- translated fresh in this catalog's own formal (Sie)
+## register.
+
+prefs-fw-enable = Ordner überwachen aktivieren
+prefs-fw-input-folder-label = Eingabeordner
+prefs-fw-input-folder-placeholder = /pfad/zum/eingabeordner
+prefs-fw-output-folder-label = Ausgabeordner
+prefs-fw-output-folder-placeholder = /pfad/zum/ausgabeordner
+prefs-fw-browse = Durchsuchen
+prefs-fw-delete-checkbox = Verarbeitete Dateien löschen
+prefs-fw-disposition-note = Nach der Transkription wird die Quelldatei in den Ausgabeordner verschoben — oder gelöscht, wenn Verarbeitete Dateien löschen aktiviert ist.
 
 ## Transcript viewer window (views/viewer.rs, F-080)
 

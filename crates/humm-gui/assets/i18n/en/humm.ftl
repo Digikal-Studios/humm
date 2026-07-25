@@ -213,6 +213,7 @@ prefs-title = Preferences
 prefs-tab-general = General
 prefs-tab-models = Models
 prefs-tab-shortcuts = Shortcuts
+prefs-tab-folder-watch = Folder Watch
 prefs-tab-privacy = Privacy
 
 ## Preferences General tab, complete (views/prefs_general.rs, F-100,
@@ -300,6 +301,23 @@ prefs-shortcuts-press = Press shortcut…
 prefs-shortcuts-clear-tooltip = Reset to default
 prefs-shortcuts-conflict = Conflicts with { $other }
 prefs-shortcuts-reset = Reset to Defaults
+
+## Preferences Folder Watch tab (views/prefs_folder_watch.rs, F-030c, design
+## spec §8.4). Row labels/Browse are Buzz's own `folder_watch_preferences_
+## widget.py` strings, ported verbatim. `prefs-fw-disposition-note` is a ✚
+## humm-only addition (design spec §3.4) -- Buzz never told users a watched
+## file's source is always removed from the input tree (deleted or moved);
+## the embedded options form below this section reuses the options-sheet's
+## own `options-*`/shared strings above, no new keys needed for it.
+
+prefs-fw-enable = Enable folder watch
+prefs-fw-input-folder-label = Input folder
+prefs-fw-input-folder-placeholder = /path/to/input/folder
+prefs-fw-output-folder-label = Output folder
+prefs-fw-output-folder-placeholder = /path/to/output/folder
+prefs-fw-browse = Browse
+prefs-fw-delete-checkbox = Delete processed files
+prefs-fw-disposition-note = Once transcribed, the source file is moved into the output folder — or deleted, if Delete processed files is checked.
 
 ## Transcript viewer window (views/viewer.rs, F-080)
 

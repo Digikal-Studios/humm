@@ -219,6 +219,7 @@ prefs-title = Preferencias
 prefs-tab-general = General
 prefs-tab-models = Modelos
 prefs-tab-shortcuts = Atajos
+prefs-tab-folder-watch = Vigilancia de carpetas
 prefs-tab-privacy = Privacidad
 
 ## Preferences General tab, complete (views/prefs_general.rs, F-100,
@@ -305,6 +306,21 @@ prefs-shortcuts-press = Presione una combinación de teclas…
 prefs-shortcuts-clear-tooltip = Restablecer al valor por defecto
 prefs-shortcuts-conflict = Entra en conflicto con { $other }
 prefs-shortcuts-reset = Reestablecer los Valores por Defecto
+
+## Preferences Folder Watch tab (views/prefs_folder_watch.rs, F-030c, design
+## spec §8.4). Row labels/Browse are Buzz's own es_ES translations
+## (`folder_watch_preferences_widget.py`), used verbatim.
+## `prefs-fw-disposition-note` is a ✚ humm-only addition (design spec §3.4,
+## no Buzz source) -- translated fresh in this catalog's own register.
+
+prefs-fw-enable = Habilitar la inspección de carpetas
+prefs-fw-input-folder-label = Carpeta de entrada
+prefs-fw-input-folder-placeholder = /ruta/a/la/carpeta/de/entrada
+prefs-fw-output-folder-label = Carpeta de salida
+prefs-fw-output-folder-placeholder = /ruta/a/la/carpeta/de/salida
+prefs-fw-browse = Navegar
+prefs-fw-delete-checkbox = Eliminar archivos procesados
+prefs-fw-disposition-note = Una vez transcrito, el archivo de origen se mueve a la carpeta de salida — o se elimina, si Eliminar archivos procesados está marcado.
 
 ## Transcript viewer window (views/viewer.rs, F-080)
 

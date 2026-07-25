@@ -262,6 +262,7 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "prefs-tab-general",
         "prefs-tab-models",
         "prefs-tab-shortcuts",
+        "prefs-tab-folder-watch",
         "prefs-tab-privacy",
         // Preferences General tab, complete (views/prefs_general.rs, F-100,
         // design spec §8.1)
@@ -339,6 +340,18 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "prefs-shortcuts-clear-tooltip",
         "prefs-shortcuts-conflict",
         "prefs-shortcuts-reset",
+        // Preferences Folder Watch tab (views/prefs_folder_watch.rs, F-030c,
+        // design spec §8.4, Task 15) -- the embedded options form below this
+        // tab's own rows reuses the options-sheet's `options-*` keys above,
+        // no new keys needed for it.
+        "prefs-fw-enable",
+        "prefs-fw-input-folder-label",
+        "prefs-fw-input-folder-placeholder",
+        "prefs-fw-output-folder-label",
+        "prefs-fw-output-folder-placeholder",
+        "prefs-fw-browse",
+        "prefs-fw-delete-checkbox",
+        "prefs-fw-disposition-note",
         // Transcript viewer window (views/viewer.rs, F-080)
         "viewer-view",
         "viewer-mode-text",

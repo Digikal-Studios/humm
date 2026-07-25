@@ -228,6 +228,7 @@ prefs-title = 偏好设置
 prefs-tab-general = 通用
 prefs-tab-models = 模型
 prefs-tab-shortcuts = 快捷键
+prefs-tab-folder-watch = 文件夹查看
 prefs-tab-privacy = 隐私
 
 ## Preferences General tab, complete (views/prefs_general.rs, F-100,
@@ -314,6 +315,23 @@ prefs-shortcuts-press = 按下快捷键…
 prefs-shortcuts-clear-tooltip = 恢复为默认值
 prefs-shortcuts-conflict = 与 { $other } 冲突
 prefs-shortcuts-reset = 恢复默认
+
+## Preferences Folder Watch tab (views/prefs_folder_watch.rs, F-030c, design
+## spec §8.4). Row labels/Browse are Buzz's own zh_CN translations
+## (`folder_watch_preferences_widget.py`), used verbatim.
+## `prefs-fw-disposition-note` is a ✚ humm-only addition (design spec §3.4,
+## no Buzz source) -- translated fresh, using 识别 for "transcribed" to match
+## this catalog's own established term (see the provenance note at the top
+## of this file).
+
+prefs-fw-enable = 开启文件夹监控
+prefs-fw-input-folder-label = 输入文件夹
+prefs-fw-input-folder-placeholder = /输入文件夹/路径
+prefs-fw-output-folder-label = 输出文件夹
+prefs-fw-output-folder-placeholder = /输出文件夹/路径
+prefs-fw-browse = 浏览
+prefs-fw-delete-checkbox = 删除已处理的文件
+prefs-fw-disposition-note = 识别完成后，源文件会被移动到输出文件夹——如果勾选了"删除已处理的文件"，则会改为删除。
 
 ## Transcript viewer window (views/viewer.rs, F-080)
 

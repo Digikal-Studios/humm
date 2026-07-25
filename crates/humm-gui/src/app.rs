@@ -1789,6 +1789,7 @@ impl HummApp {
         let validate = &self.services.validate;
         let shortcuts_generation = &self.shortcuts_generation;
         let current_shortcuts = &self.shortcuts;
+        let dialogs = self.dialogs.as_ref();
         let mut close_requested = false;
 
         let appearance_before = ui_appearance_snapshot(settings);
@@ -1811,6 +1812,7 @@ impl HummApp {
                         validate,
                         shortcuts_generation,
                         current_shortcuts,
+                        dialogs,
                     );
                 });
                 if ui.ctx().input(|input| input.viewport().close_requested()) {

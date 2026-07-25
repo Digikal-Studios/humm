@@ -311,6 +311,41 @@ in this plain TOML file.
 | `base_url` | `Option<String>` | `None` | Base URL for the OpenAI-compatible API. `None` uses the client's built-in default, `https://api.openai.com/v1`. |
 | `api_model` | String | `"whisper-1"` | Model id used for the OpenAI-compatible transcription endpoint. |
 
+### 6.5 Folder-watch settings (`[folder_watch]`, F-030, M7 Tasks 1/9/15)
+
+Ported from Buzz's `folder-watch/*` `QSettings` group (`main_window.py:167-183`,
+design spec §3); configured from the Preferences → Folder Watch tab
+(`views/prefs_folder_watch.rs`, Task 15). Watching is off, and every directory
+is unset, by default. `enabled`/`delete_processed_files` write through on
+checkbox click; `input_dir`/`output_dir` commit on focus-out/Enter (empty →
+`None`); `options`' fields commit together as one `SheetState::write_to` call
+whenever the embedded auto-task options form changes (§6.3's table above is
+that same `FileTranscriberSettings` shape, reused wholesale —
+`last_import_folder` is simply unused in this context). No field here can ever
+carry API-key material: `FileTranscriberSettings` has no key-shaped field at
+all, so even the embedded form's Api Key row (F-041) only ever reaches the OS
+keyring (§6's keyring row above), never this table.
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `enabled` | bool | `false` | Whether the folder watcher runs at all. |
+| `input_dir` | `Option<PathBuf>` | `None` | Directory scanned for new media files (Buzz's `input_folder`) — the watch's *identity*: changing this (or the enabled/disabled transition) restarts the OS-level watch subscription (`humm_gui::folder_watch::reconcile_folder_watch`). |
+| `output_dir` | `Option<PathBuf>` | `None` | Directory mirrored transcription outputs are written under (Buzz's `output_directory`) — part of the job *template*: changing this updates the running watcher in place, no restart. |
+| `delete_processed_files` | bool | `false` | Whether a completed source file is deleted (`true`) or moved into `output_dir` (`false`) after transcription (design spec §3.4) — part of the job template. **Disposition semantics**: Buzz always removes the source from the input tree one way or the other (`file_transcriber.py:155-170`) — this checkbox only chooses delete vs. move; the tab's own caption states this plainly (`prefs-fw-disposition-note`), which Buzz's UI never did. |
+| `options` | `FileTranscriberSettings` | see §6.3 | Per-auto-task file-transcription options applied to every watched file (Buzz's `file_transcription_options` sub-group) — part of the job template. |
+
+**Template-override note** (M7 Task 11 review fix, carried here): a watched
+file's `OutputSpec.file_name_template` is **not** read from
+`options.default_export_template` (that field is part of this per-auto-task
+snapshot but nothing in the UI ever writes it) — it's threaded in as an
+explicit override from the **global**
+`settings.file_transcriber.default_export_template` (§6.3, Preferences →
+General) instead, so a General-tab edit to the default export template also
+reaches folder-watch tasks without needing its own per-watch setting. This
+keeps that field correctly on the *template* half of the watch-identity/
+job-template split (`humm_gui::folder_watch`'s own module doc): a Preferences
+→ General edit resolves `ReconcileAction::UpdateTemplate`, never `Restart`.
+
 ## 7. First-run migration
 
 On first launch, if a Buzz database exists (macOS

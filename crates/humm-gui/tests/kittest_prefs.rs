@@ -41,9 +41,34 @@ use humm_gui::models_ui::{self, ModelsTabState};
 use humm_gui::services::{self, Capabilities, TestDeps, UpdateNotice};
 use humm_gui::shortcuts::ShortcutMap;
 use humm_gui::views::preferences::{self, PreferencesState, PrefsTab};
+use humm_gui::views::prefs_folder_watch::FolderWatchTabState;
 use humm_gui::views::prefs_general::{self, GeneralModal, GeneralTabState, ValidateFn};
 use humm_gui::views::prefs_shortcuts::ShortcutsTabState;
 use humm_store::SqliteStore;
+
+/// A [`FileDialogs`] that never returns a pick — every test in this file
+/// exercises tabs whose rendering doesn't need a real dialog (the Folder
+/// Watch tab's own Browse-button coverage lives in
+/// `kittest_prefs_folder_watch.rs`, with its own scripted double).
+struct NullDialogs;
+
+impl humm_gui::import::FileDialogs for NullDialogs {
+    fn pick_files(&self, _start_dir: Option<&std::path::Path>) -> Option<Vec<PathBuf>> {
+        None
+    }
+    fn pick_folder(&self, _start_dir: Option<&std::path::Path>) -> Option<PathBuf> {
+        None
+    }
+    fn save_file(
+        &self,
+        _title: &str,
+        _default_path: &std::path::Path,
+        _filter_name: &str,
+        _extension: &str,
+    ) -> Option<PathBuf> {
+        None
+    }
+}
 
 /// Polls `condition` every 5 ms, stepping `harness` each time so its own
 /// per-frame render (and, for the General tab, its `drain_test_result`
@@ -116,6 +141,12 @@ fn privacy_toggles_persist_to_the_settings_file() {
             general: GeneralTabState::new(secrets.as_ref(), &Settings::default()),
             models: ModelsTabState::new(model_root_dir.path(), None, false),
             shortcuts: ShortcutsTabState::default(),
+            folder_watch: FolderWatchTabState::new(
+                &humm_core::settings::FolderWatchSettings::default(),
+                secrets.as_ref(),
+                false,
+                false,
+            ),
         },
         model_root: model_root_dir.path().to_path_buf(),
         settings,
@@ -138,6 +169,7 @@ fn privacy_toggles_persist_to_the_settings_file() {
                 &fixture.validate,
                 &fixture.shortcuts_generation,
                 &fixture.current_shortcuts,
+                &NullDialogs,
             );
         },
         fixture,
@@ -208,6 +240,12 @@ fn general_harness(
             general: GeneralTabState::new(secrets.as_ref(), &Settings::default()),
             models: ModelsTabState::new(&model_root, None, false),
             shortcuts: ShortcutsTabState::default(),
+            folder_watch: FolderWatchTabState::new(
+                &humm_core::settings::FolderWatchSettings::default(),
+                secrets.as_ref(),
+                false,
+                false,
+            ),
         },
         model_root,
         settings: Arc::new(Mutex::new(Settings::default())),
@@ -232,6 +270,7 @@ fn general_harness(
                 &fixture.validate,
                 &fixture.shortcuts_generation,
                 &fixture.current_shortcuts,
+                &NullDialogs,
             );
         },
         fixture,

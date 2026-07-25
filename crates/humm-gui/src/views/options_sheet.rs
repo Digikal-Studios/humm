@@ -380,7 +380,12 @@ pub enum SheetModal {
     KeyringSaveFailed,
 }
 
-fn sheet_modal_title_and_body(modal: SheetModal) -> (String, String) {
+///
+/// `pub(crate)`: also reused by the Folder Watch preferences tab
+/// (`views/prefs_folder_watch.rs`, F-030c, design spec §8.4) for its own
+/// embedded Api Key row's commit-failure modal — same [`SheetModal`]
+/// variants, same wording either way.
+pub(crate) fn sheet_modal_title_and_body(modal: SheetModal) -> (String, String) {
     match modal {
         SheetModal::InvalidKeyCharset => (
             tr("prefs-general-invalid-key-title"),
@@ -804,36 +809,29 @@ fn checkbox_for_format(
     }
 }
 
-fn render_export_checkboxes(ui: &mut egui::Ui, state: &mut SheetState) {
+/// The export-format checkbox row (TXT/SRT/VTT). Takes `formats` directly
+/// rather than `&mut SheetState` (task brief, Task 15): the row only ever
+/// touches this one field, so a narrow signature lets the Folder Watch
+/// preferences tab (`views/prefs_folder_watch.rs`, F-030c) reuse it verbatim
+/// over its own embedded `SheetState.formats` without needing a wrapper.
+pub(crate) fn render_export_checkboxes(ui: &mut egui::Ui, formats: &mut BTreeSet<OutputFormat>) {
     ui.horizontal(|ui| {
         ui.label(tr("options-export-label"));
-        checkbox_for_format(
-            ui,
-            &mut state.formats,
-            OutputFormat::Txt,
-            tr("options-export-txt"),
-        );
-        checkbox_for_format(
-            ui,
-            &mut state.formats,
-            OutputFormat::Srt,
-            tr("options-export-srt"),
-        );
-        checkbox_for_format(
-            ui,
-            &mut state.formats,
-            OutputFormat::Vtt,
-            tr("options-export-vtt"),
-        );
+        checkbox_for_format(ui, formats, OutputFormat::Txt, tr("options-export-txt"));
+        checkbox_for_format(ui, formats, OutputFormat::Srt, tr("options-export-srt"));
+        checkbox_for_format(ui, formats, OutputFormat::Vtt, tr("options-export-vtt"));
     });
 }
 
 /// The backend combo row (F-041, design spec §7.2): `Whisper` /
 /// `OpenAI Whisper API`, sitting above [`render_model_combo`]'s size row.
-/// Sheet-only this milestone (recording-window backend selection is
-/// deferred — spec §0) — not shared like `render_model_combo`/
-/// `render_task_combo`/`render_language_combo`, so it stays a private `fn`.
-fn render_backend_combo(ui: &mut egui::Ui, id_salt: &str, backend: &mut Backend) {
+///
+/// `pub(crate)`: promoted (Task 15) alongside `render_model_combo`/
+/// `render_task_combo`/`render_language_combo` — the Folder Watch
+/// preferences tab (`views/prefs_folder_watch.rs`, F-030c, design spec §8.4)
+/// renders the identical row over its own embedded `SheetState` with its own
+/// `id_salt`.
+pub(crate) fn render_backend_combo(ui: &mut egui::Ui, id_salt: &str, backend: &mut Backend) {
     ui.horizontal(|ui| {
         ui.label(tr("options-backend-label"));
         let selected = match *backend {
@@ -860,7 +858,12 @@ fn render_backend_combo(ui: &mut egui::Ui, id_salt: &str, backend: &mut Backend)
 /// design spec §7.2 ledger #9). `modal` is [`OptionsSheet::modal`] threaded
 /// in separately rather than the whole `&mut OptionsSheet` — [`ui`] already
 /// holds `state`/`modal` as separate locals after destructuring the sheet.
-fn render_api_key_row(
+///
+/// `pub(crate)`: promoted (Task 15) for the Folder Watch preferences tab
+/// (`views/prefs_folder_watch.rs`, F-030c, design spec §8.4), whose embedded
+/// options form renders this exact row over its own `SheetState`/`modal`
+/// pair — same keyring entry, same commit behavior either way.
+pub(crate) fn render_api_key_row(
     ui: &mut egui::Ui,
     state: &mut SheetState,
     modal: &mut Option<SheetModal>,
@@ -884,17 +887,29 @@ fn render_api_key_row(
 /// picker `ComboBox`, ✚ J-8) and the instructions textarea, both disabled
 /// while unchecked (Buzz's own `.setEnabled(enable_llm_translation)` on
 /// every row below the checkbox).
-fn render_llm_translation_block(ui: &mut egui::Ui, state: &mut SheetState) {
+///
+/// `id_salt` is threaded straight through to the inner
+/// [`render_llm_model_prompt_fields`]'s own `ComboBox` (review fix, Task 15):
+/// this function used to hard-code `"humm-options-llm-model-presets"`,
+/// which was harmless while this sheet was the only caller but would have
+/// collided with the Folder Watch preferences tab's own call to this same
+/// function (`views/prefs_folder_watch.rs`, F-030c, design spec §8.4) — the
+/// options sheet (main window) and the Preferences window are separate
+/// `egui` viewports that can both be open and rendering in the same frame,
+/// sharing one `egui::Context`'s `Id` namespace, exactly the scenario
+/// `render_model_combo`'s own `id_salt` doc comment already calls out.
+///
+/// `pub(crate)`: promoted (Task 15) for that same reuse.
+pub(crate) fn render_llm_translation_block(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    state: &mut SheetState,
+) {
     ui.label(egui::RichText::new(tr("options-llm-heading")).strong());
     ui.checkbox(&mut state.enable_llm_translation, tr("options-llm-enable"));
 
     ui.add_enabled_ui(state.enable_llm_translation, |ui| {
-        render_llm_model_prompt_fields(
-            ui,
-            "humm-options-llm-model-presets",
-            &mut state.llm_model,
-            &mut state.llm_prompt,
-        );
+        render_llm_model_prompt_fields(ui, id_salt, &mut state.llm_model, &mut state.llm_prompt);
     });
 }
 
@@ -1011,7 +1026,7 @@ pub fn ui(
         )
         .on_disabled_hover_text(tr("options-extract-speech-tooltip"));
 
-        render_export_checkboxes(ui, state);
+        render_export_checkboxes(ui, &mut state.formats);
 
         egui::CollapsingHeader::new(tr("options-advanced")).show(ui, |ui| {
             ui.label(tr("options-initial-prompt-label"));
@@ -1021,7 +1036,7 @@ pub fn ui(
                 ui.text_edit_singleline(&mut state.hf_repo);
             }
             ui.separator();
-            render_llm_translation_block(ui, state);
+            render_llm_translation_block(ui, "humm-options-llm-model-presets", state);
         });
 
         ui.separator();

@@ -1,11 +1,12 @@
 //! The Preferences window (⌘, / Help → Preferences…): tabs **General**
 //! (F-100, [`crate::views::prefs_general`]), **Models** (F-044 basic,
 //! [`crate::models_ui`]), **Shortcuts** (F-005 editor + ✚ conflict
-//! detection, [`crate::views::prefs_shortcuts`], Task 14), and **Privacy**
+//! detection, [`crate::views::prefs_shortcuts`], Task 14), **Folder Watch**
+//! (F-030c, [`crate::views::prefs_folder_watch`], Task 15), and **Privacy**
 //! (ADR-009, UX §J-11), in that strip order — design spec §8's full strip is
 //! General · Models · Shortcuts · Folder Watch · Post-processing · Privacy;
-//! `Folder Watch`/`Post-processing` are later M7 tasks, so Privacy sits
-//! immediately after Shortcuts until they land
+//! `Post-processing` is a later M7 task, so Privacy sits immediately after
+//! Folder Watch until it lands
 //! (`buzz-notes-import-progress-models.md`'s preferences-shell notes).
 //!
 //! Rendered as a real OS window (an egui *immediate* viewport, min
@@ -34,8 +35,10 @@ use humm_core::secrets::SecretStore;
 use humm_core::settings::Settings;
 
 use crate::i18n::{self, tr};
+use crate::import::FileDialogs;
 use crate::models_ui::{self, ModelsTabState};
 use crate::shortcuts::ShortcutMap;
+use crate::views::prefs_folder_watch::{self, FolderWatchTabState};
 use crate::views::prefs_general::{self, GeneralTabState, ValidateFn};
 use crate::views::prefs_shortcuts::{self, ShortcutsTabState};
 
@@ -43,13 +46,16 @@ use crate::views::prefs_shortcuts::{self, ShortcutsTabState};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefsTab {
     /// UI language, font size, the OpenAI block, default export template,
-    /// and Disable GPU (F-100 complete, design spec §8.1). Folder Watch/
-    /// Post-processing tabs are later M7 tasks.
+    /// and Disable GPU (F-100 complete, design spec §8.1). Post-processing
+    /// tab is a later M7 task.
     General,
     /// F-044 basic model list.
     Models,
     /// F-005 editor + ✚ conflict detection (design spec §8.3, Task 14).
     Shortcuts,
+    /// F-030c: enable/paths/delete-processed + the embedded auto-task
+    /// options form (design spec §8.4, Task 15).
+    FolderWatch,
     /// ADR-009/UX §J-11 telemetry + update-check toggles.
     Privacy,
 }
@@ -70,6 +76,10 @@ pub struct PreferencesState {
     /// with nothing capturing, same "rebuilt fresh on open" contract as
     /// every other tab's own state.
     pub shortcuts: ShortcutsTabState,
+    /// The Folder Watch tab's own state (design spec §8.4, Task 15) — seeded
+    /// from `settings.folder_watch` (and the keyring, for its embedded Api
+    /// Key row), same "rebuilt fresh on open" contract as every other tab.
+    pub folder_watch: FolderWatchTabState,
 }
 
 impl PreferencesState {
@@ -98,16 +108,26 @@ impl PreferencesState {
             std::env::var("LANG").ok().as_deref(),
         );
         let include_lumii = i18n::lumii_locale_requested(settings, system_locale.as_deref());
+        let custom_model_available = custom_url.is_some();
         PreferencesState {
             tab: PrefsTab::General,
             general: GeneralTabState::new(secrets.as_ref(), settings),
             models: ModelsTabState::new(root, custom_url, include_lumii),
             shortcuts: ShortcutsTabState::default(),
+            folder_watch: FolderWatchTabState::new(
+                &settings.folder_watch,
+                secrets.as_ref(),
+                custom_model_available,
+                include_lumii,
+            ),
         }
     }
 }
 
-/// Renders the tab strip + the selected tab's content.
+/// Renders the tab strip + the selected tab's content. `dialogs` is only
+/// used by the Folder Watch tab's Browse buttons (design spec §8.4) — every
+/// other tab ignores it, same "threaded everywhere, consumed where needed"
+/// shape `secrets`/`validate` already have in this signature.
 #[allow(clippy::too_many_arguments)]
 pub fn ui(
     ui: &mut egui::Ui,
@@ -119,6 +139,7 @@ pub fn ui(
     validate: &ValidateFn,
     shortcuts_generation: &Arc<AtomicUsize>,
     current_shortcuts: &ShortcutMap,
+    dialogs: &dyn FileDialogs,
 ) {
     ui.horizontal(|ui| {
         ui.selectable_value(&mut state.tab, PrefsTab::General, tr("prefs-tab-general"));
@@ -127,6 +148,11 @@ pub fn ui(
             &mut state.tab,
             PrefsTab::Shortcuts,
             tr("prefs-tab-shortcuts"),
+        );
+        ui.selectable_value(
+            &mut state.tab,
+            PrefsTab::FolderWatch,
+            tr("prefs-tab-folder-watch"),
         );
         ui.selectable_value(&mut state.tab, PrefsTab::Privacy, tr("prefs-tab-privacy"));
     });
@@ -154,6 +180,16 @@ pub fn ui(
                 settings_path,
                 shortcuts_generation,
                 current_shortcuts,
+            );
+        }
+        PrefsTab::FolderWatch => {
+            prefs_folder_watch::ui(
+                ui,
+                &mut state.folder_watch,
+                settings,
+                settings_path,
+                secrets,
+                dialogs,
             );
         }
         PrefsTab::Privacy => privacy_tab_ui(ui, settings, settings_path),
