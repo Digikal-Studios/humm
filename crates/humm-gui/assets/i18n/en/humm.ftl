@@ -7,11 +7,15 @@
 ## grouped by the view that renders them.
 
 ## Locale display names (i18n::display_name, F-008a) -- one key per
-## i18n::AVAILABLE_LOCALES entry; Task 12 adds the rest as each catalog
-## ports. Source: Buzz's `ui_locales` dict values
-## (general_preferences_widget.py:34-50).
+## i18n::AVAILABLE_LOCALES entry; every catalog carries the *whole* set, so
+## the language combo stays fully localized whichever locale is active.
+## Source: Buzz's `ui_locales` dict values
+## (general_preferences_widget.py:34-50), in Buzz's own dict order.
 
 locale-name-en-us = English
+locale-name-de-de = German
+locale-name-es-es = Spanish
+locale-name-zh-cn = Chinese (Simplified)
 
 ## Empty-state hero (views/main_window.rs)
 

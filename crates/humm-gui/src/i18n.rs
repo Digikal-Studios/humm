@@ -5,11 +5,12 @@
 //! (`buzz/locale.py`) ported to Fluent (ADR-014). This module owns three
 //! things:
 //!
-//! - [`AVAILABLE_LOCALES`]: the registry of embedded catalogs. Only `en_US`
-//!   is embedded this milestone (Task 12 appends `de_DE`/`es_ES`/`zh_CN`, one
-//!   array element + one `include_str!` each) — the app still renders
-//!   English end to end, but through the same switchable machinery every
-//!   later locale will use.
+//! - [`AVAILABLE_LOCALES`]: the registry of embedded catalogs — `en_US`
+//!   plus the `de_DE`/`es_ES`/`zh_CN` starter set (F-008b, design spec §9.2),
+//!   in Buzz's own `ui_locales` order. Adding one of Buzz's remaining 11
+//!   locales is one array element + one `include_str!` + one catalog file:
+//!   no code changes here, and the per-locale completeness tests at the
+//!   bottom of this module pick the new entry up automatically.
 //! - [`negotiate`]/[`negotiate_in`]: Buzz's own gettext fallback chain
 //!   (`buzz/locale.py:15-21`) reimplemented over the registry — exact code
 //!   match, then language-prefix match, then `en_US`.
@@ -72,17 +73,54 @@ impl std::fmt::Debug for LocaleEntry {
 /// The embedded English Fluent catalog source.
 const EN_FTL: &str = include_str!("../assets/i18n/en/humm.ftl");
 
-/// The locale registry: every catalog embedded into this binary. Starts
-/// with just `en_US`; Task 12 appends `de_DE`/`es_ES`/`zh_CN` entries (one
-/// array element + one `include_str!` each — the registry is designed so
-/// that's the *entire* diff a new locale needs here). Index `0` is always
-/// `en_US` — both [`negotiate_in`]'s final fallback and
+/// The embedded German catalog source (F-008b).
+const DE_FTL: &str = include_str!("../assets/i18n/de/humm.ftl");
+
+/// The embedded Spanish catalog source (F-008b).
+const ES_FTL: &str = include_str!("../assets/i18n/es/humm.ftl");
+
+/// The embedded Simplified Chinese catalog source (F-008b).
+const ZH_CN_FTL: &str = include_str!("../assets/i18n/zh-CN/humm.ftl");
+
+/// The locale registry: every catalog embedded into this binary — `en_US`
+/// plus the F-008b starter set, listed in Buzz's own `ui_locales` order
+/// (`general_preferences_widget.py:34-50`), which is also the order the
+/// Preferences language combo renders. Adding one of Buzz's remaining 11
+/// locales is one array element + one `include_str!` here and one catalog
+/// file: the registry is deliberately the *entire* code diff a new locale
+/// needs, and this module's per-locale completeness tests iterate this array,
+/// so a new entry is covered the moment it lands.
+///
+/// Index `0` is always `en_US` — both [`negotiate_in`]'s final fallback and
 /// [`ACTIVE_LOCALE_INDEX`]'s initial value depend on that.
-pub static AVAILABLE_LOCALES: &[LocaleEntry] = &[LocaleEntry {
-    buzz_code: "en_US",
-    langid: "en-US",
-    ftl: EN_FTL,
-}];
+///
+/// `langid` note: `zh_CN`'s tag is the plain `zh-CN` rather than
+/// `zh-Hans-CN`. Both parse, and `unic_langid` treats the script as implicit
+/// for `zh-CN`; the shorter form keeps the tag a mechanical rewrite of the
+/// Buzz code, and Fluent only consults it for plural rules and bidi
+/// direction, neither of which differs between the two spellings.
+pub static AVAILABLE_LOCALES: &[LocaleEntry] = &[
+    LocaleEntry {
+        buzz_code: "en_US",
+        langid: "en-US",
+        ftl: EN_FTL,
+    },
+    LocaleEntry {
+        buzz_code: "de_DE",
+        langid: "de-DE",
+        ftl: DE_FTL,
+    },
+    LocaleEntry {
+        buzz_code: "es_ES",
+        langid: "es-ES",
+        ftl: ES_FTL,
+    },
+    LocaleEntry {
+        buzz_code: "zh_CN",
+        langid: "zh-CN",
+        ftl: ZH_CN_FTL,
+    },
+];
 
 /// Every catalog key `humm-gui` actually references from view code, asserted
 /// resolvable by this module's unit test (the F-008 "matrix method": unit
@@ -92,9 +130,12 @@ pub static AVAILABLE_LOCALES: &[LocaleEntry] = &[LocaleEntry {
 pub fn all_keys_used() -> &'static [&'static str] {
     &[
         // Locale display names (i18n::display_name, F-008a) -- one key per
-        // AVAILABLE_LOCALES entry; Task 12 adds the rest as each catalog
-        // ports.
+        // AVAILABLE_LOCALES entry, present in *every* catalog so the language
+        // combo stays localized whichever locale is active.
         "locale-name-en-us",
+        "locale-name-de-de",
+        "locale-name-es-es",
+        "locale-name-zh-cn",
         "hero-drop",
         "hero-import-button",
         "table-col-file-name",
@@ -606,9 +647,11 @@ pub fn lock_locale_for_test() -> LocaleTestGuard {
 /// `ui_locales` dict (`general_preferences_widget.py:34-50`), whose values
 /// are themselves wrapped in `_()`, so the combo's own entries are localized
 /// into whichever UI language is currently active rather than fixed to
-/// English. Falls through [`tr`]'s own missing-key echo if a locale's
-/// `locale-name-*` key hasn't landed yet (Task 12 adds one key per newly
-/// ported catalog, in the same commit as that catalog).
+/// English. Every catalog carries a `locale-name-*` key for *every* registry
+/// entry — not just its own — which is what makes the combo fully localized;
+/// `display_name_resolves_for_every_locale_under_every_locale` below pins
+/// that whole matrix, so a new locale that forgets one of these keys fails
+/// the suite rather than echoing a raw key name into the combo.
 pub fn display_name(buzz_code: &str) -> String {
     let key = format!(
         "locale-name-{}",
@@ -758,6 +801,7 @@ pub fn tr_args(key: &str, args: &[(&str, &str)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use unic_langid::langid;
 
     fn locale(buzz_code: &'static str, langid: &'static str) -> LocaleEntry {
@@ -768,8 +812,41 @@ mod tests {
         }
     }
 
+    /// The message ids a `.ftl` source declares.
+    ///
+    /// A deliberately narrow scanner rather than a real Fluent parse:
+    /// `fluent-syntax` is only a transitive dependency here, and pulling it in
+    /// directly just to enumerate ids would add a dependency for a test. The
+    /// scanner is sound for the catalogs this crate owns, which use only
+    /// plain messages — in valid Fluent a message declaration is always at
+    /// column 0 and every continuation line is indented, so "unindented,
+    /// non-comment, contains `=`" identifies exactly the declarations.
+    ///
+    /// It is not trusted blindly: [`every_locale_has_exactly_the_en_key_set`]
+    /// cross-checks its output against [`all_keys_used`] (an independently
+    /// maintained list), and [`every_key_resolves_in_every_locale`] feeds
+    /// every scanned key back through Fluent itself — so an under-read or a
+    /// bogus id fails the suite rather than weakening it.
+    fn catalog_keys(ftl: &str) -> BTreeSet<String> {
+        ftl.lines()
+            .filter_map(|line| {
+                if line.starts_with('#') || line.starts_with(char::is_whitespace) {
+                    return None;
+                }
+                let (id, _) = line.split_once('=')?;
+                let id = id.trim_end();
+                let is_message_id = !id.is_empty()
+                    && id
+                        .chars()
+                        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-');
+                is_message_id.then(|| id.to_string())
+            })
+            .collect()
+    }
+
     #[test]
     fn every_registered_key_resolves_to_something_other_than_itself() {
+        let _guard = lock_locale_for_test();
         for key in all_keys_used() {
             let resolved = tr(key);
             assert_ne!(
@@ -782,26 +859,31 @@ mod tests {
 
     #[test]
     fn hero_drop_matches_the_buzz_notes_wording() {
+        let _guard = lock_locale_for_test();
         assert_eq!(tr("hero-drop"), "Drop media here, or ⌘O");
     }
 
     #[test]
     fn hero_import_button_matches_the_buzz_notes_wording() {
+        let _guard = lock_locale_for_test();
         assert_eq!(tr("hero-import-button"), "Import files…");
     }
 
     #[test]
     fn url_dialog_invalid_matches_the_buzz_message_byte_exact() {
+        let _guard = lock_locale_for_test();
         assert_eq!(tr("url-dialog-invalid"), "The URL you entered is invalid.");
     }
 
     #[test]
     fn unknown_key_resolves_to_itself() {
+        let _guard = lock_locale_for_test();
         assert_eq!(tr("no-such-key"), "no-such-key");
     }
 
     #[test]
     fn recording_advanced_max_entries_label_has_the_buzz_embedded_newline() {
+        let _guard = lock_locale_for_test();
         // Buzz: QLabel(_("Limit export entries\n(0 = export all):")) --
         // `advanced_settings_dialog.py:242`. Fluent's own multi-line value
         // syntax (indented continuation lines) joins with `\n`.
@@ -813,6 +895,7 @@ mod tests {
 
     #[test]
     fn recording_advanced_ok_is_title_case_not_all_caps() {
+        let _guard = lock_locale_for_test();
         // Buzz's advanced-dialog button box explicitly relabels its Ok
         // button to "Ok" (`_setup_button_box`, `:261`) -- distinct from the
         // generic all-caps "OK" every other humm dialog uses (`dialog-ok`).
@@ -822,6 +905,7 @@ mod tests {
 
     #[test]
     fn presentation_and_copy_strings_are_buzz_byte_exact() {
+        let _guard = lock_locale_for_test();
         assert_eq!(tr("presentation-show-tooltip"), "Show in new window");
         assert_eq!(
             tr("presentation-window-title"),
@@ -838,6 +922,7 @@ mod tests {
 
     #[test]
     fn prefs_general_strings_are_buzz_byte_exact_with_the_product_name_swap() {
+        let _guard = lock_locale_for_test();
         // Buzz `general_preferences_widget.py:261-267`/`:349`: identical
         // wording, verbatim.
         assert_eq!(tr("prefs-general-invalid-key-title"), "Invalid API key");
@@ -861,6 +946,7 @@ mod tests {
 
     #[test]
     fn prefs_general_m7_strings_are_buzz_byte_exact_with_the_product_name_swap() {
+        let _guard = lock_locale_for_test();
         // M7 Task 11 (F-100) additions -- `general_preferences_widget.py:91`
         // (`_("Ui Language")`), `:99` (`_("Font Size")`), `:148`
         // (`_("Default export file name")`), `:218` (checkbox text) / `:223`
@@ -886,6 +972,7 @@ mod tests {
 
     #[test]
     fn viewer_translate_key_required_strings_are_buzz_byte_exact() {
+        let _guard = lock_locale_for_test();
         // Buzz `on_translate_button_clicked`
         // (`transcription_viewer_widget.py:1303-1306`).
         assert_eq!(
@@ -1046,7 +1133,11 @@ mod tests {
             .recv()
             .expect("worker thread signals ready before any set_locale call");
         let global_before = GENERATION.load(Ordering::SeqCst);
-        set_locale("en_US");
+        // Switch to a *different* catalog, not back to `en_US`: with the
+        // F-008b locales registered, the worker's post-switch `tr` result is
+        // now a content-level proof of cross-thread visibility, not just
+        // generation bookkeeping (see the closing assertion).
+        set_locale("de_DE");
         let global_after = GENERATION.load(Ordering::SeqCst);
         proceed_tx
             .send(())
@@ -1068,19 +1159,164 @@ mod tests {
              main thread's set_locale call"
         );
         assert!(after_generation >= global_after);
-        // With only `en_US` ever registered, the resolved text is stable
-        // across the switch -- proving no corruption/staleness snuck in
-        // under the cross-thread rebuild, even though the *value* itself
-        // doesn't change yet (Task 12's catalogs are what make this
-        // assertion interesting on text content, not just generation
-        // bookkeeping).
-        assert_eq!(after_text, "Drop media here, or ⌘O");
+        // The payoff of switching to a real second catalog above: the worker
+        // thread resolved the *German* string, from a bundle it rebuilt
+        // itself, after a `set_locale` call made on another thread entirely.
+        // That is the deferred-viewport render-thread contract proven on
+        // content, not just on the generation counter.
+        assert_eq!(after_text, "Medien hier ablegen oder ⌘O");
+    }
+
+    // -- per-locale catalog completeness (F-008b) -------------------------------
+
+    /// Global Constraint 5's enforcement: every embedded catalog declares
+    /// *exactly* the `en` key set — both directions, so neither a forgotten
+    /// key nor a stale one left behind after an `en` rename can ship.
+    #[test]
+    fn every_locale_has_exactly_the_en_key_set() {
+        let en_keys = catalog_keys(EN_FTL);
+        // Anchor `catalog_keys` against an independently maintained list: if
+        // the scanner under-read the source, this fails here rather than
+        // silently letting every locale "agree" on a truncated key set.
+        for key in all_keys_used() {
+            assert!(
+                en_keys.contains(*key),
+                "all_keys_used() lists {key:?}, but the en catalog does not declare it"
+            );
+        }
+        for entry in AVAILABLE_LOCALES {
+            let keys = catalog_keys(entry.ftl);
+            let missing: Vec<_> = en_keys.difference(&keys).collect();
+            let extra: Vec<_> = keys.difference(&en_keys).collect();
+            assert!(
+                missing.is_empty() && extra.is_empty(),
+                "{} catalog's key set differs from en — missing: {missing:?}, extra: {extra:?}",
+                entry.buzz_code
+            );
+        }
+    }
+
+    /// Every key resolves to real text in every locale — never an empty
+    /// value, never the key echoing back as its own name (`tr`'s missing-key
+    /// fallback). Run through the live bundle, so this also proves each
+    /// catalog parses and each `langid` is a valid language identifier
+    /// (`build_bundle` panics otherwise).
+    #[test]
+    fn every_key_resolves_in_every_locale() {
+        let _guard = lock_locale_for_test();
+        let en_keys = catalog_keys(EN_FTL);
+        for entry in AVAILABLE_LOCALES {
+            set_locale(entry.buzz_code);
+            for key in &en_keys {
+                let resolved = tr(key);
+                assert_ne!(
+                    &resolved, key,
+                    "{}: key {key:?} resolved to its own name — missing from that catalog",
+                    entry.buzz_code
+                );
+                assert!(
+                    !resolved.trim().is_empty(),
+                    "{}: key {key:?} resolved to empty text",
+                    entry.buzz_code
+                );
+            }
+        }
+    }
+
+    /// Placeables survive translation in every locale: the argument's value
+    /// lands in the rendered string, and no unsubstituted `{ $… }` syntax is
+    /// left behind (which is what a mistyped or dropped placeable name in a
+    /// translated value looks like at runtime).
+    #[test]
+    fn every_locale_substitutes_placeables() {
+        let _guard = lock_locale_for_test();
+        for entry in AVAILABLE_LOCALES {
+            set_locale(entry.buzz_code);
+
+            // Two arguments in one value, one of them adjacent to a literal
+            // `×` — the hardest placeable in the catalog to reposition
+            // correctly when the sentence is reordered for another language.
+            let warning = tr_args(
+                "recording-realtime-warning",
+                &[("size", "Large"), ("ratio", "0.4")],
+            );
+            for expected in ["Large", "0.4"] {
+                assert!(
+                    warning.contains(expected),
+                    "{}: recording-realtime-warning dropped {expected:?} — got {warning:?}",
+                    entry.buzz_code
+                );
+            }
+            assert!(
+                !warning.contains("{$") && !warning.contains("{ $"),
+                "{}: recording-realtime-warning left an unsubstituted placeable — got {warning:?}",
+                entry.buzz_code
+            );
+
+            let pill = tr_args("folderwatch-pill-watching", &[("name", "my-clips")]);
+            assert!(
+                pill.contains("my-clips"),
+                "{}: folderwatch-pill-watching dropped its name argument — got {pill:?}",
+                entry.buzz_code
+            );
+            assert!(
+                !pill.contains("{$") && !pill.contains("{ $"),
+                "{}: folderwatch-pill-watching left an unsubstituted placeable — got {pill:?}",
+                entry.buzz_code
+            );
+        }
     }
 
     // -- display_name -----------------------------------------------------------
 
     #[test]
     fn display_name_en() {
+        let _guard = lock_locale_for_test();
         assert_eq!(display_name("en_US"), "English");
+    }
+
+    /// The whole language-combo matrix: under every active locale, every
+    /// registered locale's display name resolves — Buzz's `ui_locales` values
+    /// are themselves `_()`-wrapped, so each catalog names *all* the
+    /// languages, not just its own.
+    #[test]
+    fn display_name_resolves_for_every_locale_under_every_locale() {
+        let _guard = lock_locale_for_test();
+        for active in AVAILABLE_LOCALES {
+            set_locale(active.buzz_code);
+            for named in AVAILABLE_LOCALES {
+                let name = display_name(named.buzz_code);
+                assert!(
+                    !name.starts_with("locale-name-"),
+                    "under {}, display_name({:?}) echoed its own key — got {name:?}",
+                    active.buzz_code,
+                    named.buzz_code
+                );
+                assert!(
+                    !name.trim().is_empty(),
+                    "under {}, display_name({:?}) resolved to empty text",
+                    active.buzz_code,
+                    named.buzz_code
+                );
+            }
+        }
+    }
+
+    /// Spot-check that switching locale actually changes rendered text, in
+    /// each embedded catalog, on a key with no shared proper nouns to hide
+    /// behind — the end-to-end sanity the completeness tests above deliberately
+    /// do not assert (they check shape, not content).
+    #[test]
+    fn set_locale_switches_rendered_text_per_catalog() {
+        let _guard = lock_locale_for_test();
+        for (code, expected) in [
+            ("en_US", "Preferences"),
+            ("de_DE", "Einstellungen"),
+            ("es_ES", "Preferencias"),
+            ("zh_CN", "偏好设置"),
+        ] {
+            set_locale(code);
+            assert_eq!(tr("prefs-title"), expected, "prefs-title under {code}");
+        }
     }
 }

@@ -377,8 +377,8 @@ fn base_url_and_model_fields_persist_to_settings() {
 
 // -- General tab: the M7 Task 11 rows (F-100 complete) -----------------------
 
-/// The UI-language combo lists exactly [`i18n::AVAILABLE_LOCALES`] (one
-/// entry, `en_US`, this milestone) and selecting an entry persists
+/// The UI-language combo lists exactly [`i18n::AVAILABLE_LOCALES`] (the
+/// F-008b starter set: `en_US`/`de_DE`/`es_ES`/`zh_CN`) and selecting an entry persists
 /// `ui.locale` (live apply -- design spec ledger #L10). Driving a `ComboBox`
 /// selection by simulated click has no kittest precedent in this workspace
 /// (`kittest_import.rs`/`kittest_recording.rs` both document the same gap
@@ -396,9 +396,9 @@ fn language_combo_lists_available_locales_and_persists() {
     let _locale_guard = i18n::lock_locale_for_test();
     assert_eq!(
         i18n::AVAILABLE_LOCALES.len(),
-        1,
-        "this milestone embeds only en_US -- update this test once Task 12 \
-         ports more locales"
+        4,
+        "the F-008b starter set embeds en_US/de_DE/es_ES/zh_CN -- update this \
+         count as each of Buzz's remaining 11 locales is ported"
     );
 
     let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
