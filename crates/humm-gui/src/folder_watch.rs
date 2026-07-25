@@ -25,14 +25,19 @@
 //! restart costs: `input_dir` is the watch's *identity* — changing it means
 //! tearing down and rebuilding the OS-level subscription (FSEvents/
 //! PollWatcher), since that's what the watcher was actually told to watch —
-//! while `output_dir`/`delete_processed_files`/`options` are a **job
-//! template** the running worker thread reads fresh on every rescan via
-//! shared state ([`JobTemplate`], `Arc<Mutex<_>>`) and [`FolderWatchService::
-//! update_template`] can swap out without touching the watcher at all. This
-//! matters because Task 15 lands a live-editable options form for
-//! `folder_watch.options` — without the split, every keystroke committing a
-//! field would restart the FSEvents subscription; with it, only an actual
-//! `input_dir` change (or the feature being turned on/off) ever does.
+//! while `output_dir`/`delete_processed_files`/`options`/
+//! `default_export_template` are a **job template** the running worker
+//! thread reads fresh on every rescan via shared state ([`JobTemplate`],
+//! `Arc<Mutex<_>>`) and [`FolderWatchService::update_template`] can swap out
+//! without touching the watcher at all. This matters because Task 15 lands
+//! a live-editable options form for `folder_watch.options` — without the
+//! split, every keystroke committing a field would restart the FSEvents
+//! subscription; with it, only an actual `input_dir` change (or the feature
+//! being turned on/off) ever does. The same split is why
+//! `default_export_template` (a *global* Preferences → General setting, not
+//! part of `[folder_watch]` at all) is threaded through as its own
+//! [`FolderWatchSnapshot`] field rather than folded into `options`: an edit
+//! there must also resolve to `UpdateTemplate`, never `Restart`.
 //! [`reconcile_folder_watch`] is the pure decision function choosing between
 //! `Restart` (identity changed) and `UpdateTemplate` (only the template did).
 //!
@@ -133,18 +138,42 @@ pub struct FolderWatchSnapshot {
     /// Per-auto-task file-transcription options (Buzz's
     /// `file_transcription_options` sub-group) — part of the job template.
     pub options: FileTranscriberSettings,
+    /// The **global** default export-file-name template
+    /// (`settings.file_transcriber.default_export_template`, Preferences →
+    /// General — design spec §8.1) — part of the job template, review-fixed
+    /// (M7 Task 11 follow-up): the earlier wiring read
+    /// `options.default_export_template` (`folder_watch.options`'s own
+    /// field), which nothing in the UI ever writes — folder-watch tasks
+    /// share the one global template every other spec-build site
+    /// (options-sheet, CLI, viewer export) reads, not a per-watch override.
+    /// Living here (not on `options`) keeps it correctly on the *template*
+    /// half of the watch-identity/job-template split: a Preferences → General
+    /// edit changes only this field, so [`reconcile_folder_watch`] resolves
+    /// `ReconcileAction::UpdateTemplate`, never `Restart` (`options.
+    /// default_export_template` participating in equality would have had
+    /// the same effect, but reading the *global* setting through the wrong
+    /// field is exactly the bug this fixes).
+    pub default_export_template: Option<String>,
 }
 
 impl FolderWatchSnapshot {
     /// Clones the live `[folder_watch]` settings into a snapshot.
+    /// `default_export_template` is threaded in separately — the caller's
+    /// `settings.file_transcriber.default_export_template` (the *global*
+    /// setting; see this struct's own field doc for why it isn't read off
+    /// `settings.options` instead).
     #[must_use]
-    pub fn from_settings(settings: &FolderWatchSettings) -> Self {
+    pub fn from_settings(
+        settings: &FolderWatchSettings,
+        default_export_template: Option<String>,
+    ) -> Self {
         FolderWatchSnapshot {
             enabled: settings.enabled,
             input_dir: settings.input_dir.clone(),
             output_dir: settings.output_dir.clone(),
             delete_processed_files: settings.delete_processed_files,
             options: settings.options.clone(),
+            default_export_template,
         }
     }
 
@@ -200,6 +229,7 @@ impl FolderWatchSnapshot {
                 .expect("is_active() guarantees output_dir is Some"),
             delete_processed_files: self.delete_processed_files,
             options: self.options.clone(),
+            default_export_template: self.default_export_template.clone(),
         }
     }
 }
@@ -215,6 +245,11 @@ struct JobTemplate {
     output_dir: PathBuf,
     delete_processed_files: bool,
     options: FileTranscriberSettings,
+    /// The global default export template — see
+    /// [`FolderWatchSnapshot::default_export_template`]'s doc; threaded into
+    /// [`crate::views::options_sheet::spec_from_transcriber_settings`] as an
+    /// explicit override, not read off `options`.
+    default_export_template: Option<String>,
 }
 
 /// What `app.rs`'s per-frame reconcile should do about the folder-watch
@@ -233,7 +268,8 @@ pub enum ReconcileAction {
     /// stop it and start a fresh one with the current snapshot.
     Restart,
     /// A service is running and only the job *template*
-    /// (`output_dir`/`delete_processed_files`/`options`) changed —
+    /// (`output_dir`/`delete_processed_files`/`options`/
+    /// `default_export_template`) changed —
     /// [`FolderWatchService::update_template`] in place, no restart.
     UpdateTemplate,
     /// A service is running but the snapshot is no longer active (disabled,
@@ -507,7 +543,8 @@ impl FolderWatchService {
     }
 
     /// Swaps in a new job template (`output_dir`/`delete_processed_files`/
-    /// `options`) without touching the watcher at all — the `UpdateTemplate`
+    /// `options`/`default_export_template`) without touching the watcher at
+    /// all — the `UpdateTemplate`
     /// half of this module's watch-identity/job-template split. `snapshot`
     /// must already be known active (`app.rs`'s reconcile function is the
     /// sole caller and upholds this).
@@ -716,6 +753,7 @@ fn rescan_and_enqueue(worker: &WorkerCtx) {
             candidate.path.clone(),
             mirrored,
             disposition,
+            template.default_export_template.as_deref(),
         );
         worker
             .queue
@@ -763,58 +801,82 @@ mod tests {
         }
     }
 
+    /// A [`FolderWatchSnapshot`] built the same way `app.rs`'s reconcile
+    /// call site does — `settings(...)` for the `[folder_watch]` half, plus
+    /// the *global* `default_export_template` (`None` for every test that
+    /// isn't specifically exercising it, matching a fresh install).
+    fn snapshot(
+        enabled: bool,
+        input: Option<&str>,
+        output: Option<&str>,
+        default_export_template: Option<&str>,
+    ) -> FolderWatchSnapshot {
+        FolderWatchSnapshot::from_settings(
+            &settings(enabled, input, output),
+            default_export_template.map(str::to_string),
+        )
+    }
+
     // -- FolderWatchSnapshot::is_active / pill_folder_name -------------------
 
     #[test]
     fn inactive_when_disabled() {
-        let snap = FolderWatchSnapshot::from_settings(&settings(false, Some("/in"), Some("/out")));
+        let snap = snapshot(false, Some("/in"), Some("/out"), None);
         assert!(!snap.is_active());
         assert_eq!(snap.pill_folder_name(), None);
     }
 
     #[test]
     fn inactive_when_input_dir_missing() {
-        let snap = FolderWatchSnapshot::from_settings(&settings(true, None, Some("/out")));
+        let snap = snapshot(true, None, Some("/out"), None);
         assert!(!snap.is_active());
         assert_eq!(snap.pill_folder_name(), None);
     }
 
     #[test]
     fn inactive_when_output_dir_missing() {
-        let snap = FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), None));
+        let snap = snapshot(true, Some("/in"), None, None);
         assert!(!snap.is_active());
         assert_eq!(snap.pill_folder_name(), None);
     }
 
     #[test]
     fn active_when_enabled_with_both_dirs() {
-        let snap = FolderWatchSnapshot::from_settings(&settings(
-            true,
-            Some("/watched/my-clips"),
-            Some("/out"),
-        ));
+        let snap = snapshot(true, Some("/watched/my-clips"), Some("/out"), None);
         assert!(snap.is_active());
         assert_eq!(snap.pill_folder_name(), Some("my-clips".to_string()));
     }
 
-    /// M7 Task 11 (F-100): `settings.folder_watch.options.
-    /// default_export_template` survives the snapshot → job-template step
-    /// (`FolderWatchSnapshot::from_settings` → `FolderWatchSnapshot::
-    /// template`) unchanged — the flow `rescan_and_enqueue` relies on to hand
-    /// a watched file's custom template to `spec_from_transcriber_settings`
-    /// (design spec §8.1, options_sheet.rs).
+    /// M7 Task 11 review fix (F-100/F-030): the **global**
+    /// `file_transcriber.default_export_template` — not `folder_watch.
+    /// options.default_export_template` (a decoy field nothing in the UI
+    /// writes, the original, inert wiring's bug) — survives
+    /// `FolderWatchSnapshot::from_settings` → `FolderWatchSnapshot::template`
+    /// → `spec_from_transcriber_settings`'s explicit override parameter,
+    /// end to end to the produced `TaskSpec`. This is the flow
+    /// `rescan_and_enqueue` relies on to hand a watched file's task the same
+    /// global template every other spec-build site uses (design spec §8.1).
     #[test]
     fn template_carries_the_default_export_template_setting() {
-        let mut folder_watch_settings = settings(true, Some("/in"), Some("/out"));
-        folder_watch_settings.options.default_export_template =
-            Some("{{ input_file_name }}-watched".to_string());
-
-        let snap = FolderWatchSnapshot::from_settings(&folder_watch_settings);
+        let global_template = "{{ input_file_name }}-watched";
+        let snap = snapshot(true, Some("/in"), Some("/out"), Some(global_template));
         let template = snap.template();
-
         assert_eq!(
-            template.options.default_export_template.as_deref(),
-            Some("{{ input_file_name }}-watched")
+            template.default_export_template.as_deref(),
+            Some(global_template)
+        );
+
+        let spec = spec_from_transcriber_settings(
+            &template.options,
+            true,
+            PathBuf::from("/in/clip.wav"),
+            template.output_dir.clone(),
+            humm_core::domain::SourceDisposition::Delete,
+            template.default_export_template.as_deref(),
+        );
+        assert_eq!(
+            spec.output.file_name_template.as_deref(),
+            Some(global_template)
         );
     }
 
@@ -822,7 +884,7 @@ mod tests {
 
     #[test]
     fn inactive_and_not_running_is_no_change() {
-        let snap = FolderWatchSnapshot::from_settings(&settings(false, None, None));
+        let snap = snapshot(false, None, None, None);
         assert_eq!(
             reconcile_folder_watch(&snap, None, false),
             ReconcileAction::NoChange
@@ -831,8 +893,8 @@ mod tests {
 
     #[test]
     fn inactive_but_running_stops() {
-        let snap = FolderWatchSnapshot::from_settings(&settings(false, None, None));
-        let cached = FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out")));
+        let snap = snapshot(false, None, None, None);
+        let cached = snapshot(true, Some("/in"), Some("/out"), None);
         assert_eq!(
             reconcile_folder_watch(&snap, Some(&cached), true),
             ReconcileAction::Stop
@@ -841,7 +903,7 @@ mod tests {
 
     #[test]
     fn active_and_not_running_starts() {
-        let snap = FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out")));
+        let snap = snapshot(true, Some("/in"), Some("/out"), None);
         assert_eq!(
             reconcile_folder_watch(&snap, None, false),
             ReconcileAction::Start
@@ -850,7 +912,7 @@ mod tests {
 
     #[test]
     fn active_running_unchanged_snapshot_is_no_change() {
-        let snap = FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out")));
+        let snap = snapshot(true, Some("/in"), Some("/out"), None);
         assert_eq!(
             reconcile_folder_watch(&snap, Some(&snap), true),
             ReconcileAction::NoChange
@@ -859,10 +921,8 @@ mod tests {
 
     #[test]
     fn active_running_input_dir_change_restarts() {
-        let current =
-            FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out")));
-        let cached =
-            FolderWatchSnapshot::from_settings(&settings(true, Some("/in2"), Some("/out")));
+        let current = snapshot(true, Some("/in"), Some("/out"), None);
+        let cached = snapshot(true, Some("/in2"), Some("/out"), None);
         assert_eq!(
             reconcile_folder_watch(&current, Some(&cached), true),
             ReconcileAction::Restart
@@ -871,10 +931,8 @@ mod tests {
 
     #[test]
     fn active_running_output_dir_change_updates_template_not_restart() {
-        let current =
-            FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out")));
-        let cached =
-            FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out2")));
+        let current = snapshot(true, Some("/in"), Some("/out"), None);
+        let cached = snapshot(true, Some("/in"), Some("/out2"), None);
         assert_eq!(
             reconcile_folder_watch(&current, Some(&cached), true),
             ReconcileAction::UpdateTemplate
@@ -883,8 +941,7 @@ mod tests {
 
     #[test]
     fn active_running_delete_processed_files_change_updates_template_not_restart() {
-        let current =
-            FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out")));
+        let current = snapshot(true, Some("/in"), Some("/out"), None);
         let mut cached = current.clone();
         cached.delete_processed_files = true;
         assert_eq!(
@@ -895,10 +952,35 @@ mod tests {
 
     #[test]
     fn active_running_options_change_updates_template_not_restart() {
-        let current =
-            FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out")));
+        let current = snapshot(true, Some("/in"), Some("/out"), None);
         let mut cached = current.clone();
         cached.options.word_timestamps = Some(true);
+        assert_eq!(
+            reconcile_folder_watch(&current, Some(&cached), true),
+            ReconcileAction::UpdateTemplate
+        );
+    }
+
+    /// Review-fix pin (M7 Task 11 follow-up): a Preferences → General edit
+    /// to the *global* `file_transcriber.default_export_template` must
+    /// reconcile as `UpdateTemplate`, never `Restart` — it's part of the job
+    /// template (this module's doc / `FolderWatchSnapshot::
+    /// default_export_template`'s own doc), not the watch identity, exactly
+    /// like `output_dir`/`delete_processed_files`/`options` above.
+    #[test]
+    fn active_running_default_export_template_change_updates_template_not_restart() {
+        let current = snapshot(
+            true,
+            Some("/in"),
+            Some("/out"),
+            Some("{{ input_file_name }}-new"),
+        );
+        let cached = snapshot(
+            true,
+            Some("/in"),
+            Some("/out"),
+            Some("{{ input_file_name }}-old"),
+        );
         assert_eq!(
             reconcile_folder_watch(&current, Some(&cached), true),
             ReconcileAction::UpdateTemplate
@@ -909,10 +991,8 @@ mod tests {
     fn disabled_to_enabled_transition_starts_not_restarts() {
         // Going from inactive (not running) to active is always `Start`,
         // never `Restart` — there's no watcher to tear down yet.
-        let current =
-            FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out")));
-        let cached =
-            FolderWatchSnapshot::from_settings(&settings(false, Some("/in"), Some("/out")));
+        let current = snapshot(true, Some("/in"), Some("/out"), None);
+        let cached = snapshot(false, Some("/in"), Some("/out"), None);
         assert_eq!(
             reconcile_folder_watch(&current, Some(&cached), false),
             ReconcileAction::Start
@@ -927,7 +1007,7 @@ mod tests {
         // `Some`) — specifically so an unchanged snapshot doesn't retry (and
         // re-warn) on every single frame at UI frame rate. Retrying only
         // happens once the snapshot actually changes again.
-        let snap = FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out")));
+        let snap = snapshot(true, Some("/in"), Some("/out"), None);
         assert_eq!(
             reconcile_folder_watch(&snap, Some(&snap), false),
             ReconcileAction::NoChange
@@ -939,10 +1019,8 @@ mod tests {
         // The counterpart to the no-spin case above: once the cached
         // (failed or stopped) snapshot no longer matches the fresh one, a
         // retry is exactly right.
-        let current =
-            FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out")));
-        let cached =
-            FolderWatchSnapshot::from_settings(&settings(true, Some("/in2"), Some("/out")));
+        let current = snapshot(true, Some("/in"), Some("/out"), None);
+        let cached = snapshot(true, Some("/in2"), Some("/out"), None);
         assert_eq!(
             reconcile_folder_watch(&current, Some(&cached), false),
             ReconcileAction::Start

@@ -235,6 +235,10 @@ fn start_service(
         output_dir: Some(output_dir.to_path_buf()),
         delete_processed_files,
         options: folder_watch_options(),
+        // No global template override needed for this integration test — the
+        // export-format assertions below only care about the file's
+        // extension, not its stem.
+        default_export_template: None,
     };
     FolderWatchService::start_with_poll_watcher_for_test(
         snapshot,

@@ -527,10 +527,25 @@ fn transcription_options_from_state(state: &SheetState) -> TranscriptionOptions 
 /// [`SheetState::from_settings`]'s exact parsing/defaulting rules (via
 /// [`transcription_options_from_state`]) so a watched file's task has
 /// identical option semantics to a manual import sharing the same persisted
-/// settings, then layers on the two things only folder watch ever sets:
+/// settings, then layers on the things only folder watch ever sets:
 /// `directory` (the mirrored output directory, already `create_dir_all`'d by
-/// the caller) and `source_disposition` (delete vs. move-into-output,
-/// design spec §3.4) — an options-sheet import never sets either.
+/// the caller), `source_disposition` (delete vs. move-into-output, design
+/// spec §3.4), and `default_export_template` — an options-sheet import never
+/// sets any of these.
+///
+/// `default_export_template` is an **explicit override**, not read from
+/// `settings` (review fix, M7 Task 11 follow-up): `settings` here is always
+/// `folder_watch.options`, a *per-auto-task* prefill snapshot with its own
+/// (currently unwritten — no UI sets it) `default_export_template` field
+/// distinct from the **global** `file_transcriber.default_export_template`
+/// every other spec-build site reads (Preferences → General). Folder-watch
+/// tasks share that same global template, not a per-watch one, so the
+/// caller (`humm_gui::folder_watch::rescan_and_enqueue`, via
+/// `JobTemplate::default_export_template`) threads the global value in here
+/// directly — this is also what keeps the setting on the *template* half of
+/// the watch-identity/job-template split (a Preferences edit must produce
+/// `ReconcileAction::UpdateTemplate`, never `Restart`; see
+/// `FolderWatchSnapshot`'s own doc).
 ///
 /// `custom_model_available` is always `true` here (not threaded from
 /// `settings.models.custom_model_url` the way the live options sheet is
@@ -540,12 +555,14 @@ fn transcription_options_from_state(state: &SheetState) -> TranscriptionOptions 
 /// degrades the same way any other missing-model case does (the engine
 /// factory fails to resolve it and the task fails actionably), rather than
 /// being silently downgraded to "Small" behind the user's back.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spec_from_transcriber_settings(
     settings: &FileTranscriberSettings,
     custom_model_available: bool,
     input: std::path::PathBuf,
     output_dir: std::path::PathBuf,
     source_disposition: humm_core::domain::SourceDisposition,
+    default_export_template: Option<&str>,
 ) -> TaskSpec {
     let state = SheetState::from_settings(settings, custom_model_available);
     let options = transcription_options_from_state(&state);
@@ -555,11 +572,7 @@ pub(crate) fn spec_from_transcriber_settings(
         output: OutputSpec {
             formats: state.formats,
             directory: Some(output_dir),
-            // `state.export_template` is already `settings.
-            // default_export_template.clone()` (`SheetState::from_settings`
-            // seeds it) — design spec §8.1: wired into every spec-build site,
-            // folder watch included.
-            file_name_template: state.export_template,
+            file_name_template: default_export_template.map(str::to_string),
             paragraph_split: paragraph_split_from_env(),
             source_disposition: Some(source_disposition),
         },
@@ -1485,6 +1498,7 @@ mod tests {
             PathBuf::from("/in/clip.wav"),
             PathBuf::from("/out/sub"),
             humm_core::domain::SourceDisposition::Delete,
+            None,
         );
 
         assert_eq!(spec.input, Input::Path(PathBuf::from("/in/clip.wav")));
@@ -1498,21 +1512,28 @@ mod tests {
             spec.output.source_disposition,
             Some(humm_core::domain::SourceDisposition::Delete)
         );
-        // `settings.default_export_template` is unset here, so this stays
-        // `None` (the default template) — see
-        // `spec_from_transcriber_settings_honors_a_custom_export_template`
+        // No override passed -> stays `None` (the default template) — see
+        // `spec_from_transcriber_settings_honors_the_explicit_export_template_override`
         // below for the wired, non-`None` case.
         assert_eq!(spec.output.file_name_template, None);
     }
 
-    /// M7 Task 11 (F-100): `spec_from_transcriber_settings` (the folder-watch
-    /// spec-build site) now carries `settings.default_export_template`
-    /// straight through to `OutputSpec.file_name_template`, same as every
-    /// other spec-build site (design spec §8.1).
+    /// M7 Task 11 review fix (F-100/F-030): `spec_from_transcriber_settings`
+    /// carries its explicit `default_export_template` **override** straight
+    /// through to `OutputSpec.file_name_template` — NOT
+    /// `settings.default_export_template` (that field is `folder_watch.
+    /// options.default_export_template`, a per-auto-task prefill nothing in
+    /// the UI ever writes; the caller must thread the *global*
+    /// `file_transcriber.default_export_template` in as the override, see
+    /// this function's own doc and `humm_gui::folder_watch::
+    /// template_carries_the_default_export_template_setting` for the
+    /// end-to-end version through `JobTemplate`).
     #[test]
-    fn spec_from_transcriber_settings_honors_a_custom_export_template() {
+    fn spec_from_transcriber_settings_honors_the_explicit_export_template_override() {
+        // Deliberately non-empty AND different from the override, proving
+        // the override wins rather than merely happening to agree with it.
         let settings = FileTranscriberSettings {
-            default_export_template: Some("{{ input_file_name }}-watched".to_string()),
+            default_export_template: Some("{{ input_file_name }}-unused-decoy".to_string()),
             ..FileTranscriberSettings::default()
         };
 
@@ -1522,6 +1543,7 @@ mod tests {
             PathBuf::from("/in/clip.wav"),
             PathBuf::from("/out/sub"),
             humm_core::domain::SourceDisposition::Delete,
+            Some("{{ input_file_name }}-watched"),
         );
 
         assert_eq!(
@@ -1539,6 +1561,7 @@ mod tests {
             PathBuf::from("/in/clip.wav"),
             PathBuf::from("/out"),
             humm_core::domain::SourceDisposition::MoveToOutput,
+            None,
         );
         assert_eq!(
             spec.output.source_disposition,

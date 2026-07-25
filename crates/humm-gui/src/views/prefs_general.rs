@@ -358,19 +358,24 @@ pub struct GeneralTabState {
 impl GeneralTabState {
     /// Builds the tab's initial state: `key_buffer` from `secrets` (an
     /// absent entry, or a backend error, both seed an empty field — the same
-    /// "nothing stored yet" starting point as a fresh Buzz install), and every
+    /// "nothing stored yet" starting point as a fresh Buzz install), every
     /// other field from `settings` at the moment the Preferences window
-    /// opens (`openai`, `ui.{locale,font_size}`,
-    /// `file_transcriber.default_export_template`, `models.force_cpu`).
+    /// opens (`openai`, `ui.font_size`, `file_transcriber.
+    /// default_export_template`, `models.force_cpu`) — except `locale_code`,
+    /// which seeds from [`i18n::active_locale`] (review fix, M7 Task 11
+    /// follow-up): re-deriving it via `i18n::negotiate(settings.ui.locale.
+    /// as_deref())` alone (the original wiring) skips the system-locale
+    /// fallback `HummApp::new`'s own startup negotiation applies, so it
+    /// could disagree with the locale actually active whenever
+    /// `settings.ui.locale` is `None` — reading the already-resolved ground
+    /// truth instead can't drift from it.
     pub fn new(secrets: &dyn SecretStore, settings: &Settings) -> Self {
         let key_buffer = secrets
             .get(SecretKey::OpenAiApiKey)
             .ok()
             .flatten()
             .unwrap_or_default();
-        let locale_code = i18n::negotiate(settings.ui.locale.as_deref())
-            .buzz_code
-            .to_string();
+        let locale_code = i18n::active_locale().to_string();
         GeneralTabState {
             key_buffer,
             key_visible: false,
@@ -621,7 +626,11 @@ pub fn ui(
     // 2. Font size (Buzz row 2, QSpinBox 8-32) -- a "Custom font size"
     // checkbox gates the DragValue (module doc: humm's `None`/egui-default
     // has no Buzz-parity concrete value to always show). Applies live.
+    // Row-label first, then checkbox, then DragValue -- matches the
+    // Disable-GPU row's own shape below and Buzz's form-row order (label
+    // column, then the control(s)).
     ui.horizontal(|ui| {
+        ui.label(tr("prefs-general-font-size-label"));
         let mut custom = state.font_size_custom;
         if ui
             .checkbox(&mut custom, tr("prefs-general-font-size-custom-label"))
@@ -630,7 +639,6 @@ pub fn ui(
             state.font_size_custom = custom;
             commit_font_size(state, settings, settings_path, ui.ctx());
         }
-        ui.label(tr("prefs-general-font-size-label"));
         let mut value = state.font_size_value;
         let response = ui.add_enabled(
             state.font_size_custom,
@@ -860,22 +868,37 @@ mod tests {
 
     // -- GeneralTabState::new -- the M7 Task 11 additions ------------------------
 
+    /// Review fix (M7 Task 11 follow-up): `locale_code` seeds from
+    /// [`i18n::active_locale`] — the already-resolved ground truth — not by
+    /// re-deriving it via `i18n::negotiate(settings.ui.locale.as_deref())`,
+    /// which would ignore the system-locale fallback `HummApp::new`'s own
+    /// startup negotiation applies. Proven here by seeding with a
+    /// `settings.ui.locale` value that does **not** match the active locale
+    /// (`i18n::set_locale` is the sole writer of "active"; a stored setting
+    /// is just data until something calls it) — the seeded `locale_code`
+    /// must track whatever's actually active, not the stored setting.
     #[test]
-    fn new_seeds_locale_code_from_negotiated_settings_locale() {
+    fn new_seeds_locale_code_from_the_active_locale_not_the_stored_setting() {
+        let _guard = i18n::lock_locale_for_test();
         let secrets = MemorySecretStore::new();
-        // No `ui.locale` set: negotiates to the fallback, `en_US` (the only
-        // embedded locale this milestone).
-        let state = GeneralTabState::new(&secrets, &Settings::default());
-        assert_eq!(state.locale_code, "en_US");
 
+        // `settings.ui.locale` says "de_DE" (unregistered this milestone),
+        // but nothing has called `set_locale` to actually activate it —
+        // `active_locale()` still reports whatever's really active (`en_US`,
+        // the guard's own reset-on-drop baseline).
         let settings = Settings {
             ui: UiSettings {
-                locale: Some("en_US".to_string()),
+                locale: Some("de_DE".to_string()),
                 ..UiSettings::default()
             },
             ..Settings::default()
         };
         let state = GeneralTabState::new(&secrets, &settings);
+        assert_eq!(
+            state.locale_code,
+            i18n::active_locale(),
+            "locale_code must track the active locale, not settings.ui.locale directly"
+        );
         assert_eq!(state.locale_code, "en_US");
     }
 
@@ -1056,6 +1079,12 @@ mod tests {
 
     #[test]
     fn commit_locale_persists_ui_locale() {
+        // `commit_locale` calls `i18n::set_locale`, which mutates
+        // process-wide global state other tests (in this file, `i18n.rs`,
+        // and `kittest_prefs.rs`) also touch — review fix (this guard was
+        // missing here even though every other `set_locale`-calling test
+        // added this task holds it).
+        let _guard = i18n::lock_locale_for_test();
         let dir = tempfile::tempdir().unwrap();
         let settings_path = dir.path().join("settings.toml");
         let settings = Mutex::new(Settings::default());

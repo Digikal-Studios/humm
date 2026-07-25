@@ -22,8 +22,7 @@ use humm_core::live::{
 use humm_core::models::download::DownloadProgress;
 use humm_core::openai::{ENV_BASE, ENV_KEY, TranslatorConfig, resolve_endpoint};
 use humm_core::queue::{ArtifactEnsurer, QueueHandle, TaskEvent, TaskEventKind};
-use humm_core::settings::Settings;
-use humm_core::settings::{FileTranscriberSettings, GuiSettings, ViewerGeometry};
+use humm_core::settings::{FileTranscriberSettings, GuiSettings, Settings, ViewerGeometry};
 use humm_media::{FfmpegDecoder, FfmpegVideoStreamer, FfprobeProber};
 use humm_whisper::LiveOptions;
 
@@ -711,9 +710,6 @@ impl HummApp {
         settings.models.custom_model_url.clone()
     }
 
-    /// The current `settings.openai` snapshot — the Preferences window's
-    /// General tab (partial F-100, Task 13) seeds its base-URL/API-model
-    /// buffers from this the moment the window opens.
     /// A full clone of the live settings, snapshotted at the moment the
     /// Preferences window opens (`PreferencesState::new`'s own contract:
     /// every tab's fields are seeded once, at open time, not live-read
@@ -787,7 +783,15 @@ impl HummApp {
                 .settings
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            FolderWatchSnapshot::from_settings(&settings.folder_watch)
+            // The *global* `file_transcriber.default_export_template`
+            // (Preferences → General) threads in here, not `folder_watch.
+            // options.default_export_template` — review fix (M7 Task 11
+            // follow-up), see `FolderWatchSnapshot::default_export_template`'s
+            // own doc for why.
+            FolderWatchSnapshot::from_settings(
+                &settings.folder_watch,
+                settings.file_transcriber.default_export_template.clone(),
+            )
         };
         let changed = self.folder_watch_snapshot.as_ref() != Some(&snapshot);
 
@@ -807,8 +811,9 @@ impl HummApp {
             ReconcileAction::UpdateTemplate => {
                 // The watcher itself (identity: `input_dir`) is untouched —
                 // only the job template (`output_dir`/`delete_processed_files`/
-                // `options`) changed, so the running worker just picks up the
-                // new template on its next rescan; no watcher teardown/
+                // `options`/`default_export_template`) changed, so the running
+                // worker just picks up the new template on its next rescan; no
+                // watcher teardown/
                 // rebuild, no lost `SeenSet` progress, no churn (this is
                 // exactly what keeps a future per-keystroke options-form edit
                 // — Task 15 — from restarting the FSEvents/PollWatcher
@@ -1697,6 +1702,19 @@ impl HummApp {
     /// as a real OS viewport, min 650×500 (binding decision). Same
     /// immediate-viewport shape as [`Self::show_about_viewport`]; see
     /// `views::preferences`'s module doc for the tradeoff this implies.
+    ///
+    /// Review fix (M7 Task 11 follow-up, repaint gap): `ui.locale`/
+    /// `ui.font_size` are compared before and after the `preferences::ui`
+    /// call, and [`Self::repaint_other_open_viewports`] runs whenever either
+    /// changed — the General tab's language combo/font-size row already
+    /// apply live process-wide (`i18n::set_locale`/`prefs_general::
+    /// apply_font_size` touch global state every `tr()`/style lookup reads),
+    /// but an *idle* deferred viewport (a viewer, resizer, the recording
+    /// window, the presentation window) only repaints on its own input or
+    /// timer — without this, one of those windows sitting open and untouched
+    /// would keep rendering the old locale/font scale until the user
+    /// happened to interact with it, even though the very next frame it
+    /// *does* repaint would already show the change.
     fn show_preferences_viewport(&mut self, ctx: &egui::Context) {
         let Some(state) = &mut self.preferences_state else {
             return;
@@ -1707,6 +1725,8 @@ impl HummApp {
         let secrets = &self.services.secrets;
         let validate = &self.services.validate;
         let mut close_requested = false;
+
+        let appearance_before = ui_appearance_snapshot(settings);
 
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("humm-preferences-viewport"),
@@ -1732,9 +1752,44 @@ impl HummApp {
             },
         );
 
+        let appearance_after = ui_appearance_snapshot(settings);
+        if ui_appearance_changed(&appearance_before, &appearance_after) {
+            self.repaint_other_open_viewports(ctx);
+        }
+
         if close_requested {
             self.preferences_open = false;
             self.preferences_state = None;
+        }
+    }
+
+    /// Requests a repaint of every other open deferred viewport — every
+    /// open viewer/resizer, the live-recording window, and (if it's also
+    /// open) the presentation window — see [`Self::show_preferences_viewport`]'s
+    /// own doc for why. Harmless to call for a viewport id that isn't
+    /// actually being shown this frame: `egui::Context::request_repaint_of`
+    /// only affects a viewport that's currently registered via
+    /// `show_viewport_deferred`/`_immediate`, so a request against one that
+    /// isn't (this method itself only requests the presentation window's id
+    /// when [`crate::views::presentation::PresentationVm::open`] agrees it
+    /// should be) is simply never consumed.
+    fn repaint_other_open_viewports(&self, ctx: &egui::Context) {
+        for id in self.viewers.keys() {
+            ctx.request_repaint_of(egui::ViewportId::from_hash_of(("viewer", *id)));
+        }
+        for id in self.resizers.keys() {
+            ctx.request_repaint_of(egui::ViewportId::from_hash_of(("resizer", *id)));
+        }
+        if let Some(vm_arc) = &self.recording {
+            ctx.request_repaint_of(egui::ViewportId::from_hash_of(("recording",)));
+            let presentation_open = vm_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .presentation
+                .open;
+            if presentation_open {
+                ctx.request_repaint_of(egui::ViewportId::from_hash_of(("presentation",)));
+            }
         }
     }
 
@@ -3354,6 +3409,30 @@ fn postprocessed_should_reload_viewer(kind: &TaskEventKind) -> bool {
     )
 }
 
+/// `(ui.locale, ui.font_size)`, the two settings a Preferences edit can
+/// change that every other open window must repaint to reflect
+/// ([`HummApp::show_preferences_viewport`]'s own doc) — read under one lock
+/// so the pair is a consistent snapshot from a single point in time.
+fn ui_appearance_snapshot(settings: &Mutex<Settings>) -> (Option<String>, Option<u32>) {
+    let guard = settings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    (guard.ui.locale.clone(), guard.ui.font_size)
+}
+
+/// Whether two [`ui_appearance_snapshot`] values differ — pure and free of
+/// any `HummApp`/`egui::Context` state so the decision itself is directly
+/// unit-testable, independent of [`HummApp::show_preferences_viewport`]'s
+/// viewport plumbing (mirrors [`retry_allowed`]/
+/// [`postprocessed_should_reload_viewer`]'s own "pure decision, `HummApp`
+/// only acts on it" split above).
+fn ui_appearance_changed(
+    before: &(Option<String>, Option<u32>),
+    after: &(Option<String>, Option<u32>),
+) -> bool {
+    before != after
+}
+
 /// The [`egui::ViewportBuilder`] for a viewer window: `title`, min size
 /// 800×500, and either the captured shared geometry (`geometry`, position
 /// applied only when both coordinates are known) or the 1000×800 default
@@ -3822,6 +3901,52 @@ mod tests {
         assert!(!postprocessed_should_reload_viewer(
             &TaskEventKind::Completed { written: vec![] }
         ));
+    }
+
+    // -- ui_appearance_changed / ui_appearance_snapshot (repaint-gap fix) --------
+
+    #[test]
+    fn ui_appearance_changed_is_false_for_an_identical_snapshot() {
+        let snap = (Some("de_DE".to_string()), Some(20));
+        assert!(!ui_appearance_changed(&snap, &snap.clone()));
+        let none_snap = (None, None);
+        assert!(!ui_appearance_changed(&none_snap, &none_snap));
+    }
+
+    #[test]
+    fn ui_appearance_changed_true_when_locale_differs() {
+        let before = (Some("en_US".to_string()), Some(14));
+        let after = (Some("de_DE".to_string()), Some(14));
+        assert!(ui_appearance_changed(&before, &after));
+    }
+
+    #[test]
+    fn ui_appearance_changed_true_when_font_size_differs() {
+        let before = (None, Some(14));
+        let after = (None, Some(20));
+        assert!(ui_appearance_changed(&before, &after));
+    }
+
+    #[test]
+    fn ui_appearance_changed_true_when_font_size_toggles_custom_off() {
+        // Unchecking "Custom font size" clears the setting to `None` --
+        // this must count as a change too, not just a numeric edit.
+        let before = (None, Some(20));
+        let after = (None, None);
+        assert!(ui_appearance_changed(&before, &after));
+    }
+
+    #[test]
+    fn ui_appearance_snapshot_reads_both_fields_under_one_lock() {
+        let mut settings = Settings::default();
+        settings.ui.locale = Some("es_ES".to_string());
+        settings.ui.font_size = Some(18);
+        let settings = Mutex::new(settings);
+
+        assert_eq!(
+            ui_appearance_snapshot(&settings),
+            (Some("es_ES".to_string()), Some(18))
+        );
     }
 
     #[test]

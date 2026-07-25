@@ -509,11 +509,17 @@ pub fn set_locale(buzz_code: &str) {
         .iter()
         .position(|candidate| candidate.buzz_code == entry.buzz_code)
     {
-        // Release: publishes the new index before `GENERATION`'s own Release
-        // store just below, so a reader that observes the bumped generation
-        // (via an Acquire load) is guaranteed to also observe this index
-        // update, not a stale one (single-writer publish pattern — reviewer-
-        // confirmed this pair needs only acquire/release, not SeqCst).
+        // Ordering note (review-corrected): this store's own ordering isn't
+        // what publishes it — there are no earlier writes it needs to carry.
+        // `GENERATION`'s `fetch_add(Release)` right below is the actual
+        // publisher: program order alone guarantees this store happens
+        // before that fetch_add in this thread's own execution, and a
+        // Release store is a one-way barrier (nothing before it in program
+        // order can be reordered past it), so any thread that Acquire-loads
+        // the bumped `GENERATION` value is guaranteed to see this index
+        // update too — even if this store were `Relaxed`. Kept as `Release`
+        // anyway for symmetry with the store just below, not because
+        // correctness depends on it.
         ACTIVE_LOCALE_INDEX.store(index, Ordering::Release);
     }
     // Release: pairs with `tr_args`'/`active_entry`'s Acquire loads, so a
@@ -532,6 +538,23 @@ fn active_entry() -> &'static LocaleEntry {
     // the index that store published, not a stale/torn value.
     let index = ACTIVE_LOCALE_INDEX.load(Ordering::Acquire);
     &AVAILABLE_LOCALES[index.min(AVAILABLE_LOCALES.len() - 1)]
+}
+
+/// [`active_entry`]'s `buzz_code` alone (review fix, M7 Task 11 follow-up) —
+/// the narrowest way for a caller that just needs "what locale is actually
+/// active right now" to get it, without re-deriving it. The Preferences
+/// General tab's language-combo seed is exactly this case: seeding it via
+/// `negotiate(settings.ui.locale.as_deref())` alone (the original, buggy
+/// wiring) skips the system-locale fallback `HummApp::new`'s own startup
+/// negotiation applies (`negotiate(settings.ui.locale.or(system_locale))`),
+/// so whenever `settings.ui.locale` is `None` the combo could show a
+/// *different* locale than the one [`set_locale`] actually activated at
+/// startup. Reading the already-resolved ground truth here instead — the
+/// same value [`set_locale`] last stored — sidesteps that re-derivation
+/// entirely rather than threading the startup negotiation's result through
+/// as a second, parallel code path that could drift from it.
+pub fn active_locale() -> &'static str {
+    active_entry().buzz_code
 }
 
 /// Serializes every test — in this module or any integration test — that
