@@ -634,7 +634,7 @@ impl SqliteStore {
     /// this lookup — deliberately: this table is
     /// personal-transcription-history scale (a full scan of a few thousand
     /// rows costs nothing worth an index for).
-    pub fn find_completed_by_file_name(
+    pub fn find_completed_transcription_by_basename(
         &self,
         name: &str,
     ) -> Result<Option<TranscriptionId>, StoreError> {
@@ -665,7 +665,8 @@ impl SqliteStore {
 
     /// Reports whether any task — regardless of status — has `file` exactly
     /// equal to `path`'s displayed form. An exact-path existence check, not
-    /// a basename search (contrast [`Self::find_completed_by_file_name`]).
+    /// a basename search (contrast
+    /// [`Self::find_completed_transcription_by_basename`]).
     pub fn has_task_for_file(&self, path: &Path) -> Result<bool, StoreError> {
         let conn = self.lock()?;
         conn.query_row(
@@ -1502,10 +1503,12 @@ impl TaskStore for SqliteStore {
         &self,
         name: &str,
     ) -> Result<Option<TranscriptionId>, StoreError> {
-        // Delegates to the inherent method below — inherent methods take
-        // priority over trait methods in Rust's call resolution even from
-        // inside a trait impl block, so this is not (accidental) recursion.
-        self.find_completed_by_file_name(name)
+        // Delegates to the distinctly-named inherent method above. Naming
+        // this differently from the trait method (rather than relying on
+        // Rust's inherent-method-priority rule to disambiguate a same-named
+        // pair) means renaming or inlining the inherent method can never
+        // silently turn this into infinite recursion.
+        self.find_completed_transcription_by_basename(name)
     }
 
     fn segments_for(&self, id: &TranscriptionId) -> Result<Vec<Segment>, StoreError> {
@@ -1835,7 +1838,7 @@ mod tests {
     }
 
     #[test]
-    fn find_completed_by_file_name_matches_basename_newest_first() {
+    fn find_completed_transcription_by_basename_matches_basename_newest_first() {
         let store = SqliteStore::open_in_memory().expect("open");
 
         let mut spec_a = sample_task_spec();
@@ -1882,7 +1885,7 @@ mod tests {
         }
 
         let found = store
-            .find_completed_by_file_name("x.mp3")
+            .find_completed_transcription_by_basename("x.mp3")
             .expect("query")
             .expect("found");
         assert_eq!(found, queued_earlier_finishes_later);
@@ -1900,14 +1903,18 @@ mod tests {
 
         // Still `queued` — not a match.
         assert_eq!(
-            store.find_completed_by_file_name("x.mp3").expect("query"),
+            store
+                .find_completed_transcription_by_basename("x.mp3")
+                .expect("query"),
             None
         );
 
         // `failed` — still not a match.
         store.mark_failed(&id, "boom").expect("fail");
         assert_eq!(
-            store.find_completed_by_file_name("x.mp3").expect("query"),
+            store
+                .find_completed_transcription_by_basename("x.mp3")
+                .expect("query"),
             None
         );
     }

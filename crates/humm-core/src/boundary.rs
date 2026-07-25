@@ -571,7 +571,9 @@ pub trait TaskStore: Send + Sync {
 
     /// Finds the newest (`time_ended` descending) `completed` task whose
     /// input file's basename matches `name` — the trait-level counterpart
-    /// of `SqliteStore::find_completed_by_file_name`, needed so
+    /// of `SqliteStore::find_completed_transcription_by_basename`
+    /// (distinctly named, not reused, so the trait impl's delegation can
+    /// never become accidental recursion), needed so
     /// [`crate::postproc::skip::check`]'s database check (F-115, design
     /// spec §2.3/§4) can reach it through the same store handle
     /// [`crate::queue::RunnerDeps::store`] already holds, without
