@@ -7,6 +7,8 @@
 //! golden tests (`tests/transcriber/transcriber_test.py:12-43`), ported
 //! verbatim.
 
+pub mod docx;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 

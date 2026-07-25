@@ -78,7 +78,14 @@ fn basename(path: &Path) -> String {
 /// F-027) speech-extraction plugin names its intermediate file
 /// `{stem}_speech.mp3`; stripping the suffix here means a result produced
 /// from that intermediate file still matches the original recording's stem.
-fn stem_for(path: &Path) -> String {
+///
+/// `pub(super)`: also reused by [`crate::postproc::docx`] (F-113) for its
+/// own stem derivation — Buzz's `export_docx` plugin instead prefers
+/// `task.original_file_path` when set (`export_docx/plugin.py:102-107`),
+/// which humm has no equivalent field for yet (see that module's doc
+/// comment); stripping `_speech` from the same `task_input` this module
+/// already receives reaches the same practical stem.
+pub(super) fn stem_for(path: &Path) -> String {
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())

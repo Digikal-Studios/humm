@@ -1,0 +1,6 @@
+---
+source: crates/humm-core/src/export/docx.rs
+assertion_line: 299
+expression: document_xml_of(&bytes)
+---
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:spacing w:after="200"/></w:pPr><w:r><w:rPr><w:b/><w:sz w:val="36"/><w:szCs w:val="36"/></w:rPr><w:t xml:space="preserve">transcript</w:t></w:r></w:p><w:p><w:r><w:t xml:space="preserve">Tom &amp; Jerry &lt;says&gt; "hi" it's &lt;ok&gt;</w:t></w:r></w:p><w:p><w:r><w:t xml:space="preserve">你好，世界 — 日本語のテスト</w:t></w:r></w:p><w:sectPr/></w:body></w:document>

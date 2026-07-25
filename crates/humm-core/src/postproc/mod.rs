@@ -4,6 +4,7 @@
 //! ai_summary, F-113 export_docx, F-116 transcript_resizer). Design:
 //! `docs/superpowers/specs/2026-07-25-m7-completeness-design.md` §2, §4.
 
+pub mod docx;
 pub mod skip;
 pub mod summary;
 
