@@ -59,6 +59,7 @@ unic-langid = { version = "0.9", features = ["macros"] }
 open = "5"
 regex = "1"
 egui_kittest = { version = "0.35", features = ["eframe"] }
+notify = "8"
 
 [profile.release]
 lto = "thin"

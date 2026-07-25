@@ -450,19 +450,7 @@ fn build_specs_with_paragraph_split(
     state: &SheetState,
     paragraph_split: Millis,
 ) -> Vec<(TranscriptionId, TaskSpec, Source)> {
-    let options = TranscriptionOptions {
-        language: state.language,
-        task: state.task,
-        model: ModelSpec {
-            backend: state.backend,
-            size: state.model_size,
-            hf_repo: non_empty_trimmed(&state.hf_repo),
-        },
-        word_timestamps: state.word_timestamps,
-        initial_prompt: state.initial_prompt.clone(),
-        temperature: DEFAULT_TEMPERATURE.to_vec(),
-        llm: llm_options(state),
-    };
+    let options = transcription_options_from_state(state);
     let output = OutputSpec {
         formats: state.formats.clone(),
         paragraph_split,
@@ -493,6 +481,69 @@ fn build_specs_with_paragraph_split(
             },
             Source::UrlImport,
         )],
+    }
+}
+
+/// Builds a [`TranscriptionOptions`] from a live [`SheetState`] — the
+/// construction [`build_specs_with_paragraph_split`] shares with
+/// [`spec_from_transcriber_settings`] (folder watch, F-030), so both call
+/// sites apply language/task/model/word-timestamps/initial-prompt/llm
+/// identically rather than maintaining two copies of the same mapping.
+fn transcription_options_from_state(state: &SheetState) -> TranscriptionOptions {
+    TranscriptionOptions {
+        language: state.language,
+        task: state.task,
+        model: ModelSpec {
+            backend: state.backend,
+            size: state.model_size,
+            hf_repo: non_empty_trimmed(&state.hf_repo),
+        },
+        word_timestamps: state.word_timestamps,
+        initial_prompt: state.initial_prompt.clone(),
+        temperature: DEFAULT_TEMPERATURE.to_vec(),
+        llm: llm_options(state),
+    }
+}
+
+/// Builds a folder-watch auto-task's [`TaskSpec`] straight from a
+/// [`FileTranscriberSettings`] snapshot (`settings.folder_watch.options`)
+/// rather than a live [`SheetState`] — `humm_gui::folder_watch`'s shared
+/// construction path (F-030, design spec §3.2). Reuses
+/// [`SheetState::from_settings`]'s exact parsing/defaulting rules (via
+/// [`transcription_options_from_state`]) so a watched file's task has
+/// identical option semantics to a manual import sharing the same persisted
+/// settings, then layers on the two things only folder watch ever sets:
+/// `directory` (the mirrored output directory, already `create_dir_all`'d by
+/// the caller) and `source_disposition` (delete vs. move-into-output,
+/// design spec §3.4) — an options-sheet import never sets either.
+///
+/// `custom_model_available` is always `true` here (not threaded from
+/// `settings.models.custom_model_url` the way the live options sheet is
+/// gated): that gate exists solely so a picker never displays a "Custom"
+/// selection it can no longer list, which has no analogue for a headless
+/// auto-task — a stale `Custom` selection whose URL was since cleared
+/// degrades the same way any other missing-model case does (the engine
+/// factory fails to resolve it and the task fails actionably), rather than
+/// being silently downgraded to "Small" behind the user's back.
+pub(crate) fn spec_from_transcriber_settings(
+    settings: &FileTranscriberSettings,
+    custom_model_available: bool,
+    input: std::path::PathBuf,
+    output_dir: std::path::PathBuf,
+    source_disposition: humm_core::domain::SourceDisposition,
+) -> TaskSpec {
+    let state = SheetState::from_settings(settings, custom_model_available);
+    let options = transcription_options_from_state(&state);
+    TaskSpec {
+        input: Input::Path(input),
+        options,
+        output: OutputSpec {
+            formats: state.formats,
+            directory: Some(output_dir),
+            file_name_template: None,
+            paragraph_split: paragraph_split_from_env(),
+            source_disposition: Some(source_disposition),
+        },
     }
 }
 
@@ -1368,6 +1419,59 @@ mod tests {
                 humm_core::export::DEFAULT_PARAGRAPH_SPLIT
             );
         }
+    }
+
+    // -- spec_from_transcriber_settings (folder watch, F-030) -------------------
+
+    #[test]
+    fn spec_from_transcriber_settings_sets_directory_and_disposition() {
+        let settings = FileTranscriberSettings {
+            language: Some("en".to_string()),
+            task: Some("translate".to_string()),
+            model_size: Some("small".to_string()),
+            word_timestamps: Some(true),
+            export_formats: Some(vec!["srt".to_string()]),
+            ..FileTranscriberSettings::default()
+        };
+
+        let spec = spec_from_transcriber_settings(
+            &settings,
+            true,
+            PathBuf::from("/in/clip.wav"),
+            PathBuf::from("/out/sub"),
+            humm_core::domain::SourceDisposition::Delete,
+        );
+
+        assert_eq!(spec.input, Input::Path(PathBuf::from("/in/clip.wav")));
+        assert_eq!(spec.options.language, Language::parse("en"));
+        assert_eq!(spec.options.task, TaskKind::Translate);
+        assert_eq!(spec.options.model.size, ModelSize::Small);
+        assert!(spec.options.word_timestamps);
+        assert_eq!(spec.output.formats, BTreeSet::from([OutputFormat::Srt]));
+        assert_eq!(spec.output.directory, Some(PathBuf::from("/out/sub")));
+        assert_eq!(
+            spec.output.source_disposition,
+            Some(humm_core::domain::SourceDisposition::Delete)
+        );
+        // Task 11 wires `default_export_template` into this site — until
+        // then it must stay `None` (the default template).
+        assert_eq!(spec.output.file_name_template, None);
+    }
+
+    #[test]
+    fn spec_from_transcriber_settings_move_to_output_disposition() {
+        let settings = FileTranscriberSettings::default();
+        let spec = spec_from_transcriber_settings(
+            &settings,
+            true,
+            PathBuf::from("/in/clip.wav"),
+            PathBuf::from("/out"),
+            humm_core::domain::SourceDisposition::MoveToOutput,
+        );
+        assert_eq!(
+            spec.output.source_disposition,
+            Some(humm_core::domain::SourceDisposition::MoveToOutput)
+        );
     }
 
     // -- header/summary text ----------------------------------------------------

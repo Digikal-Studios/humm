@@ -128,6 +128,11 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "options-llm-model-label",
         "options-llm-model-presets-button",
         "options-llm-prompt-label",
+        // Folder-watch pill (views/main_window.rs, F-030, design spec §3.3)
+        "folderwatch-pill-watching",
+        "folderwatch-pill-paused",
+        "folderwatch-pill-pause-tip",
+        "folderwatch-pill-resume-tip",
         // Update chip + dialog (views/update_notice.rs, F-006, ADR-015)
         "update-chip-label",
         "update-dialog-title",

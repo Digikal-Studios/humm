@@ -159,6 +159,13 @@ options-llm-model-label = AI model:
 options-llm-model-presets-button = Presets
 options-llm-prompt-label = Instructions for AI:
 
+## Folder-watch pill (views/main_window.rs, F-030, design spec §3.3)
+
+folderwatch-pill-watching = Watching { $name }
+folderwatch-pill-paused = Paused
+folderwatch-pill-pause-tip = Pause folder watching
+folderwatch-pill-resume-tip = Resume folder watching
+
 ## Update chip + dialog (views/update_notice.rs, F-006, ADR-015)
 
 update-chip-label = Update Available

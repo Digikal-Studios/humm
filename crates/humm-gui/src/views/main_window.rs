@@ -17,7 +17,7 @@ use std::time::Instant;
 use humm_core::domain::Status;
 use humm_core::secrets::SecretStore;
 
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_args};
 use crate::shortcuts::{ShortcutAction, ShortcutMap};
 use crate::viewmodel::{TableAction, TasksVm};
 use crate::views::options_sheet::{self, OptionsSheet, SheetOutcome};
@@ -208,6 +208,38 @@ pub fn toolbar_enablement(statuses: &[Status]) -> ToolbarEnablement {
     }
 }
 
+/// The folder-watch toolbar pill's live state (F-030, design spec §3.3).
+/// `app.rs` builds this fresh every frame from whether
+/// `crate::folder_watch::FolderWatchService` is *actually* running — not
+/// merely `settings.folder_watch.enabled` — so the pill only ever promises a
+/// watcher that's really up (a `start()` failure, or the feature simply
+/// being off/unconfigured, both mean "no pill", handled by `app.rs` passing
+/// `None` to [`show`] rather than by any visibility check in this module).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FolderWatchPillState {
+    /// The watched input directory's basename (Buzz parity: the folder's
+    /// own name, not its full path — `FolderWatchSnapshot::pill_folder_name`).
+    pub folder_name: String,
+    /// Whether the service is currently paused (the pill's own toggle,
+    /// session-scoped — never a persisted setting).
+    pub paused: bool,
+}
+
+/// The pill's label text: "Watching {name}", with a dimmed "— Paused" suffix
+/// while paused (design spec §3.3). Pure (no `egui::Ui` involved), so it's
+/// directly unit-testable.
+pub fn folder_watch_pill_label(state: &FolderWatchPillState) -> String {
+    let watching = tr_args(
+        "folderwatch-pill-watching",
+        &[("name", state.folder_name.as_str())],
+    );
+    if state.paused {
+        format!("{watching} — {}", tr("folderwatch-pill-paused"))
+    } else {
+        watching
+    }
+}
+
 /// Everything this frame's `show` produced that `app.rs` (not this module)
 /// must act on: it owns `Services` (store/queue), which this module never
 /// touches.
@@ -227,6 +259,11 @@ pub struct ShowResult {
     /// the options sheet with it (needs `Services.settings` for prefill,
     /// which this module never touches).
     pub url_dialog_result: Option<url::Url>,
+    /// The folder-watch pill's pause/resume toggle button was clicked this
+    /// frame (F-030, design spec §3.3) — `app.rs` flips the running
+    /// service's pause flag (it owns the service, which this module never
+    /// touches).
+    pub folder_watch_pause_toggled: bool,
 }
 
 /// Renders the main window: global shortcuts, menu bar, toolbar, the
@@ -243,7 +280,11 @@ pub struct ShowResult {
 /// update dialog's "Current version: …" line. `secrets` is threaded
 /// straight through to the options sheet's Api Key row (F-041, Task 14) —
 /// the one piece of `Services` this module passes on without touching
-/// itself, same as `custom_model_available`/`yt_dlp_available`.
+/// itself, same as `custom_model_available`/`yt_dlp_available`. `folder_watch_pill`
+/// is `app.rs`'s own precomputed pill state (F-030, design spec §3.3) —
+/// `None` hides the pill entirely; this module never reaches into
+/// `crate::folder_watch` itself, same "app.rs computes, this module only
+/// renders" split as everything else in this list.
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
@@ -257,14 +298,17 @@ pub fn show(
     yt_dlp_available: bool,
     current_version: &str,
     secrets: &Arc<dyn SecretStore>,
+    folder_watch_pill: Option<&FolderWatchPillState>,
 ) -> ShowResult {
     handle_global_shortcuts(ui, actions, shortcuts, state, yt_dlp_available);
 
+    let mut folder_watch_pause_toggled = false;
     egui::Panel::top("humm-menu-bar").show(ui, |ui| {
         show_menu_bar(ui, shortcuts, state, yt_dlp_available);
     });
     egui::Panel::top("humm-toolbar").show(ui, |ui| {
-        show_toolbar(ui, vm, actions, state, yt_dlp_available);
+        folder_watch_pause_toggled =
+            show_toolbar(ui, vm, actions, state, yt_dlp_available, folder_watch_pill);
     });
     if state.banner.visible() {
         egui::Panel::top("humm-store-health-banner").show(ui, |ui| {
@@ -300,6 +344,7 @@ pub fn show(
         toast_actions,
         sheet_outcome,
         url_dialog_result,
+        folder_watch_pause_toggled,
     }
 }
 
@@ -454,14 +499,21 @@ fn show_menu_bar(
 ///
 /// "New URL Transcription" is disabled with a tooltip when
 /// `yt_dlp_available` is `false` (Policy rule 6).
+///
+/// Returns whether the folder-watch pill's pause/resume button was clicked
+/// this frame (F-030, design spec §3.3) — `show`'s own caller (`app.rs`)
+/// owns the actual [`crate::folder_watch::FolderWatchService`], so the click
+/// is only ever reported up, never acted on here.
 fn show_toolbar(
     ui: &mut egui::Ui,
     vm: &TasksVm,
     actions: &mut Vec<TableAction>,
     state: &mut ActionState,
     yt_dlp_available: bool,
-) {
+    folder_watch_pill: Option<&FolderWatchPillState>,
+) -> bool {
     let enablement = toolbar_enablement(&vm.selected_statuses());
+    let mut pause_toggled = false;
     ui.horizontal(|ui| {
         if ui.button(tr("toolbar-record")).clicked() {
             state.record_requested = true;
@@ -502,7 +554,32 @@ fn show_toolbar(
         }
         ui.separator();
         update_notice::chip_ui(ui, &mut state.update_notice);
+        if let Some(pill) = folder_watch_pill {
+            ui.separator();
+            pause_toggled = show_folder_watch_pill(ui, pill);
+        }
     });
+    pause_toggled
+}
+
+/// The folder-watch pill itself (design spec §3.3): the label text
+/// ([`folder_watch_pill_label`]), dimmed while paused, plus a small icon-only
+/// toggle button (⏸/▶ — the same raw-glyph-button precedent as
+/// [`show_banner`]'s own dismiss "×") with a tooltip explaining what it does.
+/// Returns whether that button was clicked this frame.
+fn show_folder_watch_pill(ui: &mut egui::Ui, pill: &FolderWatchPillState) -> bool {
+    let label = folder_watch_pill_label(pill);
+    if pill.paused {
+        ui.weak(label);
+    } else {
+        ui.label(label);
+    }
+    let (icon, tooltip_key) = if pill.paused {
+        ("\u{25b6}", "folderwatch-pill-resume-tip")
+    } else {
+        ("\u{23f8}", "folderwatch-pill-pause-tip")
+    };
+    ui.button(icon).on_hover_text(tr(tooltip_key)).clicked()
 }
 
 /// The persistent store-health banner: base message plus a dismiss button.
@@ -677,6 +754,34 @@ mod tests {
         assert!(banner.visible());
         // Fresh reappearance: exactly the base message, no "(N)" suffix.
         assert_eq!(banner.message(), Some(tr("banner-store-health")));
+    }
+
+    // -- folder_watch_pill_label ---------------------------------------------
+
+    #[test]
+    fn pill_label_watching_has_no_paused_suffix() {
+        let state = FolderWatchPillState {
+            folder_name: "my-clips".to_string(),
+            paused: false,
+        };
+        assert_eq!(
+            folder_watch_pill_label(&state),
+            tr_args("folderwatch-pill-watching", &[("name", "my-clips")])
+        );
+    }
+
+    #[test]
+    fn pill_label_paused_appends_the_paused_suffix() {
+        let state = FolderWatchPillState {
+            folder_name: "my-clips".to_string(),
+            paused: true,
+        };
+        let label = folder_watch_pill_label(&state);
+        assert!(label.contains(&tr_args(
+            "folderwatch-pill-watching",
+            &[("name", "my-clips")]
+        )));
+        assert!(label.contains(&tr("folderwatch-pill-paused")));
     }
 
     // -- ActionState::modal_open --------------------------------------------

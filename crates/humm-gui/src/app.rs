@@ -27,6 +27,7 @@ use humm_whisper::LiveOptions;
 
 use crate::engine_factory::DownloaderEnsurer;
 use crate::events::{self, SharedEventQueue};
+use crate::folder_watch::{FolderWatchService, FolderWatchSnapshot, ReconcileAction};
 use crate::i18n::tr;
 use crate::import::{FileDialogs, ImportRequest, RfdFileDialogs, scan_folder};
 use crate::live_fixture::FixtureCapture;
@@ -42,7 +43,9 @@ use crate::viewer::{ViewerDeps, ViewerVm};
 use crate::viewmodel::{TableAction, TasksVm};
 use crate::views;
 use crate::views::about::{self, AboutCheckResult, AboutState};
-use crate::views::main_window::{ActionState, PendingImportRequest, toolbar_enablement};
+use crate::views::main_window::{
+    ActionState, FolderWatchPillState, PendingImportRequest, toolbar_enablement,
+};
 use crate::views::options_sheet::{OptionsSheet, SheetOutcome, SheetState};
 use crate::views::preferences::{self, PreferencesState};
 use crate::views::rename_notes::{self, DialogOutcome};
@@ -232,6 +235,34 @@ pub struct HummApp {
     /// still active; this only remembers *when* Record was clicked and
     /// whether Stop has been latched yet).
     smoke_live_fixture_state: Option<SmokeLiveFixtureState>,
+    /// The running queue handle, `Arc`-wrapped so the folder-watch service's
+    /// worker thread can share it (F-030): `humm_core::queue::QueueHandle`
+    /// deliberately has no `Clone` impl (it uniquely owns the runner
+    /// thread's `JoinHandle` — only one thing may ever call `finish`/
+    /// `finish_within` on it), so rather than each ordinary call site
+    /// borrowing `&QueueHandle` through `Services::queue()` (as before this
+    /// task), `Self::build` takes `services.queue` out exactly once and
+    /// wraps it here; [`Self::queue`] is the accessor every ordinary call
+    /// site now uses instead of `self.services.queue()`. `Option` for the
+    /// same reason as `Services::queue`: `on_exit` takes it to reclaim sole
+    /// ownership (`Arc::try_unwrap`) for [`shutdown_queue`], which only
+    /// succeeds once `folder_watch` (stopped first) has dropped its own
+    /// clone — see [`Self::on_exit`].
+    queue: Option<Arc<QueueHandle>>,
+    /// The folder-watch service (F-030, design spec §3.2) — `None` while
+    /// disabled/unconfigured, or (transiently, logged) after a `start()`
+    /// failure. Reconciled against live settings every frame
+    /// ([`Self::sync_folder_watch`]) and stopped before the queue on
+    /// shutdown ([`Self::on_exit`]), mirroring Buzz's own teardown order
+    /// (`main_window.py:500-507` disconnects the folder watcher before
+    /// `closeEvent` does anything else).
+    folder_watch: Option<FolderWatchService>,
+    /// The `[folder_watch]` snapshot the running `folder_watch` service (if
+    /// any) was last started/restarted with — `None` whenever `folder_watch`
+    /// is `None` too (disabled, or a `start()` failure). Compared every
+    /// frame against a freshly read snapshot to decide whether to restart
+    /// (`crate::folder_watch::reconcile_folder_watch`).
+    folder_watch_snapshot: Option<FolderWatchSnapshot>,
 }
 
 impl HummApp {
@@ -389,7 +420,7 @@ impl HummApp {
     /// `services.settings.gui` before the first frame ever renders.
     #[allow(clippy::too_many_arguments)]
     fn build(
-        services: Services,
+        mut services: Services,
         event_queue: Option<SharedEventQueue>,
         pending_argv_import: Vec<PathBuf>,
         smoke_hooks: SmokeHooks,
@@ -399,6 +430,11 @@ impl HummApp {
         upload_factory: Arc<dyn UploadFactory>,
         use_gpu: bool,
     ) -> Self {
+        // Taken out of `services` exactly once, here, and `Arc`-wrapped —
+        // see `Self::queue`'s field doc for why. Every later ordinary call
+        // site uses `Self::queue`, never `services.queue()` again.
+        let queue = services.queue.take().map(Arc::new);
+
         let (gui_settings, stored_available_version) = {
             let settings = services
                 .settings
@@ -516,6 +552,9 @@ impl HummApp {
             smoke_viewer_opened: false,
             smoke_viewer_id: None,
             smoke_live_fixture_state: None,
+            queue,
+            folder_watch: None,
+            folder_watch_snapshot: None,
         }
     }
 
@@ -617,6 +656,118 @@ impl HummApp {
         settings.openai.clone()
     }
 
+    /// The running queue handle, for every ordinary (non-shutdown) caller —
+    /// the `Arc`-wrapped replacement for `Services::queue()` (see
+    /// `Self::queue` field's own doc for why). Panics if called after the
+    /// queue was taken for shutdown, mirroring `Services::queue`'s own
+    /// contract exactly.
+    fn queue(&self) -> &QueueHandle {
+        self.queue
+            .as_deref()
+            .expect("HummApp::queue called after the queue was taken for shutdown")
+    }
+
+    /// Re-derives the `[folder_watch]` settings snapshot and starts/
+    /// restarts/stops [`Self::folder_watch`] to match (F-030, design spec
+    /// §3.2). Run every frame (`eframe::App::ui`): a
+    /// [`FolderWatchSnapshot`] comparison is a handful of string/bool/path
+    /// equality checks, no I/O, so doing this unconditionally on every frame
+    /// costs nothing measurable while covering both "startup" (the very
+    /// first frame, `self.folder_watch` starts `None`) and "a Preferences
+    /// edit landed since last frame" with the exact same code path — no
+    /// separate one-shot "apply on window close" hook to keep in sync, per
+    /// humm's established write-through-on-commit pattern (ledger #L8 in the
+    /// design spec).
+    ///
+    /// A `start()` failure (e.g. the configured input directory doesn't
+    /// exist) is logged and leaves `folder_watch`/`folder_watch_snapshot`
+    /// both `None` — the next frame's reconcile call sees "not running" and
+    /// retries automatically once the snapshot changes again (e.g. the user
+    /// fixes the path in Preferences); this task's brief keeps the failure
+    /// path simple (log only, no toast) since the Preferences tab that would
+    /// let a user *edit* folder-watch settings from inside the running app
+    /// lands in a later task.
+    fn sync_folder_watch(&mut self, ctx: &egui::Context) {
+        let snapshot = {
+            let settings = self
+                .services
+                .settings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            FolderWatchSnapshot::from_settings(&settings.folder_watch)
+        };
+
+        let action = crate::folder_watch::reconcile_folder_watch(
+            &snapshot,
+            self.folder_watch_snapshot.as_ref(),
+            self.folder_watch.is_some(),
+        );
+
+        match action {
+            ReconcileAction::NoChange => {}
+            ReconcileAction::Stop => {
+                if let Some(service) = self.folder_watch.take() {
+                    service.stop();
+                }
+                self.folder_watch_snapshot = None;
+            }
+            ReconcileAction::Start | ReconcileAction::Restart => {
+                if let Some(service) = self.folder_watch.take() {
+                    service.stop();
+                }
+                let Some(queue) = self.queue.as_ref().map(Arc::clone) else {
+                    // Only reachable once shutdown has already taken the
+                    // queue — `on_exit` also stops `folder_watch` (before
+                    // that happens), so this frame should never actually
+                    // run again afterward; defensive only.
+                    return;
+                };
+                match FolderWatchService::start(
+                    snapshot.clone(),
+                    queue,
+                    Arc::clone(&self.services.store),
+                    ctx.clone(),
+                ) {
+                    Ok(service) => {
+                        self.folder_watch = Some(service);
+                        self.folder_watch_snapshot = Some(snapshot);
+                    }
+                    Err(err) => {
+                        log::warn!("could not start the folder-watch service: {err}");
+                        self.folder_watch_snapshot = None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The current folder-watch toolbar pill state (design spec §3.3), or
+    /// `None` to hide it entirely — `Some` iff a service is actually
+    /// running, which already implies `folder_watch_snapshot.is_active()`
+    /// (`Self::sync_folder_watch` only ever sets both together).
+    fn folder_watch_pill(&self) -> Option<FolderWatchPillState> {
+        let service = self.folder_watch.as_ref()?;
+        let folder_name = self
+            .folder_watch_snapshot
+            .as_ref()
+            .and_then(FolderWatchSnapshot::pill_folder_name)?;
+        Some(FolderWatchPillState {
+            folder_name,
+            paused: service.is_paused(),
+        })
+    }
+
+    /// The folder-watch pill's pause/resume button was clicked this frame
+    /// (design spec §3.3): flips the running service's pause flag. A no-op
+    /// if the service isn't running (e.g. a click landed the same frame
+    /// `sync_folder_watch` stopped it — harmless either way, the pill itself
+    /// wouldn't have rendered a toggle button with nothing to toggle).
+    fn toggle_folder_watch_pause(&mut self) {
+        if let Some(service) = &self.folder_watch {
+            service.pause(!service.is_paused());
+        }
+    }
+
     /// Opens the options sheet for `request`, prefilled from the current
     /// `settings.file_transcriber`/`settings.models` snapshot.
     fn open_options_sheet(&mut self, request: ImportRequest) {
@@ -647,7 +798,7 @@ impl HummApp {
             SheetOutcome::Run { specs, sticky } => {
                 self.persist_sticky_prefs(&sticky);
                 for (id, spec, source) in specs {
-                    self.services.queue().enqueue(id, spec, source);
+                    self.queue().enqueue(id, spec, source);
                 }
             }
             SheetOutcome::Cancelled { sticky } => self.persist_sticky_prefs(&sticky),
@@ -982,7 +1133,7 @@ impl HummApp {
             .map(|row| row.id)
             .collect();
         for id in ids {
-            self.services.queue().cancel(id);
+            self.queue().cancel(id);
         }
     }
 
@@ -1028,7 +1179,7 @@ impl HummApp {
             Err(err) => Err(err),
         };
         match spec {
-            Ok(Some(spec)) => self.services.queue().retry(id, spec),
+            Ok(Some(spec)) => self.queue().retry(id, spec),
             Ok(None) | Err(_) => {
                 self.push_error_toast(tr("retry-error-unavailable"), now);
             }
@@ -3334,6 +3485,7 @@ impl eframe::App for HummApp {
         self.drain_pending_argv_import();
         self.drain_update_notices();
         self.drain_app_events();
+        self.sync_folder_watch(ui.ctx());
 
         let now = Instant::now();
         if let Some(event_queue) = &self.event_queue {
@@ -3345,6 +3497,7 @@ impl eframe::App for HummApp {
 
         let custom_model_available = self.custom_model_available();
         let yt_dlp_available = self.services.capabilities.yt_dlp;
+        let folder_watch_pill = self.folder_watch_pill();
 
         let result = views::main_window::show(
             ui,
@@ -3358,6 +3511,7 @@ impl eframe::App for HummApp {
             yt_dlp_available,
             CURRENT_VERSION,
             &self.services.secrets,
+            folder_watch_pill.as_ref(),
         );
 
         if let Some(outcome) = result.dialog_outcome {
@@ -3374,6 +3528,9 @@ impl eframe::App for HummApp {
         }
         if let Some(url) = result.url_dialog_result {
             self.open_options_sheet(ImportRequest::Url(url));
+        }
+        if result.folder_watch_pause_toggled {
+            self.toggle_folder_watch_pause();
         }
 
         self.drain_table_actions(now);
@@ -3428,7 +3585,12 @@ impl eframe::App for HummApp {
 
     /// Called once on shutdown (`eframe::App::on_exit`, non-`glow` build —
     /// `humm-gui` doesn't enable the `glow` feature, so this is the
-    /// zero-argument signature). Performs the graceful, bounded shutdown
+    /// zero-argument signature). Stops the folder-watch service **before**
+    /// touching the queue (Buzz's own teardown order,
+    /// `main_window.py:500-507`: the folder watcher is disconnected before
+    /// `closeEvent` does anything else) — this also drops that service's own
+    /// `Arc<QueueHandle>` clone, which is why the `Arc::try_unwrap` below can
+    /// actually succeed. Then performs the graceful, bounded shutdown
     /// `services.rs`'s `Services` struct doc documents: cancel every in-
     /// flight/pending task, then wait — up to [`SHUTDOWN_DRAIN_TIMEOUT`]
     /// (ADR-022) — for the runner to actually drain and stop, so each
@@ -3437,8 +3599,18 @@ impl eframe::App for HummApp {
     /// if the queue was somehow already taken (defensive only — `on_exit`
     /// fires at most once per process).
     fn on_exit(&mut self) {
-        if let Some(queue) = self.services.queue.take() {
-            shutdown_queue(queue);
+        if let Some(service) = self.folder_watch.take() {
+            service.stop();
+        }
+        self.folder_watch_snapshot = None;
+        if let Some(queue) = self.queue.take() {
+            match Arc::try_unwrap(queue) {
+                Ok(queue) => shutdown_queue(queue),
+                Err(_still_shared) => log::error!(
+                    "queue handle was still shared at shutdown (folder-watch service not fully \
+                     stopped?) — skipping the graceful drain"
+                ),
+            }
         }
     }
 }
