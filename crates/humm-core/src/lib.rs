@@ -10,6 +10,7 @@ pub mod domain;
 pub mod env;
 pub mod error;
 pub mod export;
+pub mod folderwatch;
 pub mod format;
 pub mod instance;
 pub mod language;

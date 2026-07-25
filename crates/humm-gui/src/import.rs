@@ -15,18 +15,12 @@ use std::path::{Path, PathBuf};
 /// Buzz's folder-watch/import supported extensions
 /// (`transcription_task_folder_watcher.py:15-18`), lowercase and without a
 /// leading dot: 6 audio + 7 video = 13. Used both by [`scan_folder`] (folder
-/// import) and the "Media files" file-dialog filter group.
-pub const SUPPORTED_EXTENSIONS: [&str; 13] = [
-    "mp3", "wav", "m4a", "ogg", "opus", "flac", "mp4", "webm", "ogm", "mov", "mkv", "avi", "wmv",
-];
-
-/// The "Audio files" file-dialog filter group (`transcriber.py:222-225`) —
-/// the audio-only subset of [`SUPPORTED_EXTENSIONS`], same order.
-const AUDIO_EXTENSIONS: [&str; 6] = ["mp3", "wav", "m4a", "ogg", "opus", "flac"];
-
-/// The "Video files" file-dialog filter group (`transcriber.py:222-225`) —
-/// the video-only subset of [`SUPPORTED_EXTENSIONS`], same order.
-const VIDEO_EXTENSIONS: [&str; 7] = ["mp4", "webm", "ogm", "mov", "mkv", "avi", "wmv"];
+/// import) and the "Media files" file-dialog filter group. Moved to
+/// `humm_core::folderwatch` (F-030, M7 task 8) so the folder-watch scanner
+/// and this folder-import scanner share one source of truth; re-exported
+/// here so every existing caller in this crate is unaffected.
+pub use humm_core::folderwatch::SUPPORTED_EXTENSIONS;
+use humm_core::folderwatch::{AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, has_supported_extension};
 
 /// What the options sheet was opened for: a batch of local files, or one
 /// remote URL. Produced by every import path (file dialog, drag-drop, folder
@@ -38,18 +32,6 @@ pub enum ImportRequest {
     Files(Vec<PathBuf>),
     /// A single remote URL, validated by `views::url_dialog::validate_url`.
     Url(url::Url),
-}
-
-/// Whether `path`'s extension (case-insensitive) is one of
-/// [`SUPPORTED_EXTENSIONS`].
-fn has_supported_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            SUPPORTED_EXTENSIONS
-                .iter()
-                .any(|supported| ext.eq_ignore_ascii_case(supported))
-        })
 }
 
 /// Recursively scans `root` for files with a [`SUPPORTED_EXTENSIONS`]
