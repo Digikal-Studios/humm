@@ -248,13 +248,17 @@ pub fn run_file_job(
 
     // Drain and merge LLM translations (if a translator ran). `stop(Some(cancel))`
     // is a poll-join (M7 hardening of the ticket this comment used to carry,
-    // design spec §14): a waiter thread performs the actual join — bounded, as
-    // before, by the worker's own per-request `REQUEST_TIMEOUT` (60 s) — while
-    // this call polls `cancel` roughly every 100 ms, so a cancel landing either
-    // before this point or at any moment during the drain is honored at the
-    // very next poll tick. The cancel-ack bound here is now ≤ ~100 ms + one
-    // poll tick, not the ceil(N/10) x 60 s worst-case join this comment used to
-    // document for N items already queued when the drain started (ADR-022's
+    // design spec §14): the join itself is still bounded by exactly the
+    // worst case this comment has always documented — the worker drains a
+    // FIFO queue in batches of at most `BATCH_SIZE` (10) items, each
+    // dispatched as one request bounded by `REQUEST_TIMEOUT` (60 s), so
+    // completing the join can still take up to ceil(N/10) x 60 s for N items
+    // already queued when the drain starts. What changes is *where* that
+    // wait happens: a waiter thread performs the join off this calling
+    // thread, while this call itself only ever blocks in ~100 ms polling
+    // increments, checking `cancel` between them — so a cancel landing
+    // either before this point or at any moment during the drain is honored
+    // within about one poll tick, not the full ceil(N/10) x 60 s (ADR-022's
     // translator-drain-exception paragraph predates this poll-join — this is
     // the as-built note the full doc sweep will fold in). `stop` returns
     // `false` when abandoned on cancel: the worker is left detached to drain
@@ -264,6 +268,16 @@ pub fn run_file_job(
     if let Some(handle) = translator
         && !handle.stop(Some(cancel))
     {
+        return Err(CoreError::Canceled);
+    }
+    // `stop` returning `true` means the join completed without ever
+    // observing a cancellation itself, but there's a narrow residual race it
+    // can't close on its own: a fast/empty drain can complete within a
+    // single poll tick, racing a cancel that lands in that same window. One
+    // more check here — the same discipline the pre-poll-join drain always
+    // had — closes it: a job canceled by this point must not merge
+    // translations, write exports, or run its folder-watch disposition.
+    if cancel.is_canceled() {
         return Err(CoreError::Canceled);
     }
     if let Some(results) = &translation_results {
@@ -356,6 +370,12 @@ pub fn run_file_job(
 /// no-op on most platforms, but skipping makes the no-op explicit rather than
 /// relying on that.
 ///
+/// `MoveToOutput` best-effort `create_dir_all`s the resolved directory before
+/// moving into it: the export loop normally creates it, but a job with an
+/// empty format set (no exports requested) never runs that loop at all, which
+/// would otherwise leave a folder-watch job with `delete_processed_files`
+/// unset permanently unable to move its source anywhere.
+///
 /// Every failure — a missing/permission-denied delete, a failed move (and its
 /// copy+delete fallback) — is logged via `log::warn!` and swallowed. This
 /// never fails the job: the transcription succeeded and every requested
@@ -392,6 +412,14 @@ fn apply_source_disposition(
                     .unwrap_or_else(|| Path::new(""))
                     .to_path_buf()
             });
+            // A folder-watch job with an empty format set never runs the
+            // export loop's own `create_dir_all` (nothing gets written), which
+            // would otherwise leave `MoveToOutput` permanently unable to
+            // succeed for such a job. Best-effort, ignored here: a genuine
+            // problem (e.g. `dir` exists as a non-directory, or is otherwise
+            // uncreatable) still surfaces from the `move_file` call below,
+            // which is where it's logged.
+            let _ = std::fs::create_dir_all(&dir);
             let dest = dir.join(file_name);
 
             if dest == input {
@@ -1176,16 +1204,21 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let input = tmp.path().join("input.mp3");
         touch(&input);
-        // A directory that never gets created: no formats are requested, so
-        // the export loop never runs `create_dir_all` on it, leaving the
-        // `MoveToOutput` disposition's destination directory missing and the
-        // move guaranteed to fail.
-        let missing_output_dir = tmp.path().join("does-not-exist");
+        // A regular *file* sitting where the "output directory" should be:
+        // `apply_source_disposition`'s best-effort `create_dir_all` fails
+        // silently on it (ignored), and the move destination -- a path
+        // underneath this file -- can never be created on any platform, so
+        // both `fs::rename` and its copy+delete fallback deterministically
+        // fail. Cross-platform and independent of permission-bit quirks
+        // (unlike a read-only-directory trigger, which behaves inconsistently
+        // when tests run as root).
+        let blocked_output_dir = tmp.path().join("blocked");
+        std::fs::write(&blocked_output_dir, b"not a directory").unwrap();
 
         let mut job = job_with(
             input.clone(),
             BTreeSet::new(),
-            Some(missing_output_dir),
+            Some(blocked_output_dir),
             None,
         );
         job.output.source_disposition = Some(SourceDisposition::MoveToOutput);
@@ -1216,6 +1249,58 @@ mod tests {
         assert!(
             input.exists(),
             "the source is left in place when the move itself fails"
+        );
+    }
+
+    #[test]
+    fn move_succeeds_with_empty_formats_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input_dir = tmp.path().join("in");
+        std::fs::create_dir_all(&input_dir).unwrap();
+        let input = input_dir.join("input.mp3");
+        touch(&input);
+        // Deliberately never created up front: with an empty format set the
+        // export loop never runs its own `create_dir_all`, so this directory
+        // would not exist by the time the disposition step runs unless
+        // `apply_source_disposition` creates it itself.
+        let output_dir = tmp.path().join("out");
+
+        let mut job = job_with(
+            input.clone(),
+            BTreeSet::new(),
+            Some(output_dir.clone()),
+            None,
+        );
+        job.output.source_disposition = Some(SourceDisposition::MoveToOutput);
+
+        let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let prober = prober_with_audio();
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let mut observer = NullSink;
+        let cancel = CancelToken::new();
+
+        let outcome = run_file_job(
+            &job,
+            &EngineTuning::default(),
+            &decoder,
+            &prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+            None,
+        )
+        .unwrap();
+
+        assert!(outcome.written.is_empty(), "no formats were requested");
+        assert!(
+            !input.exists(),
+            "the source must be gone from the watched input directory"
+        );
+        assert!(
+            output_dir.join("input.mp3").exists(),
+            "the source must land in the export directory this call had to create"
         );
     }
 

@@ -358,24 +358,33 @@ impl TranslatorHandle {
     /// **poll-join** (M7 hardening of a carried ticket, design spec §14),
     /// mirroring [`crate::queue::QueueHandle::finish_within`]'s "watcher
     /// thread + bounded channel recv" shape (ADR-022): sends the `Stop`
-    /// sentinel, then hands the actual (otherwise-unbounded from this call's
-    /// point of view) `join()` to a small waiter thread that signals an
-    /// `mpsc` channel once it returns, while this call polls that channel
-    /// with `recv_timeout(100 ms)` in a loop.
+    /// sentinel, then hands the actual join to a small waiter thread that
+    /// signals an `mpsc` channel once it returns, while this call polls that
+    /// channel with `recv_timeout(100 ms)` in a loop. The join itself is
+    /// still bounded by exactly the worst case this method has always had —
+    /// the worker drains its FIFO queue in batches of at most [`BATCH_SIZE`]
+    /// (10) items, each dispatched as one request bounded by
+    /// [`REQUEST_TIMEOUT`] (60 s), so completing the join can still take up
+    /// to ceil(N/10) x 60 s for N items already queued when `stop` is
+    /// called. What changes is *where* that wait happens: a waiter thread
+    /// performs it off this calling thread, which itself only ever blocks in
+    /// ~100 ms increments.
     ///
-    /// `cancel`, when `Some`, is checked at the top of every loop iteration —
-    /// including before the very first wait — so a token that is already
-    /// canceled at call time is honored immediately, and one that becomes
-    /// canceled *during* the join is honored at the next iteration, at most
-    /// one poll tick later. Either way this returns `false`: the wait is
-    /// **abandoned**, not the worker — the waiter thread (and the translator
-    /// worker it's joining) keeps running independently, deliberately leaked
-    /// exactly as `finish_within` leaks on timeout, since every request the
-    /// worker issues has its own bounded [`REQUEST_TIMEOUT`] and so it exits
-    /// quietly on its own shortly after. `cancel: None` never takes that
-    /// early exit — the loop just keeps polling until the join completes,
-    /// bounded only by the worker's own per-request timeout, exactly as
-    /// `stop`'s contract always has been.
+    /// `cancel`, when `Some`, is checked once before the waiter thread is
+    /// even spawned — a token already canceled at call time returns `false`
+    /// immediately, spawning no threads at all, the same fast path
+    /// `stop_detached` takes — and again at the top of every subsequent loop
+    /// iteration, so a token that becomes canceled *during* the join is
+    /// honored at the next iteration, at most one ~100 ms poll tick later.
+    /// Either way this returns `false`: the wait is **abandoned**, not the
+    /// worker — the waiter thread (and the translator worker it's joining,
+    /// if one was ever spawned) keeps running independently, deliberately
+    /// leaked exactly as `finish_within` leaks on timeout, since every
+    /// request the worker issues has its own bounded [`REQUEST_TIMEOUT`] and
+    /// so it exits quietly on its own shortly after. `cancel: None` never
+    /// takes that early exit — the loop just keeps polling until the join
+    /// completes, bounded only by the worker's own per-request timeout,
+    /// exactly as `stop`'s contract always has been.
     ///
     /// Returns `true` once the join actually completed (every translation
     /// [`Self::spawn`]'s `on_result` collected up to that point is final and
@@ -383,6 +392,17 @@ impl TranslatorHandle {
     pub fn stop(self, cancel: Option<&CancelToken>) -> bool {
         let TranslatorHandle { sender, join } = self;
         let _ = sender.send(TranslatorMsg::Stop);
+
+        // Fast path: already canceled at call time, so don't even spawn a
+        // waiter thread. `join` is dropped here without ever being joined —
+        // Rust threads are detached by default (unlike C++'s `std::thread`),
+        // so the worker keeps draining and reporting independently, exactly
+        // as `stop_detached` would leave it.
+        if let Some(c) = cancel
+            && c.is_canceled()
+        {
+            return false;
+        }
 
         let (done_tx, done_rx) = mpsc::channel();
         thread::spawn(move || {
@@ -394,19 +414,32 @@ impl TranslatorHandle {
         });
 
         loop {
-            if let Some(cancel) = cancel
-                && cancel.is_canceled()
-            {
-                return false;
-            }
             match done_rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(()) => return true,
-                // The sender is dropped only after it sends, or if its
-                // thread panicked without unwinding past the `let _ =`
-                // above — either way the worker is as done as it's going to
-                // get, so this counts as completed rather than abandoned.
+                // Deliberately diverges from `finish_within`'s blanket
+                // `Err(_) => false` mapping: `finish_within` calls
+                // `recv_timeout` exactly once for its whole deadline, so it
+                // never needs to tell `Timeout` and `Disconnected` apart —
+                // either one just means "not done by the deadline". This
+                // loop instead calls `recv_timeout` on a poll cycle, where
+                // `Timeout` is the routine, expected outcome every ~100 ms
+                // and `Disconnected` is not: `done_tx` is dropped only after
+                // it sends (the waiter thread's whole body above is `let _ =
+                // join.join(); let _ = done_tx.send(());`), so this arm is
+                // reached only if the waiter thread itself panicked between
+                // being spawned and that final send — vanishingly unlikely
+                // for a two-line closure, but if it ever happened the
+                // underlying worker thread is as done as it's going to get
+                // either way, so this still counts as completed rather than
+                // abandoned.
                 Err(mpsc::RecvTimeoutError::Disconnected) => return true,
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if let Some(c) = cancel
+                        && c.is_canceled()
+                    {
+                        return false;
+                    }
+                }
             }
         }
     }
@@ -1301,6 +1334,44 @@ mod tests {
             assert!(
                 elapsed < Duration::from_secs(1),
                 "stop must return well under 1s when canceled, took {elapsed:?}"
+            );
+        }
+
+        #[test]
+        fn stop_honors_cancel_arriving_mid_join() {
+            // The worker is blocked 5s; a second thread cancels the token
+            // ~200ms after `stop` starts polling. A passing test proves
+            // `stop` actually entered the poll loop and noticed the
+            // cancellation there -- rather than short-circuiting on the
+            // pre-call check, which would return near-instantly and could
+            // pass even if the mid-loop check were broken or missing.
+            let handle = handle_blocked_for(Duration::from_secs(5));
+            let cancel = CancelToken::new();
+            let canceler = {
+                let cancel = cancel.clone();
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(200));
+                    cancel.cancel();
+                })
+            };
+
+            let start = std::time::Instant::now();
+            let completed = handle.stop(Some(&cancel));
+            let elapsed = start.elapsed();
+            canceler.join().expect("canceler thread joins");
+
+            assert!(
+                !completed,
+                "a cancel landing mid-join must abandon the wait, not complete it"
+            );
+            assert!(
+                elapsed < Duration::from_secs(1),
+                "stop must return well under 1s once canceled, took {elapsed:?}"
+            );
+            assert!(
+                elapsed > Duration::from_millis(150),
+                "stop must not have returned before the cancel even landed -- it \
+                 should have entered the poll loop and waited for it, took {elapsed:?}"
             );
         }
 
