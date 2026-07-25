@@ -592,22 +592,19 @@ pub trait TaskStore: Send + Sync {
     fn segments_for(&self, id: &TranscriptionId) -> Result<Vec<Segment>, StoreError>;
 
     /// Overwrites `id`'s free-text notes with `notes` — the trait-level
-    /// counterpart of `SqliteStore::set_task_notes`, needed so
+    /// counterpart of `SqliteStore::update_transcription_notes`, needed so
     /// [`crate::postproc::summary::run`] (F-111's `save_to_notes` arm, design
     /// spec §6.2) can reach it through the same store handle
     /// [`crate::queue::RunnerDeps::store`] already holds, without
     /// `humm-core` depending on `humm-store` for the concrete type. Ported
     /// from Buzz's `update_transcription_notes` (an overwrite, not an
-    /// append).
+    /// append) — the inherent method is named after it directly.
     ///
-    /// Unlike [`Self::find_completed_by_file_name`]/[`Self::segments_for`]
-    /// above, this trait method keeps `SqliteStore`'s own inherent method's
-    /// exact name rather than a distinct one: there is no shadowing risk to
-    /// guard against here, because Rust's method resolution always prefers
-    /// an inherent method over a trait method of the same name — so
-    /// `SqliteStore`'s `impl TaskStore` can write `self.set_task_notes(id,
-    /// notes)` in this method's body and reach its own inherent method,
-    /// never itself.
+    /// Like [`Self::find_completed_by_file_name`]/[`Self::segments_for`]
+    /// above, `SqliteStore`'s inherent method uses a name distinct from this
+    /// trait method's, so its `impl TaskStore` delegation can never silently
+    /// become infinite recursion if the inherent method is later renamed or
+    /// inlined.
     fn set_task_notes(&self, id: &TranscriptionId, notes: &str) -> Result<(), StoreError>;
 }
 

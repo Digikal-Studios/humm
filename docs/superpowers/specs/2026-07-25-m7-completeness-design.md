@@ -410,8 +410,15 @@ Port of `ai_summary/plugin.py:96-168`:
 - `save_to_file` → `{stem}.summary.txt` in `output_folder` else next to the
   source (`original` path preferred, `:155-163`), `create_dir_all`, write; errors
   logged, non-fatal.
-- Empty/absent `choices[0].message.content` → error logged, nothing written
-  (`:150-153`).
+- **Analysis correction (Task 5 review):** the response-content gate is two
+  distinct Buzz behaviors, not one. `choices`/`message` *structurally absent*
+  → error logged ("AI Summary: empty response from server"), nothing written
+  (`:150-153`); `message` *present* but its `content` is empty/`None` →
+  `_summarize` returns that falsy value and `on_complete`'s `if not summary:
+  return` (`:111-112`) exits **silently** — no log, no error, nothing
+  written. `chat::complete` maps the former to `Err(ApiFailure::Shape)`
+  (logged) and the latter to `Ok("")` (silent no-op) — the same distinction
+  the shared function already drew pre-M7, carried through unchanged.
 
 ### 6.3 Verification
 

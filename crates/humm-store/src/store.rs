@@ -703,7 +703,17 @@ impl SqliteStore {
     /// (`transcription_dao.py:303-318`), which raises when the row doesn't
     /// exist (`query.numRowsAffected() == 0`); this returns
     /// `Err(StoreError::Query)` in that case.
-    pub fn set_task_notes(&self, id: &TranscriptionId, notes: &str) -> Result<(), StoreError> {
+    ///
+    /// Named after Buzz's own DAO method rather than `set_task_notes` (the
+    /// `TaskStore` trait method's name, `boundary.rs`) — a distinct name,
+    /// following Task 4's `find_completed_transcription_by_basename`
+    /// precedent, so the trait impl's delegation below can never silently
+    /// become infinite recursion if this method is ever renamed or inlined.
+    pub fn update_transcription_notes(
+        &self,
+        id: &TranscriptionId,
+        notes: &str,
+    ) -> Result<(), StoreError> {
         let conn = self.lock()?;
         let affected = conn
             .execute(
@@ -713,7 +723,7 @@ impl SqliteStore {
             .map_err(query_error)?;
         if affected == 0 {
             return Err(StoreError::Query {
-                detail: format!("set_task_notes: no task with id {id}"),
+                detail: format!("update_transcription_notes: no task with id {id}"),
             });
         }
         Ok(())
@@ -1516,12 +1526,11 @@ impl TaskStore for SqliteStore {
     }
 
     fn set_task_notes(&self, id: &TranscriptionId, notes: &str) -> Result<(), StoreError> {
-        // Rust prefers the inherent method of the same name over this trait
-        // method when resolving a `self.set_task_notes(...)` call, so this
-        // reaches the inherent method above, not itself -- see the trait's
-        // own doc comment (`boundary.rs`) for why that's safe here, unlike
-        // `find_completed_by_file_name`/`segments_for` just above.
-        self.set_task_notes(id, notes)
+        // Delegates to the distinctly-named inherent method above, the same
+        // Task 4 pattern `find_completed_by_file_name`/`segments_for` use
+        // just above -- renaming or inlining that inherent method can never
+        // silently turn this into infinite recursion.
+        self.update_transcription_notes(id, notes)
     }
 }
 
@@ -2326,7 +2335,7 @@ mod tests {
     }
 
     #[test]
-    fn set_task_notes_updates_notes_and_errors_on_missing_id() {
+    fn update_transcription_notes_updates_notes_and_errors_on_missing_id() {
         let store = SqliteStore::open_in_memory().expect("open");
         let id = TranscriptionId::new();
         store
@@ -2334,14 +2343,14 @@ mod tests {
             .expect("create");
 
         store
-            .set_task_notes(&id, "remember to trim the intro")
+            .update_transcription_notes(&id, "remember to trim the intro")
             .expect("set notes");
         let row = store.get_task(&id).expect("get").expect("present");
         assert_eq!(row.notes.as_deref(), Some("remember to trim the intro"));
 
         let missing = TranscriptionId::new();
         let err = store
-            .set_task_notes(&missing, "x")
+            .update_transcription_notes(&missing, "x")
             .expect_err("missing id must error");
         assert!(matches!(err, StoreError::Query { .. }));
     }
@@ -2811,7 +2820,9 @@ mod tests {
             .create_task(&id, &spec, Source::FileImport)
             .expect("create");
         store.set_task_name(&id, "My Recording").expect("name");
-        store.set_task_notes(&id, "notes here").expect("notes");
+        store
+            .update_transcription_notes(&id, "notes here")
+            .expect("notes");
         store.mark_started(&id).expect("start");
         store
             .mark_completed(

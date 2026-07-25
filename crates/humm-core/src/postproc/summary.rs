@@ -42,10 +42,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Outcome of one [`run`] call (design spec §6.2).
 ///
-/// A *skip* (no key configured, or an empty transcript) is not an error:
-/// both fields stay at their default and [`Self::error`] stays `None` —
-/// only an actual failure (a canceled request, a request/parse failure, an
-/// empty response, or a `save_to_notes`/`save_to_file` write failure)
+/// A *skip* (no key configured, an empty transcript, or a response whose
+/// message content is itself empty/absent — Buzz's silent `if not summary:
+/// return`) is not an error: both fields stay at their default and
+/// [`Self::error`] stays `None` — only an actual failure (a canceled
+/// request, a request/parse failure — including a structurally missing
+/// `choices`/`message` — or a `save_to_notes`/`save_to_file` write failure)
 /// populates it. When *both* the notes and file arms fail, their messages
 /// are joined with `"; "` (Buzz handles each in its own `try`/`except` and
 /// merely logs both independently; this struct has one `error` slot, so
@@ -83,8 +85,13 @@ pub struct SummaryResult {
 ///    wrapped in [`cancelable`] (a cancel-ack ✚ over Buzz's uninterruptible
 ///    call — a canceled `cancel` yields `error: Some("canceled".into())`
 ///    with nothing written, never even reaching the write arms below). Any
-///    other request failure, or an empty response body, is likewise
-///    recorded in [`SummaryResult::error`] and logged, with nothing written.
+///    other request failure (including a *structurally absent*
+///    `choices`/`message`, `:150-153`) is recorded in
+///    [`SummaryResult::error`] and logged, with nothing written — but a
+///    response that *has* a message with an empty/absent `content` is a
+///    **silent** no-op instead (Buzz's `if not summary: return`, `:111-112`
+///    — no log beyond `debug`, no error, nothing written), since Buzz never
+///    logs for that case.
 /// 4. **`save_to_notes`** (`:114-121`): [`TaskStore::set_task_notes`]
 ///    overwrites the task's notes (Buzz's `update_transcription_notes` is
 ///    an overwrite too). A store error is logged and recorded, but does not
@@ -158,12 +165,19 @@ pub fn run(
     };
 
     if summary.is_empty() {
-        let message = "AI Summary: empty response from server".to_string();
-        log::error!("{message}");
-        return SummaryResult {
-            error: Some(message),
-            ..SummaryResult::default()
-        };
+        // Buzz's `_summarize` returns `completion.choices[0].message.content`
+        // directly whenever `message` itself is present (even if `content`
+        // is `None`/`""`) -- it only logs "empty response from server" when
+        // `completion`/`choices`/`message` are *structurally absent*
+        // (`plugin.py:150-153`), which `chat::complete` already maps to
+        // `Err(ApiFailure::Shape)` above (the "request failed" arm). Back in
+        // `on_complete`, `if not summary: return` (`:111-112`) then exits
+        // with **no** log and **no** error for the present-but-empty case --
+        // a skip, not a failure. `summary` is checked unstripped (`is_empty`,
+        // no `.trim()`) because Buzz's `if not summary` is Python falsiness
+        // on the raw content, with no stripping beforehand.
+        log::debug!("AI Summary: server returned an empty summary (Buzz's silent no-op case)");
+        return SummaryResult::default();
     }
 
     let mut errors: Vec<String> = Vec::new();
@@ -216,13 +230,16 @@ fn or_default_then_trim(value: &str, default: &str) -> String {
 
 /// Writes `summary` to `{stem}.summary.txt` (Buzz `_write_file`,
 /// `ai_summary/plugin.py:155-168`): `stem` from `task_input`'s file stem,
-/// destination `cfg.summary.output_folder` if set and non-empty, else
-/// `task_input`'s parent directory (Buzz's `os.path.dirname(...) or
-/// os.getcwd()` — `Path::parent()` on a bare relative filename already
-/// yields the empty path, which resolves against the process's current
-/// directory exactly like Buzz's explicit fallback). The destination
-/// directory is created (`create_dir_all`) before the write. Returns the
-/// written file's path.
+/// destination `cfg.summary.output_folder` if set and non-empty *after
+/// trimming* (Buzz's `(cfg.get("output_folder") or "").strip()`,
+/// `:159` — a whitespace-only configured folder falls back exactly like an
+/// empty one, mirroring [`or_default_then_trim`]'s trim-before-decide
+/// idiom), else `task_input`'s parent directory (Buzz's
+/// `os.path.dirname(...) or os.getcwd()` — `Path::parent()` on a bare
+/// relative filename already yields the empty path, which resolves against
+/// the process's current directory exactly like Buzz's explicit fallback).
+/// The destination directory is created (`create_dir_all`) before the
+/// write. Returns the written file's path.
 fn write_summary_file(
     cfg: &PostprocConfig,
     task_input: &Path,
@@ -233,9 +250,16 @@ fn write_summary_file(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "transcript".to_string());
 
-    let folder = match &cfg.summary.output_folder {
-        Some(folder) if !folder.as_os_str().is_empty() => folder.clone(),
-        _ => task_input
+    let trimmed_output_folder = cfg
+        .summary
+        .output_folder
+        .as_ref()
+        .map(|folder| folder.to_string_lossy().trim().to_string())
+        .filter(|folder| !folder.is_empty());
+
+    let folder = match trimmed_output_folder {
+        Some(folder) => PathBuf::from(folder),
+        None => task_input
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_default(),
@@ -485,6 +509,22 @@ mod tests {
         assert!(out_dir.is_dir(), "output_folder should be create_dir_all'd");
     }
 
+    #[test]
+    fn write_summary_file_whitespace_only_output_folder_falls_back_to_next_to_input() {
+        // Buzz's `(cfg.get("output_folder") or "").strip()`: a
+        // whitespace-only configured folder is *not* used verbatim -- it
+        // trims down to "" and falls back exactly like an unset folder.
+        let tmp = TempDir::new().expect("tempdir");
+        let input = tmp.path().join("clip.mp3");
+        std::fs::write(&input, b"fake media").expect("write input");
+        let mut cfg = base_cfg();
+        cfg.summary.output_folder = Some(PathBuf::from("   "));
+
+        let path = write_summary_file(&cfg, &input, "the summary").expect("write");
+
+        assert_eq!(path, tmp.path().join("clip.summary.txt"));
+    }
+
     // -- mock-server tests (TCP) ---------------------------------------------
     //
     // Bind TCP (`TestServer::start`) -- blocked under the sandbox, run with
@@ -701,7 +741,14 @@ mod tests {
         }
 
         #[test]
-        fn empty_response_content_is_error_recorded_nothing_written() {
+        fn empty_response_content_is_a_silent_no_op_per_buzz() {
+            // Buzz distinguishes "message present but content empty" (silent
+            // skip, no log, no error -- `plugin.py:111-112,150`) from
+            // "choices/message structurally absent" (logged error,
+            // `:152-153`, covered by `malformed_json_body_is_error_recorded_
+            // nothing_written` and `non_2xx_response_is_error_recorded_
+            // nothing_written` above). This response has a real `message`
+            // object with an empty `content` string -- the former case.
             let server = TestServer::start();
             server.set_route_for_method(
                 "POST",
@@ -721,12 +768,7 @@ mod tests {
                 &CancelToken::new(),
             );
 
-            assert_eq!(
-                result.error.as_deref(),
-                Some("AI Summary: empty response from server")
-            );
-            assert!(!result.notes_updated);
-            assert_eq!(result.file_written, None);
+            assert_eq!(result, SummaryResult::default());
         }
 
         #[test]
