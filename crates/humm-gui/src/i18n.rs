@@ -261,6 +261,7 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "prefs-title",
         "prefs-tab-general",
         "prefs-tab-models",
+        "prefs-tab-shortcuts",
         "prefs-tab-privacy",
         // Preferences General tab, complete (views/prefs_general.rs, F-100,
         // design spec §8.1)
@@ -312,6 +313,32 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "models-download-failed",
         "models-speed-badge",
         "models-speed-badge-tip",
+        // Preferences Shortcuts tab (views/prefs_shortcuts.rs, F-005 editor +
+        // ✚ conflict detection, design spec §8.3, Task 14)
+        "shortcut-desc-open-record-window",
+        "shortcut-desc-import-file",
+        "shortcut-desc-import-url",
+        "shortcut-desc-open-preferences-window",
+        "shortcut-desc-view-transcript-text",
+        "shortcut-desc-view-transcript-translation",
+        "shortcut-desc-view-transcript-timestamps",
+        "shortcut-desc-search-transcript",
+        "shortcut-desc-search-next",
+        "shortcut-desc-search-previous",
+        "shortcut-desc-scroll-to-current-text",
+        "shortcut-desc-play-pause-audio",
+        "shortcut-desc-replay-current-segment",
+        "shortcut-desc-toggle-playback-controls",
+        "shortcut-desc-decrease-segment-start",
+        "shortcut-desc-increase-segment-start",
+        "shortcut-desc-decrease-segment-end",
+        "shortcut-desc-increase-segment-end",
+        "shortcut-desc-clear-history",
+        "shortcut-desc-stop-transcription",
+        "prefs-shortcuts-press",
+        "prefs-shortcuts-clear-tooltip",
+        "prefs-shortcuts-conflict",
+        "prefs-shortcuts-reset",
         // Transcript viewer window (views/viewer.rs, F-080)
         "viewer-view",
         "viewer-mode-text",
@@ -1370,6 +1397,7 @@ mod tests {
             ),
             ("recording-model-downloading", &[("percent", "42")]),
             ("models-speed-badge", &[("ratio", "2.5")]),
+            ("prefs-shortcuts-conflict", &[("other", "Import File")]),
         ];
 
         // Drift guard: a new `tr_args` key added to the catalog without a row

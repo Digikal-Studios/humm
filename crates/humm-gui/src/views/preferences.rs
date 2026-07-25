@@ -1,6 +1,11 @@
-//! The Preferences window (⌘, / Help → Preferences…): tabs **Models**
-//! (F-044 basic, [`crate::models_ui`]) and **Privacy** (ADR-009, UX §J-11) —
-//! `General`/`Shortcuts`/`Folder Watch` arrive M7
+//! The Preferences window (⌘, / Help → Preferences…): tabs **General**
+//! (F-100, [`crate::views::prefs_general`]), **Models** (F-044 basic,
+//! [`crate::models_ui`]), **Shortcuts** (F-005 editor + ✚ conflict
+//! detection, [`crate::views::prefs_shortcuts`], Task 14), and **Privacy**
+//! (ADR-009, UX §J-11), in that strip order — design spec §8's full strip is
+//! General · Models · Shortcuts · Folder Watch · Post-processing · Privacy;
+//! `Folder Watch`/`Post-processing` are later M7 tasks, so Privacy sits
+//! immediately after Shortcuts until they land
 //! (`buzz-notes-import-progress-models.md`'s preferences-shell notes).
 //!
 //! Rendered as a real OS window (an egui *immediate* viewport, min
@@ -22,6 +27,7 @@
 //! `docs/gui-manual/M3.md` covers it).
 
 use std::path::Path;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use humm_core::secrets::SecretStore;
@@ -29,17 +35,21 @@ use humm_core::settings::Settings;
 
 use crate::i18n::{self, tr};
 use crate::models_ui::{self, ModelsTabState};
+use crate::shortcuts::ShortcutMap;
 use crate::views::prefs_general::{self, GeneralTabState, ValidateFn};
+use crate::views::prefs_shortcuts::{self, ShortcutsTabState};
 
 /// Which tab is currently selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefsTab {
     /// UI language, font size, the OpenAI block, default export template,
-    /// and Disable GPU (F-100 complete, design spec §8.1). Shortcuts/Folder
-    /// Watch/Post-processing tabs are later M7 tasks.
+    /// and Disable GPU (F-100 complete, design spec §8.1). Folder Watch/
+    /// Post-processing tabs are later M7 tasks.
     General,
     /// F-044 basic model list.
     Models,
+    /// F-005 editor + ✚ conflict detection (design spec §8.3, Task 14).
+    Shortcuts,
     /// ADR-009/UX §J-11 telemetry + update-check toggles.
     Privacy,
 }
@@ -56,6 +66,10 @@ pub struct PreferencesState {
     pub general: GeneralTabState,
     /// The Models tab's own state.
     pub models: ModelsTabState,
+    /// The Shortcuts tab's own state (design spec §8.3, Task 14) — starts
+    /// with nothing capturing, same "rebuilt fresh on open" contract as
+    /// every other tab's own state.
+    pub shortcuts: ShortcutsTabState,
 }
 
 impl PreferencesState {
@@ -88,6 +102,7 @@ impl PreferencesState {
             tab: PrefsTab::General,
             general: GeneralTabState::new(secrets.as_ref(), settings),
             models: ModelsTabState::new(root, custom_url, include_lumii),
+            shortcuts: ShortcutsTabState::default(),
         }
     }
 }
@@ -102,10 +117,17 @@ pub fn ui(
     settings_path: &Path,
     secrets: &Arc<dyn SecretStore>,
     validate: &ValidateFn,
+    shortcuts_generation: &Arc<AtomicUsize>,
+    current_shortcuts: &ShortcutMap,
 ) {
     ui.horizontal(|ui| {
         ui.selectable_value(&mut state.tab, PrefsTab::General, tr("prefs-tab-general"));
         ui.selectable_value(&mut state.tab, PrefsTab::Models, tr("prefs-tab-models"));
+        ui.selectable_value(
+            &mut state.tab,
+            PrefsTab::Shortcuts,
+            tr("prefs-tab-shortcuts"),
+        );
         ui.selectable_value(&mut state.tab, PrefsTab::Privacy, tr("prefs-tab-privacy"));
     });
     ui.separator();
@@ -123,6 +145,16 @@ pub fn ui(
         }
         PrefsTab::Models => {
             models_ui::ui(ui, &mut state.models, model_root, settings, settings_path);
+        }
+        PrefsTab::Shortcuts => {
+            prefs_shortcuts::ui(
+                ui,
+                &mut state.shortcuts,
+                settings,
+                settings_path,
+                shortcuts_generation,
+                current_shortcuts,
+            );
         }
         PrefsTab::Privacy => privacy_tab_ui(ui, settings, settings_path),
     }

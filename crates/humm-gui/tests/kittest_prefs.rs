@@ -20,7 +20,9 @@
 //! multi-window smoke test — that's `docs/gui-manual/M3.md`'s manual
 //! checklist (M3 Task 13), run on an unsandboxed machine with a display.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,8 +39,10 @@ use humm_gui::app::HummApp;
 use humm_gui::i18n;
 use humm_gui::models_ui::{self, ModelsTabState};
 use humm_gui::services::{self, Capabilities, TestDeps, UpdateNotice};
+use humm_gui::shortcuts::ShortcutMap;
 use humm_gui::views::preferences::{self, PreferencesState, PrefsTab};
 use humm_gui::views::prefs_general::{self, GeneralModal, GeneralTabState, ValidateFn};
+use humm_gui::views::prefs_shortcuts::ShortcutsTabState;
 use humm_store::SqliteStore;
 
 /// Polls `condition` every 5 ms, stepping `harness` each time so its own
@@ -72,6 +76,8 @@ struct PrivacyFixture {
     settings_path: PathBuf,
     secrets: Arc<dyn SecretStore>,
     validate: ValidateFn,
+    shortcuts_generation: Arc<AtomicUsize>,
+    current_shortcuts: ShortcutMap,
 }
 
 #[test]
@@ -109,12 +115,15 @@ fn privacy_toggles_persist_to_the_settings_file() {
             tab: PrefsTab::Privacy,
             general: GeneralTabState::new(secrets.as_ref(), &Settings::default()),
             models: ModelsTabState::new(model_root_dir.path(), None, false),
+            shortcuts: ShortcutsTabState::default(),
         },
         model_root: model_root_dir.path().to_path_buf(),
         settings,
         settings_path: settings_path.clone(),
         secrets,
         validate,
+        shortcuts_generation: Arc::new(AtomicUsize::new(0)),
+        current_shortcuts: ShortcutMap::from_settings(&HashMap::new()),
     };
 
     let mut harness = Harness::new_ui_state(
@@ -127,6 +136,8 @@ fn privacy_toggles_persist_to_the_settings_file() {
                 &fixture.settings_path,
                 &fixture.secrets,
                 &fixture.validate,
+                &fixture.shortcuts_generation,
+                &fixture.current_shortcuts,
             );
         },
         fixture,
@@ -172,6 +183,8 @@ struct GeneralFixture {
     settings_path: PathBuf,
     secrets: Arc<dyn SecretStore>,
     validate: ValidateFn,
+    shortcuts_generation: Arc<AtomicUsize>,
+    current_shortcuts: ShortcutMap,
     _model_root_dir: tempfile::TempDir,
     _settings_dir: tempfile::TempDir,
 }
@@ -194,12 +207,15 @@ fn general_harness(
             tab: PrefsTab::General,
             general: GeneralTabState::new(secrets.as_ref(), &Settings::default()),
             models: ModelsTabState::new(&model_root, None, false),
+            shortcuts: ShortcutsTabState::default(),
         },
         model_root,
         settings: Arc::new(Mutex::new(Settings::default())),
         settings_path,
         secrets,
         validate,
+        shortcuts_generation: Arc::new(AtomicUsize::new(0)),
+        current_shortcuts: ShortcutMap::from_settings(&HashMap::new()),
         _model_root_dir: model_root_dir,
         _settings_dir: settings_dir,
     };
@@ -214,6 +230,8 @@ fn general_harness(
                 &fixture.settings_path,
                 &fixture.secrets,
                 &fixture.validate,
+                &fixture.shortcuts_generation,
+                &fixture.current_shortcuts,
             );
         },
         fixture,

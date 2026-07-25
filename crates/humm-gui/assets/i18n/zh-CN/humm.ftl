@@ -227,6 +227,7 @@ about-check-failed = 更新检查失败——请查看日志文件
 prefs-title = 偏好设置
 prefs-tab-general = 通用
 prefs-tab-models = 模型
+prefs-tab-shortcuts = 快捷键
 prefs-tab-privacy = 隐私
 
 ## Preferences General tab, complete (views/prefs_general.rs, F-100,
@@ -284,6 +285,35 @@ models-download-error-title = 错误
 models-download-failed = 下载失败
 models-speed-badge = 实时速度 { $ratio }×
 models-speed-badge-tip = 根据本机实时录音会话测得的实时速度
+
+## Preferences Shortcuts tab (views/prefs_shortcuts.rs, F-005 editor + ✚
+## conflict detection, design spec §8.3). The 20 shortcut-desc-* strings are
+## Buzz's own `.po` translations for `shortcut.py`'s descriptions.
+
+shortcut-desc-open-record-window = 打开录制窗口
+shortcut-desc-import-file = 导入文件
+shortcut-desc-import-url = 导入URL
+shortcut-desc-open-preferences-window = 打开偏好设置窗口
+shortcut-desc-view-transcript-text = 查看识别的文本
+shortcut-desc-view-transcript-translation = 查看识别的翻译
+shortcut-desc-view-transcript-timestamps = 查看识别时间戳
+shortcut-desc-search-transcript = 搜索识别内容
+shortcut-desc-search-next = 转到下一个识别搜索结果
+shortcut-desc-search-previous = 转到上一个识别搜索结果
+shortcut-desc-scroll-to-current-text = 滚动到当前文本
+shortcut-desc-play-pause-audio = 播放/暂停音频
+shortcut-desc-replay-current-segment = 重播当前片段
+shortcut-desc-toggle-playback-controls = 切换播放控制
+shortcut-desc-decrease-segment-start = 减少片段开始时间
+shortcut-desc-increase-segment-start = 增加片段开始时间
+shortcut-desc-decrease-segment-end = 减少片段结束时间
+shortcut-desc-increase-segment-end = 增加片段结束时间
+shortcut-desc-clear-history = 清除历史纪录
+shortcut-desc-stop-transcription = 取消识别
+prefs-shortcuts-press = 按下快捷键…
+prefs-shortcuts-clear-tooltip = 恢复为默认值
+prefs-shortcuts-conflict = 与 { $other } 冲突
+prefs-shortcuts-reset = 恢复默认
 
 ## Transcript viewer window (views/viewer.rs, F-080)
 

@@ -119,6 +119,39 @@ impl ShortcutAction {
         }
     }
 
+    /// The Fluent key for this action's description label (Task 14, design
+    /// spec §8.3): the shortcuts-editor tab's row label, resolved via
+    /// [`crate::i18n::tr`]. English text is Buzz's own `shortcut.py`
+    /// description, byte-for-byte (e.g. `OPEN_RECORD_WINDOW`'s `_("Open
+    /// Record Window")`) — the `de`/`es`/`zh_CN` catalogs carry Buzz's own
+    /// `.po` translations for the same 20 strings.
+    pub fn description_key(self) -> &'static str {
+        match self {
+            ShortcutAction::OpenRecordWindow => "shortcut-desc-open-record-window",
+            ShortcutAction::OpenImportWindow => "shortcut-desc-import-file",
+            ShortcutAction::OpenImportUrlWindow => "shortcut-desc-import-url",
+            ShortcutAction::OpenPreferencesWindow => "shortcut-desc-open-preferences-window",
+            ShortcutAction::ViewTranscriptText => "shortcut-desc-view-transcript-text",
+            ShortcutAction::ViewTranscriptTranslation => {
+                "shortcut-desc-view-transcript-translation"
+            }
+            ShortcutAction::ViewTranscriptTimestamps => "shortcut-desc-view-transcript-timestamps",
+            ShortcutAction::SearchTranscript => "shortcut-desc-search-transcript",
+            ShortcutAction::SearchNext => "shortcut-desc-search-next",
+            ShortcutAction::SearchPrevious => "shortcut-desc-search-previous",
+            ShortcutAction::ScrollToCurrentText => "shortcut-desc-scroll-to-current-text",
+            ShortcutAction::PlayPauseAudio => "shortcut-desc-play-pause-audio",
+            ShortcutAction::ReplayCurrentSegment => "shortcut-desc-replay-current-segment",
+            ShortcutAction::TogglePlaybackControls => "shortcut-desc-toggle-playback-controls",
+            ShortcutAction::DecreaseSegmentStart => "shortcut-desc-decrease-segment-start",
+            ShortcutAction::IncreaseSegmentStart => "shortcut-desc-increase-segment-start",
+            ShortcutAction::DecreaseSegmentEnd => "shortcut-desc-decrease-segment-end",
+            ShortcutAction::IncreaseSegmentEnd => "shortcut-desc-increase-segment-end",
+            ShortcutAction::ClearHistory => "shortcut-desc-clear-history",
+            ShortcutAction::StopTranscription => "shortcut-desc-stop-transcription",
+        }
+    }
+
     /// Buzz's default key sequence for this action (`shortcut.py`), in the
     /// `Ctrl+Shift+P`-style notation [`parse_sequence`] accepts.
     pub fn default_sequence(self) -> &'static str {
@@ -176,17 +209,29 @@ pub fn parse_sequence(sequence: &str) -> Option<KeyboardShortcut> {
 
 /// Parses the final (key) token of a sequence into an [`egui::Key`].
 ///
-/// Covers exactly the tokens Buzz's 20 default sequences use: `,`, `Return`,
-/// `Left`/`Right`, and the ten letters `E F G L O P R S T U X` — spelled out
-/// explicitly (rather than derived from a single-char-to-`Key` helper) so
-/// this stays correct without depending on an `egui::Key` API surface beyond
-/// its named constants.
+/// Covers the tokens Buzz's 20 default sequences use — `,`, `Return`,
+/// `Left`/`Right`, and the ten letters `E F G L O P R S T U X` — plus the
+/// digits `0`-`9` (Task 14: the shortcuts-editor capture widget can bind a
+/// digit key, so the parser must round-trip whatever it emits even though no
+/// *default* sequence uses one). Spelled out explicitly (rather than derived
+/// from a single-char-to-`Key` helper) so this stays correct without
+/// depending on an `egui::Key` API surface beyond its named constants.
 fn parse_key(token: &str) -> Option<Key> {
     match token {
         "," => Some(Key::Comma),
         "Return" => Some(Key::Enter),
         "Left" => Some(Key::ArrowLeft),
         "Right" => Some(Key::ArrowRight),
+        "0" => Some(Key::Num0),
+        "1" => Some(Key::Num1),
+        "2" => Some(Key::Num2),
+        "3" => Some(Key::Num3),
+        "4" => Some(Key::Num4),
+        "5" => Some(Key::Num5),
+        "6" => Some(Key::Num6),
+        "7" => Some(Key::Num7),
+        "8" => Some(Key::Num8),
+        "9" => Some(Key::Num9),
         "A" => Some(Key::A),
         "B" => Some(Key::B),
         "C" => Some(Key::C),
@@ -215,6 +260,111 @@ fn parse_key(token: &str) -> Option<Key> {
         "Z" => Some(Key::Z),
         _ => None,
     }
+}
+
+/// The reverse of [`parse_key`]: the Buzz-notation token for `key`, or
+/// `None` if `key` falls outside the vocabulary this module's sequences ever
+/// use. `pub(crate)` — the shortcuts-editor capture widget
+/// (`views/prefs_shortcuts.rs`, Task 14) reuses it to decide whether a
+/// captured keypress is bindable at all (a key with no token here is simply
+/// not a candidate for a new binding), and [`serialize_shortcut`] uses it to
+/// spell the final (key) token of the string it builds.
+pub(crate) fn key_token(key: Key) -> Option<&'static str> {
+    Some(match key {
+        Key::Comma => ",",
+        Key::Enter => "Return",
+        Key::ArrowLeft => "Left",
+        Key::ArrowRight => "Right",
+        Key::Num0 => "0",
+        Key::Num1 => "1",
+        Key::Num2 => "2",
+        Key::Num3 => "3",
+        Key::Num4 => "4",
+        Key::Num5 => "5",
+        Key::Num6 => "6",
+        Key::Num7 => "7",
+        Key::Num8 => "8",
+        Key::Num9 => "9",
+        Key::A => "A",
+        Key::B => "B",
+        Key::C => "C",
+        Key::D => "D",
+        Key::E => "E",
+        Key::F => "F",
+        Key::G => "G",
+        Key::H => "H",
+        Key::I => "I",
+        Key::J => "J",
+        Key::K => "K",
+        Key::L => "L",
+        Key::M => "M",
+        Key::N => "N",
+        Key::O => "O",
+        Key::P => "P",
+        Key::Q => "Q",
+        Key::R => "R",
+        Key::S => "S",
+        Key::T => "T",
+        Key::U => "U",
+        Key::V => "V",
+        Key::W => "W",
+        Key::X => "X",
+        Key::Y => "Y",
+        Key::Z => "Z",
+        _ => return None,
+    })
+}
+
+/// Serializes a resolved [`KeyboardShortcut`] back into Buzz's own
+/// `"Ctrl+Shift+P"`-style notation, modifiers in Buzz's own declared order
+/// (Ctrl, Shift, Alt — checked against `shortcut.py`'s own sequences, e.g.
+/// `REPLAY_CURRENT_SEGMENT = "Ctrl+Shift+P"`, `TOGGLE_PLAYBACK_CONTROLS =
+/// "Ctrl+Alt+P"`) — the exact inverse of [`parse_sequence`]:
+/// `parse_sequence(&serialize_shortcut(s)) == Some(s)` for every `s` built
+/// from a [`key_token`]-recognized key (this module's tests cover all 20
+/// Buzz defaults plus the digit tokens the shortcuts-editor capture widget
+/// also accepts, Task 14).
+///
+/// A `logical_key` outside [`key_token`]'s vocabulary serializes its final
+/// token as a literal `"?"` rather than panicking — never produced by
+/// [`ShortcutAction::default_sequence`] or the capture widget (which only
+/// ever proposes a [`key_token`]-recognized key), so this is an
+/// unreachable-in-practice fallback, not a silent-corruption risk.
+pub fn serialize_shortcut(shortcut: &KeyboardShortcut) -> String {
+    let mut parts = Vec::new();
+    if shortcut.modifiers.command {
+        parts.push("Ctrl");
+    }
+    if shortcut.modifiers.shift {
+        parts.push("Shift");
+    }
+    if shortcut.modifiers.alt {
+        parts.push("Alt");
+    }
+    parts.push(key_token(shortcut.logical_key).unwrap_or("?"));
+    parts.join("+")
+}
+
+/// Every pair of actions whose resolved [`KeyboardShortcut`] is identical
+/// (F-005 conflict detection ✚, design spec §8.3, Task 14) — Buzz's own
+/// `shortcuts.py` has no such check (it silently allows two actions to share
+/// a sequence); humm surfaces the collision instead of forbidding it (the
+/// design spec's own "least surprising superset" — the assignment still
+/// stands). Each unordered pair appears exactly once, in
+/// [`ShortcutAction::ALL`]'s declared order, and no action is ever paired
+/// with itself. `O(n²)` over 20 actions (190 comparisons) — cheap enough to
+/// recompute every frame the shortcuts-editor tab is open; no caching
+/// needed.
+pub fn conflicts(map: &ShortcutMap) -> Vec<(ShortcutAction, ShortcutAction)> {
+    let mut found = Vec::new();
+    for (i, &a) in ShortcutAction::ALL.iter().enumerate() {
+        for &b in &ShortcutAction::ALL[i + 1..] {
+            if map.get(a) == map.get(b) {
+                found.push((a, b));
+            }
+        }
+    }
+    found
 }
 
 /// The resolved shortcut for every [`ShortcutAction`]: Buzz defaults, with
@@ -377,5 +527,101 @@ mod tests {
             .map(|a| a.settings_key())
             .collect();
         assert_eq!(keys.len(), 20);
+    }
+
+    // -- description_key (Task 14) -----------------------------------------
+
+    #[test]
+    fn all_twenty_actions_have_distinct_description_keys() {
+        let keys: std::collections::HashSet<_> = ShortcutAction::ALL
+            .iter()
+            .map(|a| a.description_key())
+            .collect();
+        assert_eq!(keys.len(), 20);
+    }
+
+    // -- serialize_shortcut (Task 14) ---------------------------------------
+
+    #[test]
+    fn every_default_sequence_round_trips_through_serialize() {
+        for action in ShortcutAction::ALL {
+            let sequence = action.default_sequence();
+            let shortcut = parse_sequence(sequence)
+                .unwrap_or_else(|| panic!("{action:?}'s default sequence {sequence:?} must parse"));
+            assert_eq!(
+                serialize_shortcut(&shortcut),
+                sequence,
+                "serialize_shortcut must reproduce {action:?}'s own default sequence text exactly"
+            );
+            // The full parse -> serialize -> parse loop must land on the same
+            // shortcut, not just the same text.
+            let reparsed = parse_sequence(&serialize_shortcut(&shortcut))
+                .expect("a just-serialized default sequence must re-parse");
+            assert_eq!(reparsed, shortcut);
+        }
+    }
+
+    #[test]
+    fn digit_tokens_parse_and_round_trip() {
+        let digits = [
+            ("0", Key::Num0),
+            ("1", Key::Num1),
+            ("2", Key::Num2),
+            ("3", Key::Num3),
+            ("4", Key::Num4),
+            ("5", Key::Num5),
+            ("6", Key::Num6),
+            ("7", Key::Num7),
+            ("8", Key::Num8),
+            ("9", Key::Num9),
+        ];
+        for (token, key) in digits {
+            let sequence = format!("Ctrl+{token}");
+            let shortcut = parse_sequence(&sequence)
+                .unwrap_or_else(|| panic!("{sequence:?} must parse now that digits are supported"));
+            assert_eq!(shortcut.logical_key, key);
+            assert_eq!(
+                serialize_shortcut(&shortcut),
+                sequence,
+                "a digit shortcut must serialize back to the same text it was parsed from"
+            );
+        }
+    }
+
+    // -- conflicts (Task 14) -------------------------------------------------
+
+    #[test]
+    fn defaults_are_conflict_free() {
+        let map = ShortcutMap::from_settings(&HashMap::new());
+        assert!(
+            conflicts(&map).is_empty(),
+            "Buzz's 20 default sequences must never collide with each other"
+        );
+    }
+
+    #[test]
+    fn conflicts_detects_an_injected_pair_exactly_once_and_never_self_pairs() {
+        let mut overrides = HashMap::new();
+        // Force OpenImportWindow onto ClearHistory's default sequence.
+        overrides.insert(
+            ShortcutAction::OpenImportWindow.settings_key().to_string(),
+            ShortcutAction::ClearHistory.default_sequence().to_string(),
+        );
+        let map = ShortcutMap::from_settings(&overrides);
+
+        let found = conflicts(&map);
+
+        assert_eq!(
+            found,
+            vec![(
+                ShortcutAction::OpenImportWindow,
+                ShortcutAction::ClearHistory
+            )],
+            "exactly one pair, in ShortcutAction::ALL order, no duplicates"
+        );
+        assert!(
+            found.iter().all(|(a, b)| a != b),
+            "no action may ever be paired with itself"
+        );
     }
 }

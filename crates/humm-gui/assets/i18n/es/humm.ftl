@@ -218,6 +218,7 @@ about-check-failed = La comprobación de actualizaciones falló — consulte el 
 prefs-title = Preferencias
 prefs-tab-general = General
 prefs-tab-models = Modelos
+prefs-tab-shortcuts = Atajos
 prefs-tab-privacy = Privacidad
 
 ## Preferences General tab, complete (views/prefs_general.rs, F-100,
@@ -275,6 +276,35 @@ models-download-error-title = Error
 models-download-failed = Descarga fallida
 models-speed-badge = { $ratio }× tiempo real
 models-speed-badge-tip = Velocidad en tiempo real medida en las sesiones de grabación en vivo de este equipo
+
+## Preferences Shortcuts tab (views/prefs_shortcuts.rs, F-005 editor + ✚
+## conflict detection, design spec §8.3). The 20 shortcut-desc-* strings are
+## Buzz's own `.po` translations for `shortcut.py`'s descriptions.
+
+shortcut-desc-open-record-window = Abrir ventana de grabación
+shortcut-desc-import-file = Importar archivo
+shortcut-desc-import-url = URL de importación
+shortcut-desc-open-preferences-window = Abrir ventana de preferencias
+shortcut-desc-view-transcript-text = Ver el texto de la transcripción
+shortcut-desc-view-transcript-translation = Ver la traducción de la transcripción
+shortcut-desc-view-transcript-timestamps = Ver marcas de tiempo de la transcripción
+shortcut-desc-search-transcript = Buscar transcripción
+shortcut-desc-search-next = Ir al siguiente resultado de búsqueda de transcripción
+shortcut-desc-search-previous = Ir al resultado de búsqueda de transcripción anterior
+shortcut-desc-scroll-to-current-text = Desplazarse al texto actual
+shortcut-desc-play-pause-audio = Reproducir/Pausar audio
+shortcut-desc-replay-current-segment = Reproducir segmento actual
+shortcut-desc-toggle-playback-controls = Alternar controles de reproducción
+shortcut-desc-decrease-segment-start = Disminuir el tiempo de inicio del segmento
+shortcut-desc-increase-segment-start = Aumentar el tiempo de inicio del segmento
+shortcut-desc-decrease-segment-end = Disminuir el tiempo de finalización del segmento
+shortcut-desc-increase-segment-end = Aumentar el tiempo de finalización del segmento
+shortcut-desc-clear-history = Vaciar historial
+shortcut-desc-stop-transcription = Cancelar transcripción
+prefs-shortcuts-press = Presiona una combinación de teclas…
+prefs-shortcuts-clear-tooltip = Restablecer al valor por defecto
+prefs-shortcuts-conflict = Entra en conflicto con { $other }
+prefs-shortcuts-reset = Reestablecer los Valores por Defecto
 
 ## Transcript viewer window (views/viewer.rs, F-080)
 

@@ -4,8 +4,9 @@
 //! toast/banner state, rendering the main window every frame (design spec
 //! §1/§4).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -116,13 +117,39 @@ pub struct HummApp {
     /// returns (so actions pushed by this same frame's clicks are the ones
     /// executed, not last frame's).
     pending_table_actions: Vec<TableAction>,
-    /// The resolved keyboard-shortcut bindings (F-005 defaults; `[shortcuts]`
-    /// settings overrides aren't wired yet — that's the shortcut-editor UI,
-    /// M7 — so this is always `ShortcutMap::from_settings(&HashMap::new())`,
-    /// i.e. Buzz's defaults unmodified). `Arc` so it can be cloned into each
-    /// viewer's deferred-viewport render closure (which egui requires be
-    /// `Send + Sync + 'static`).
+    /// The resolved keyboard-shortcut bindings: Buzz's F-005 defaults with
+    /// `settings.shortcuts` overrides applied (`ShortcutMap::from_settings`),
+    /// seeded at startup and rebuilt whenever [`Self::shortcuts_generation`]
+    /// moves (the shortcuts-editor tab's own write path,
+    /// `views/prefs_shortcuts.rs`, Task 14). `Arc` so it can be cloned into
+    /// each viewer's deferred-viewport render closure (which egui requires
+    /// be `Send + Sync + 'static`) — every consumer (main window, viewer,
+    /// search) reads this fresh every frame rather than caching it, so a
+    /// rebuilt `Arc` reaches all of them the very next frame with no
+    /// per-consumer wiring (`show_viewer_viewports`/`show_resizer_viewports`
+    /// re-`Arc::clone` this field into their deferred closures every single
+    /// call, and `views::main_window::show` takes it by reference directly —
+    /// see [`Self::rebuild_shortcuts_if_generation_changed`]'s own doc for
+    /// the rebuild trigger).
     shortcuts: Arc<ShortcutMap>,
+    /// Bumped by the shortcuts-editor tab (`views/prefs_shortcuts.rs`'s
+    /// `commit_capture`/`commit_clear`/`commit_reset_all`) every time
+    /// `settings.shortcuts` changes. Read-and-compared-against
+    /// [`Self::last_shortcuts_generation`] once per frame
+    /// ([`Self::rebuild_shortcuts_if_generation_changed`]) to decide whether
+    /// [`Self::shortcuts`] needs rebuilding. Both the write (inside the
+    /// Preferences window, an *immediate* viewport rendered inline on the
+    /// main UI thread) and the read happen on the same thread, so this is
+    /// never actually contended — the `Arc<AtomicUsize>` (rather than a bare
+    /// `AtomicUsize` field) exists only because `views::prefs_shortcuts::ui`
+    /// needs its own clone-able handle to bump it, the same reason
+    /// `services.update_tx`-style channels get cloned into view code
+    /// elsewhere in this module.
+    shortcuts_generation: Arc<AtomicUsize>,
+    /// The last [`Self::shortcuts_generation`] value [`Self::shortcuts`] was
+    /// rebuilt from — starts at `0`, matching the counter's own initial
+    /// value, so the first frame never spuriously rebuilds.
+    last_shortcuts_generation: usize,
     /// Open transcript viewers (F-080), one per transcript, keyed by id — each
     /// a deferred egui viewport (`Self::show_viewer_viewports`). The `Arc<
     /// Mutex<_>>` is the shared handle the deferred render closure locks; the
@@ -504,7 +531,7 @@ impl HummApp {
         // site uses `Self::queue`, never `services.queue()` again.
         let queue = services.queue.take().map(Arc::new);
 
-        let (gui_settings, stored_available_version) = {
+        let (gui_settings, stored_available_version, shortcut_overrides) = {
             let settings = services
                 .settings
                 .lock()
@@ -512,6 +539,7 @@ impl HummApp {
             (
                 settings.gui.clone(),
                 settings.updates.available_version.clone(),
+                settings.shortcuts.clone(),
             )
         };
 
@@ -522,10 +550,13 @@ impl HummApp {
         let table_layout = TableLayout::from_gui_settings(&gui_settings);
         let last_saved_gui_settings = table_layout.to_gui_settings(tasks.sort());
 
-        // No `[shortcuts]` settings section exists yet (the override-editor
-        // UI is M7); an empty overrides map resolves every action to its
-        // Buzz default (`ShortcutMap::from_settings`'s own contract).
-        let shortcuts = Arc::new(ShortcutMap::from_settings(&HashMap::new()));
+        // Seed the resolved map from whatever `[shortcuts]` overrides are
+        // already on disk (Task 14: the shortcuts-editor tab writes this
+        // same `settings.shortcuts` map at runtime; an empty map — the
+        // common case, nothing customized yet — resolves every action to
+        // its Buzz default, `ShortcutMap::from_settings`'s own contract).
+        let shortcuts = Arc::new(ShortcutMap::from_settings(&shortcut_overrides));
+        let shortcuts_generation = Arc::new(AtomicUsize::new(0));
 
         // The viewer adapter bundle (F-080): all real adapters are stateless
         // handles that resolve their OS resources lazily (cpal at stream
@@ -601,6 +632,8 @@ impl HummApp {
             last_saved_gui_settings,
             pending_table_actions: Vec::new(),
             shortcuts,
+            shortcuts_generation,
+            last_shortcuts_generation: 0,
             viewers: BTreeMap::new(),
             resizers: BTreeMap::new(),
             viewer_deps,
@@ -1754,6 +1787,8 @@ impl HummApp {
         let model_root = &self.services.model_root;
         let secrets = &self.services.secrets;
         let validate = &self.services.validate;
+        let shortcuts_generation = &self.shortcuts_generation;
+        let current_shortcuts = &self.shortcuts;
         let mut close_requested = false;
 
         let appearance_before = ui_appearance_snapshot(settings);
@@ -1774,6 +1809,8 @@ impl HummApp {
                         settings_path,
                         secrets,
                         validate,
+                        shortcuts_generation,
+                        current_shortcuts,
                     );
                 });
                 if ui.ctx().input(|input| input.viewport().close_requested()) {
@@ -3321,6 +3358,33 @@ impl HummApp {
         self.app_event_tx.clone()
     }
 
+    /// Rebuilds [`Self::shortcuts`] from the live `settings.shortcuts`
+    /// overrides when [`Self::shortcuts_generation`] has moved since the last
+    /// rebuild (the shortcuts-editor tab's write path bumps it on every
+    /// commit — `views/prefs_shortcuts.rs`'s module doc has the full
+    /// handshake). A no-op most frames (the common case: nothing changed) —
+    /// one atomic load plus an integer compare. Called once per frame, before
+    /// anything renders, so every consumer that reads `self.shortcuts` this
+    /// frame (the main window directly, viewers/resizers via their own
+    /// per-frame `Arc::clone`) already sees the rebuilt map, not a
+    /// stale one.
+    fn rebuild_shortcuts_if_generation_changed(&mut self) {
+        let current_generation = self.shortcuts_generation.load(Ordering::Relaxed);
+        if current_generation == self.last_shortcuts_generation {
+            return;
+        }
+        self.last_shortcuts_generation = current_generation;
+        let overrides = {
+            let guard = self
+                .services
+                .settings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.shortcuts.clone()
+        };
+        self.shortcuts = Arc::new(ShortcutMap::from_settings(&overrides));
+    }
+
     // -- Test seams (F-086 resizer) -----------------------------------------
     // The resizer window is a deferred OS viewport an `egui_kittest` Harness
     // cannot reach into, so these plain `pub fn`s (the `new_for_test`/
@@ -3367,6 +3431,15 @@ impl HummApp {
     /// Whether the task table's view-model currently has a row for `id`.
     pub fn has_task_row_for_test(&self, id: TranscriptionId) -> bool {
         self.tasks.sorted_rows().iter().any(|row| row.id == id)
+    }
+
+    /// The app's currently-resolved shortcut map (Task 14) — so a test can
+    /// assert `settings.shortcuts` overrides were actually seeded at
+    /// startup, or that a shortcuts-editor commit's generation bump was
+    /// picked up by [`Self::rebuild_shortcuts_if_generation_changed`] on the
+    /// next `ui()` call.
+    pub fn shortcuts_for_test(&self) -> Arc<ShortcutMap> {
+        Arc::clone(&self.shortcuts)
     }
 
     // -- Test seams (F-060 recording window) ---------------------------------
@@ -3721,6 +3794,7 @@ impl eframe::App for HummApp {
             ));
         }
 
+        self.rebuild_shortcuts_if_generation_changed();
         self.fire_telemetry_once();
         self.apply_smoke_open_windows_once();
         self.apply_smoke_open_viewer_once(Instant::now());

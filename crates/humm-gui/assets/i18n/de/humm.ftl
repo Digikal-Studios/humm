@@ -216,6 +216,7 @@ about-check-failed = Die Update-Prüfung ist fehlgeschlagen — siehe Protokolld
 prefs-title = Einstellungen
 prefs-tab-general = Allgemein
 prefs-tab-models = Modelle
+prefs-tab-shortcuts = Tastenkombinationen
 prefs-tab-privacy = Datenschutz
 
 ## Preferences General tab, complete (views/prefs_general.rs, F-100,
@@ -273,6 +274,35 @@ models-download-error-title = Fehler
 models-download-failed = Der Download ist fehlgeschlagen
 models-speed-badge = { $ratio }× Echtzeit
 models-speed-badge-tip = Gemessene Echtzeit-Geschwindigkeit aus den Live-Aufnahmesitzungen auf diesem Gerät
+
+## Preferences Shortcuts tab (views/prefs_shortcuts.rs, F-005 editor + ✚
+## conflict detection, design spec §8.3). The 20 shortcut-desc-* strings are
+## Buzz's own `.po` translations for `shortcut.py`'s descriptions.
+
+shortcut-desc-open-record-window = Aufnahmefenster öffnen
+shortcut-desc-import-file = Datei importieren
+shortcut-desc-import-url = URL importieren
+shortcut-desc-open-preferences-window = Einstellungsfenster öffnen
+shortcut-desc-view-transcript-text = Transkriptionstext anzeigen
+shortcut-desc-view-transcript-translation = Übersetzung des Transkripts anzeigen
+shortcut-desc-view-transcript-timestamps = Zeitstempel des Transkripts anzeigen
+shortcut-desc-search-transcript = Transkript durchsuchen
+shortcut-desc-search-next = Zum nächsten Transkript-Suchergebnis gehen
+shortcut-desc-search-previous = Zum vorherigen Transkript-Suchergebnis gehen
+shortcut-desc-scroll-to-current-text = Zum aktuellen Text scrollen
+shortcut-desc-play-pause-audio = Audio abspielen/pausieren
+shortcut-desc-replay-current-segment = Aktuelles Segment erneut abspielen
+shortcut-desc-toggle-playback-controls = Wiedergabesteuerung ein-/ausblenden
+shortcut-desc-decrease-segment-start = Segmentanfangszeit verringern
+shortcut-desc-increase-segment-start = Segmentanfangszeit erhöhen
+shortcut-desc-decrease-segment-end = Segmentendzeit verringern
+shortcut-desc-increase-segment-end = Segmentendzeit erhöhen
+shortcut-desc-clear-history = Verlauf löschen
+shortcut-desc-stop-transcription = Transkription abbrechen
+prefs-shortcuts-press = Tastenkombination drücken…
+prefs-shortcuts-clear-tooltip = Auf Standard zurücksetzen
+prefs-shortcuts-conflict = Kollidiert mit { $other }
+prefs-shortcuts-reset = Auf Standardeinstellungen zurücksetzen
 
 ## Transcript viewer window (views/viewer.rs, F-080)
 

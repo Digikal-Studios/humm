@@ -212,6 +212,7 @@ about-check-failed = Update check failed — see the log file
 prefs-title = Preferences
 prefs-tab-general = General
 prefs-tab-models = Models
+prefs-tab-shortcuts = Shortcuts
 prefs-tab-privacy = Privacy
 
 ## Preferences General tab, complete (views/prefs_general.rs, F-100,
@@ -270,6 +271,35 @@ models-download-error-title = Error
 models-download-failed = Download failed
 models-speed-badge = { $ratio }× realtime
 models-speed-badge-tip = Measured realtime speed from this machine's live recording sessions
+
+## Preferences Shortcuts tab (views/prefs_shortcuts.rs, F-005 editor + ✚
+## conflict detection, design spec §8.3). The 20 shortcut-desc-* strings are
+## Buzz's own `shortcut.py` descriptions, byte-for-byte.
+
+shortcut-desc-open-record-window = Open Record Window
+shortcut-desc-import-file = Import File
+shortcut-desc-import-url = Import URL
+shortcut-desc-open-preferences-window = Open Preferences Window
+shortcut-desc-view-transcript-text = View Transcript Text
+shortcut-desc-view-transcript-translation = View Transcript Translation
+shortcut-desc-view-transcript-timestamps = View Transcript Timestamps
+shortcut-desc-search-transcript = Search Transcript
+shortcut-desc-search-next = Go to Next Transcript Search Result
+shortcut-desc-search-previous = Go to Previous Transcript Search Result
+shortcut-desc-scroll-to-current-text = Scroll to Current Text
+shortcut-desc-play-pause-audio = Play/Pause Audio
+shortcut-desc-replay-current-segment = Replay Current Segment
+shortcut-desc-toggle-playback-controls = Toggle Playback Controls
+shortcut-desc-decrease-segment-start = Decrease Segment Start Time
+shortcut-desc-increase-segment-start = Increase Segment Start Time
+shortcut-desc-decrease-segment-end = Decrease Segment End Time
+shortcut-desc-increase-segment-end = Increase Segment End Time
+shortcut-desc-clear-history = Clear History
+shortcut-desc-stop-transcription = Cancel Transcription
+prefs-shortcuts-press = Press shortcut…
+prefs-shortcuts-clear-tooltip = Reset to default
+prefs-shortcuts-conflict = Conflicts with { $other }
+prefs-shortcuts-reset = Reset to Defaults
 
 ## Transcript viewer window (views/viewer.rs, F-080)
 
