@@ -202,9 +202,13 @@ prefs-tab-general = General
 prefs-tab-models = Models
 prefs-tab-privacy = Privacy
 
-## Preferences General tab -- OpenAI block only (views/prefs_general.rs,
-## partial F-100, design spec §7.1)
+## Preferences General tab, complete (views/prefs_general.rs, F-100,
+## design spec §8.1) -- Buzz row order: UI language, font size, the OpenAI
+## block, default export file name, Disable GPU.
 
+prefs-general-ui-language-label = Ui Language
+prefs-general-font-size-label = Font Size
+prefs-general-font-size-custom-label = Custom font size
 prefs-general-openai-key-label = OpenAI API key
 prefs-general-openai-key-placeholder = sk-...
 prefs-general-key-show = Show
@@ -220,6 +224,10 @@ prefs-general-base-url-label = OpenAI base url
 prefs-general-base-url-placeholder = https://api.openai.com/v1
 prefs-general-model-label = OpenAI API model
 prefs-general-model-placeholder = whisper-1
+prefs-general-export-template-label = Default export file name
+prefs-general-force-cpu-row-label = Disable GPU
+prefs-general-force-cpu-label = Use only CPU and disable GPU acceleration
+prefs-general-force-cpu-tooltip = Set this if larger models do not fit your GPU memory and humm crashes
 
 ## Privacy tab (views/preferences.rs, ADR-009, UX §J-11)
 

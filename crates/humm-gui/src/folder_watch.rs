@@ -797,6 +797,27 @@ mod tests {
         assert_eq!(snap.pill_folder_name(), Some("my-clips".to_string()));
     }
 
+    /// M7 Task 11 (F-100): `settings.folder_watch.options.
+    /// default_export_template` survives the snapshot → job-template step
+    /// (`FolderWatchSnapshot::from_settings` → `FolderWatchSnapshot::
+    /// template`) unchanged — the flow `rescan_and_enqueue` relies on to hand
+    /// a watched file's custom template to `spec_from_transcriber_settings`
+    /// (design spec §8.1, options_sheet.rs).
+    #[test]
+    fn template_carries_the_default_export_template_setting() {
+        let mut folder_watch_settings = settings(true, Some("/in"), Some("/out"));
+        folder_watch_settings.options.default_export_template =
+            Some("{{ input_file_name }}-watched".to_string());
+
+        let snap = FolderWatchSnapshot::from_settings(&folder_watch_settings);
+        let template = snap.template();
+
+        assert_eq!(
+            template.options.default_export_template.as_deref(),
+            Some("{{ input_file_name }}-watched")
+        );
+    }
+
     // -- reconcile_folder_watch matrix ----------------------------------------
 
     #[test]

@@ -94,6 +94,12 @@ pub struct ViewerDeps {
     /// The LLM-translation worker seam (F-085, design spec §7.3): spawns the
     /// per-viewer translator on the first Translate click.
     pub translate: Arc<dyn TranslateSpawner>,
+    /// The shared live settings (M7 Task 11, F-100, design spec §8.1): the
+    /// Export menu reads `file_transcriber.default_export_template` fresh
+    /// from this at every export, so a Preferences edit applies to the very
+    /// next export with no reopen required — the same shared handle
+    /// `Services::settings` threads everywhere else.
+    pub settings: Arc<std::sync::Mutex<Settings>>,
 }
 
 /// The three transcript views (`transcription_view_mode_tool_button.py`,
@@ -1937,6 +1943,7 @@ mod tests {
             dialogs: Arc::new(FakeDialogs),
             secrets: Arc::new(MemorySecretStore::new()),
             translate: Arc::new(ScriptedTranslateSpawner::identity()),
+            settings: Arc::new(std::sync::Mutex::new(Settings::default())),
         }
     }
 

@@ -363,6 +363,50 @@ fn add_wav_completes_with_persisted_row_and_zero_segments() {
     );
 }
 
+// M7 Task 11 (F-100): `settings.file_transcriber.default_export_template`
+// (Preferences → General → "Default export file name") is wired into
+// `run.rs`'s own `OutputSpec` construction — a custom template in
+// `settings.toml` names the exported file, not the hardcoded
+// `DEFAULT_EXPORT_TEMPLATE`. Hermetic: the stub-tiny model + a local wav
+// fixture, no network (same shape as `add_wav_completes_with_persisted_row_
+// and_zero_segments` above).
+#[test]
+fn default_export_template_setting_names_output_file() {
+    let env = Env::new();
+    let wav = testdata_dir().join("whisper-latvian.wav");
+    assert!(wav.is_file(), "missing testdata: {}", wav.display());
+    let out = tempfile::tempdir().unwrap();
+
+    fs::write(
+        env.config.path().join("settings.toml"),
+        "[file_transcriber]\ndefault_export_template = \"{{ input_file_name }}-custom-name\"\n",
+    )
+    .expect("write settings.toml");
+
+    env.cmd()
+        .arg("add")
+        .arg(&wav)
+        .arg("--txt")
+        .arg("-s")
+        .arg("tiny")
+        .arg("-d")
+        .arg(out.path())
+        .assert()
+        .code(0);
+
+    let entries: Vec<PathBuf> = fs::read_dir(out.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(entries.len(), 1, "expected exactly one export: {entries:?}");
+    let file_name = entries[0]
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(file_name, "whisper-latvian-custom-name.txt");
+}
+
 // A missing input alongside a good one -> exit 2 and TWO history rows: one
 // `failed` (naming the path) and one `completed` (parity: failures persist).
 #[test]

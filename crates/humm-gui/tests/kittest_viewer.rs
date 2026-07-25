@@ -180,6 +180,7 @@ fn fake_deps(store: Arc<SqliteStore>) -> ViewerDeps {
         dialogs: Arc::new(FakeDialogs),
         secrets: Arc::new(MemorySecretStore::new()),
         translate: Arc::new(ScriptedTranslateSpawner::identity()),
+        settings: Arc::new(Mutex::new(Settings::default())),
     }
 }
 

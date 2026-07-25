@@ -143,7 +143,19 @@ fn export_entry(vm: &mut ViewerVm, deps: &ViewerDeps, format: OutputFormat, key:
     };
 
     let now = chrono::Local::now().naive_local();
-    let default_path = default_export_path(&deps.store, vm.id, &file, format, now);
+    // Read fresh at export time (design spec §8.1: every spec-build/template
+    // site reads `settings.file_transcriber.default_export_template` fresh,
+    // not cached at viewer-open time), matching how the sheet/CLI/folder-watch
+    // sites all resolve it.
+    let template = {
+        let guard = deps
+            .settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.file_transcriber.default_export_template.clone()
+    };
+    let default_path =
+        default_export_path(&deps.store, vm.id, &file, format, now, template.as_deref());
 
     let Some(chosen) = deps.dialogs.save_file(
         &tr("viewer-export-dialog-title"),
@@ -251,10 +263,11 @@ fn default_export_directory(store: &SqliteStore, id: TranscriptionId) -> Option<
 
 /// Builds the default save path for one export entry: [`export_options`]'s
 /// task/language/model feed the shared template engine
-/// (`output_file_path`, `template = None` → `DEFAULT_EXPORT_TEMPLATE`, the
-/// same resolution the queue's own export (`pipeline::run_file_job`) uses —
-/// this milestone has no settings-level template override to thread through
-/// either path), with [`default_export_directory`] substituted for the
+/// (`output_file_path`, `template = None` → `DEFAULT_EXPORT_TEMPLATE`) — the
+/// same resolution the queue's own export (`pipeline::run_file_job`) uses,
+/// now also given `settings.file_transcriber.default_export_template`
+/// (design spec §8.1, F-100) so a custom template applies here too, not just
+/// at import time — with [`default_export_directory`] substituted for the
 /// input file's own directory when a valid last-export folder exists.
 fn default_export_path(
     store: &SqliteStore,
@@ -262,6 +275,7 @@ fn default_export_path(
     file: &Path,
     format: OutputFormat,
     now: chrono::NaiveDateTime,
+    template: Option<&str>,
 ) -> PathBuf {
     let options = export_options(store, id);
     let directory = default_export_directory(store, id);
@@ -272,7 +286,7 @@ fn default_export_path(
         options.model.size,
         format,
         directory.as_deref(),
-        None,
+        template,
         now,
     )
 }
@@ -332,7 +346,7 @@ mod tests {
         let id = seed(&store, file.to_str().expect("utf8 path"));
 
         // No last folder set yet: falls back to the input file's own directory.
-        let path = default_export_path(&store, id, &file, OutputFormat::Srt, fixed_now());
+        let path = default_export_path(&store, id, &file, OutputFormat::Srt, fixed_now(), None);
         assert_eq!(path.parent(), Some(input_dir.path()));
         assert_eq!(
             path.file_name().and_then(|n| n.to_str()),
@@ -344,14 +358,41 @@ mod tests {
         store
             .set_last_export_folder(id, export_dir.path())
             .expect("set last export folder");
-        let path = default_export_path(&store, id, &file, OutputFormat::Srt, fixed_now());
+        let path = default_export_path(&store, id, &file, OutputFormat::Srt, fixed_now(), None);
         assert_eq!(path.parent(), Some(export_dir.path()));
 
         // A last export folder that no longer exists falls back to the input
         // file's directory again, rather than building a path into nowhere.
         drop(export_dir); // deletes the tempdir
-        let path = default_export_path(&store, id, &file, OutputFormat::Srt, fixed_now());
+        let path = default_export_path(&store, id, &file, OutputFormat::Srt, fixed_now(), None);
         assert_eq!(path.parent(), Some(input_dir.path()));
+    }
+
+    /// M7 Task 11 (F-100): `default_export_path`'s new `template` parameter
+    /// actually reaches [`output_file_path`] — a caller-supplied template
+    /// overrides `DEFAULT_EXPORT_TEMPLATE`, proving the viewer export menu
+    /// (once `export_entry` reads `settings.file_transcriber.
+    /// default_export_template` and passes it through) isn't silently
+    /// ignoring the setting.
+    #[test]
+    fn default_export_path_honors_a_custom_template() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let input_dir = tempfile::tempdir().expect("input tempdir");
+        let file = input_dir.path().join("interview.wav");
+        let id = seed(&store, file.to_str().expect("utf8 path"));
+
+        let path = default_export_path(
+            &store,
+            id,
+            &file,
+            OutputFormat::Srt,
+            fixed_now(),
+            Some("{{ input_file_name }}-custom"),
+        );
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("interview-custom.srt")
+        );
     }
 
     fn seg(start: i64, end: i64, text: &str, translation: &str) -> Segment {

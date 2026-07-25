@@ -1,15 +1,19 @@
-//! Preferences → General tab, OpenAI block only (partial F-100, design spec
-//! §7.1). The rest of Buzz's General tab (UI language, font size, export
-//! template, live-export relocation, GPU toggles) is M7 — this module renders
-//! *only* the four OpenAI rows Buzz's `GeneralPreferencesWidget` places first
-//! (`general_preferences_widget.py:101-139`): the API key field with its
-//! show/hide eye toggle and Test button, the base-URL field, and the API
-//! model field.
+//! Preferences → General tab, complete (F-100, design spec §8.1). Buzz's row
+//! order (`general_preferences_widget.py:66-225`), reproduced here: **UI
+//! language** combo (live apply — [`apply_font_size`]'s sibling for locale is
+//! [`crate::i18n::set_locale`], design spec ledger #L10), **font size**
+//! `DragValue` 8–32 (live apply via [`apply_font_size`]), the M6 **OpenAI
+//! block** unchanged in place (key field with its show/hide eye toggle and
+//! Test button, base-URL field, API-model field), **default export file
+//! name** (commit-on-focus-out → `file_transcriber.default_export_template`),
+//! and **Disable GPU** (`models.force_cpu`).
 //!
 //! Ported from Buzz:
-//! - `buzz/widgets/preferences_dialog/general_preferences_widget.py`
-//!   `BASE64_PATTERN` (`:32`), the row construction (`:101-139`), and every
-//!   `on_*` handler (`:230-273`, `ValidateOpenAIApiKeyJob` at `:338-385`).
+//! - `buzz/widgets/preferences_dialog/general_preferences_widget.py` —
+//!   `ui_locales` (`:34-50`), the row construction (`:66-225`), and every
+//!   `on_*` handler (`:227-335`, `ValidateOpenAIApiKeyJob` at `:338-385`).
+//!   Not ported (ledger #L11/#L12, design spec §8.1): the live-export
+//!   block, the live-recording-mode combo, and "Reduce GPU RAM".
 //! - `buzz/widgets/openai_api_key_line_edit.py` — the masked field + eye
 //!   toggle.
 //! - `buzz/widgets/main_window.py:323-331` — the keyring-write failure
@@ -52,14 +56,18 @@
 //! §7.2) reuses both rather than re-porting Buzz's
 //! `openai_api_key_line_edit.py`/`BASE64_PATTERN` a second time.
 
+use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use humm_core::export::DEFAULT_EXPORT_TEMPLATE;
 use humm_core::openai::{OpenAiAuth, ValidateOutcome, validate_key};
 use humm_core::secrets::{SecretKey, SecretStore};
-use humm_core::settings::{OpenAiSettings, Settings};
+use humm_core::settings::{
+    FileTranscriberSettings, ModelSettings, OpenAiSettings, Settings, UiSettings,
+};
 
-use crate::i18n::tr;
+use crate::i18n::{self, tr};
 use crate::views::secret_field::{self, CommitOutcome};
 
 /// Signature for the Test button's background key-validation check:
@@ -145,6 +153,123 @@ fn persist_openai(
     }
 }
 
+/// As [`persist_openai`], but for `settings.ui` (locale, font size).
+fn persist_ui(settings: &Mutex<Settings>, settings_path: &Path, f: impl FnOnce(&mut UiSettings)) {
+    let mut guard = settings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard.ui);
+    if let Err(err) = guard.save(settings_path) {
+        log::warn!("could not persist the UI settings: {err}");
+    }
+}
+
+/// As [`persist_openai`], but for `settings.file_transcriber` (the default
+/// export template).
+fn persist_file_transcriber(
+    settings: &Mutex<Settings>,
+    settings_path: &Path,
+    f: impl FnOnce(&mut FileTranscriberSettings),
+) {
+    let mut guard = settings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard.file_transcriber);
+    if let Err(err) = guard.save(settings_path) {
+        log::warn!("could not persist the file-transcriber settings: {err}");
+    }
+}
+
+/// As [`persist_openai`], but for `settings.models` (Disable GPU).
+fn persist_models(
+    settings: &Mutex<Settings>,
+    settings_path: &Path,
+    f: impl FnOnce(&mut ModelSettings),
+) {
+    let mut guard = settings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard.models);
+    if let Err(err) = guard.save(settings_path) {
+        log::warn!("could not persist the model settings: {err}");
+    }
+}
+
+// -- Font-size scaling (design spec §8.1) -------------------------------------
+
+/// egui's own default [`egui::TextStyle::Body`] size, in points
+/// (`egui::Style::default()`'s `default_text_styles()`) — the reference point
+/// [`scale_text_styles`] scales every other style relative to: "font size N
+/// maps Body to N points, every other style scales by the same ratio" (this
+/// module's own documented mapping, design spec §8.1). Also
+/// [`GeneralTabState`]'s seed value for the font-size `DragValue` the first
+/// time "Custom font size" is checked with nothing stored yet, so turning the
+/// checkbox on doesn't itself visibly change anything until the value is
+/// actually edited (Buzz's own spinbox always starts at the font's *current*
+/// point size, `self.font().pointSize()`; humm's closest equivalent starting
+/// point is egui's own untouched default).
+pub const DEFAULT_BODY_SIZE: u32 = 13;
+
+/// [`apply_font_size`]'s one-time capture of egui's pristine default text
+/// styles, taken from whichever `egui::Context` first calls it — before any
+/// override this module ever applies. Every later `Some`/`None` call scales
+/// from (or restores exactly) this snapshot, never from the *current*
+/// (possibly already-scaled) style, so repeated `Some(n)` calls are
+/// idempotent and a `None` after any number of `Some` calls always lands back
+/// on the same pristine sizes.
+static DEFAULT_TEXT_STYLES: OnceLock<BTreeMap<egui::TextStyle, egui::FontId>> = OnceLock::new();
+
+/// Pure core of [`apply_font_size`]: applies `size` to `style.text_styles`,
+/// scaling every entry proportionally from `defaults` (egui's pristine
+/// per-[`egui::TextStyle`] sizes, captured once — see [`apply_font_size`]'s
+/// own doc). `None` restores `style.text_styles` to `defaults` verbatim, byte
+/// for byte. Free of any `egui::Context`, so it's testable directly against a
+/// plain [`egui::Style`] value.
+pub fn scale_text_styles(
+    style: &mut egui::Style,
+    size: Option<u32>,
+    defaults: &BTreeMap<egui::TextStyle, egui::FontId>,
+) {
+    match size {
+        None => style.text_styles = defaults.clone(),
+        Some(points) => {
+            let default_body = defaults
+                .get(&egui::TextStyle::Body)
+                .map_or(DEFAULT_BODY_SIZE as f32, |font_id| font_id.size);
+            let scale = points as f32 / default_body;
+            style.text_styles = defaults
+                .iter()
+                .map(|(text_style, font_id)| {
+                    (
+                        text_style.clone(),
+                        egui::FontId::new(font_id.size * scale, font_id.family.clone()),
+                    )
+                })
+                .collect();
+        }
+    }
+}
+
+/// Applies `size` to `ctx`'s style (both the light and dark theme variants,
+/// via `egui::Context::all_styles_mut` — font size must not depend on which
+/// theme is active): `None` restores egui's pristine default text styles;
+/// `Some(n)` scales every [`egui::TextStyle`] proportionally so
+/// [`egui::TextStyle::Body`] lands at exactly `n` points ([`scale_text_styles`]'s
+/// own doc has the full mapping).
+///
+/// The very first call this process ever makes (from either call site —
+/// startup, `app.rs::HummApp::new`, or a Preferences edit) captures `ctx`'s
+/// current text styles into [`DEFAULT_TEXT_STYLES`] as the pristine baseline
+/// every later call scales from; call this **before** any other code has
+/// touched `ctx`'s style, i.e. at startup right after the settings file loads
+/// — the same "resolved once, before the first frame paints" contract the
+/// locale negotiation right next to it in `HummApp::new` already follows.
+pub fn apply_font_size(ctx: &egui::Context, size: Option<u32>) {
+    let defaults =
+        DEFAULT_TEXT_STYLES.get_or_init(|| ctx.style_of(egui::Theme::Light).text_styles.clone());
+    ctx.all_styles_mut(|style| scale_text_styles(style, size, defaults));
+}
+
 // -- Modal --------------------------------------------------------------------
 
 /// Which of the tab's three possible modals (if any) is currently showing.
@@ -205,28 +330,64 @@ pub struct GeneralTabState {
     pub base_url_buffer: String,
     /// The API-model field's live text.
     pub api_model_buffer: String,
+    /// The UI-language combo's current selection — a [`crate::i18n::
+    /// LocaleEntry::buzz_code`] from [`crate::i18n::AVAILABLE_LOCALES`].
+    /// Seeded from `crate::i18n::negotiate(settings.ui.locale...)`, matching
+    /// whatever locale is actually active the moment the window opens.
+    pub locale_code: String,
+    /// Whether the font-size row's "Custom font size" checkbox is on — humm's
+    /// own gate for [`UiSettings::font_size`]'s `Option`: Buzz's spinbox
+    /// always has a concrete value, but humm's `None` means "use egui's
+    /// built-in default" (Task 1's contract), so an explicit on/off toggle is
+    /// needed to distinguish "never customized" from "customized to exactly
+    /// the default size".
+    pub font_size_custom: bool,
+    /// The font-size `DragValue`'s live buffer, 8–32
+    /// ([`UiSettings::MIN_FONT_SIZE`]–[`UiSettings::MAX_FONT_SIZE`]).
+    /// Meaningful only while [`Self::font_size_custom`] is `true`; seeded
+    /// from `settings.ui.font_size` when set, else [`DEFAULT_BODY_SIZE`] (a
+    /// visually-neutral starting point — see that constant's doc).
+    pub font_size_value: u32,
+    /// The "Default export file name" field's live text (empty means "use
+    /// [`DEFAULT_EXPORT_TEMPLATE`]", shown as the field's hint text).
+    pub export_template_buffer: String,
+    /// The "Disable GPU" checkbox's live value (`settings.models.force_cpu`).
+    pub force_cpu: bool,
 }
 
 impl GeneralTabState {
     /// Builds the tab's initial state: `key_buffer` from `secrets` (an
     /// absent entry, or a backend error, both seed an empty field — the same
-    /// "nothing stored yet" starting point as a fresh Buzz install), and the
-    /// URL/model buffers from `openai` (`settings.openai` at the moment the
-    /// Preferences window opens).
-    pub fn new(secrets: &dyn SecretStore, openai: &OpenAiSettings) -> Self {
+    /// "nothing stored yet" starting point as a fresh Buzz install), and every
+    /// other field from `settings` at the moment the Preferences window
+    /// opens (`openai`, `ui.{locale,font_size}`,
+    /// `file_transcriber.default_export_template`, `models.force_cpu`).
+    pub fn new(secrets: &dyn SecretStore, settings: &Settings) -> Self {
         let key_buffer = secrets
             .get(SecretKey::OpenAiApiKey)
             .ok()
             .flatten()
             .unwrap_or_default();
+        let locale_code = i18n::negotiate(settings.ui.locale.as_deref())
+            .buzz_code
+            .to_string();
         GeneralTabState {
             key_buffer,
             key_visible: false,
             test_running: false,
             test_rx: None,
             modal: None,
-            base_url_buffer: openai.base_url.clone().unwrap_or_default(),
-            api_model_buffer: openai.api_model.clone(),
+            base_url_buffer: settings.openai.base_url.clone().unwrap_or_default(),
+            api_model_buffer: settings.openai.api_model.clone(),
+            locale_code,
+            font_size_custom: settings.ui.font_size.is_some(),
+            font_size_value: settings.ui.font_size.unwrap_or(DEFAULT_BODY_SIZE),
+            export_template_buffer: settings
+                .file_transcriber
+                .default_export_template
+                .clone()
+                .unwrap_or_default(),
+            force_cpu: settings.models.force_cpu,
         }
     }
 }
@@ -241,6 +402,11 @@ impl std::fmt::Debug for GeneralTabState {
             .field("modal", &self.modal)
             .field("base_url_buffer", &self.base_url_buffer)
             .field("api_model_buffer", &self.api_model_buffer)
+            .field("locale_code", &self.locale_code)
+            .field("font_size_custom", &self.font_size_custom)
+            .field("font_size_value", &self.font_size_value)
+            .field("export_template_buffer", &self.export_template_buffer)
+            .field("force_cpu", &self.force_cpu)
             .finish()
     }
 }
@@ -288,6 +454,62 @@ pub fn commit_base_url(state: &GeneralTabState, settings: &Mutex<Settings>, sett
 pub fn commit_api_model(state: &GeneralTabState, settings: &Mutex<Settings>, settings_path: &Path) {
     let value = api_model_or_default(&state.api_model_buffer);
     persist_openai(settings, settings_path, |openai| openai.api_model = value);
+}
+
+/// Commits a UI-language selection: switches the process-wide active locale
+/// (live apply — design spec ledger #L10, no restart hint) and persists
+/// `ui.locale`. `code` should already be a valid [`crate::i18n::
+/// AVAILABLE_LOCALES`] entry's `buzz_code` (the combo only ever offers those),
+/// but [`crate::i18n::set_locale`]'s own `en_US` fallback absorbs anything
+/// else without panicking.
+pub fn commit_locale(code: &str, settings: &Mutex<Settings>, settings_path: &Path) {
+    i18n::set_locale(code);
+    let code = code.to_string();
+    persist_ui(settings, settings_path, move |ui| ui.locale = Some(code));
+}
+
+/// Commits the font-size row: `state.font_size_custom` gates whether
+/// `settings.ui.font_size` becomes `Some(state.font_size_value.clamp(MIN,
+/// MAX))` or `None` (Task 1's contract — `None` is egui's own default, never
+/// persisted as a concrete number); either way, [`apply_font_size`] applies
+/// the resolved value to `ctx` immediately (live, no restart).
+pub fn commit_font_size(
+    state: &GeneralTabState,
+    settings: &Mutex<Settings>,
+    settings_path: &Path,
+    ctx: &egui::Context,
+) {
+    let value = state.font_size_custom.then(|| {
+        state
+            .font_size_value
+            .clamp(UiSettings::MIN_FONT_SIZE, UiSettings::MAX_FONT_SIZE)
+    });
+    persist_ui(settings, settings_path, |ui| ui.font_size = value);
+    apply_font_size(ctx, value);
+}
+
+/// Commits the "Default export file name" field: empty → `None` (shown as
+/// the field's own hint text, [`DEFAULT_EXPORT_TEMPLATE`]) — same
+/// empty-means-unset rule [`empty_to_none`] already applies to the base-URL
+/// field.
+pub fn commit_export_template(
+    state: &GeneralTabState,
+    settings: &Mutex<Settings>,
+    settings_path: &Path,
+) {
+    let value = empty_to_none(&state.export_template_buffer);
+    persist_file_transcriber(settings, settings_path, |ft| {
+        ft.default_export_template = value
+    });
+}
+
+/// Commits the "Disable GPU" checkbox: persists `models.force_cpu`, read
+/// fresh at every engine-construction site (`engine_factory.rs::
+/// create_whisper`'s own doc, `humm_core::env::use_gpu_resolution`), so this
+/// takes effect on the very next transcription with no restart.
+pub fn commit_force_cpu(state: &GeneralTabState, settings: &Mutex<Settings>, settings_path: &Path) {
+    let value = state.force_cpu;
+    persist_models(settings, settings_path, |models| models.force_cpu = value);
 }
 
 /// Starts a Test click: snapshots `settings.openai.base_url` *now* (spec
@@ -359,9 +581,10 @@ pub fn drain_test_result(state: &mut GeneralTabState) {
 
 // -- Render -------------------------------------------------------------------
 
-/// Renders the General tab's OpenAI block: the key field + eye toggle, the
-/// Test button, the base-URL field, and the API-model field, plus whichever
-/// modal (if any) is currently open.
+/// Renders the General tab, Buzz row order (module doc): UI language, font
+/// size, the OpenAI block (key field + eye toggle, Test button, base-URL,
+/// API-model), default export file name, Disable GPU — plus whichever modal
+/// (if any) is currently open.
 pub fn ui(
     ui: &mut egui::Ui,
     state: &mut GeneralTabState,
@@ -372,6 +595,55 @@ pub fn ui(
 ) {
     drain_test_result(state);
 
+    // 1. UI language (Buzz row 1) -- lists exactly `AVAILABLE_LOCALES`
+    // (en-only this milestone; Task 12 appends more), applies live, no
+    // restart hint (ledger #L10).
+    ui.horizontal(|ui| {
+        ui.label(tr("prefs-general-ui-language-label"));
+        let mut selected = state.locale_code.clone();
+        egui::ComboBox::from_id_salt("humm-prefs-general-ui-language")
+            .selected_text(i18n::display_name(&selected))
+            .show_ui(ui, |ui| {
+                for entry in i18n::AVAILABLE_LOCALES {
+                    ui.selectable_value(
+                        &mut selected,
+                        entry.buzz_code.to_string(),
+                        i18n::display_name(entry.buzz_code),
+                    );
+                }
+            });
+        if selected != state.locale_code {
+            state.locale_code = selected;
+            commit_locale(&state.locale_code, settings, settings_path);
+        }
+    });
+
+    // 2. Font size (Buzz row 2, QSpinBox 8-32) -- a "Custom font size"
+    // checkbox gates the DragValue (module doc: humm's `None`/egui-default
+    // has no Buzz-parity concrete value to always show). Applies live.
+    ui.horizontal(|ui| {
+        let mut custom = state.font_size_custom;
+        if ui
+            .checkbox(&mut custom, tr("prefs-general-font-size-custom-label"))
+            .changed()
+        {
+            state.font_size_custom = custom;
+            commit_font_size(state, settings, settings_path, ui.ctx());
+        }
+        ui.label(tr("prefs-general-font-size-label"));
+        let mut value = state.font_size_value;
+        let response = ui.add_enabled(
+            state.font_size_custom,
+            egui::DragValue::new(&mut value)
+                .range(UiSettings::MIN_FONT_SIZE..=UiSettings::MAX_FONT_SIZE),
+        );
+        if response.changed() {
+            state.font_size_value = value;
+            commit_font_size(state, settings, settings_path, ui.ctx());
+        }
+    });
+
+    // 3-5. The existing OpenAI block, unchanged in place.
     let key_response = secret_field::masked_field_row(
         ui,
         tr("prefs-general-openai-key-label"),
@@ -416,6 +688,37 @@ pub fn ui(
         );
         if response.changed() {
             commit_api_model(state, settings, settings_path);
+        }
+    });
+
+    // 6. Default export file name -- commit-on-focus-out, empty -> None
+    // (hint text = `DEFAULT_EXPORT_TEMPLATE`).
+    ui.horizontal(|ui| {
+        ui.label(tr("prefs-general-export-template-label"));
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut state.export_template_buffer)
+                .hint_text(DEFAULT_EXPORT_TEMPLATE),
+        );
+        if response.lost_focus() {
+            commit_export_template(state, settings, settings_path);
+        }
+    });
+
+    // 7. Disable GPU (Buzz row last) -- Buzz has both a form-row label
+    // ("Disable GPU") and a separate checkbox-own label ("Use only CPU and
+    // disable GPU acceleration"); egui's checkbox has one text slot, so both
+    // render here, row label then checkbox. Tooltip verbatim, product name
+    // swapped ("Buzz" -> "humm", module doc).
+    ui.horizontal(|ui| {
+        ui.label(tr("prefs-general-force-cpu-row-label"));
+        let mut force_cpu = state.force_cpu;
+        if ui
+            .checkbox(&mut force_cpu, tr("prefs-general-force-cpu-label"))
+            .on_hover_text(tr("prefs-general-force-cpu-tooltip"))
+            .changed()
+        {
+            state.force_cpu = force_cpu;
+            commit_force_cpu(state, settings, settings_path);
         }
     });
 
@@ -483,6 +786,11 @@ mod tests {
             modal: None,
             base_url_buffer: String::new(),
             api_model_buffer: String::new(),
+            locale_code: "en_US".to_string(),
+            font_size_custom: false,
+            font_size_value: DEFAULT_BODY_SIZE,
+            export_template_buffer: String::new(),
+            force_cpu: false,
         }
     }
 
@@ -513,7 +821,7 @@ mod tests {
         let secrets = MemorySecretStore::new();
         secrets.set(SecretKey::OpenAiApiKey, "sk-seeded").unwrap();
 
-        let state = GeneralTabState::new(&secrets, &OpenAiSettings::default());
+        let state = GeneralTabState::new(&secrets, &Settings::default());
 
         assert_eq!(state.key_buffer, "sk-seeded");
     }
@@ -521,19 +829,22 @@ mod tests {
     #[test]
     fn new_key_buffer_is_empty_when_nothing_is_stored() {
         let secrets = MemorySecretStore::new();
-        let state = GeneralTabState::new(&secrets, &OpenAiSettings::default());
+        let state = GeneralTabState::new(&secrets, &Settings::default());
         assert_eq!(state.key_buffer, "");
     }
 
     #[test]
     fn new_seeds_url_and_model_buffers_from_settings() {
         let secrets = MemorySecretStore::new();
-        let openai = OpenAiSettings {
-            base_url: Some("https://example.com/v1".to_string()),
-            api_model: "whisper-1-custom".to_string(),
+        let settings = Settings {
+            openai: OpenAiSettings {
+                base_url: Some("https://example.com/v1".to_string()),
+                api_model: "whisper-1-custom".to_string(),
+            },
+            ..Settings::default()
         };
 
-        let state = GeneralTabState::new(&secrets, &openai);
+        let state = GeneralTabState::new(&secrets, &settings);
 
         assert_eq!(state.base_url_buffer, "https://example.com/v1");
         assert_eq!(state.api_model_buffer, "whisper-1-custom");
@@ -542,9 +853,82 @@ mod tests {
     #[test]
     fn new_base_url_buffer_is_empty_by_default() {
         let secrets = MemorySecretStore::new();
-        let state = GeneralTabState::new(&secrets, &OpenAiSettings::default());
+        let state = GeneralTabState::new(&secrets, &Settings::default());
         assert_eq!(state.base_url_buffer, "");
         assert_eq!(state.api_model_buffer, "whisper-1");
+    }
+
+    // -- GeneralTabState::new -- the M7 Task 11 additions ------------------------
+
+    #[test]
+    fn new_seeds_locale_code_from_negotiated_settings_locale() {
+        let secrets = MemorySecretStore::new();
+        // No `ui.locale` set: negotiates to the fallback, `en_US` (the only
+        // embedded locale this milestone).
+        let state = GeneralTabState::new(&secrets, &Settings::default());
+        assert_eq!(state.locale_code, "en_US");
+
+        let settings = Settings {
+            ui: UiSettings {
+                locale: Some("en_US".to_string()),
+                ..UiSettings::default()
+            },
+            ..Settings::default()
+        };
+        let state = GeneralTabState::new(&secrets, &settings);
+        assert_eq!(state.locale_code, "en_US");
+    }
+
+    #[test]
+    fn new_seeds_font_size_custom_and_value_from_settings() {
+        let secrets = MemorySecretStore::new();
+
+        let state = GeneralTabState::new(&secrets, &Settings::default());
+        assert!(
+            !state.font_size_custom,
+            "no stored font_size -> Custom is off"
+        );
+        assert_eq!(state.font_size_value, DEFAULT_BODY_SIZE);
+
+        let settings = Settings {
+            ui: UiSettings {
+                font_size: Some(20),
+                ..UiSettings::default()
+            },
+            ..Settings::default()
+        };
+        let state = GeneralTabState::new(&secrets, &settings);
+        assert!(state.font_size_custom, "a stored font_size -> Custom is on");
+        assert_eq!(state.font_size_value, 20);
+    }
+
+    #[test]
+    fn new_seeds_export_template_buffer_and_force_cpu_from_settings() {
+        let secrets = MemorySecretStore::new();
+        let settings = Settings {
+            file_transcriber: FileTranscriberSettings {
+                default_export_template: Some("{{ input_file_name }}-custom".to_string()),
+                ..Default::default()
+            },
+            models: ModelSettings {
+                force_cpu: true,
+                ..Default::default()
+            },
+            ..Settings::default()
+        };
+
+        let state = GeneralTabState::new(&secrets, &settings);
+
+        assert_eq!(state.export_template_buffer, "{{ input_file_name }}-custom");
+        assert!(state.force_cpu);
+    }
+
+    #[test]
+    fn new_export_template_buffer_is_empty_by_default() {
+        let secrets = MemorySecretStore::new();
+        let state = GeneralTabState::new(&secrets, &Settings::default());
+        assert_eq!(state.export_template_buffer, "");
+        assert!(!state.force_cpu);
     }
 
     // -- commit_key ---------------------------------------------------------------
@@ -650,15 +1034,7 @@ mod tests {
 
     #[test]
     fn debug_redacts_key_buffer() {
-        let state = GeneralTabState {
-            key_buffer: "sk-super-secret-value".to_string(),
-            key_visible: false,
-            test_running: false,
-            test_rx: None,
-            modal: None,
-            base_url_buffer: String::new(),
-            api_model_buffer: String::new(),
-        };
+        let state = state_with("sk-super-secret-value", false);
 
         let debug_output = format!("{state:?}");
 
@@ -674,5 +1050,186 @@ mod tests {
             debug_output.contains("GeneralTabState"),
             "Debug output must contain the struct name, got: {debug_output}"
         );
+    }
+
+    // -- commit_locale --------------------------------------------------------
+
+    #[test]
+    fn commit_locale_persists_ui_locale() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.toml");
+        let settings = Mutex::new(Settings::default());
+
+        commit_locale("en_US", &settings, &settings_path);
+
+        assert_eq!(settings.lock().unwrap().ui.locale.as_deref(), Some("en_US"));
+        let reloaded = Settings::load(&settings_path).expect("settings file was written");
+        assert_eq!(reloaded.ui.locale.as_deref(), Some("en_US"));
+    }
+
+    // -- commit_font_size -------------------------------------------------------
+
+    #[test]
+    fn commit_font_size_custom_persists_the_clamped_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.toml");
+        let settings = Mutex::new(Settings::default());
+        let ctx = egui::Context::default();
+
+        let mut state = state_with("", false);
+        state.font_size_custom = true;
+        state.font_size_value = 99; // above UiSettings::MAX_FONT_SIZE (32)
+        commit_font_size(&state, &settings, &settings_path, &ctx);
+
+        assert_eq!(
+            settings.lock().unwrap().ui.font_size,
+            Some(UiSettings::MAX_FONT_SIZE),
+            "an out-of-range value must be clamped before it's persisted"
+        );
+    }
+
+    #[test]
+    fn commit_font_size_not_custom_persists_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.toml");
+        let mut settings = Settings::default();
+        settings.ui.font_size = Some(20);
+        let settings = Mutex::new(settings);
+        let ctx = egui::Context::default();
+
+        let mut state = state_with("", false);
+        state.font_size_custom = false;
+        state.font_size_value = 20;
+        commit_font_size(&state, &settings, &settings_path, &ctx);
+
+        assert_eq!(
+            settings.lock().unwrap().ui.font_size,
+            None,
+            "unchecking Custom must clear the setting back to the egui default"
+        );
+    }
+
+    // -- commit_export_template ---------------------------------------------------
+
+    #[test]
+    fn commit_export_template_empty_clears_the_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.toml");
+        let mut settings = Settings::default();
+        settings.file_transcriber.default_export_template = Some("old".to_string());
+        let settings = Mutex::new(settings);
+
+        let mut state = state_with("", false);
+        state.export_template_buffer = String::new();
+        commit_export_template(&state, &settings, &settings_path);
+
+        assert_eq!(
+            settings
+                .lock()
+                .unwrap()
+                .file_transcriber
+                .default_export_template,
+            None
+        );
+    }
+
+    #[test]
+    fn commit_export_template_non_empty_saves_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.toml");
+        let settings = Mutex::new(Settings::default());
+
+        let mut state = state_with("", false);
+        state.export_template_buffer = "{{ input_file_name }}-custom".to_string();
+        commit_export_template(&state, &settings, &settings_path);
+
+        assert_eq!(
+            settings
+                .lock()
+                .unwrap()
+                .file_transcriber
+                .default_export_template,
+            Some("{{ input_file_name }}-custom".to_string())
+        );
+    }
+
+    // -- commit_force_cpu -----------------------------------------------------
+
+    #[test]
+    fn commit_force_cpu_persists_true_and_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.toml");
+        let settings = Mutex::new(Settings::default());
+
+        let mut state = state_with("", false);
+        state.force_cpu = true;
+        commit_force_cpu(&state, &settings, &settings_path);
+        assert!(settings.lock().unwrap().models.force_cpu);
+
+        state.force_cpu = false;
+        commit_force_cpu(&state, &settings, &settings_path);
+        assert!(!settings.lock().unwrap().models.force_cpu);
+    }
+
+    // -- scale_text_styles / apply_font_size -------------------------------------
+
+    #[test]
+    fn apply_font_size_scales_all_text_styles_and_restores() {
+        let defaults = egui::Style::default().text_styles;
+        let default_body = defaults[&egui::TextStyle::Body].size;
+        assert_eq!(
+            default_body, DEFAULT_BODY_SIZE as f32,
+            "this test's own assumed baseline must match the module's documented default"
+        );
+
+        // Some(26) doubles Body (13 -> 26) and every other entry by the same
+        // ratio, relative to the *pristine* defaults, not whatever the style
+        // already holds.
+        let mut style = egui::Style::default();
+        scale_text_styles(&mut style, Some(26), &defaults);
+        assert_eq!(style.text_styles[&egui::TextStyle::Body].size, 26.0);
+        for (text_style, font_id) in &defaults {
+            let scaled = style.text_styles[text_style].size;
+            assert!(
+                (scaled - font_id.size * 2.0).abs() < 1e-4,
+                "{text_style:?}: expected {} scaled 2x, got {scaled}",
+                font_id.size
+            );
+        }
+
+        // Idempotent: re-applying Some(26) onto the already-scaled `style`
+        // must land on exactly the same sizes -- proving the scale is always
+        // computed from `defaults`, never from the current (possibly
+        // already-scaled) style.
+        let before = style.text_styles.clone();
+        scale_text_styles(&mut style, Some(26), &defaults);
+        assert_eq!(style.text_styles, before);
+
+        // A second, independent `Style` scaled the same way matches too.
+        let mut style2 = egui::Style::default();
+        scale_text_styles(&mut style2, Some(26), &defaults);
+        assert_eq!(style.text_styles, style2.text_styles);
+
+        // None restores exactly the pristine defaults, byte for byte.
+        scale_text_styles(&mut style, None, &defaults);
+        assert_eq!(style.text_styles, defaults);
+    }
+
+    #[test]
+    fn apply_font_size_via_ctx_scales_body_to_the_requested_points() {
+        let ctx = egui::Context::default();
+
+        apply_font_size(&ctx, Some(26));
+        let body_size = ctx.style_of(egui::Theme::Light).text_styles[&egui::TextStyle::Body].size;
+        assert_eq!(body_size, 26.0);
+        // Both theme variants are scaled identically (font size must not
+        // depend on light/dark).
+        let dark_body_size =
+            ctx.style_of(egui::Theme::Dark).text_styles[&egui::TextStyle::Body].size;
+        assert_eq!(dark_body_size, 26.0);
+
+        apply_font_size(&ctx, None);
+        let restored = ctx.style_of(egui::Theme::Light).text_styles[&egui::TextStyle::Body].size;
+        assert_eq!(restored, DEFAULT_BODY_SIZE as f32);
     }
 }

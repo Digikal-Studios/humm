@@ -28,6 +28,7 @@
 //! above, rather than a single shared bundle behind a lock.
 
 use std::cell::RefCell;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fluent::{FluentArgs, FluentBundle, FluentResource, FluentValue};
@@ -219,8 +220,11 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "prefs-tab-general",
         "prefs-tab-models",
         "prefs-tab-privacy",
-        // Preferences General tab -- OpenAI block only (views/prefs_general.rs,
-        // partial F-100, design spec §7.1, Task 13)
+        // Preferences General tab, complete (views/prefs_general.rs, F-100,
+        // design spec §8.1)
+        "prefs-general-ui-language-label",
+        "prefs-general-font-size-label",
+        "prefs-general-font-size-custom-label",
         "prefs-general-openai-key-label",
         "prefs-general-openai-key-placeholder",
         "prefs-general-key-show",
@@ -236,6 +240,10 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "prefs-general-base-url-placeholder",
         "prefs-general-model-label",
         "prefs-general-model-placeholder",
+        "prefs-general-export-template-label",
+        "prefs-general-force-cpu-row-label",
+        "prefs-general-force-cpu-label",
+        "prefs-general-force-cpu-tooltip",
         // Privacy tab (views/preferences.rs, ADR-009, UX §J-11)
         "privacy-telemetry-checkbox",
         "privacy-telemetry-disabled-caption",
@@ -501,9 +509,17 @@ pub fn set_locale(buzz_code: &str) {
         .iter()
         .position(|candidate| candidate.buzz_code == entry.buzz_code)
     {
-        ACTIVE_LOCALE_INDEX.store(index, Ordering::SeqCst);
+        // Release: publishes the new index before `GENERATION`'s own Release
+        // store just below, so a reader that observes the bumped generation
+        // (via an Acquire load) is guaranteed to also observe this index
+        // update, not a stale one (single-writer publish pattern — reviewer-
+        // confirmed this pair needs only acquire/release, not SeqCst).
+        ACTIVE_LOCALE_INDEX.store(index, Ordering::Release);
     }
-    GENERATION.fetch_add(1, Ordering::SeqCst);
+    // Release: pairs with `tr_args`'/`active_entry`'s Acquire loads, so a
+    // thread that observes a bumped generation also observes every write
+    // that happened-before this one (the `ACTIVE_LOCALE_INDEX` store above).
+    GENERATION.fetch_add(1, Ordering::Release);
 }
 
 /// The currently active locale entry — [`ACTIVE_LOCALE_INDEX`] read through
@@ -512,8 +528,53 @@ pub fn set_locale(buzz_code: &str) {
 /// an index it just found *in* `AVAILABLE_LOCALES`, so this can never
 /// actually be out of range.
 fn active_entry() -> &'static LocaleEntry {
-    let index = ACTIVE_LOCALE_INDEX.load(Ordering::SeqCst);
+    // Acquire: pairs with `set_locale`'s Release store, so this always sees
+    // the index that store published, not a stale/torn value.
+    let index = ACTIVE_LOCALE_INDEX.load(Ordering::Acquire);
     &AVAILABLE_LOCALES[index.min(AVAILABLE_LOCALES.len() - 1)]
+}
+
+/// Serializes every test — in this module or any integration test — that
+/// calls [`set_locale`], against every other one: the harness runs `#[test]`
+/// functions concurrently by default, and [`set_locale`] mutates process-wide
+/// global state ([`GENERATION`]/[`ACTIVE_LOCALE_INDEX`]) two tests could
+/// otherwise race on. **Not** `#[cfg(test)]`-gated — a Cargo integration test
+/// (anything under `humm-gui/tests/*.rs`, e.g. `kittest_prefs.rs`'s language-
+/// combo test) is compiled as its own separate crate linking against the
+/// compiled library, so it can never reach a `#[cfg(test)]`-gated item of
+/// this crate at all, regardless of visibility; this mirrors
+/// `services::default_test_validate`'s own "production code, test-only in
+/// practice" shape — acquiring this lock has no effect on a real running
+/// process, since nothing outside a test ever calls it.
+static LOCALE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// RAII guard returned by [`lock_locale_for_test`]: holds [`LOCALE_TEST_LOCK`]
+/// for its lifetime and resets the active locale back to `en_US` (index `0`)
+/// on drop — so a test that switches locale can never leak a non-default
+/// locale into whichever test runs next, regardless of test order or a panic
+/// mid-test (`Drop` still runs during unwind).
+// The guard's only job is to stay alive (holding the lock) until dropped —
+// it's never read, only held, so the field itself is dead code by rustc's
+// reckoning even though the type is very much "used".
+#[allow(dead_code)]
+pub struct LocaleTestGuard(std::sync::MutexGuard<'static, ()>);
+
+impl Drop for LocaleTestGuard {
+    fn drop(&mut self) {
+        set_locale("en_US");
+    }
+}
+
+/// Acquires [`LOCALE_TEST_LOCK`] for the calling test's whole body. Every
+/// test — in this module or any integration test — that calls [`set_locale`]
+/// must hold one of these, bound to a `let _guard = ...` for its full
+/// duration (a `let _ = ...` would drop the guard, and its reset-to-`en_US`
+/// effect, immediately).
+pub fn lock_locale_for_test() -> LocaleTestGuard {
+    let guard = LOCALE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    LocaleTestGuard(guard)
 }
 
 /// Resolves `buzz_code`'s human-readable display name via its own
@@ -611,7 +672,10 @@ thread_local! {
     /// only ever reads its own cache and the shared counter, never another
     /// thread's bundle directly.
     static BUNDLE: RefCell<(usize, FluentBundle<FluentResource>)> = RefCell::new({
-        let generation = GENERATION.load(Ordering::SeqCst);
+        // Acquire: pairs with `set_locale`'s Release store/fetch_add (see
+        // that function's own doc) -- this thread's first-ever bundle build
+        // must see whichever locale is already active, not a stale one.
+        let generation = GENERATION.load(Ordering::Acquire);
         (generation, build_bundle(active_entry()))
     });
 }
@@ -638,7 +702,10 @@ pub fn tr(key: &str) -> String {
 pub fn tr_args(key: &str, args: &[(&str, &str)]) -> String {
     BUNDLE.with(|cell| {
         let mut cached = cell.borrow_mut();
-        let current_generation = GENERATION.load(Ordering::SeqCst);
+        // Acquire: pairs with `set_locale`'s Release store/fetch_add, so a
+        // rebuild triggered by an observed generation bump also sees the
+        // matching `ACTIVE_LOCALE_INDEX` write, not a stale one.
+        let current_generation = GENERATION.load(Ordering::Acquire);
         if cached.0 != current_generation {
             *cached = (current_generation, build_bundle(active_entry()));
         }
@@ -668,21 +735,7 @@ pub fn tr_args(key: &str, args: &[(&str, &str)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use unic_langid::langid;
-
-    /// Serializes the handful of tests below that mutate the shared global
-    /// locale state (`GENERATION`/`ACTIVE_LOCALE_INDEX`, via [`set_locale`])
-    /// against each other — the test harness runs `#[test]` functions
-    /// concurrently by default, and two of these tests intentionally
-    /// observe that global state changing under them, which would be racy
-    /// against each other without this. Every other test in this module
-    /// only ever *reads* through `tr`/`tr_args`/`display_name`, which stays
-    /// safe to interleave freely: with only `en_US` ever registered,
-    /// negotiation can never resolve anywhere but index `0` no matter how
-    /// many times `set_locale` is called concurrently, so those tests are
-    /// unaffected by this lock or by each other.
-    static LOCALE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn locale(buzz_code: &'static str, langid: &'static str) -> LocaleEntry {
         LocaleEntry {
@@ -784,6 +837,31 @@ mod tests {
     }
 
     #[test]
+    fn prefs_general_m7_strings_are_buzz_byte_exact_with_the_product_name_swap() {
+        // M7 Task 11 (F-100) additions -- `general_preferences_widget.py:91`
+        // (`_("Ui Language")`), `:99` (`_("Font Size")`), `:148`
+        // (`_("Default export file name")`), `:218` (checkbox text) / `:223`
+        // (row label, `_("Disable GPU")`).
+        assert_eq!(tr("prefs-general-ui-language-label"), "Ui Language");
+        assert_eq!(tr("prefs-general-font-size-label"), "Font Size");
+        assert_eq!(
+            tr("prefs-general-export-template-label"),
+            "Default export file name"
+        );
+        assert_eq!(tr("prefs-general-force-cpu-row-label"), "Disable GPU");
+        assert_eq!(
+            tr("prefs-general-force-cpu-label"),
+            "Use only CPU and disable GPU acceleration"
+        );
+        // `:221` -- Buzz names "Buzz"; humm substitutes its own product name
+        // (design spec §8.1, same swap as the OpenAI Test success body).
+        assert_eq!(
+            tr("prefs-general-force-cpu-tooltip"),
+            "Set this if larger models do not fit your GPU memory and humm crashes"
+        );
+    }
+
+    #[test]
     fn viewer_translate_key_required_strings_are_buzz_byte_exact() {
         // Buzz `on_translate_button_clicked`
         // (`transcription_viewer_widget.py:1303-1306`).
@@ -873,13 +951,22 @@ mod tests {
         assert_eq!(negotiate_in(&registry, Some("DE")).buzz_code, "de_DE");
     }
 
+    /// Carried from the Task 10 review: an empty (or blank-after-trim)
+    /// requested locale must fall back to `en_US` exactly like `None`
+    /// ([`negotiate_in`]'s own `requested.trim().is_empty()` branch), not
+    /// panic or match some entry by an empty-string coincidence.
+    #[test]
+    fn negotiate_in_empty_string_falls_back_en() {
+        let registry = [locale("en_US", "en-US"), locale("de_DE", "de-DE")];
+        assert_eq!(negotiate_in(&registry, Some("")).buzz_code, "en_US");
+        assert_eq!(negotiate_in(&registry, Some("   ")).buzz_code, "en_US");
+    }
+
     // -- set_locale / generation ----------------------------------------------
 
     #[test]
     fn set_locale_rebuilds_bundle_on_same_thread() {
-        let _guard = LOCALE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = lock_locale_for_test();
         let before = GENERATION.load(Ordering::SeqCst);
         set_locale("en_US");
         let after_first_call = GENERATION.load(Ordering::SeqCst);
@@ -909,9 +996,7 @@ mod tests {
 
     #[test]
     fn set_locale_visible_from_second_thread() {
-        let _guard = LOCALE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = lock_locale_for_test();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
         let (proceed_tx, proceed_rx) = std::sync::mpsc::channel::<()>();
         let (result_tx, result_rx) = std::sync::mpsc::channel::<(String, usize, usize)>();

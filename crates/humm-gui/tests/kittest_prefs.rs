@@ -31,9 +31,10 @@ use humm_core::domain::ModelSize;
 use humm_core::models::registry::{SENTINEL_SUFFIX, ggml_file_name};
 use humm_core::openai::{OpenAiAuth, ValidateOutcome};
 use humm_core::secrets::{MemorySecretStore, SecretKey, SecretStore};
-use humm_core::settings::{OpenAiSettings, Settings};
+use humm_core::settings::Settings;
 use humm_core::update::UpdateInfo;
 use humm_gui::app::HummApp;
+use humm_gui::i18n;
 use humm_gui::models_ui::{self, ModelsTabState};
 use humm_gui::services::{self, Capabilities, TestDeps, UpdateNotice};
 use humm_gui::views::preferences::{self, PreferencesState, PrefsTab};
@@ -106,7 +107,7 @@ fn privacy_toggles_persist_to_the_settings_file() {
     let fixture = PrivacyFixture {
         state: PreferencesState {
             tab: PrefsTab::Privacy,
-            general: GeneralTabState::new(secrets.as_ref(), &OpenAiSettings::default()),
+            general: GeneralTabState::new(secrets.as_ref(), &Settings::default()),
             models: ModelsTabState::new(model_root_dir.path(), None),
         },
         model_root: model_root_dir.path().to_path_buf(),
@@ -155,7 +156,7 @@ fn privacy_toggles_persist_to_the_settings_file() {
     );
 }
 
-// -- General tab: OpenAI block (partial F-100, Task 13) ----------------------
+// -- General tab: OpenAI block (F-100 complete, design spec §8.1) ------------
 
 /// The General tab's own render-loop fixture: `state` starts on
 /// [`PrefsTab::General`] so [`preferences::ui`] renders the OpenAI block
@@ -191,7 +192,7 @@ fn general_harness(
     let fixture = GeneralFixture {
         state: PreferencesState {
             tab: PrefsTab::General,
-            general: GeneralTabState::new(secrets.as_ref(), &OpenAiSettings::default()),
+            general: GeneralTabState::new(secrets.as_ref(), &Settings::default()),
             models: ModelsTabState::new(&model_root, None),
         },
         model_root,
@@ -228,7 +229,7 @@ fn general_harness(
 #[test]
 fn general_tab_key_field_persists_to_secret_store() {
     let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
-    let mut state = GeneralTabState::new(secrets.as_ref(), &OpenAiSettings::default());
+    let mut state = GeneralTabState::new(secrets.as_ref(), &Settings::default());
     state.key_buffer = "sk-committed-via-seam".to_string();
 
     prefs_general::commit_key(&mut state, &secrets);
@@ -372,6 +373,199 @@ fn base_url_and_model_fields_persist_to_settings() {
     let reloaded = Settings::load(&settings_path).expect("settings file was written");
     assert_eq!(reloaded.openai.base_url, None);
     assert_eq!(reloaded.openai.api_model, "whisper-1");
+}
+
+// -- General tab: the M7 Task 11 rows (F-100 complete) -----------------------
+
+/// The UI-language combo lists exactly [`i18n::AVAILABLE_LOCALES`] (one
+/// entry, `en_US`, this milestone) and selecting an entry persists
+/// `ui.locale` (live apply -- design spec ledger #L10). Driving a `ComboBox`
+/// selection by simulated click has no kittest precedent in this workspace
+/// (`kittest_import.rs`/`kittest_recording.rs` both document the same gap
+/// and mutate backing state directly instead) -- this test follows suit,
+/// asserting the rendered combo's closed-state label matches the negotiated
+/// locale's display name, then driving the "selection" via the commit seam
+/// directly, exactly like `base_url_and_model_fields_persist_to_settings`
+/// above does for its own text fields.
+///
+/// Wrapped in [`i18n::lock_locale_for_test`]: [`prefs_general::commit_locale`]
+/// calls [`i18n::set_locale`], which mutates process-wide global state other
+/// tests (in this file and `i18n.rs`) also touch.
+#[test]
+fn language_combo_lists_available_locales_and_persists() {
+    let _locale_guard = i18n::lock_locale_for_test();
+    assert_eq!(
+        i18n::AVAILABLE_LOCALES.len(),
+        1,
+        "this milestone embeds only en_US -- update this test once Task 12 \
+         ports more locales"
+    );
+
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+    let mut harness = general_harness(secrets, services::default_test_validate());
+    harness.run();
+
+    // The combo's closed-state control shows the negotiated locale's display
+    // name as its accessible *value* (accesskit's `ComboBox` role reports its
+    // current selection there, not as a `label`) -- proves it renders
+    // through `i18n::display_name`, not a hardcoded string.
+    harness.get(
+        By::new()
+            .role(Role::ComboBox)
+            .value(&i18n::display_name("en_US")),
+    );
+
+    {
+        let fixture = harness.state_mut();
+        fixture.state.general.locale_code = "en_US".to_string();
+        prefs_general::commit_locale(
+            &fixture.state.general.locale_code,
+            &fixture.settings,
+            &fixture.settings_path,
+        );
+    }
+
+    let settings_path = harness.state().settings_path.clone();
+    let reloaded = Settings::load(&settings_path).expect("settings file was written");
+    assert_eq!(reloaded.ui.locale.as_deref(), Some("en_US"));
+}
+
+/// The font-size row: a `DragValue` has no kittest-driving precedent in this
+/// workspace either (confirmed: zero uses across `crates/humm-gui/tests/`),
+/// so this drives the commit seam directly (`prefs_general::commit_font_size`)
+/// -- the same "state seam, not simulated widget interaction" precedent
+/// `base_url_and_model_fields_persist_to_settings` sets for this file's own
+/// text fields. Proves both persistence and the `UiSettings::MIN_FONT_SIZE`/
+/// `MAX_FONT_SIZE` clamp (Task 1's contract) -- an out-of-range value is
+/// clamped *at commit time* here, matching `Settings::load`'s own
+/// `UiSettings::clamp` for a value that reached disk some other way (a
+/// hand-edited file).
+#[test]
+fn font_size_persists_and_clamps() {
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+    let mut harness = general_harness(secrets, services::default_test_validate());
+    harness.run();
+
+    let ctx = egui::Context::default();
+    {
+        let fixture = harness.state_mut();
+        fixture.state.general.font_size_custom = true;
+        fixture.state.general.font_size_value = 99; // above MAX_FONT_SIZE (32)
+        prefs_general::commit_font_size(
+            &fixture.state.general,
+            &fixture.settings,
+            &fixture.settings_path,
+            &ctx,
+        );
+    }
+
+    let settings_path = harness.state().settings_path.clone();
+    let reloaded = Settings::load(&settings_path).expect("settings file was written");
+    assert_eq!(
+        reloaded.ui.font_size,
+        Some(humm_core::settings::UiSettings::MAX_FONT_SIZE),
+        "an out-of-range value must be clamped before it's persisted"
+    );
+
+    // Unchecking "Custom font size" clears the setting back to `None` (the
+    // egui default), regardless of whatever number is still in the buffer.
+    {
+        let fixture = harness.state_mut();
+        fixture.state.general.font_size_custom = false;
+        prefs_general::commit_font_size(
+            &fixture.state.general,
+            &fixture.settings,
+            &fixture.settings_path,
+            &ctx,
+        );
+    }
+    let reloaded = Settings::load(&settings_path).expect("settings file was written");
+    assert_eq!(reloaded.ui.font_size, None);
+}
+
+/// The "Default export file name" field: commit-on-focus-out, empty ->
+/// `None` (`prefs_general::commit_export_template`), driven through the real
+/// `TextEdit` widget via focus/type/Tab -- the same shape
+/// `custom_url_field_persists_on_lost_focus_not_per_keystroke` uses for the
+/// Models tab's own custom-URL field. Unlike that field, the General tab now
+/// has several single-line text inputs, so this locates the export-template
+/// field specifically by its hint text (the placeholder
+/// `DEFAULT_EXPORT_TEMPLATE`) rather than a bare `Role::TextInput` query,
+/// which would be ambiguous here.
+#[test]
+fn export_template_field_persists_empty_as_none() {
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+    let mut harness = general_harness(secrets, services::default_test_validate());
+    harness.run();
+
+    // Seam-level round trip first (mirrors `base_url_and_model_fields_
+    // persist_to_settings`): a non-empty value saves verbatim, an emptied
+    // value clears to `None`.
+    {
+        let fixture = harness.state_mut();
+        fixture.state.general.export_template_buffer = "{{ input_file_name }}-custom".to_string();
+        prefs_general::commit_export_template(
+            &fixture.state.general,
+            &fixture.settings,
+            &fixture.settings_path,
+        );
+    }
+    let settings_path = harness.state().settings_path.clone();
+    let reloaded = Settings::load(&settings_path).expect("settings file was written");
+    assert_eq!(
+        reloaded.file_transcriber.default_export_template.as_deref(),
+        Some("{{ input_file_name }}-custom")
+    );
+
+    {
+        let fixture = harness.state_mut();
+        fixture.state.general.export_template_buffer = String::new();
+        prefs_general::commit_export_template(
+            &fixture.state.general,
+            &fixture.settings,
+            &fixture.settings_path,
+        );
+    }
+    let reloaded = Settings::load(&settings_path).expect("settings file was written");
+    assert_eq!(
+        reloaded.file_transcriber.default_export_template, None,
+        "an emptied field must clear the setting to None, not persist an \
+         empty string"
+    );
+}
+
+/// The "Disable GPU" checkbox: driven by label click, exactly like the
+/// Privacy tab's own checkboxes (`privacy_toggles_persist_to_the_settings_
+/// file`) -- egui checkboxes render with an accessible label matching their
+/// caption text, and this row's checkbox caption
+/// ("Use only CPU and disable GPU acceleration") is unique on the tab.
+#[test]
+fn force_cpu_checkbox_persists() {
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+    let mut harness = general_harness(secrets, services::default_test_validate());
+    harness.run();
+
+    harness
+        .get_by_label("Use only CPU and disable GPU acceleration")
+        .click();
+    harness.run();
+
+    let settings_path = harness.state().settings_path.clone();
+    let reloaded = Settings::load(&settings_path).expect("settings file was written");
+    assert!(
+        reloaded.models.force_cpu,
+        "clicking the checkbox must persist force_cpu = true"
+    );
+
+    harness
+        .get_by_label("Use only CPU and disable GPU acceleration")
+        .click();
+    harness.run();
+    let reloaded = Settings::load(&settings_path).expect("settings file was written");
+    assert!(
+        !reloaded.models.force_cpu,
+        "clicking it again must persist force_cpu = false"
+    );
 }
 
 struct NeverCalledEngineFactory;

@@ -293,10 +293,15 @@ fn route_ensure_vad(
 /// `[openai]` settings (no local model — `resolved` is ignored, mirroring the
 /// CLI's own `CliEngineFactory`, `humm-cli/src/run.rs`).
 pub struct GuiEngineFactory {
-    /// Whether to allow GPU (Metal/CoreML) acceleration when loading a local
-    /// [`Backend::Whisper`] engine — resolved once at startup from
+    /// Whether the env allows GPU (Metal/CoreML) acceleration when loading a
+    /// local [`Backend::Whisper`] engine — resolved once at startup from
     /// `HUMM_FORCE_CPU` (`services::init`, mirroring the CLI's own
-    /// `use_gpu_from_env`). Ignored for [`Backend::OpenAiApi`].
+    /// `use_gpu_from_env`); env vars don't change mid-process, so caching this
+    /// half is safe. [`Self::create_whisper`] additionally ANDs in a *fresh*
+    /// `settings.models.force_cpu` read at actual engine-construction time
+    /// (design spec §8.1) — `HUMM_FORCE_CPU` still wins whenever it forces
+    /// CPU, but the settings checkbox is honored live, no restart required.
+    /// Ignored for [`Backend::OpenAiApi`].
     pub use_gpu: bool,
     /// The shared live settings — `openai.{base_url, api_model}` are read
     /// fresh at [`Backend::OpenAiApi`] engine-construction time (Buzz reads
@@ -384,7 +389,24 @@ impl GuiEngineFactory {
                     .to_string(),
             }));
         };
-        humm_whisper::WhisperEngine::load(path, self.use_gpu)
+        // `settings.models.force_cpu` (Preferences → General → Disable GPU,
+        // design spec §8.1) is read fresh here, at actual engine-construction
+        // time — mirroring `create_openai`'s own fresh `openai.*` read just
+        // above — rather than cached at startup, so a checkbox flip is honored
+        // by the very next task with no restart (the field's own doc comment's
+        // stated contract). `self.use_gpu` stays the startup-resolved,
+        // env-only half (`HUMM_FORCE_CPU` doesn't change mid-process); `env`
+        // wins over the setting whenever it forces CPU, matching
+        // `humm_core::env::use_gpu_resolution`'s precedence.
+        let force_cpu_setting = {
+            let guard = self
+                .settings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.models.force_cpu
+        };
+        let use_gpu = self.use_gpu && !force_cpu_setting;
+        humm_whisper::WhisperEngine::load(path, use_gpu)
             .map(|engine| Box::new(engine) as Box<dyn TranscriptionEngine>)
             .map_err(CoreError::from)
     }

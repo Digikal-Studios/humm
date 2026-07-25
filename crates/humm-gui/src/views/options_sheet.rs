@@ -140,6 +140,14 @@ pub struct SheetState {
     pub llm_model: String,
     /// The "Instructions for AI:" field — seeded with [`DEFAULT_LLM_PROMPT`].
     pub llm_prompt: String,
+    /// The output-filename template (F-100, design spec §8.1): a snapshot of
+    /// `settings.file_transcriber.default_export_template` taken when the
+    /// sheet opens, carried straight into every produced [`TaskSpec`]'s
+    /// `OutputSpec.file_name_template` ([`build_specs`]). Not an editable
+    /// sheet row (that field lives only in Preferences → General) and never
+    /// written back by [`SheetState::write_to`] — same "never persisted from
+    /// here" shape as [`SheetState::api_key`].
+    pub export_template: Option<String>,
 }
 
 impl SheetState {
@@ -203,6 +211,7 @@ impl SheetState {
                 .llm_prompt
                 .clone()
                 .unwrap_or_else(|| DEFAULT_LLM_PROMPT.to_string()),
+            export_template: prefill.default_export_template.clone(),
         }
     }
 
@@ -247,6 +256,7 @@ impl std::fmt::Debug for SheetState {
             .field("enable_llm_translation", &self.enable_llm_translation)
             .field("llm_model", &self.llm_model)
             .field("llm_prompt", &self.llm_prompt)
+            .field("export_template", &self.export_template)
             .finish()
     }
 }
@@ -454,6 +464,11 @@ fn build_specs_with_paragraph_split(
     let output = OutputSpec {
         formats: state.formats.clone(),
         paragraph_split,
+        // `None` uses `export::DEFAULT_EXPORT_TEMPLATE` (design spec §8.1:
+        // wired into every spec-build site — `state.export_template` is the
+        // sheet-open-time snapshot of `settings.file_transcriber.
+        // default_export_template`, see that field's doc comment).
+        file_name_template: state.export_template.clone(),
         ..OutputSpec::default()
     };
 
@@ -540,7 +555,11 @@ pub(crate) fn spec_from_transcriber_settings(
         output: OutputSpec {
             formats: state.formats,
             directory: Some(output_dir),
-            file_name_template: None,
+            // `state.export_template` is already `settings.
+            // default_export_template.clone()` (`SheetState::from_settings`
+            // seeds it) — design spec §8.1: wired into every spec-build site,
+            // folder watch included.
+            file_name_template: state.export_template,
             paragraph_split: paragraph_split_from_env(),
             source_disposition: Some(source_disposition),
         },
@@ -1049,6 +1068,7 @@ mod tests {
             enable_llm_translation: false,
             llm_model: String::new(),
             llm_prompt: String::new(),
+            export_template: None,
         }
     }
 
@@ -1079,6 +1099,31 @@ mod tests {
         assert_eq!(
             state.llm_prompt, DEFAULT_LLM_PROMPT,
             "the seeded AI-instructions default"
+        );
+        assert_eq!(state.export_template, None);
+    }
+
+    /// M7 Task 11 (F-100): `SheetState::from_settings` seeds `export_template`
+    /// verbatim from `settings.default_export_template`, and [`build_specs`]
+    /// carries it straight into every produced `TaskSpec.output.
+    /// file_name_template` (design spec §8.1).
+    #[test]
+    fn from_settings_seeds_export_template_and_build_specs_carries_it() {
+        let prefill = FileTranscriberSettings {
+            default_export_template: Some("{{ input_file_name }}-custom".to_string()),
+            ..Default::default()
+        };
+        let state = SheetState::from_settings(&prefill, false);
+        assert_eq!(
+            state.export_template.as_deref(),
+            Some("{{ input_file_name }}-custom")
+        );
+
+        let request = ImportRequest::Files(vec![PathBuf::from("/in/clip.wav")]);
+        let specs = build_specs(&request, &state);
+        assert_eq!(
+            specs[0].1.output.file_name_template.as_deref(),
+            Some("{{ input_file_name }}-custom")
         );
     }
 
@@ -1453,9 +1498,36 @@ mod tests {
             spec.output.source_disposition,
             Some(humm_core::domain::SourceDisposition::Delete)
         );
-        // Task 11 wires `default_export_template` into this site — until
-        // then it must stay `None` (the default template).
+        // `settings.default_export_template` is unset here, so this stays
+        // `None` (the default template) — see
+        // `spec_from_transcriber_settings_honors_a_custom_export_template`
+        // below for the wired, non-`None` case.
         assert_eq!(spec.output.file_name_template, None);
+    }
+
+    /// M7 Task 11 (F-100): `spec_from_transcriber_settings` (the folder-watch
+    /// spec-build site) now carries `settings.default_export_template`
+    /// straight through to `OutputSpec.file_name_template`, same as every
+    /// other spec-build site (design spec §8.1).
+    #[test]
+    fn spec_from_transcriber_settings_honors_a_custom_export_template() {
+        let settings = FileTranscriberSettings {
+            default_export_template: Some("{{ input_file_name }}-watched".to_string()),
+            ..FileTranscriberSettings::default()
+        };
+
+        let spec = spec_from_transcriber_settings(
+            &settings,
+            true,
+            PathBuf::from("/in/clip.wav"),
+            PathBuf::from("/out/sub"),
+            humm_core::domain::SourceDisposition::Delete,
+        );
+
+        assert_eq!(
+            spec.output.file_name_template.as_deref(),
+            Some("{{ input_file_name }}-watched")
+        );
     }
 
     #[test]

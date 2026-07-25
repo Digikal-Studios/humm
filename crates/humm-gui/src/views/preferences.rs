@@ -34,8 +34,9 @@ use crate::views::prefs_general::{self, GeneralTabState, ValidateFn};
 /// Which tab is currently selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefsTab {
-    /// The OpenAI block (partial F-100, design spec §7.1) — the rest of
-    /// Buzz's General tab arrives M7.
+    /// UI language, font size, the OpenAI block, default export template,
+    /// and Disable GPU (F-100 complete, design spec §8.1). Shortcuts/Folder
+    /// Watch/Post-processing tabs are later M7 tasks.
     General,
     /// F-044 basic model list.
     Models,
@@ -51,7 +52,7 @@ pub enum PrefsTab {
 pub struct PreferencesState {
     /// The selected tab.
     pub tab: PrefsTab,
-    /// The General tab's own state (partial F-100, Task 13).
+    /// The General tab's own state (F-100 complete, design spec §8.1).
     pub general: GeneralTabState,
     /// The Models tab's own state.
     pub models: ModelsTabState,
@@ -62,17 +63,20 @@ impl PreferencesState {
     /// dialog always opens on its first tab (`preferences_dialog.py:46-48`),
     /// and General is that first tab both in Buzz and in this tab strip's own
     /// order. `models` is scanned from `root` and seeded from the current
-    /// custom-URL setting; `general` is seeded from `secrets`/`openai`
-    /// (`settings.openai`, snapshotted by the caller when the window opens).
+    /// custom-URL setting; `general` is seeded from `secrets`/`settings`
+    /// (a full snapshot the caller takes when the window opens — General
+    /// now reads `openai`, `ui.{locale,font_size}`,
+    /// `file_transcriber.default_export_template`, and `models.force_cpu`,
+    /// F-100 complete).
     pub fn new(
         root: &Path,
         custom_url: Option<&str>,
         secrets: &Arc<dyn SecretStore>,
-        openai: &humm_core::settings::OpenAiSettings,
+        settings: &Settings,
     ) -> Self {
         PreferencesState {
             tab: PrefsTab::General,
-            general: GeneralTabState::new(secrets.as_ref(), openai),
+            general: GeneralTabState::new(secrets.as_ref(), settings),
             models: ModelsTabState::new(root, custom_url),
         }
     }
@@ -199,12 +203,7 @@ mod tests {
     fn new_opens_on_the_general_tab() {
         let dir = tempfile::tempdir().expect("tempdir");
         let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
-        let state = PreferencesState::new(
-            dir.path(),
-            None,
-            &secrets,
-            &humm_core::settings::OpenAiSettings::default(),
-        );
+        let state = PreferencesState::new(dir.path(), None, &secrets, &Settings::default());
         assert_eq!(state.tab, PrefsTab::General);
     }
 

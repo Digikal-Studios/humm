@@ -22,6 +22,7 @@ use humm_core::live::{
 use humm_core::models::download::DownloadProgress;
 use humm_core::openai::{ENV_BASE, ENV_KEY, TranslatorConfig, resolve_endpoint};
 use humm_core::queue::{ArtifactEnsurer, QueueHandle, TaskEvent, TaskEventKind};
+use humm_core::settings::Settings;
 use humm_core::settings::{FileTranscriberSettings, GuiSettings, ViewerGeometry};
 use humm_media::{FfmpegDecoder, FfmpegVideoStreamer, FfprobeProber};
 use humm_whisper::LiveOptions;
@@ -49,6 +50,7 @@ use crate::views::main_window::{
 };
 use crate::views::options_sheet::{OptionsSheet, SheetOutcome, SheetState};
 use crate::views::preferences::{self, PreferencesState};
+use crate::views::prefs_general;
 use crate::views::rename_notes::{self, DialogOutcome};
 use crate::views::resizer::{self, ResizerAction, ResizerVm};
 use crate::views::task_table::TableLayout;
@@ -315,12 +317,12 @@ impl HummApp {
         // typical macOS launch whenever `settings.ui.locale` is also
         // unset, which is a fine outcome for now since `en_US` is the only
         // catalog embedded until Task 12 anyway.
-        let requested_locale = {
+        let (requested_locale, startup_font_size) = {
             let settings = services
                 .settings
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            settings.ui.locale.clone()
+            (settings.ui.locale.clone(), settings.ui.font_size)
         };
         let system_locale = i18n::locale_from_env_vars(
             std::env::var("LC_ALL").ok().as_deref(),
@@ -328,6 +330,13 @@ impl HummApp {
         );
         let negotiated = i18n::negotiate(requested_locale.as_deref().or(system_locale.as_deref()));
         i18n::set_locale(negotiated.buzz_code);
+
+        // Font-size application (F-100, design spec §8.1): same "resolved
+        // once here, before the first frame paints" contract as the locale
+        // negotiation just above — `cc.egui_ctx` is the one handle every
+        // later `apply_font_size` call (the General tab's own DragValue/
+        // checkbox, `views::prefs_general::ui`) also mutates through.
+        prefs_general::apply_font_size(&cc.egui_ctx, startup_font_size);
 
         let event_queue = events::spawn_event_pump(services.events.clone(), cc.egui_ctx.clone());
         // Smoke-test hooks (see `SmokeHooks`'s doc comment): read from real
@@ -530,6 +539,11 @@ impl HummApp {
             // in `init`, in-memory/scripted doubles in `init_with`).
             secrets: Arc::clone(&services.secrets),
             translate: Arc::clone(&services.translate),
+            // The Export menu's `default_export_template` read (F-100,
+            // design spec §8.1) — the same shared, live handle every other
+            // settings-reading view uses, so a Preferences edit is honored by
+            // the very next export.
+            settings: Arc::clone(&services.settings),
         });
         // The recording window's adapter bundle (F-060/F-061/F-064, Q-10):
         // `capture`/`model_ensurer`/`engine_factory`/`upload_factory` are
@@ -700,13 +714,36 @@ impl HummApp {
     /// The current `settings.openai` snapshot — the Preferences window's
     /// General tab (partial F-100, Task 13) seeds its base-URL/API-model
     /// buffers from this the moment the window opens.
-    fn openai_settings_snapshot(&self) -> humm_core::settings::OpenAiSettings {
+    /// A full clone of the live settings, snapshotted at the moment the
+    /// Preferences window opens (`PreferencesState::new`'s own contract:
+    /// every tab's fields are seeded once, at open time, not live-read
+    /// per frame). Renamed from the M6-era `openai_settings_snapshot` (which
+    /// returned only `settings.openai`) once the General tab grew rows
+    /// seeded from `settings.ui`/`settings.file_transcriber`/
+    /// `settings.models` too (F-100, design spec §8.1).
+    fn settings_snapshot(&self) -> Settings {
         let settings = self
             .services
             .settings
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        settings.openai.clone()
+        settings.clone()
+    }
+
+    /// `settings.models.force_cpu`, read fresh (design spec §8.1: "Disable
+    /// GPU" persists live, no restart) — the setting-half of the live-
+    /// recording session's own `use_gpu` resolution
+    /// ([`Self::start_live_session`]'s `LiveSessionRequest.use_gpu`), which
+    /// combines this with `self.use_gpu`'s startup-cached, env-only half
+    /// (`HUMM_FORCE_CPU` doesn't change mid-process, so caching it is safe;
+    /// the setting can change any time Preferences is open, so it isn't).
+    fn force_cpu_setting(&self) -> bool {
+        let settings = self
+            .services
+            .settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        settings.models.force_cpu
     }
 
     /// The running queue handle, for every ordinary (non-shutdown) caller —
@@ -2666,7 +2703,11 @@ impl HummApp {
         let request = LiveSessionRequest {
             device_id,
             model,
-            use_gpu: self.use_gpu,
+            // `self.use_gpu` (env-only, cached at startup) AND a fresh
+            // `settings.models.force_cpu` read (design spec §8.1) — see
+            // `Self::force_cpu_setting`'s doc for why the two halves are
+            // combined here rather than both cached.
+            use_gpu: self.use_gpu && !self.force_cpu_setting(),
             live_options,
             session_config,
             separator: options.line_separator.clone(),
@@ -3639,12 +3680,12 @@ impl eframe::App for HummApp {
             // live state (an in-flight download's `Downloading` row, a
             // half-typed custom URL, an open delete-confirm modal).
             if !self.preferences_open {
-                let openai = self.openai_settings_snapshot();
+                let settings_snapshot = self.settings_snapshot();
                 self.preferences_state = Some(PreferencesState::new(
                     &self.services.model_root,
                     self.custom_model_url().as_deref(),
                     &self.services.secrets,
-                    &openai,
+                    &settings_snapshot,
                 ));
             }
             self.preferences_open = true;

@@ -53,7 +53,7 @@ use humm_core::domain::{
     TaskSpec, TranscriptionId, TranscriptionOptions,
 };
 use humm_core::env::{
-    keyring_disabled_from_env, threads_from_env, use_gpu_from_env, vad_disabled_from_env,
+    keyring_disabled_from_env, threads_from_env, use_gpu_resolution, vad_disabled_from_env,
 };
 use humm_core::error::CoreError;
 use humm_core::format::format_eta;
@@ -182,7 +182,14 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
     // installed later (brief step 8), so a SIGINT during a long model download
     // is the default terminate, matching Buzz.
     let download_cancel = CancelToken::new();
-    let use_gpu = use_gpu_from_env(std::env::var("HUMM_FORCE_CPU").ok().as_deref());
+    // `HUMM_FORCE_CPU` wins whenever set (any non-"false" value); otherwise
+    // `settings.models.force_cpu` decides (Preferences → General → Disable
+    // GPU, design spec §8.1) — `settings` is already loaded above, so this is
+    // a fresh, current-run read, matching Buzz's own always-fresh env check.
+    let use_gpu = use_gpu_resolution(
+        std::env::var("HUMM_FORCE_CPU").ok().as_deref(),
+        settings.models.force_cpu,
+    );
 
     // The API backend has no local model or VAD model to resolve (design
     // spec §2.1): both the synchronous model-download phase and the VAD
@@ -239,7 +246,9 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
     let output = OutputSpec {
         formats,
         directory: args.output_directory.clone(),
-        file_name_template: None,
+        // `None` uses `export::DEFAULT_EXPORT_TEMPLATE` (design spec §8.1:
+        // wired into every spec-build site).
+        file_name_template: settings.file_transcriber.default_export_template.clone(),
         paragraph_split: humm_core::viewer::text_view::paragraph_split_from_env(),
         // The CLI has no folder-watch surface (Buzz or humm, design spec
         // §3.5) -- it never sets a source disposition.
