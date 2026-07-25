@@ -21,13 +21,14 @@
 //! below).
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, mpsc};
 use std::thread;
 use std::time::Duration;
 
 use regex::Regex;
 use serde_json::Value;
 
+use crate::cancel::CancelToken;
 use crate::secrets::{SecretKey, SecretStore};
 
 use super::client::{ApiFailure, OpenAiAuth, effective_base};
@@ -353,17 +354,61 @@ impl TranslatorHandle {
     }
 
     /// Stops the worker and waits for it to exit (Buzz `stop`, `:196-198`,
-    /// plus the join Buzz's caller performs on the underlying `QThread`).
+    /// plus the join Buzz's caller performs on the underlying `QThread`) — a
+    /// **poll-join** (M7 hardening of a carried ticket, design spec §14),
+    /// mirroring [`crate::queue::QueueHandle::finish_within`]'s "watcher
+    /// thread + bounded channel recv" shape (ADR-022): sends the `Stop`
+    /// sentinel, then hands the actual (otherwise-unbounded from this call's
+    /// point of view) `join()` to a small waiter thread that signals an
+    /// `mpsc` channel once it returns, while this call polls that channel
+    /// with `recv_timeout(100 ms)` in a loop.
     ///
-    /// Sends the `Stop` sentinel, then blocks joining the worker thread. The
-    /// wait is bounded: the worker honors `Stop` between requests (or after
-    /// finishing a batch that had `Stop` queued mid-drain — see
-    /// [`Self::update_options`]'s sibling drain semantics), and every
-    /// request has its own [`REQUEST_TIMEOUT`], so this returns within
-    /// roughly one in-flight request's timeout, never indefinitely.
-    pub fn stop(self) {
-        let _ = self.sender.send(TranslatorMsg::Stop);
-        let _ = self.join.join();
+    /// `cancel`, when `Some`, is checked at the top of every loop iteration —
+    /// including before the very first wait — so a token that is already
+    /// canceled at call time is honored immediately, and one that becomes
+    /// canceled *during* the join is honored at the next iteration, at most
+    /// one poll tick later. Either way this returns `false`: the wait is
+    /// **abandoned**, not the worker — the waiter thread (and the translator
+    /// worker it's joining) keeps running independently, deliberately leaked
+    /// exactly as `finish_within` leaks on timeout, since every request the
+    /// worker issues has its own bounded [`REQUEST_TIMEOUT`] and so it exits
+    /// quietly on its own shortly after. `cancel: None` never takes that
+    /// early exit — the loop just keeps polling until the join completes,
+    /// bounded only by the worker's own per-request timeout, exactly as
+    /// `stop`'s contract always has been.
+    ///
+    /// Returns `true` once the join actually completed (every translation
+    /// [`Self::spawn`]'s `on_result` collected up to that point is final and
+    /// safe to use), `false` when abandoned on cancel.
+    pub fn stop(self, cancel: Option<&CancelToken>) -> bool {
+        let TranslatorHandle { sender, join } = self;
+        let _ = sender.send(TranslatorMsg::Stop);
+
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = join.join();
+            // The receiver may already be gone (a canceled caller stopped
+            // polling and returned) — expected and fine, not an error worth
+            // handling.
+            let _ = done_tx.send(());
+        });
+
+        loop {
+            if let Some(cancel) = cancel
+                && cancel.is_canceled()
+            {
+                return false;
+            }
+            match done_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(()) => return true,
+                // The sender is dropped only after it sends, or if its
+                // thread panicked without unwinding past the `let _ =`
+                // above — either way the worker is as done as it's going to
+                // get, so this counts as completed rather than abandoned.
+                Err(mpsc::RecvTimeoutError::Disconnected) => return true,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
     }
 
     /// Stops the worker without waiting for it — the GUI close path, which
@@ -758,7 +803,7 @@ mod tests {
         // non-empty result per id.
         handle.enqueue("Good morning, everyone.".into(), Some(1));
         handle.enqueue("The weather is nice today.".into(), Some(2));
-        handle.stop();
+        handle.stop(None);
 
         let mut seen = std::collections::BTreeMap::new();
         while let Ok((text, id)) = results_rx.try_recv() {
@@ -1210,6 +1255,66 @@ mod tests {
         }
     }
 
+    // ---------------------------------------- TranslatorHandle::stop poll-join
+    //
+    // Network-free, no TCP bound: builds a `TranslatorHandle` directly (this
+    // module is a descendant of `translate`, so it can see its private
+    // `sender`/`join` fields, the same trick `drop_without_stop_ends_the_worker`
+    // in `mod worker` below uses) around a bare thread that just sleeps,
+    // standing in for a worker stuck mid-request without ever touching the
+    // network or `worker_loop` itself.
+
+    mod stop_poll_join {
+        use super::*;
+
+        /// A `TranslatorHandle` whose "worker" is a thread that sleeps for
+        /// `block_for` instead of running the real `worker_loop` -- long
+        /// enough to still be "in progress" for whatever this test asserts,
+        /// with no HTTP client, no channel messages consumed, and no TCP
+        /// bound anywhere.
+        fn handle_blocked_for(block_for: Duration) -> TranslatorHandle {
+            let (sender, _receiver) = flume::unbounded::<TranslatorMsg>();
+            let join = thread::spawn(move || {
+                thread::sleep(block_for);
+            });
+            TranslatorHandle { sender, join }
+        }
+
+        #[test]
+        fn stop_with_canceled_token_returns_within_bound() {
+            // The worker is "blocked" for 5s -- far longer than any sane
+            // cancel-ack bound -- so a passing test proves `stop` actually
+            // abandoned the join rather than happening to race it.
+            let handle = handle_blocked_for(Duration::from_secs(5));
+            let cancel = CancelToken::new();
+            cancel.cancel();
+
+            let start = std::time::Instant::now();
+            let completed = handle.stop(Some(&cancel));
+            let elapsed = start.elapsed();
+
+            assert!(
+                !completed,
+                "a pre-canceled token must abandon the join (the worker is left \
+                 detached), not wait for it"
+            );
+            assert!(
+                elapsed < Duration::from_secs(1),
+                "stop must return well under 1s when canceled, took {elapsed:?}"
+            );
+        }
+
+        #[test]
+        fn stop_with_none_cancel_waits_for_the_join_and_returns_true() {
+            let handle = handle_blocked_for(Duration::from_millis(50));
+            let completed = handle.stop(None);
+            assert!(
+                completed,
+                "with no cancel source, stop waits out the join and reports true"
+            );
+        }
+    }
+
     // -------------------------------------------------- TranslatorHandle worker
     //
     // Binds TCP (`TestServer::start`) -- blocked under the sandbox, run with
@@ -1292,7 +1397,7 @@ mod tests {
             handle.enqueue("Hello".to_string(), Some(1));
             assert_eq!(recv(&rx), ("Bonjour".to_string(), Some(1)));
 
-            handle.stop();
+            handle.stop(None);
 
             let requests = server.requests();
             assert_eq!(requests.len(), 1);
@@ -1470,7 +1575,7 @@ mod tests {
             handle.enqueue("second".to_string(), Some(2));
             recv(&rx); // batch 2 fully processed
 
-            handle.stop();
+            handle.stop(None);
 
             let requests = server.requests();
             assert_eq!(requests.len(), 2);
@@ -1504,7 +1609,7 @@ mod tests {
             // order) and blocks until the worker has drained everything
             // queued ahead of it, so every callback below is available by
             // the time `stop` returns.
-            handle.stop();
+            handle.stop(None);
 
             let mut ids: Vec<Option<i64>> = (0..3).map(|_| recv(&rx).1).collect();
             ids.sort();

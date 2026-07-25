@@ -282,6 +282,7 @@ fn sample_task_spec() -> TaskSpec {
             directory: Some(std::path::PathBuf::from("/tmp/out")),
             file_name_template: None,
             paragraph_split: Millis(2000),
+            source_disposition: None,
         },
     }
 }

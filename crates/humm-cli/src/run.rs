@@ -240,6 +240,9 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         directory: args.output_directory.clone(),
         file_name_template: None,
         paragraph_split: humm_core::viewer::text_view::paragraph_split_from_env(),
+        // The CLI has no folder-watch surface (Buzz or humm, design spec
+        // §3.5) -- it never sets a source disposition.
+        source_disposition: None,
     };
 
     let decoder: Arc<dyn AudioDecoder> = Arc::new(FfmpegDecoder::new());

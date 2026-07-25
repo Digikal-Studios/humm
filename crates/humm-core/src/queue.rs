@@ -3691,12 +3691,14 @@ mod tests {
 
     /// Network-free (passes sandboxed): a translator IS spawned (the endpoint
     /// resolves), but the engine trips the cancel token as its last act, so
-    /// the pipeline observes the cancel *before* the drain and takes the
-    /// `stop_detached` + return `Canceled` path (design spec §6) — never
-    /// merging or persisting any translation. Deterministic; the endpoint
-    /// points at a dead loopback port so the detached worker's lone request
-    /// can never reach a real service, and the test never waits on that
-    /// worker.
+    /// by the time the pipeline reaches the drain, `cancel` is already
+    /// canceled — `TranslatorHandle::stop(Some(cancel))`'s poll-join (M7,
+    /// design spec §14) sees that on its very first check, before ever
+    /// waiting on the join, and returns `false` immediately, which the
+    /// pipeline turns into `Canceled` (design spec §6) — never merging or
+    /// persisting any translation. Deterministic; the endpoint points at a
+    /// dead loopback port so the detached worker's lone request can never
+    /// reach a real service, and the test never waits on that worker.
     #[test]
     fn cancel_during_translation_drain_yields_canceled() {
         let source: Arc<dyn LlmEndpointSource> = Arc::new(FixedEndpoint {

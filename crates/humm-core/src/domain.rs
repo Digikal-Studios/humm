@@ -532,6 +532,27 @@ impl Default for TranscriptionOptions {
     }
 }
 
+/// What happens to a folder-watch task's source file once every requested
+/// export has been written (F-030, design spec §3.4).
+///
+/// Ported from Buzz's `_handle_folder_watch` (`file_transcriber.py:155-170`),
+/// which always removes the source from the watched input tree — either
+/// deleting it outright or moving it into the output directory — driven by
+/// the folder-watch tab's "delete processed files" checkbox. Buzz never
+/// leaves the source in place for a folder-watch task; `None` on
+/// [`OutputSpec::source_disposition`] is humm's way of saying "this job did
+/// not come from folder watch" (or, pre-M7, that the field didn't exist yet),
+/// not a third disposition choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceDisposition {
+    /// Remove the source file outright (`os.remove`, `file_transcriber.py:162`).
+    Delete,
+    /// Move the source file into the export directory, under its own
+    /// basename (`shutil.move`, `file_transcriber.py:163-169`).
+    MoveToOutput,
+}
+
 /// Where and how to write transcription results.
 ///
 /// Ported from Buzz's `FileTranscriptionOptions.output_formats` plus the
@@ -547,6 +568,13 @@ pub struct OutputSpec {
     pub file_name_template: Option<String>,
     /// Maximum gap between segments before starting a new paragraph on export.
     pub paragraph_split: Millis,
+    /// What to do with the input file after every requested export has been
+    /// written (F-030): delete it, move it into the export directory, or (the
+    /// default, `None`) leave it alone — this job isn't a folder-watch task.
+    /// `#[serde(default)]` resolves every pre-M7 `options_json` row — which
+    /// has no `source_disposition` key at all — to `None`.
+    #[serde(default)]
+    pub source_disposition: Option<SourceDisposition>,
 }
 
 impl Default for OutputSpec {
@@ -556,6 +584,7 @@ impl Default for OutputSpec {
             directory: None,
             file_name_template: None,
             paragraph_split: Millis(2000),
+            source_disposition: None,
         }
     }
 }
@@ -789,6 +818,7 @@ mod tests {
                 directory: None,
                 file_name_template: None,
                 paragraph_split: Millis(2000),
+                source_disposition: None,
             }
         );
     }
@@ -982,6 +1012,7 @@ mod tests {
                 directory: Some(PathBuf::from("/tmp/out")),
                 file_name_template: Some("{{ input_file_name }}".to_string()),
                 paragraph_split: Millis(1500),
+                source_disposition: Some(SourceDisposition::MoveToOutput),
             },
         };
 
@@ -989,6 +1020,7 @@ mod tests {
         assert!(json.contains("\"task\":\"transcribe\""));
         assert!(json.contains("\"large-v3-turbo\""));
         assert!(json.contains("\"url\":\"https://example.com/audio.mp3\""));
+        assert!(json.contains("\"source_disposition\":\"move_to_output\""));
 
         let round_tripped: TaskSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(round_tripped, spec);
@@ -1071,5 +1103,50 @@ mod tests {
         let spec: TaskSpec = serde_json::from_str(pre_m6_json).expect("pre-M6 row deserializes");
         assert_eq!(spec.options.model.backend, Backend::Whisper);
         assert_eq!(spec.options.llm, None);
+    }
+
+    // -- SourceDisposition (M7, F-030) -------------------------------------
+
+    #[test]
+    fn output_spec_default_has_no_source_disposition() {
+        assert_eq!(OutputSpec::default().source_disposition, None);
+    }
+
+    #[test]
+    fn source_disposition_round_trips_through_options_json() {
+        for (variant, wire) in [
+            (SourceDisposition::Delete, "\"delete\""),
+            (SourceDisposition::MoveToOutput, "\"move_to_output\""),
+        ] {
+            let output = OutputSpec {
+                source_disposition: Some(variant),
+                ..OutputSpec::default()
+            };
+
+            let json = serde_json::to_string(&output).unwrap();
+            assert!(
+                json.contains(&format!("\"source_disposition\":{wire}")),
+                "expected {wire} in {json}"
+            );
+
+            let round_tripped: OutputSpec = serde_json::from_str(&json).unwrap();
+            assert_eq!(round_tripped, output);
+            assert_eq!(round_tripped.source_disposition, Some(variant));
+        }
+    }
+
+    #[test]
+    fn old_options_json_without_disposition_deserializes() {
+        // A real M6-era `TaskSpec` shape: `backend`/`llm` already exist (M6
+        // added them — see `options_json_without_backend_or_llm_deserializes_to_whisper_none`
+        // above for the pre-M6 shape), but `output` has no
+        // `"source_disposition"` key at all, since M7 is what introduces it.
+        // Every `options_json` row persisted before this milestone looks
+        // like this — `#[serde(default)]` on the new field must resolve it
+        // to `None`, not fail to deserialize.
+        let m6_json = r#"{"input":{"path":"/audio/sample.mp3"},"options":{"language":"fr","task":"transcribe","model":{"backend":"whisper","size":"small","hf_repo":null},"word_timestamps":false,"initial_prompt":"","temperature":[0.0,0.2,0.4,0.6,0.8,1.0],"llm":null},"output":{"formats":["srt"],"directory":null,"file_name_template":null,"paragraph_split":2000}}"#;
+
+        let spec: TaskSpec = serde_json::from_str(m6_json).expect("M6-era row deserializes");
+        assert_eq!(spec.output.source_disposition, None);
     }
 }

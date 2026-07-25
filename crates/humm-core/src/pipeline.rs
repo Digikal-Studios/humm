@@ -6,12 +6,12 @@
 //! names no adapter — it is pure core, exercised in tests with in-module
 //! fakes only.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::boundary::{AudioDecoder, EngineOptions, MediaProber, SegmentSink, TranscriptionEngine};
 use crate::cancel::CancelToken;
-use crate::domain::{JobSpec, Segment};
+use crate::domain::{JobSpec, Segment, SourceDisposition};
 use crate::error::{CoreError, ExportError, MediaError};
 use crate::export::{TextKey, output_file_path, write_format};
 use crate::openai::{LlmEndpointSource, TranslatorConfig, TranslatorHandle};
@@ -246,46 +246,39 @@ pub fn run_file_job(
         return Err(err.into());
     }
 
-    // Drain and merge LLM translations (if a translator ran). `stop()` joins
-    // the worker, which drains a FIFO queue in batches of at most
-    // `BATCH_SIZE` (10) items, each dispatched as one request bounded by
-    // `REQUEST_TIMEOUT` (60 s) — so the worst-case join is ceil(N/10) x 60 s
-    // for N items already queued when `stop()` is called, not a flat 60 s.
-    // This is accepted rather than hardened because the backlog at stop-time
-    // is normally at most one batch (batches are dispatched concurrently
-    // with the transcription that keeps enqueuing them, so the queue rarely
-    // grows past a single in-flight batch by the time transcription
-    // finishes and this drain runs); a poll-and-check-cancel join loop
-    // instead of a single blocking join is an M7 hardening candidate if that
-    // assumption ever proves wrong (design spec §4.2/§6).
-    if let Some(handle) = translator {
-        // A cancel that has *already* landed is honored without waiting on the
-        // drain at all: detach the worker and bail (design spec §6 / ADR-022's
-        // "stop_detached + Canceled").
-        if cancel.is_canceled() {
-            handle.stop_detached();
-            return Err(CoreError::Canceled);
-        }
-        handle.stop();
-        // A cancel that landed *during* the (bounded) drain is honored here, at
-        // the post-join check; the collected translations are then discarded.
-        if cancel.is_canceled() {
-            return Err(CoreError::Canceled);
-        }
-        if let Some(results) = &translation_results {
-            for (id, translation) in results
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .iter()
+    // Drain and merge LLM translations (if a translator ran). `stop(Some(cancel))`
+    // is a poll-join (M7 hardening of the ticket this comment used to carry,
+    // design spec §14): a waiter thread performs the actual join — bounded, as
+    // before, by the worker's own per-request `REQUEST_TIMEOUT` (60 s) — while
+    // this call polls `cancel` roughly every 100 ms, so a cancel landing either
+    // before this point or at any moment during the drain is honored at the
+    // very next poll tick. The cancel-ack bound here is now ≤ ~100 ms + one
+    // poll tick, not the ceil(N/10) x 60 s worst-case join this comment used to
+    // document for N items already queued when the drain started (ADR-022's
+    // translator-drain-exception paragraph predates this poll-join — this is
+    // the as-built note the full doc sweep will fold in). `stop` returns
+    // `false` when abandoned on cancel: the worker is left detached to drain
+    // and exit on its own, exactly as `stop_detached` would have; `true` once
+    // the join actually completed, which is the only case where the collected
+    // translations are safe to merge.
+    if let Some(handle) = translator
+        && !handle.stop(Some(cancel))
+    {
+        return Err(CoreError::Canceled);
+    }
+    if let Some(results) = &translation_results {
+        for (id, translation) in results
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+        {
+            // Empty (errored/missing-marker) translations leave the
+            // segment's `translation` as "" — parity with Buzz's error→""
+            // degradation (`translator.py`).
+            if !translation.is_empty()
+                && let Some(segment) = segments.get_mut(*id as usize)
             {
-                // Empty (errored/missing-marker) translations leave the
-                // segment's `translation` as "" — parity with Buzz's error→""
-                // degradation (`translator.py`).
-                if !translation.is_empty()
-                    && let Some(segment) = segments.get_mut(*id as usize)
-                {
-                    segment.translation = translation.clone();
-                }
+                segment.translation = translation.clone();
             }
         }
     }
@@ -336,14 +329,112 @@ pub fn run_file_job(
         written.push(path);
     }
 
+    // F-030: folder-watch source disposition, run in the same place Buzz runs
+    // it — immediately after every requested export has been written, before
+    // returning (`_handle_folder_watch`, `file_transcriber.py:72-73`). `None`
+    // (the common case: this job did not come from folder watch) is a no-op.
+    // Every failure here is logged and swallowed, never propagated: the
+    // transcription itself already succeeded (ADR-018 spirit).
+    if let Some(disposition) = job.output.source_disposition {
+        apply_source_disposition(disposition, &job.input, job.output.directory.as_deref());
+    }
+
     Ok(JobOutcome { segments, written })
+}
+
+/// Executes one folder-watch source disposition (F-030, design spec §3.4)
+/// after every requested export has been written — the same placement Buzz
+/// uses (`_handle_folder_watch`, `file_transcriber.py:155-170`).
+///
+/// `export_dir` is `job.output.directory`, the same directory the export loop
+/// just resolved every written path against; when it's `None` (exports write
+/// alongside the input), the destination for [`SourceDisposition::MoveToOutput`]
+/// resolves to `input`'s own parent, matching [`output_file_path`]'s
+/// resolution exactly. If that makes the destination equal to `input` itself
+/// (moving the file onto itself), the move is skipped with a `log::debug!`
+/// rather than attempted — `fs::rename` of a path onto itself is a silent
+/// no-op on most platforms, but skipping makes the no-op explicit rather than
+/// relying on that.
+///
+/// Every failure — a missing/permission-denied delete, a failed move (and its
+/// copy+delete fallback) — is logged via `log::warn!` and swallowed. This
+/// never fails the job: the transcription succeeded and every requested
+/// export is already on disk by the time this runs, so losing the source
+/// file afterward is a disposition failure, not a job failure (ADR-018
+/// spirit, the same non-fatal treatment [`crate::queue`] gives a store-write
+/// failure after a completed run).
+fn apply_source_disposition(
+    disposition: SourceDisposition,
+    input: &Path,
+    export_dir: Option<&Path>,
+) {
+    match disposition {
+        SourceDisposition::Delete => {
+            if let Err(err) = std::fs::remove_file(input) {
+                log::warn!(
+                    "folder-watch: failed to delete source {}: {err} — the transcription \
+                     itself succeeded, so the job still completes",
+                    input.display()
+                );
+            }
+        }
+        SourceDisposition::MoveToOutput => {
+            let Some(file_name) = input.file_name() else {
+                log::warn!(
+                    "folder-watch: move skipped, {} has no file name",
+                    input.display()
+                );
+                return;
+            };
+            let dir = export_dir.map(Path::to_path_buf).unwrap_or_else(|| {
+                input
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""))
+                    .to_path_buf()
+            });
+            let dest = dir.join(file_name);
+
+            if dest == input {
+                log::debug!(
+                    "folder-watch: move skipped, source and destination are the same path ({})",
+                    dest.display()
+                );
+                return;
+            }
+
+            if let Err(err) = move_file(input, &dest) {
+                log::warn!(
+                    "folder-watch: failed to move source {} to {}: {err} — the transcription \
+                     itself succeeded, so the job still completes",
+                    input.display(),
+                    dest.display()
+                );
+            }
+        }
+    }
+}
+
+/// Renames `from` to `to`, falling back to a copy-then-delete when the rename
+/// fails (`fs::rename` cannot cross filesystem/device boundaries; Buzz's
+/// `shutil.move` handles this transparently — this is that same fallback,
+/// ported explicitly since `fs::rename` doesn't have one built in).
+fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            std::fs::copy(from, to)?;
+            std::fs::remove_file(from)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::boundary::{EngineCaps, MediaInfo, Pcm, PlaybackPcm};
-    use crate::domain::{Millis, OutputFormat, OutputSpec, TranscriptionOptions};
+    use crate::domain::{
+        Millis, OutputFormat, OutputSpec, SourceDisposition, TranscriptionOptions,
+    };
     use crate::error::EngineError;
     use pretty_assertions::assert_eq;
     use std::collections::BTreeSet;
@@ -520,6 +611,7 @@ mod tests {
                 directory,
                 file_name_template,
                 paragraph_split: Millis(2000),
+                source_disposition: None,
             },
         }
     }
@@ -991,5 +1083,175 @@ mod tests {
         assert_eq!(decoder.call_count(), 0);
         let entries: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
         assert_eq!(entries.len(), 1);
+    }
+
+    // -- Folder-watch source disposition (F-030) --------------------------
+
+    #[test]
+    fn folder_watch_delete_removes_source_after_export() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input.mp3");
+        touch(&input);
+
+        let formats: BTreeSet<OutputFormat> = [OutputFormat::Txt].into_iter().collect();
+        let mut job = job_with(input.clone(), formats, Some(tmp.path().to_path_buf()), None);
+        job.output.source_disposition = Some(SourceDisposition::Delete);
+
+        let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let prober = prober_with_audio();
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let mut observer = NullSink;
+        let cancel = CancelToken::new();
+
+        let outcome = run_file_job(
+            &job,
+            &EngineTuning::default(),
+            &decoder,
+            &prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.written.len(), 1);
+        assert!(
+            outcome.written[0].exists(),
+            "the export must still be written"
+        );
+        assert!(!input.exists(), "the source must be deleted after export");
+    }
+
+    #[test]
+    fn folder_watch_move_relocates_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input_dir = tmp.path().join("in");
+        let output_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&input_dir).unwrap();
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let input = input_dir.join("input.mp3");
+        touch(&input);
+
+        let formats: BTreeSet<OutputFormat> = [OutputFormat::Txt].into_iter().collect();
+        let mut job = job_with(input.clone(), formats, Some(output_dir.clone()), None);
+        job.output.source_disposition = Some(SourceDisposition::MoveToOutput);
+
+        let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let prober = prober_with_audio();
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let mut observer = NullSink;
+        let cancel = CancelToken::new();
+
+        let outcome = run_file_job(
+            &job,
+            &EngineTuning::default(),
+            &decoder,
+            &prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.written.len(), 1);
+        assert!(
+            !input.exists(),
+            "the source must be gone from the watched input directory"
+        );
+        let moved = output_dir.join("input.mp3");
+        assert!(
+            moved.exists(),
+            "the source must be relocated into the export directory"
+        );
+    }
+
+    #[test]
+    fn disposition_failure_is_nonfatal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input.mp3");
+        touch(&input);
+        // A directory that never gets created: no formats are requested, so
+        // the export loop never runs `create_dir_all` on it, leaving the
+        // `MoveToOutput` disposition's destination directory missing and the
+        // move guaranteed to fail.
+        let missing_output_dir = tmp.path().join("does-not-exist");
+
+        let mut job = job_with(
+            input.clone(),
+            BTreeSet::new(),
+            Some(missing_output_dir),
+            None,
+        );
+        job.output.source_disposition = Some(SourceDisposition::MoveToOutput);
+
+        let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let prober = prober_with_audio();
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let mut observer = NullSink;
+        let cancel = CancelToken::new();
+
+        let result = run_file_job(
+            &job,
+            &EngineTuning::default(),
+            &decoder,
+            &prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+            None,
+        );
+
+        assert!(
+            result.is_ok(),
+            "a disposition failure must not fail an otherwise-successful job, got {result:?}"
+        );
+        assert!(
+            input.exists(),
+            "the source is left in place when the move itself fails"
+        );
+    }
+
+    #[test]
+    fn no_disposition_leaves_source_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input.mp3");
+        touch(&input);
+
+        // `source_disposition: None` (job_with's default) -- not a
+        // folder-watch task, so the source must survive untouched.
+        let formats: BTreeSet<OutputFormat> = [OutputFormat::Txt].into_iter().collect();
+        let job = job_with(input.clone(), formats, Some(tmp.path().to_path_buf()), None);
+        assert_eq!(job.output.source_disposition, None);
+
+        let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let prober = prober_with_audio();
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let mut observer = NullSink;
+        let cancel = CancelToken::new();
+
+        let outcome = run_file_job(
+            &job,
+            &EngineTuning::default(),
+            &decoder,
+            &prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.written.len(), 1);
+        assert!(input.exists(), "no disposition set -- the source stays put");
     }
 }

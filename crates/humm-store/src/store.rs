@@ -1530,6 +1530,7 @@ mod tests {
                 directory: Some(PathBuf::from("/tmp/out")),
                 file_name_template: None,
                 paragraph_split: Millis(2000),
+                source_disposition: None,
             },
         }
     }
