@@ -359,6 +359,57 @@ fn per_row_clear_restores_only_that_actions_default() {
     harness.get_by_label(&display_text("Ctrl+Shift+S"));
 }
 
+#[test]
+fn per_row_clear_while_that_row_is_capturing_also_ends_capture() {
+    let mut settings = Settings::default();
+    settings.shortcuts.insert(
+        ShortcutAction::OpenImportWindow.settings_key().to_string(),
+        "Ctrl+Shift+I".to_string(),
+    );
+    let mut harness = shortcuts_harness(settings);
+    harness.run();
+
+    // Start capturing OpenImportWindow's row.
+    harness.get_by_label(&display_text("Ctrl+Shift+I")).click();
+    harness.run();
+    assert_eq!(
+        harness.state().state.capturing,
+        Some(ShortcutAction::OpenImportWindow),
+        "premise: the row is now mid-capture"
+    );
+
+    // Click that same row's ↺ clear button. Every row's clear button shares
+    // the identical accessible label, so this locates it by position
+    // (`ShortcutAction::ALL`'s declared order, which is also render order)
+    // rather than by label, which would match all 20 and panic.
+    let index = ShortcutAction::ALL
+        .iter()
+        .position(|&a| a == ShortcutAction::OpenImportWindow)
+        .expect("OpenImportWindow is in ALL");
+    harness
+        .get_all_by_label("\u{21ba}")
+        .nth(index)
+        .expect("a clear button for every row")
+        .click();
+    harness.run();
+
+    assert_eq!(
+        harness.state().state.capturing,
+        None,
+        "clearing the row that's mid-capture must also end the capture \
+         (Reset to Defaults' own unconditional reset, scoped here to just \
+         this row)"
+    );
+    let settings_path = harness.state().settings_path.clone();
+    let reloaded = Settings::load(&settings_path).expect("settings file was written");
+    assert!(
+        !reloaded
+            .shortcuts
+            .contains_key(ShortcutAction::OpenImportWindow.settings_key()),
+        "the clear itself must still have taken effect"
+    );
+}
+
 // -- App-level: startup seeds overrides from settings ------------------------
 
 struct NeverCalledEngineFactory;

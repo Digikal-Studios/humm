@@ -9,15 +9,29 @@
 //!   `reset_to_defaults` (`:46-56`, `shortcuts.clear()` then repaints every
 //!   row from the now-cleared store).
 //! - `buzz/widgets/sequence_edit.py` — `keyPressEvent`'s two special cases:
-//!   Esc is intercepted and forwarded to the parent (closing Buzz's dialog;
-//!   "the user can't set a shortcut that contains the Esc key", `:17-23`) and
-//!   a bare modifier press is ignored (`:26-33`). egui has no `Key` variant
-//!   for a bare Ctrl/Shift/Alt/Cmd press at all (confirmed against
-//!   `egui::Key`'s definition) — modifier-only presses are simply never
-//!   reported as `Event::Key` in the first place, so that half of Buzz's
-//!   guard has nothing to port; only the Esc-cancels behavior is implemented
-//!   here ([`resolve_capture_event`]), giving the same net "can't bind Esc"
-//!   limitation.
+//!   Esc is intercepted and forwarded to the parent (`:17-23`) — closing
+//!   Buzz's whole Preferences `QDialog` (that file's own comment: "the user
+//!   can't set a shortcut that contains the Esc key" is a side effect of
+//!   Qt's default modal-dialog behavior, where Escape rejects the dialog,
+//!   deliberately not suppressed here). humm's Preferences window is a
+//!   non-modal, write-through window with no Esc-closes-the-window semantics
+//!   anywhere else in it, so there is no dialog for Esc to close — here Esc
+//!   cancels only the in-flight row capture ([`resolve_capture_event`]'s
+//!   `Cancel` outcome). **This is a deliberate adaptation, not the same
+//!   mechanism**: the one invariant the two share is that Esc can never
+//!   itself become a bound sequence. Buzz's second special case, ignoring a
+//!   bare modifier press (`:26-33`), *does* have an egui equivalent to port
+//!   — egui 0.35 defines physical-position modifier variants
+//!   (`Key::ShiftLeft`/`ShiftRight`, `ControlLeft`/`ControlRight`,
+//!   `AltLeft`/`AltRight`, `SuperLeft`/`SuperRight`, `key.rs:199-220`),
+//!   emitted as physical `Event::Key` presses just like Buzz's
+//!   `Qt.Key.Key_Control` etc. The guard is implemented implicitly:
+//!   [`shortcuts::key_token`]'s vocabulary (letters, digits, comma, Return,
+//!   the two arrow keys) simply excludes every one of those modifier
+//!   variants, so `resolve_capture_event`'s `shortcuts::key_token(key)?`
+//!   early-return already rejects a bare modifier press — an intentional
+//!   guard equivalent to Buzz's, not an accident of egui lacking the
+//!   concept (tested explicitly below, one case per modifier key).
 //! - `buzz/settings/shortcuts.py` — `set`/`clear`: `set` stores only the
 //!   override ([`apply_override`] additionally keeps the map *minimal* by
 //!   removing an override that has been set back to the action's own
@@ -206,9 +220,13 @@ enum CaptureOutcome {
 /// Pure core of the capture widget's key handling: resolves one raw
 /// `(key, modifiers)` pair — as delivered by an egui `Event::Key { pressed:
 /// true, .. }` — to a [`CaptureOutcome`], or `None` if `key` is neither Esc
-/// nor in [`shortcuts::key_token`]'s bindable vocabulary (e.g. Tab, a
-/// function key — left alone entirely so it doesn't disrupt focus
-/// navigation). `modifiers.ctrl`/`.mac_cmd` are deliberately dropped in favor
+/// nor in [`shortcuts::key_token`]'s bindable vocabulary. That vocabulary
+/// exclusion is also what implements Buzz's "ignore a bare modifier press"
+/// guard (module doc): a physical `Key::ControlLeft`/`ShiftRight`/`AltLeft`/
+/// `SuperLeft`-etc. press (egui does emit these) resolves to `None` here
+/// exactly like an unrelated non-vocabulary key (Tab, a function key) would
+/// — left alone entirely so it doesn't disrupt focus navigation.
+/// `modifiers.ctrl`/`.mac_cmd` are deliberately dropped in favor
 /// of `.command` alone when building the bound shortcut, normalizing to
 /// exactly the representation [`shortcuts::parse_sequence`] itself produces
 /// for a `"Ctrl+…"` token (cross-platform: `.command` mirrors the physical
@@ -358,6 +376,13 @@ pub fn ui(
                 .clicked()
             {
                 commit_clear(settings, settings_path, shortcuts_generation, action);
+                // Clearing the row that's mid-capture also ends the capture
+                // (Reset to Defaults' own unconditional reset, scoped here to
+                // just this row -- clearing a *different* action's override
+                // must not cancel whatever row is currently capturing).
+                if currently_capturing == Some(action) {
+                    state.capturing = None;
+                }
             }
 
             if let Some(other) = conflicting_action(&conflicts, action) {
@@ -646,6 +671,29 @@ mod tests {
         // Tab has no shortcuts.rs token -- must be left alone (not bound,
         // not treated as a cancel).
         assert_eq!(resolve_capture_event(Key::Tab, Modifiers::NONE), None);
+    }
+
+    #[test]
+    fn a_bare_modifier_key_press_resolves_to_none() {
+        // egui 0.35 *does* define physical-position modifier variants
+        // (module doc, `key.rs:199-220`) -- a bare press of one of them must
+        // be ignored exactly like any other non-vocabulary key (the sibling
+        // of `an_unbindable_key_resolves_to_none` above), not bound and not
+        // treated as a cancel. This is the vocabulary-exclusion guard that
+        // stands in for Buzz's own `sequence_edit.py:26-33` modifier-only
+        // check.
+        for key in [
+            Key::ControlLeft,
+            Key::ShiftRight,
+            Key::AltLeft,
+            Key::SuperLeft,
+        ] {
+            assert_eq!(
+                resolve_capture_event(key, Modifiers::NONE),
+                None,
+                "{key:?} must not resolve to a binding or a cancel"
+            );
+        }
     }
 
     #[test]
