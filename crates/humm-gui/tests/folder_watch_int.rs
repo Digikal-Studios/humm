@@ -7,8 +7,10 @@
 //! whisper model, no network. Drop a fixture file → `wait_for` the store to
 //! show a `Completed` `Source::FolderWatch` row → assert the mirrored export
 //! exists and the source was moved/deleted per the disposition; a pause/
-//! resume case; and a rebuild case proving the shared `SeenSet` (Buzz's
-//! `paths_emitted`) survives a service restart without double-enqueueing.
+//! resume case; and a busy-runner rebuild case (see that test's own doc)
+//! proving the shared `SeenSet` (Buzz's `paths_emitted`) — not merely the
+//! store's own `has_task_for_file` check — is what prevents a double-enqueue
+//! across a service restart.
 //!
 //! ## Watcher backend: `PollWatcher`, not FSEvents
 //!
@@ -26,12 +28,14 @@
 //! polling fallback.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use humm_core::boundary::{EngineCaps, EngineOptions, Pcm, SegmentSink, TranscriptionEngine};
 use humm_core::cancel::CancelToken;
-use humm_core::domain::{ModelSpec, Source, Status};
+use humm_core::domain::{
+    Input, ModelSpec, OutputSpec, Source, Status, TaskSpec, TranscriptionId, TranscriptionOptions,
+};
 use humm_core::error::{CoreError, EngineError};
 use humm_core::folderwatch::SeenSet;
 use humm_core::queue::{EngineFactory, QueueHandle};
@@ -89,18 +93,23 @@ fn testdata_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/Users/jawad/RustroverProjects/buzz/testdata"))
 }
 
-/// Builds real [`Services`] (real ffmpeg/ffprobe adapters, a scripted
-/// engine, an in-memory store) under `dir` — the same construction
-/// `kittest_actions.rs`'s `test_services` uses, generalized only in that the
-/// caller supplies the store (each test wants its own fresh one).
-fn test_services(store: Arc<SqliteStore>, dir: &Path) -> Services {
+/// Builds real [`Services`] (real ffmpeg/ffprobe adapters, an in-memory
+/// store) under `dir`, with the given scripted `engines` factory — the same
+/// construction `kittest_actions.rs`'s `test_services` uses, generalized
+/// over both the store (each test wants its own fresh one) and the engine
+/// factory (the busy-runner regression test below needs a gated one).
+fn test_services_with_engine(
+    store: Arc<SqliteStore>,
+    dir: &Path,
+    engines: Box<dyn EngineFactory>,
+) -> Services {
     services::init_with(TestDeps {
         store,
         media_dir: dir.join("media"),
         model_root: dir.join("models"),
         settings: Settings::default(),
         settings_path: dir.join("settings.toml"),
-        engines: Box::new(FakeSucceedingEngineFactory),
+        engines,
         fetcher: None,
         capabilities: Capabilities::default(),
         artifacts: None,
@@ -109,6 +118,90 @@ fn test_services(store: Arc<SqliteStore>, dir: &Path) -> Services {
         llm: None,
         validate: services::default_test_validate(),
     })
+}
+
+/// [`test_services_with_engine`] with the always-succeeds
+/// [`FakeSucceedingEngineFactory`] — what every test except the busy-runner
+/// regression below wants.
+fn test_services(store: Arc<SqliteStore>, dir: &Path) -> Services {
+    test_services_with_engine(store, dir, Box::new(FakeSucceedingEngineFactory))
+}
+
+/// An [`EngineFactory`]/[`TranscriptionEngine`] pair whose `transcribe` call
+/// blocks until released — lets a test hold the queue's single runner thread
+/// busy inside `run_task` on demand (`humm_core::queue`'s own doc: commands
+/// only drain *between* tasks, never while one is running), to deterministically
+/// open the enqueue→`create_task` race window
+/// `seen_set_survives_a_rebuild_so_a_recently_enqueued_file_is_not_double_enqueued`
+/// needs. Every engine instance shares the same gate, so releasing it once
+/// (for the blocker task) also means every *later* task's `transcribe` call
+/// returns immediately — no re-closing needed.
+struct GatedEngineFactory {
+    gate: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl GatedEngineFactory {
+    fn new() -> (Self, Arc<(Mutex<bool>, Condvar)>) {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        (
+            GatedEngineFactory {
+                gate: Arc::clone(&gate),
+            },
+            gate,
+        )
+    }
+}
+
+impl EngineFactory for GatedEngineFactory {
+    fn create(
+        &mut self,
+        _model: &ModelSpec,
+        _resolved: Option<&Path>,
+    ) -> Result<Box<dyn TranscriptionEngine>, CoreError> {
+        Ok(Box::new(GatedEngine {
+            gate: Arc::clone(&self.gate),
+        }))
+    }
+}
+
+struct GatedEngine {
+    gate: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl TranscriptionEngine for GatedEngine {
+    fn transcribe(
+        &mut self,
+        _audio: &Pcm,
+        _options: &EngineOptions,
+        _sink: &mut dyn SegmentSink,
+        _cancel: &CancelToken,
+    ) -> Result<(), EngineError> {
+        let (lock, cvar) = &*self.gate;
+        let mut released = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while !*released {
+            released = cvar
+                .wait(released)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        Ok(())
+    }
+
+    fn capabilities(&self) -> EngineCaps {
+        EngineCaps {
+            word_timestamps: false,
+            translate: false,
+            vad: false,
+        }
+    }
+}
+
+/// Releases every [`GatedEngine`] sharing `gate` — wakes a `transcribe` call
+/// currently blocked in it, and makes every later call on the same gate a
+/// no-op wait (the flag stays `true`).
+fn release_gate(gate: &Arc<(Mutex<bool>, Condvar)>) {
+    let (lock, cvar) = &**gate;
+    *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+    cvar.notify_all();
 }
 
 /// One export format configured (`txt`) — a folder-watch job with an empty
@@ -169,6 +262,36 @@ fn drop_fixture(dest: &Path) {
         std::fs::create_dir_all(parent).expect("create destination dir");
     }
     std::fs::copy(&fixture, dest).expect("copy fixture into the watched tree");
+}
+
+/// A plain, non-folder-watch [`TaskSpec`] over `input` — the busy-runner
+/// regression test's "blocker" task, occupying the queue's single runner
+/// thread deliberately (`Source::FileImport`, so it never shows up in a
+/// `Source::FolderWatch` row count).
+fn blocker_spec(input: PathBuf) -> TaskSpec {
+    TaskSpec {
+        input: Input::Path(input),
+        options: TranscriptionOptions::default(),
+        output: OutputSpec::default(),
+    }
+}
+
+/// Polls `store.get_task(id)` until its status is `status`, up to `timeout`.
+fn wait_for_status(store: &SqliteStore, id: TranscriptionId, status: Status, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(Some(row)) = store.get_task(&id)
+            && row.status == status
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "task did not reach {status:?} within {}s",
+            timeout.as_secs()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Polls `store` (the authoritative source, not any UI) until a
@@ -396,36 +519,65 @@ fn paused_service_ignores_a_drop_until_resumed() {
     service.stop();
 }
 
-// -- SeenSet survives a rebuild (F-030 review fix 2) -------------------------
+// -- SeenSet survives a rebuild (F-030 review fix 2, reshaped per re-review) --
 
 #[test]
 fn seen_set_survives_a_rebuild_so_a_recently_enqueued_file_is_not_double_enqueued() {
-    // Simulates a Preferences-edit-triggered restart racing the
-    // enqueue→create_task window: `QueueHandle::enqueue` is fire-and-forget
-    // (the runner thread's own `create_task` may not have landed in the
-    // store yet), so if a rebuild ever handed the new service a *fresh*
-    // `SeenSet`, a restart landing in that exact window would find the file
-    // "not known" (no store row yet) and "not seen" (blank set) and enqueue
-    // it a second time. `app.rs`'s `HummApp::folder_watch_seen` instead
-    // shares one `Arc<Mutex<SeenSet>>` across every start/restart for the
-    // process's lifetime (Buzz's own `paths_emitted` lives on the one
-    // `TranscriptionTaskFolderWatcher` object the same way) — this test
-    // proves that sharing is what actually prevents the double-enqueue,
-    // by driving the exact race deterministically: wait only for the
-    // *shared* `SeenSet` to record the candidate (which happens
-    // synchronously, right after `queue.enqueue`, deliberately *before*
-    // ever waiting for the store to reflect it), then stop service A and
-    // start service B with the same `Arc<Mutex<SeenSet>>` and rescan.
+    // The race this proves protection against only actually opens up while
+    // the queue's single runner thread is *busy* running some other task:
+    // `humm_core::queue`'s own `Runner::run` only calls
+    // `drain_commands_nonblocking` (which is what turns a pending
+    // `Command::Enqueue` into a real `create_task` store row) *between*
+    // tasks, never while one is executing (`run_task` blocks the runner
+    // thread for its whole duration). With an otherwise-idle runner,
+    // `create_task` for an enqueued candidate lands within microseconds —
+    // long before this test could ever race it — so `store.has_task_for_file`
+    // alone would already suppress a duplicate on its own, and an earlier
+    // revision of this test passed regardless of whether the `SeenSet` was
+    // actually shared, silently testing nothing.
+    //
+    // To open the real window deterministically, this test first occupies
+    // the runner with a "blocker" task backed by a `GatedEngine` whose
+    // `transcribe` call blocks until released, and waits for it to reach
+    // `InProgress` (confirming the runner is now busy and won't drain
+    // anything else). *Then* it runs the service A → drop file → stop A →
+    // start B (same shared `SeenSet`) → rescan sequence — all while
+    // `create_task` for the candidate is still sitting, undrained, behind
+    // the blocker in the runner's command channel, i.e. `has_task_for_file`
+    // is still `false` for it. Only the shared `SeenSet` (rule 6: "seen at
+    // this exact size/mtime") can suppress B's rescan finding it "new"
+    // again at this point. Releasing the gate afterward lets the runner
+    // drain everything at once: with the fix, exactly one `Command::Enqueue`
+    // was ever sent for the candidate (A's), so exactly one
+    // `Source::FolderWatch` row results. (Manually confirmed against a
+    // deliberately-reverted fresh-`SeenSet`-per-`start()` build: this same
+    // sequence then produces two rows — B's rescan finds the candidate
+    // "not known" *and* "not seen" and enqueues it again.)
     let root = tempfile::tempdir().expect("root tempdir");
     let input_dir = root.path().join("in");
     let output_dir = root.path().join("out");
+    let blocker_input = root.path().join("blocker.wav");
     std::fs::create_dir_all(&input_dir).expect("create input root");
     std::fs::create_dir_all(&output_dir).expect("create output root");
+    drop_fixture(&blocker_input);
 
     let store = Arc::new(SqliteStore::open_in_memory().expect("open store"));
-    let mut services = test_services(Arc::clone(&store), root.path());
+    let (engine_factory, gate) = GatedEngineFactory::new();
+    let mut services =
+        test_services_with_engine(Arc::clone(&store), root.path(), Box::new(engine_factory));
     let queue = Arc::new(services.queue.take().expect("queue present"));
     let seen = fresh_seen();
+
+    // Occupy the runner: enqueue the blocker and wait for it to actually be
+    // running (not merely queued) before touching folder watch at all.
+    let blocker_id = TranscriptionId::new();
+    queue.enqueue(blocker_id, blocker_spec(blocker_input), Source::FileImport);
+    wait_for_status(
+        &store,
+        blocker_id,
+        Status::InProgress,
+        Duration::from_secs(10),
+    );
 
     let source = input_dir.join("clip.wav");
     drop_fixture(&source);
@@ -441,9 +593,9 @@ fn seen_set_survives_a_rebuild_so_a_recently_enqueued_file_is_not_double_enqueue
     );
 
     // Wait for service A's (unconditional) initial scan to have recorded the
-    // candidate into the *shared* SeenSet — deliberately not waiting for the
-    // store to show a row at all, so we stop A as close as possible to the
-    // real enqueue→create_task race window.
+    // candidate into the *shared* SeenSet — not for the store to show a row
+    // (it can't yet: the runner is still busy on the blocker), so we stop A
+    // squarely inside the real enqueue→create_task race window.
     let metadata = std::fs::metadata(&source).expect("stat fixture");
     let mtime = metadata.modified().expect("mtime");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -463,6 +615,14 @@ fn seen_set_survives_a_rebuild_so_a_recently_enqueued_file_is_not_double_enqueue
     }
     service_a.stop();
 
+    // The runner is still busy on the blocker here: `create_task` for the
+    // candidate has not run, so `has_task_for_file` still says "not known".
+    assert!(
+        !store.has_task_for_file(&source).expect("has_task_for_file"),
+        "the candidate's create_task must not have landed yet — otherwise this test isn't \
+         actually exercising the SeenSet, just the store check"
+    );
+
     // Rebuild with the SAME shared SeenSet (and the same queue/store) — the
     // exact shape `app.rs`'s `sync_folder_watch` Restart path performs.
     let service_b = start_service(
@@ -475,9 +635,25 @@ fn seen_set_survives_a_rebuild_so_a_recently_enqueued_file_is_not_double_enqueue
         false,
     );
 
-    // Give B's own initial scan (and any settling) time to run, then assert
-    // exactly one Source::FolderWatch row exists — not two.
-    std::thread::sleep(Duration::from_millis(500));
+    // Give B's own initial scan time to run (immediate on spawn, not tied to
+    // the poll interval) — still while the runner is busy on the blocker.
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Release the blocker: the runner drains every command that piled up
+    // behind it (A's enqueue, and — only on a regression — a second one from
+    // B) in one shot, fixing the final row count right there.
+    release_gate(&gate);
+    wait_for_status(
+        &store,
+        blocker_id,
+        Status::Completed,
+        Duration::from_secs(10),
+    );
+
+    // A little settle so any (correctly single) candidate task the drain
+    // just queued gets its own store row before we count.
+    std::thread::sleep(Duration::from_millis(300));
+
     let folder_watch_rows: Vec<TaskRow> = store
         .list_tasks()
         .expect("list_tasks")

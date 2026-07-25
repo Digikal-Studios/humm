@@ -766,6 +766,18 @@ impl HummApp {
                         Ok(service) => self.folder_watch = Some(service),
                         Err(err) => {
                             log::warn!("could not start the folder-watch service: {err}");
+                            // `snapshot` is still cached below (`if changed`)
+                            // even though `start()` failed — a retry only
+                            // happens once the `[folder_watch]` snapshot
+                            // itself changes again (e.g. the user picks a
+                            // different directory in Preferences); simply
+                            // repairing whatever made `start()` fail on disk
+                            // (recreating a deleted `input_dir`, fixing a
+                            // permission) does *not* resurrect the watcher
+                            // this session on its own. This matches Buzz:
+                            // its own recovery path is also only
+                            // `set_preferences` (a fresh Preferences save),
+                            // never a live filesystem re-check.
                         }
                     }
                 }

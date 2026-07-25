@@ -49,11 +49,17 @@
 //! unboundedly) but skips the rescan itself, and never touches the
 //! [`SeenSet`] — resuming picks up exactly where scanning left off, not from
 //! a blank slate. A `stopping` flag (distinct from `paused`) is observed
-//! before the initial scan and between every candidate in a rescan, so
-//! [`FolderWatchService::stop`]'s join is bounded even if it lands mid-scan —
-//! this matters most for `Restart`, whose caller (`app.rs`, on the UI thread)
-//! calls `stop()` synchronously and would otherwise block on however long a
-//! big directory's scan takes.
+//! before the initial scan and between every already-found candidate inside a
+//! rescan, so [`FolderWatchService::stop`]'s join is bounded by, at worst, one
+//! full tree walk (this is not "instant even mid-scan": [`humm_core::
+//! folderwatch::scan`]'s own recursive walk — and its per-file
+//! `has_task_for_file` check — is not itself interruptible, and `stopping`
+//! is only consulted once that walk has already returned its candidate
+//! list) plus whatever per-candidate work was still left to do. This matters
+//! most for `Restart`, whose caller (`app.rs`, on the UI thread) calls
+//! `stop()` synchronously: a very large watched tree means a visible-but-
+//! bounded hitch on that click, accepted for M7 — revisit if a real
+//! directory this large in practice makes that hitch noticeable.
 //!
 //! ## `SeenSet` lifetime
 //!
@@ -537,13 +543,18 @@ impl FolderWatchService {
         self.paused.load(Ordering::Relaxed)
     }
 
-    /// Stops watching and joins the worker thread. Bounded: `stopping` is
-    /// set first (so the worker's initial scan, if not yet run, and the
-    /// per-candidate loop inside a rescan already in flight both notice and
-    /// return promptly — this module's "Threading model" doc), then the
-    /// watcher is dropped (so no further events arrive), then a
-    /// [`WorkerMsg::Shutdown`] wakes a worker that might be blocked in
-    /// `recv`, then the thread is joined.
+    /// Stops watching and joins the worker thread. `stopping` is set first
+    /// (so the worker's initial scan, if not yet run, and the per-candidate
+    /// loop inside a rescan already in flight both notice and return
+    /// promptly), then the watcher is dropped (so no further events arrive),
+    /// then a [`WorkerMsg::Shutdown`] wakes a worker that might be blocked in
+    /// `recv`, then the thread is joined. Bounded, but not instant even
+    /// mid-scan: [`humm_core::folderwatch::scan`]'s own recursive walk (plus
+    /// its per-file `has_task_for_file` check) is not itself interruptible,
+    /// so a `stop()` landing while that walk is in progress still waits for
+    /// it to finish before `stopping` is even consulted — see this module's
+    /// "Threading model" doc for the accepted-for-M7 tradeoff that implies
+    /// for `Restart` on the UI thread.
     pub fn stop(self) {
         let FolderWatchService {
             watcher,
@@ -632,9 +643,12 @@ fn run_worker(worker: WorkerCtx) {
 /// recording it into the shared `SeenSet` immediately after its `enqueue`
 /// call (Buzz records into `paths_emitted` only after actually emitting the
 /// task, `:120-123`) — repaints once at the end iff at least one candidate
-/// was enqueued, rather than once per candidate. Bails out between
-/// candidates if [`FolderWatchService::stop`] has set `stopping` in the
-/// meantime, so a stop lands promptly even mid-scan.
+/// was enqueued, rather than once per candidate. `folderwatch::scan`'s own
+/// recursive walk runs to completion uninterrupted (it isn't itself
+/// `stopping`-aware); only the per-candidate work *after* that walk returns
+/// bails out early once [`FolderWatchService::stop`] has set `stopping` in
+/// the meantime — see this module's "Threading model" doc for what that
+/// does and doesn't bound.
 fn rescan_and_enqueue(worker: &WorkerCtx) {
     let template = worker
         .template
