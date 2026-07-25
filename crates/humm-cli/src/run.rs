@@ -64,11 +64,12 @@ use humm_core::models::registry::local_vad_model_path;
 use humm_core::openai::{OpenAiAuth, OpenAiEngine, OpenAiEngineConfig};
 use humm_core::paths;
 use humm_core::pipeline::EngineTuning;
+use humm_core::postproc::{PostprocConfig, PostprocConfigSource};
 use humm_core::queue::{
     EngineFactory, QueueHandle, RunnerDeps, TaskEvent, TaskEventKind, spawn_task_runner,
 };
 use humm_core::secrets::{SecretKey, SecretStore};
-use humm_core::settings::{OpenAiSettings, Settings};
+use humm_core::settings::{OpenAiSettings, PostprocSettings, Settings};
 use humm_media::{FfmpegDecoder, FfprobeProber, YtDlpFetcher, probe_binaries};
 use humm_store::{KeyringSecretStore, SqliteStore};
 use humm_whisper::WhisperEngine;
@@ -269,6 +270,14 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         // No CLI flag enables LLM translation in M6 (Buzz's CLI has none
         // either, design spec §6) — the file path's translation stays inert.
         llm: None,
+        // The CLI runs post-processing hooks too (Buzz parity, design spec
+        // §2.4/§11) — always wired, since each hook's own `enabled` flag is
+        // what actually gates it; `settings.postproc` is loaded once here,
+        // matching the CLI's no-live-editing-surface pattern
+        // (`CliEngineFactory::openai_settings`, above).
+        postproc: Some(Arc::new(CliPostprocSource {
+            postproc: settings.postproc.clone(),
+        }) as Arc<dyn PostprocConfigSource>),
     };
 
     let handle = spawn_task_runner(deps);
@@ -543,6 +552,60 @@ fn resolve_openai_token(args: &AddArgs) -> Result<String, ExitCode> {
         Err(err) => {
             log::warn!("keyring lookup failed ({err}); treating as no stored token");
             Err(run_fail(NOT_FOUND))
+        }
+    }
+}
+
+/// The CLI's [`PostprocConfigSource`] (design spec §2.4): `settings.postproc`,
+/// loaded once at startup — the CLI has no live-editing surface (unlike the
+/// GUI's Preferences window), so a single snapshot cloned at `execute` time
+/// is enough.
+struct CliPostprocSource {
+    postproc: PostprocSettings,
+}
+
+impl PostprocConfigSource for CliPostprocSource {
+    fn snapshot(&self) -> PostprocConfig {
+        let summary = self.postproc.ai_summary.clone();
+        // Only resolve the key when the hook that uses it is actually
+        // enabled: `ai_summary` defaults to off (Buzz plugin parity), so
+        // this keeps every ordinary `humm add` run — and every existing
+        // hermetic CLI test, none of which enable it — from touching the
+        // real OS keychain at all, exactly like `resolve_openai_token`'s own
+        // `is_api_backend` gate above.
+        let summary_api_key = if summary.enabled {
+            resolve_ai_summary_key()
+        } else {
+            None
+        };
+        PostprocConfig {
+            skip: self.postproc.skip_already_transcribed.clone(),
+            summary,
+            summary_api_key,
+            docx: self.postproc.export_docx.clone(),
+            resize: self.postproc.transcript_resizer.clone(),
+            paragraph_split: humm_core::viewer::text_view::paragraph_split_from_env(),
+        }
+    }
+}
+
+/// Resolves the AI-summary hook's API key (F-111) the same way
+/// [`resolve_openai_token`] resolves the transcription key: a real keyring
+/// lookup, skipped (reporting "absent") under `HUMM_DISABLE_KEYRING` so
+/// hermetic tests never touch the real OS keychain. Unlike
+/// `resolve_openai_token`, an absent/failed key is not a run-ending error —
+/// the `ai_summary` hook's own `enabled` gate and empty-key skip already
+/// handle that (design spec §6.2), so this simply returns `None`.
+fn resolve_ai_summary_key() -> Option<String> {
+    if keyring_disabled_from_env(std::env::var("HUMM_DISABLE_KEYRING").ok().as_deref()) {
+        return None;
+    }
+    match KeyringSecretStore::new().get(SecretKey::AiSummaryApiKey) {
+        Ok(Some(key)) if !key.is_empty() => Some(key),
+        Ok(_) => None,
+        Err(err) => {
+            log::warn!("keyring lookup for AI Summary API key failed: {err}");
+            None
         }
     }
 }
@@ -1359,6 +1422,38 @@ mod tests {
         let mut args = base_add_args();
         args.openai_token = Some("sk-test-token".to_string());
         assert_eq!(resolve_openai_token(&args).unwrap(), "sk-test-token");
+    }
+
+    // `CliPostprocSource::snapshot`'s `ai_summary.enabled == true` branch
+    // falls through to a real keyring lookup (`resolve_ai_summary_key`),
+    // gated only by `HUMM_DISABLE_KEYRING` — the same env var this
+    // in-process test module must never set (see the comment above). Only
+    // the disabled-gate branch, which never touches the keyring at all, is
+    // safe to exercise here.
+    #[test]
+    fn postproc_snapshot_skips_keyring_when_ai_summary_disabled() {
+        let source = CliPostprocSource {
+            postproc: PostprocSettings::default(),
+        };
+        let cfg = source.snapshot();
+        assert!(!cfg.summary.enabled);
+        assert_eq!(cfg.summary_api_key, None);
+    }
+
+    #[test]
+    fn postproc_snapshot_carries_skip_settings_through() {
+        let postproc = PostprocSettings {
+            skip_already_transcribed: humm_core::settings::SkipSettings {
+                enabled: true,
+                check_database: true,
+                ..humm_core::settings::SkipSettings::default()
+            },
+            ..PostprocSettings::default()
+        };
+        let source = CliPostprocSource { postproc };
+        let cfg = source.snapshot();
+        assert!(cfg.skip.enabled);
+        assert!(cfg.skip.check_database);
     }
 
     #[test]

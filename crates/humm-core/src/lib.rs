@@ -18,6 +18,7 @@ pub mod models;
 pub mod openai;
 pub mod paths;
 pub mod pipeline;
+pub mod postproc;
 pub mod queue;
 pub mod regroup;
 pub mod resize;

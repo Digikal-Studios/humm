@@ -71,6 +71,7 @@ use crate::error::{CoreError, EngineError, MediaError, ModelError, StoreError};
 use crate::models::download::DownloadProgress;
 use crate::openai::LlmEndpointSource;
 use crate::pipeline::{EngineTuning, JobOutcome, run_file_job};
+use crate::postproc::{self, PostprocConfigSource};
 
 /// The message emitted to yt-dlp-less URL tasks: exactly this string is
 /// written to the store and carried on the `Failed` event.
@@ -156,8 +157,10 @@ pub enum TaskEventKind {
     /// parity-wise equivalent to `Completed` — Buzz counts a skip toward
     /// "quit on complete" (`main_window.py:435-443`) and this crate's CLI
     /// counts it toward exit-code success. [`TaskStore::mark_skipped`] is
-    /// this event's store counterpart. No hook is wired to produce this
-    /// event yet (a later milestone task adds the dispatch).
+    /// this event's store counterpart, emitted from `run_task`'s
+    /// `Terminal::Skipped` arm right after that write — driven by
+    /// [`postproc::skip::check`] via [`RunnerDeps::postproc`]'s `check_skip`
+    /// seam in `run_job` (design spec §2.1).
     Skipped,
     /// A post-processing hook chain ran after the task completed (F-110's
     /// `on_complete` hook seam, driving the F-111 `ai_summary`, F-113
@@ -289,6 +292,12 @@ pub struct RunnerDeps {
     /// engine — the queue never builds an engine itself, so it never needs
     /// the encoder (design spec §3, Task 9 brief deliverable B).
     pub llm: Option<Arc<dyn LlmEndpointSource>>,
+    /// Supplies a fresh [`crate::postproc::PostprocConfig`] snapshot per
+    /// task, gating the `check_skip` seam in [`Runner::run_job`] (design
+    /// spec §2.1/§2.4). `None` — every caller that predates M7, and any
+    /// test double that doesn't need hooks — means the seam never runs and
+    /// every task transcribes exactly as it did before this field existed.
+    pub postproc: Option<Arc<dyn PostprocConfigSource>>,
 }
 
 /// Shared registry of live subscriber senders.
@@ -565,6 +574,11 @@ enum Terminal {
     Canceled,
     /// Failed, with an actionable message.
     Failed(String),
+    /// Skipped: the `check_skip` seam (F-115, [`postproc::skip::check`])
+    /// found the input already transcribed before the engine ever ran;
+    /// `segments` are the task's transcript, copied from wherever the check
+    /// found them (a result file or a prior completed row).
+    Skipped(Vec<Segment>),
 }
 
 /// `true` if `error` represents cancellation rather than a genuine failure.
@@ -734,6 +748,9 @@ struct Runner {
     /// [`run_file_job`]. `None` disables translation entirely — see
     /// [`RunnerDeps::llm`].
     llm: Option<Arc<dyn LlmEndpointSource>>,
+    /// Supplies a fresh post-processing config snapshot per task. `None`
+    /// disables the `check_skip` seam entirely — see [`RunnerDeps::postproc`].
+    postproc: Option<Arc<dyn PostprocConfigSource>>,
     /// Tasks accepted but not yet run (FIFO).
     pending: VecDeque<PendingTask>,
     /// Ids canceled but not yet dequeued (Buzz's canceled-set). *Consumed*: a
@@ -954,6 +971,15 @@ impl Runner {
                     kind: TaskEventKind::Failed { message },
                 });
             }
+            Terminal::Skipped(segments) => {
+                if let Err(err) = self.store.mark_skipped(&id, &segments) {
+                    self.store_write_failed(id, "mark_skipped", &err);
+                }
+                self.emit(TaskEvent {
+                    task_id: id,
+                    kind: TaskEventKind::Skipped,
+                });
+            }
         }
 
         // Consume the id from the canceled-set at terminal time. `cancel(id)`
@@ -1017,6 +1043,28 @@ impl Runner {
             options: spec.options.clone(),
             output: spec.output.clone(),
         };
+
+        // F-115 `check_skip` seam (design spec §2.1): after input resolution
+        // (a URL task's `job.input` is by now the fetched local file) and
+        // before artifact-ensure/engine-build — Buzz's own ordering
+        // (`file_transcriber_queue_worker.py:208-230`), which runs the check
+        // right after `mark_started`/`Started` too. A snapshot is taken once
+        // per task iff a config source is configured at all; the hook chain
+        // then dispatches on `cfg.skip.enabled` — no source (`None`) or a
+        // disabled hook leaves this job's behavior byte-for-byte unchanged.
+        if let Some(postproc) = self.postproc.as_ref() {
+            let cfg = postproc.snapshot();
+            if cfg.skip.enabled
+                && let Some(segments) = postproc::skip::check(
+                    &cfg.skip,
+                    &job.input,
+                    job.output.directory.as_deref(),
+                    self.store.as_ref(),
+                )
+            {
+                return Terminal::Skipped(segments);
+            }
+        }
 
         // When an ArtifactEnsurer is configured (GUI), ensure the model/VAD
         // artifacts as this job's own phase and use a job-local tuning with
@@ -1209,6 +1257,7 @@ pub fn spawn_task_runner(deps: RunnerDeps) -> QueueHandle {
         media_dir: deps.media_dir,
         artifacts: deps.artifacts,
         llm: deps.llm,
+        postproc: deps.postproc,
         pending: VecDeque::new(),
         canceled: HashSet::new(),
         finishing: false,
@@ -1235,6 +1284,10 @@ mod tests {
     use crate::error::{ModelError, StoreError};
     use crate::models::test_server::{Canned, TestServer};
     use crate::openai::{LlmEndpoint, OpenAiAuth};
+    use crate::postproc::{PostprocConfig, PostprocConfigSource};
+    use crate::settings::{
+        AiSummarySettings, AutoResizeSettings, ExportDocxSettings, SkipSettings,
+    };
     use pretty_assertions::assert_eq;
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1402,6 +1455,19 @@ mod tests {
         ) -> Result<(), StoreError> {
             self.record(StoreCall::Skipped(*id, segments.to_vec()));
             Ok(())
+        }
+
+        fn find_completed_by_file_name(
+            &self,
+            _name: &str,
+        ) -> Result<Option<TranscriptionId>, StoreError> {
+            // No queue-level test exercises the DB-check path (that's
+            // `postproc::skip`'s own unit tests) — always "no match".
+            Ok(None)
+        }
+
+        fn segments_for(&self, _id: &TranscriptionId) -> Result<Vec<Segment>, StoreError> {
+            Ok(Vec::new())
         }
     }
 
@@ -1731,6 +1797,7 @@ mod tests {
         fetch_panics: bool,
         ensurer: Option<Arc<dyn ArtifactEnsurer>>,
         llm: Option<Arc<dyn LlmEndpointSource>>,
+        postproc: Option<Arc<dyn PostprocConfigSource>>,
     }
 
     fn build(cfg: Cfg) -> (QueueHandle, Harness) {
@@ -1783,6 +1850,7 @@ mod tests {
             media_dir: tmp.path().join("media"),
             artifacts: cfg.ensurer,
             llm: cfg.llm,
+            postproc: cfg.postproc,
         };
 
         let handle = spawn_task_runner(deps);
@@ -1809,6 +1877,29 @@ mod tests {
     ) -> (QueueHandle, Harness) {
         cfg.ensurer = Some(ensurer);
         build(cfg)
+    }
+
+    // -- Fake PostprocConfigSource: returns a fixed snapshot every call ------
+
+    struct FixedPostprocSource(PostprocConfig);
+
+    impl PostprocConfigSource for FixedPostprocSource {
+        fn snapshot(&self) -> PostprocConfig {
+            self.0.clone()
+        }
+    }
+
+    /// A [`PostprocConfig`] with every hook at its Buzz-parity default
+    /// except [`PostprocConfig::skip`], overridden by the caller.
+    fn postproc_cfg_with_skip(skip: SkipSettings) -> PostprocConfig {
+        PostprocConfig {
+            skip,
+            summary: AiSummarySettings::default(),
+            summary_api_key: None,
+            docx: ExportDocxSettings::default(),
+            resize: AutoResizeSettings::default(),
+            paragraph_split: Millis(2000),
+        }
     }
 
     fn path_task(input: PathBuf) -> TaskSpec {
@@ -3872,5 +3963,136 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "finish_within took {elapsed:?} to give up — expected well under 5s"
         );
+    }
+
+    // -- F-115 check_skip seam ------------------------------------------
+
+    /// A planted sibling `.txt` result file + a configured, enabled skip
+    /// source: the engine must never run (scripted to panic if it does),
+    /// the task ends `Skipped` with the parsed segments persisted, and the
+    /// event sequence is `Queued` → `Started` → `Skipped`, with no
+    /// `Completed` anywhere.
+    #[test]
+    fn skip_check_result_file_hit_bypasses_the_engine() {
+        let (q, h) = build(Cfg {
+            // If the engine were ever invoked despite the skip, this makes
+            // the failure loud and unmistakable rather than silently
+            // completing with the wrong segments.
+            scripts: vec![EngineScript::Panic],
+            postproc: Some(Arc::new(FixedPostprocSource(postproc_cfg_with_skip(
+                SkipSettings {
+                    enabled: true,
+                    check_result_files: true,
+                    check_database: false,
+                },
+            )))),
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let input = h.input_file("clip.mp3");
+        std::fs::write(input.with_file_name("clip.txt"), "already transcribed")
+            .expect("write sibling result file");
+
+        let a = TranscriptionId::new();
+        q.enqueue(a, path_task(input), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        assert_eq!(
+            kinds(&events, a),
+            vec![
+                TaskEventKind::Queued,
+                TaskEventKind::Started,
+                TaskEventKind::Skipped,
+            ]
+        );
+        assert!(
+            h.created.lock().expect("created").is_empty(),
+            "the engine factory must never be consulted for a skipped task"
+        );
+        let calls = h.store_calls();
+        assert!(
+            calls.iter().any(|c| matches!(
+                c,
+                StoreCall::Skipped(x, segs)
+                    if *x == a
+                        && segs.len() == 1
+                        && segs[0].text == "already transcribed"
+            )),
+            "expected a Skipped store call with the parsed result-file segment: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| matches!(c, StoreCall::Completed(..))),
+            "a skipped task must never also be marked completed"
+        );
+    }
+
+    /// `RunnerDeps::postproc: None` (every pre-M7 caller, and most test
+    /// doubles) must leave the engine path completely untouched — even
+    /// with a sibling result file sitting right there, one that *would*
+    /// trigger a skip if any source were configured.
+    #[test]
+    fn postproc_none_leaves_the_engine_path_unchanged() {
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("transcribed for real")],
+            }],
+            postproc: None,
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let input = h.input_file("clip.mp3");
+        std::fs::write(input.with_file_name("clip.txt"), "would have been skipped")
+            .expect("write sibling result file");
+
+        let a = TranscriptionId::new();
+        q.enqueue(a, path_task(input), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+        assert_eq!(h.created.lock().expect("created").len(), 1);
+    }
+
+    /// A postproc source is configured, but [`SkipSettings::enabled`] is
+    /// `false`: the seam must not run at all, and the task transcribes
+    /// normally despite the same sibling result file being present.
+    #[test]
+    fn skip_disabled_in_config_engine_still_runs() {
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("transcribed for real")],
+            }],
+            postproc: Some(Arc::new(FixedPostprocSource(postproc_cfg_with_skip(
+                SkipSettings {
+                    enabled: false,
+                    check_result_files: true,
+                    check_database: false,
+                },
+            )))),
+            ..Cfg::default()
+        });
+        let rx = q.subscribe();
+        let input = h.input_file("clip.mp3");
+        std::fs::write(input.with_file_name("clip.txt"), "would have been skipped")
+            .expect("write sibling result file");
+
+        let a = TranscriptionId::new();
+        q.enqueue(a, path_task(input), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+        assert_eq!(h.created.lock().expect("created").len(), 1);
     }
 }

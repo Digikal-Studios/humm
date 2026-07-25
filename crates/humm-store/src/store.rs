@@ -1497,6 +1497,20 @@ impl TaskStore for SqliteStore {
         tx.commit().map_err(query_error)?;
         Ok(())
     }
+
+    fn find_completed_by_file_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<TranscriptionId>, StoreError> {
+        // Delegates to the inherent method below — inherent methods take
+        // priority over trait methods in Rust's call resolution even from
+        // inside a trait impl block, so this is not (accidental) recursion.
+        self.find_completed_by_file_name(name)
+    }
+
+    fn segments_for(&self, id: &TranscriptionId) -> Result<Vec<Segment>, StoreError> {
+        self.get_segments(id)
+    }
 }
 
 #[cfg(test)]
@@ -1932,6 +1946,65 @@ mod tests {
                 .has_task_for_file(Path::new("/dir/a/x.mp3"))
                 .expect("still matches after status change")
         );
+    }
+
+    /// End-to-end proof that `humm_core::postproc::skip::check`'s database
+    /// check (F-115) works against a *real* `SqliteStore` reached purely
+    /// through the `TaskStore` trait object (exercising the
+    /// `find_completed_by_file_name`/`segments_for` trait methods added for
+    /// it, not just their already-tested inherent counterparts): a
+    /// completed task with a different directory but the same basename is
+    /// found, and its segments come back with translations forced to `""`
+    /// even though the stored row carries a real one.
+    #[test]
+    fn skip_check_db_hit_drops_translations_through_task_store_trait() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut spec = sample_task_spec();
+        spec.input = Input::Path(PathBuf::from("/dir/a/clip.mp3"));
+        let id = TranscriptionId::new();
+        store
+            .create_task(&id, &spec, Source::FileImport)
+            .expect("create");
+        store
+            .mark_completed(
+                &id,
+                &[
+                    Segment {
+                        start: Millis(0),
+                        end: Millis(1000),
+                        text: "uno".to_string(),
+                        translation: "one".to_string(),
+                    },
+                    Segment {
+                        start: Millis(1000),
+                        end: Millis(2000),
+                        text: "dos".to_string(),
+                        translation: String::new(),
+                    },
+                ],
+            )
+            .expect("complete");
+
+        let settings = humm_core::settings::SkipSettings {
+            enabled: true,
+            check_result_files: false,
+            check_database: true,
+        };
+        // A different directory, same basename — proves the match is by
+        // basename, not exact path (Buzz parity).
+        let found = humm_core::postproc::skip::check(
+            &settings,
+            Path::new("/some/other/dir/clip.mp3"),
+            None,
+            &store,
+        )
+        .expect("db hit expected");
+
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].text, "uno");
+        assert_eq!(found[0].translation, "");
+        assert_eq!(found[1].text, "dos");
+        assert_eq!(found[1].translation, "");
     }
 
     #[test]

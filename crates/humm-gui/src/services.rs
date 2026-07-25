@@ -33,13 +33,15 @@ use humm_core::error::StoreError;
 use humm_core::openai::LlmEndpointSource;
 use humm_core::paths;
 use humm_core::pipeline::EngineTuning;
+use humm_core::postproc::{PostprocConfig, PostprocConfigSource};
 use humm_core::queue::{
     ArtifactEnsurer, EngineFactory, QueueHandle, RunnerDeps, TaskEvent, spawn_task_runner,
 };
-use humm_core::secrets::{MemorySecretStore, SecretStore};
+use humm_core::secrets::{MemorySecretStore, SecretKey, SecretStore};
 use humm_core::settings::{Settings, SettingsError};
 use humm_core::telemetry::{Event, NoopTelemetry, PostHogTelemetry, Telemetry, telemetry_enabled};
 use humm_core::update::{self, UpdateInfo};
+use humm_core::viewer::text_view::paragraph_split_from_env;
 use humm_media::{FfmpegDecoder, FfprobeProber, MediaCapabilities, YtDlpFetcher, probe_binaries};
 use humm_store::{KeyringSecretStore, SqliteStore};
 
@@ -197,6 +199,55 @@ pub enum InitError {
     Store(#[from] StoreError),
 }
 
+/// The GUI's [`PostprocConfigSource`] (design spec §2.4): reads
+/// `settings.postproc` fresh from the shared live [`Settings`] on every
+/// [`PostprocConfigSource::snapshot`] call, so a Preferences → Post-
+/// processing edit made mid-run is honored by the very next task — mirrors
+/// [`crate::llm_source::GuiLlmSource`]'s "read fresh, per task" contract.
+/// The AI-summary hook's API key is only resolved from `secrets` when
+/// `ai_summary.enabled` is set, so an ordinary run with every hook off never
+/// touches the keyring at all.
+struct GuiPostprocSource {
+    /// The shared live settings — `postproc` is cloned fresh on every
+    /// snapshot.
+    settings: Arc<Mutex<Settings>>,
+    /// The secret store the AI-summary API key is read from (the OS keyring
+    /// in production, an in-memory double in tests).
+    secrets: Arc<dyn SecretStore>,
+}
+
+impl PostprocConfigSource for GuiPostprocSource {
+    fn snapshot(&self) -> PostprocConfig {
+        let postproc = {
+            let guard = self
+                .settings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.postproc.clone()
+        };
+        let summary_api_key = if postproc.ai_summary.enabled {
+            match self.secrets.get(SecretKey::AiSummaryApiKey) {
+                Ok(Some(key)) if !key.is_empty() => Some(key),
+                Ok(_) => None,
+                Err(err) => {
+                    log::warn!("keyring lookup for AI Summary API key failed: {err}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        PostprocConfig {
+            skip: postproc.skip_already_transcribed,
+            summary: postproc.ai_summary,
+            summary_api_key,
+            docx: postproc.export_docx,
+            resize: postproc.transcript_resizer,
+            paragraph_split: paragraph_split_from_env(),
+        }
+    }
+}
+
 /// Builds [`Services`] with real adapters, mirroring the CLI's startup order
 /// (`crates/humm-cli/src/run.rs::execute`): settings → store → one-time Buzz
 /// import → instance-lock-gated stale-task flip → queue spawn → (if due)
@@ -289,6 +340,13 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
             settings: Arc::clone(&settings),
             secrets: Arc::clone(&secrets),
         }) as Arc<dyn LlmEndpointSource>),
+        // The GUI's check_skip seam config source (F-115, design spec
+        // §2.4): reads `settings.postproc` fresh per task, resolving the
+        // AI-summary key from the same shared keyring `secrets` handle.
+        postproc: Some(Arc::new(GuiPostprocSource {
+            settings: Arc::clone(&settings),
+            secrets: Arc::clone(&secrets),
+        }) as Arc<dyn PostprocConfigSource>),
     };
     let queue = spawn_task_runner(deps);
     let events = queue.subscribe();
@@ -561,6 +619,11 @@ pub fn init_with(deps: TestDeps) -> Services {
         media_dir: deps.media_dir,
         artifacts: deps.artifacts,
         llm: deps.llm,
+        // No existing kittest exercises the check_skip seam or any other
+        // post-processing hook — `None` keeps every task running through
+        // the engine exactly as before this field existed (see
+        // `queue::RunnerDeps::postproc`'s doc comment).
+        postproc: None,
     };
     let queue = spawn_task_runner(runner_deps);
     let events = queue.subscribe();

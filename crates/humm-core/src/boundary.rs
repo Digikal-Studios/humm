@@ -568,6 +568,26 @@ pub trait TaskStore: Send + Sync {
     /// a failure: Buzz counts a skip toward "quit on complete"
     /// (`main_window.py:435-443`).
     fn mark_skipped(&self, id: &TranscriptionId, segments: &[Segment]) -> Result<(), StoreError>;
+
+    /// Finds the newest (`time_ended` descending) `completed` task whose
+    /// input file's basename matches `name` — the trait-level counterpart
+    /// of `SqliteStore::find_completed_by_file_name`, needed so
+    /// [`crate::postproc::skip::check`]'s database check (F-115, design
+    /// spec §2.3/§4) can reach it through the same store handle
+    /// [`crate::queue::RunnerDeps::store`] already holds, without
+    /// `humm-core` depending on `humm-store` for the concrete type.
+    fn find_completed_by_file_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<TranscriptionId>, StoreError>;
+
+    /// Fetches every persisted segment for `id`, in insertion order — the
+    /// trait-level counterpart of `SqliteStore::get_segments`, used by the
+    /// same F-115 database check to copy a prior completed transcription's
+    /// segments. Returns whatever is actually stored (including any
+    /// translation); the hook itself is what drops translations, not this
+    /// method.
+    fn segments_for(&self, id: &TranscriptionId) -> Result<Vec<Segment>, StoreError>;
 }
 
 #[cfg(test)]
