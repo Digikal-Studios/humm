@@ -220,6 +220,7 @@ prefs-tab-general = General
 prefs-tab-models = Modelos
 prefs-tab-shortcuts = Atajos
 prefs-tab-folder-watch = Vigilancia de carpetas
+prefs-tab-postproc = Postprocesamiento
 prefs-tab-privacy = Privacidad
 
 ## Preferences General tab, complete (views/prefs_general.rs, F-100,
@@ -321,6 +322,46 @@ prefs-fw-output-folder-placeholder = /ruta/a/la/carpeta/de/salida
 prefs-fw-browse = Navegar
 prefs-fw-delete-checkbox = Eliminar archivos procesados
 prefs-fw-disposition-note = Una vez transcrito, el archivo de origen se mueve a la carpeta de salida — o se elimina, si Eliminar archivos procesados está marcado.
+
+## Preferences Post-processing tab (views/prefs_postproc.rs, ADR-010, design
+## spec §8.5, Task 16). Section titles and field labels/descriptions are
+## Buzz's own es_ES plugin locale JSONs (`plugins/*/locale/es_ES.json`), used
+## verbatim -- Buzz's own translations. The four "Habilitar …" checkbox
+## labels and `prefs-postproc-header`/`prefs-postproc-summary-key-save-error-
+## body` have no Buzz source (Buzz's plugin enablement lived in the unported
+## Plugins management dialog, ADR-010) -- translated fresh in this
+## catalog's own register.
+
+prefs-postproc-header = Estos procesos se ejecutan automáticamente después de cada transcripción completada. Un fallo se registra en el log, pero nunca hace fallar la transcripción en sí.
+prefs-postproc-skip-title = Omitir ya transcritos
+prefs-postproc-skip-enable = Habilitar Omitir ya transcritos
+prefs-postproc-skip-check-files = Buscar archivos de resultado existentes
+prefs-postproc-skip-check-files-desc = Omitir si se encuentra un archivo .txt, .srt o .vtt con el mismo nombre de audio junto a él
+prefs-postproc-skip-check-db = Comprobar en la base de datos de transcripciones
+prefs-postproc-skip-check-db-desc = Omitir si este archivo ya ha sido transcrito y el registro existe en la base de datos
+prefs-postproc-resizer-title = Redimensionador automático de transcripciones
+prefs-postproc-resizer-enable = Habilitar el redimensionador automático de transcripciones
+prefs-postproc-resizer-merge-by-gap = Fusionar por intervalo
+prefs-postproc-resizer-merge-gap-seconds = Intervalo de fusión (segundos)
+prefs-postproc-resizer-split-by-punctuation = Dividir por puntuación
+prefs-postproc-resizer-punctuation = Puntuación
+prefs-postproc-resizer-split-by-max-length = Dividir por longitud máxima
+prefs-postproc-resizer-max-length = Longitud máxima del subtítulo
+prefs-postproc-summary-title = Resumen con IA
+prefs-postproc-summary-enable = Habilitar Resumen con IA
+prefs-postproc-summary-api-url = URL base de la API
+prefs-postproc-summary-api-key-label = Clave de API
+prefs-postproc-summary-model = Modelo
+prefs-postproc-summary-prompt = Indicación de resumen
+prefs-postproc-summary-save-to-notes = Guardar resumen en notas
+prefs-postproc-summary-save-to-file = Guardar resumen en un archivo
+prefs-postproc-summary-output-folder = Carpeta de salida (para el archivo)
+prefs-postproc-summary-key-save-error-body = No se puede guardar la clave de la API de Resumen con IA en el llavero
+prefs-postproc-docx-title = Exportar a DOCX
+prefs-postproc-docx-enable = Habilitar Exportar a DOCX
+prefs-postproc-docx-output-folder = Carpeta de salida
+prefs-postproc-docx-include-timestamps = Incluir marcas de tiempo
+prefs-postproc-output-folder-hint = Déjalo vacío para guardar junto al archivo de origen.
 
 ## Transcript viewer window (views/viewer.rs, F-080)
 

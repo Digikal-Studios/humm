@@ -229,6 +229,7 @@ prefs-tab-general = 通用
 prefs-tab-models = 模型
 prefs-tab-shortcuts = 快捷键
 prefs-tab-folder-watch = 文件夹查看
+prefs-tab-postproc = 后处理
 prefs-tab-privacy = 隐私
 
 ## Preferences General tab, complete (views/prefs_general.rs, F-100,
@@ -332,6 +333,50 @@ prefs-fw-output-folder-placeholder = /输出文件夹/路径
 prefs-fw-browse = 浏览
 prefs-fw-delete-checkbox = 删除已处理的文件
 prefs-fw-disposition-note = 识别完成后，源文件会被移动到输出文件夹——如果勾选了"删除已处理的文件"，则会改为删除。
+
+## Preferences Post-processing tab (views/prefs_postproc.rs, ADR-010, design
+## spec §8.5, Task 16). Section titles and field labels/descriptions are
+## Buzz's own zh_CN plugin locale JSONs (`plugins/*/locale/zh_CN.json`), used
+## verbatim -- a separate Buzz translation asset from `buzz.po`, and its own
+## translators render "transcribed"/"transcript" as 转录 rather than this
+## catalog's usual 识别; kept as-is per-string (task brief: use Buzz's own
+## translation where one exists) rather than forced to match. The four
+## "启用…" checkbox labels and `prefs-postproc-header`/`prefs-postproc-
+## summary-key-save-error-body` have no Buzz source (Buzz's plugin
+## enablement lived in the unported Plugins management dialog, ADR-010) --
+## translated fresh, using this catalog's own 识别 for "transcription" and
+## reusing each section's own copied title for its enable checkbox.
+
+prefs-postproc-header = 这些处理会在每次识别完成后自动运行。处理失败会被记录，但不会导致本次识别失败。
+prefs-postproc-skip-title = 跳过已转录文件
+prefs-postproc-skip-enable = 启用跳过已转录文件
+prefs-postproc-skip-check-files = 检查现有结果文件
+prefs-postproc-skip-check-files-desc = 如果在同目录下找到与音频文件名匹配的 .txt、.srt 或 .vtt 文件，则跳过
+prefs-postproc-skip-check-db = 在转录数据库中检查
+prefs-postproc-skip-check-db-desc = 如果此文件已被转录且记录存在于数据库中，则跳过
+prefs-postproc-resizer-title = 自动转录文本调整
+prefs-postproc-resizer-enable = 启用自动转录文本调整
+prefs-postproc-resizer-merge-by-gap = 按间隔合并
+prefs-postproc-resizer-merge-gap-seconds = 合并间隔（秒）
+prefs-postproc-resizer-split-by-punctuation = 按标点分割
+prefs-postproc-resizer-punctuation = 标点符号
+prefs-postproc-resizer-split-by-max-length = 按最大长度分割
+prefs-postproc-resizer-max-length = 字幕最大长度
+prefs-postproc-summary-title = AI 摘要
+prefs-postproc-summary-enable = 启用 AI 摘要
+prefs-postproc-summary-api-url = API 基础 URL
+prefs-postproc-summary-api-key-label = API 密钥
+prefs-postproc-summary-model = 模型
+prefs-postproc-summary-prompt = 摘要提示词
+prefs-postproc-summary-save-to-notes = 将摘要保存到备注
+prefs-postproc-summary-save-to-file = 将摘要保存到文件
+prefs-postproc-summary-output-folder = 输出文件夹（用于文件）
+prefs-postproc-summary-key-save-error-body = 无法将 AI 摘要 API 密钥保存到密钥串
+prefs-postproc-docx-title = 导出为 DOCX
+prefs-postproc-docx-enable = 启用导出为 DOCX
+prefs-postproc-docx-output-folder = 输出文件夹
+prefs-postproc-docx-include-timestamps = 包含时间戳
+prefs-postproc-output-folder-hint = 留空则保存在源文件旁边。
 
 ## Transcript viewer window (views/viewer.rs, F-080)
 

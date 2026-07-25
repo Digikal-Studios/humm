@@ -11,6 +11,7 @@ pub mod playback_controls;
 pub mod preferences;
 pub mod prefs_folder_watch;
 pub mod prefs_general;
+pub mod prefs_postproc;
 pub mod prefs_shortcuts;
 pub mod presentation;
 pub mod recording;

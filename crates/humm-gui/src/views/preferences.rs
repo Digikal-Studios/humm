@@ -2,12 +2,11 @@
 //! (F-100, [`crate::views::prefs_general`]), **Models** (F-044 basic,
 //! [`crate::models_ui`]), **Shortcuts** (F-005 editor + ✚ conflict
 //! detection, [`crate::views::prefs_shortcuts`], Task 14), **Folder Watch**
-//! (F-030c, [`crate::views::prefs_folder_watch`], Task 15), and **Privacy**
-//! (ADR-009, UX §J-11), in that strip order — design spec §8's full strip is
-//! General · Models · Shortcuts · Folder Watch · Post-processing · Privacy;
-//! `Post-processing` is a later M7 task, so Privacy sits immediately after
-//! Folder Watch until it lands
-//! (`buzz-notes-import-progress-models.md`'s preferences-shell notes).
+//! (F-030c, [`crate::views::prefs_folder_watch`], Task 15), **Post-processing**
+//! (ADR-010's config home for F-110/F-111/F-113/F-115/F-116,
+//! [`crate::views::prefs_postproc`], Task 16), and **Privacy** (ADR-009, UX
+//! §J-11), in that strip order — the full six-tab strip design spec §8/§8.6
+//! (F-101) calls for.
 //!
 //! Rendered as a real OS window (an egui *immediate* viewport, min
 //! 650×500 — `app.rs::HummApp::show_preferences_viewport`). Immediate
@@ -40,14 +39,14 @@ use crate::models_ui::{self, ModelsTabState};
 use crate::shortcuts::ShortcutMap;
 use crate::views::prefs_folder_watch::{self, FolderWatchTabState};
 use crate::views::prefs_general::{self, GeneralTabState, ValidateFn};
+use crate::views::prefs_postproc::{self, PostprocTabState};
 use crate::views::prefs_shortcuts::{self, ShortcutsTabState};
 
 /// Which tab is currently selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefsTab {
     /// UI language, font size, the OpenAI block, default export template,
-    /// and Disable GPU (F-100 complete, design spec §8.1). Post-processing
-    /// tab is a later M7 task.
+    /// and Disable GPU (F-100 complete, design spec §8.1).
     General,
     /// F-044 basic model list.
     Models,
@@ -56,6 +55,10 @@ pub enum PrefsTab {
     /// F-030c: enable/paths/delete-processed + the embedded auto-task
     /// options form (design spec §8.4, Task 15).
     FolderWatch,
+    /// The four native post-processing hooks' config home (ADR-010,
+    /// design spec §8.5, Task 16): Skip Already Transcribed, Automatic
+    /// Transcript Resizer, AI Summary, Export to DOCX.
+    PostProcessing,
     /// ADR-009/UX §J-11 telemetry + update-check toggles.
     Privacy,
 }
@@ -80,6 +83,10 @@ pub struct PreferencesState {
     /// from `settings.folder_watch` (and the keyring, for its embedded Api
     /// Key row), same "rebuilt fresh on open" contract as every other tab.
     pub folder_watch: FolderWatchTabState,
+    /// The Post-processing tab's own state (design spec §8.5, Task 16) —
+    /// seeded from `settings.postproc` (and the keyring, for the AI Summary
+    /// key row), same "rebuilt fresh on open" contract as every other tab.
+    pub postproc: PostprocTabState,
 }
 
 impl PreferencesState {
@@ -120,14 +127,16 @@ impl PreferencesState {
                 custom_model_available,
                 include_lumii,
             ),
+            postproc: PostprocTabState::new(&settings.postproc, secrets.as_ref()),
         }
     }
 }
 
 /// Renders the tab strip + the selected tab's content. `dialogs` is only
-/// used by the Folder Watch tab's Browse buttons (design spec §8.4) — every
-/// other tab ignores it, same "threaded everywhere, consumed where needed"
-/// shape `secrets`/`validate` already have in this signature.
+/// used by the Folder Watch and Post-processing tabs' own Browse buttons
+/// (design spec §8.4/§8.5) — every other tab ignores it, same "threaded
+/// everywhere, consumed where needed" shape `secrets`/`validate` already
+/// have in this signature.
 #[allow(clippy::too_many_arguments)]
 pub fn ui(
     ui: &mut egui::Ui,
@@ -153,6 +162,11 @@ pub fn ui(
             &mut state.tab,
             PrefsTab::FolderWatch,
             tr("prefs-tab-folder-watch"),
+        );
+        ui.selectable_value(
+            &mut state.tab,
+            PrefsTab::PostProcessing,
+            tr("prefs-tab-postproc"),
         );
         ui.selectable_value(&mut state.tab, PrefsTab::Privacy, tr("prefs-tab-privacy"));
     });
@@ -186,6 +200,16 @@ pub fn ui(
             prefs_folder_watch::ui(
                 ui,
                 &mut state.folder_watch,
+                settings,
+                settings_path,
+                secrets,
+                dialogs,
+            );
+        }
+        PrefsTab::PostProcessing => {
+            prefs_postproc::ui(
+                ui,
+                &mut state.postproc,
                 settings,
                 settings_path,
                 secrets,

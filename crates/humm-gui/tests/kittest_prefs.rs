@@ -43,6 +43,7 @@ use humm_gui::shortcuts::ShortcutMap;
 use humm_gui::views::preferences::{self, PreferencesState, PrefsTab};
 use humm_gui::views::prefs_folder_watch::FolderWatchTabState;
 use humm_gui::views::prefs_general::{self, GeneralModal, GeneralTabState, ValidateFn};
+use humm_gui::views::prefs_postproc::PostprocTabState;
 use humm_gui::views::prefs_shortcuts::ShortcutsTabState;
 use humm_store::SqliteStore;
 
@@ -147,6 +148,10 @@ fn privacy_toggles_persist_to_the_settings_file() {
                 false,
                 false,
             ),
+            postproc: PostprocTabState::new(
+                &humm_core::settings::PostprocSettings::default(),
+                secrets.as_ref(),
+            ),
         },
         model_root: model_root_dir.path().to_path_buf(),
         settings,
@@ -245,6 +250,10 @@ fn general_harness(
                 secrets.as_ref(),
                 false,
                 false,
+            ),
+            postproc: PostprocTabState::new(
+                &humm_core::settings::PostprocSettings::default(),
+                secrets.as_ref(),
             ),
         },
         model_root,
@@ -887,6 +896,111 @@ fn models_tab_shows_lumii_under_lv_locale() {
     harness.run();
 
     harness.get_by_label_contains("Lumii");
+}
+
+// -- F-101 assembly: all six tabs selectable and render (design spec §8.6) --
+
+/// The tab-strip fixture for [`all_six_tabs_are_selectable_and_render`] —
+/// identical shape to [`GeneralFixture`]/[`PrivacyFixture`] above, just not
+/// pinned to any one starting tab (the test itself drives every tab).
+struct SixTabFixture {
+    state: PreferencesState,
+    model_root: PathBuf,
+    settings: Arc<Mutex<Settings>>,
+    settings_path: PathBuf,
+    secrets: Arc<dyn SecretStore>,
+    validate: ValidateFn,
+    shortcuts_generation: Arc<AtomicUsize>,
+    current_shortcuts: ShortcutMap,
+    _model_root_dir: tempfile::TempDir,
+    _settings_dir: tempfile::TempDir,
+}
+
+/// F-101 is the assembly row (design spec §8.6): all six tabs — General ·
+/// Models · Shortcuts · Folder Watch · Post-processing · Privacy, exactly
+/// that strip order — are reachable and each renders its own content.
+/// Clicks every tab-strip entry in turn and asserts a label unique to that
+/// tab's own content appears afterward, proving the click actually switched
+/// [`PreferencesState::tab`] and the matching arm in [`preferences::ui`]
+/// rendered (not just that the click landed on the strip). This sweep *is*
+/// the F-101 acceptance method (`gui-manual v5` covers the windowed pass on
+/// top of it, per the matrix row).
+#[test]
+fn all_six_tabs_are_selectable_and_render() {
+    let model_root_dir = tempfile::tempdir().expect("model root tempdir");
+    let settings_dir = tempfile::tempdir().expect("settings tempdir");
+    let settings_path = settings_dir.path().join("settings.toml");
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+    let model_root = model_root_dir.path().to_path_buf();
+
+    let fixture = SixTabFixture {
+        state: PreferencesState {
+            tab: PrefsTab::General,
+            general: GeneralTabState::new(secrets.as_ref(), &Settings::default()),
+            models: ModelsTabState::new(&model_root, None, false),
+            shortcuts: ShortcutsTabState::default(),
+            folder_watch: FolderWatchTabState::new(
+                &humm_core::settings::FolderWatchSettings::default(),
+                secrets.as_ref(),
+                false,
+                false,
+            ),
+            postproc: PostprocTabState::new(
+                &humm_core::settings::PostprocSettings::default(),
+                secrets.as_ref(),
+            ),
+        },
+        model_root,
+        settings: Arc::new(Mutex::new(Settings::default())),
+        settings_path,
+        secrets,
+        validate: services::default_test_validate(),
+        shortcuts_generation: Arc::new(AtomicUsize::new(0)),
+        current_shortcuts: ShortcutMap::from_settings(&HashMap::new()),
+        _model_root_dir: model_root_dir,
+        _settings_dir: settings_dir,
+    };
+
+    let mut harness = HarnessBuilder::default()
+        .with_size(egui::Vec2::new(700.0, 1200.0))
+        .build_ui_state(
+            |ui, fixture: &mut SixTabFixture| {
+                preferences::ui(
+                    ui,
+                    &mut fixture.state,
+                    &fixture.model_root,
+                    &fixture.settings,
+                    &fixture.settings_path,
+                    &fixture.secrets,
+                    &fixture.validate,
+                    &fixture.shortcuts_generation,
+                    &fixture.current_shortcuts,
+                    &NullDialogs,
+                );
+            },
+            fixture,
+        );
+    harness.run();
+
+    // (tab-strip label, a label unique to that tab's own rendered content).
+    let tabs: &[(&str, &str)] = &[
+        ("General", "OpenAI API key"),
+        ("Models", "Downloaded"),
+        ("Shortcuts", "Open Record Window"),
+        ("Folder Watch", "Enable folder watch"),
+        // Not "Skip Already Transcribed" alone -- that CollapsingHeader
+        // title is also a substring of its own "Enable Skip Already
+        // Transcribed" checkbox, which `get_by_label_contains` would then
+        // find twice.
+        ("Post-processing", "Check for existing result files"),
+        ("Privacy", "Send anonymous launch telemetry"),
+    ];
+
+    for (tab_label, content_label) in tabs {
+        harness.get_by_label(tab_label).click();
+        harness.run();
+        harness.get_by_label_contains(content_label);
+    }
 }
 
 // -- Toolbar update chip: appears once an Available notice lands -------------

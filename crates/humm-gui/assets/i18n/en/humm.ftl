@@ -214,6 +214,7 @@ prefs-tab-general = General
 prefs-tab-models = Models
 prefs-tab-shortcuts = Shortcuts
 prefs-tab-folder-watch = Folder Watch
+prefs-tab-postproc = Post-processing
 prefs-tab-privacy = Privacy
 
 ## Preferences General tab, complete (views/prefs_general.rs, F-100,
@@ -318,6 +319,45 @@ prefs-fw-output-folder-placeholder = /path/to/output/folder
 prefs-fw-browse = Browse
 prefs-fw-delete-checkbox = Delete processed files
 prefs-fw-disposition-note = Once transcribed, the source file is moved into the output folder — or deleted, if Delete processed files is checked.
+
+## Preferences Post-processing tab (views/prefs_postproc.rs, ADR-010, design
+## spec §8.5, Task 16) -- the config home for the four native
+## post-processing hooks (F-110's resolution: features, not plugins). Section
+## titles and field labels/descriptions are Buzz's own `plugins/*/plugin.py`
+## `config_fields` strings, ported byte-faithful (they were user-facing
+## copy). `prefs-fw-browse`/`dialog-ok` above are reused for this tab's own
+## Browse buttons and key-commit-failure modal.
+
+prefs-postproc-header = These hooks run automatically after each transcription completes. A hook failure is logged but never fails the transcription itself.
+prefs-postproc-skip-title = Skip Already Transcribed
+prefs-postproc-skip-enable = Enable Skip Already Transcribed
+prefs-postproc-skip-check-files = Check for existing result files
+prefs-postproc-skip-check-files-desc = Skip if a .txt, .srt, or .vtt file matching the audio filename is found next to it
+prefs-postproc-skip-check-db = Check in transcription database
+prefs-postproc-skip-check-db-desc = Skip if this file has already been transcribed and the record exists in the database
+prefs-postproc-resizer-title = Automatic Transcript Resizer
+prefs-postproc-resizer-enable = Enable Automatic Transcript Resizer
+prefs-postproc-resizer-merge-by-gap = Merge by gap
+prefs-postproc-resizer-merge-gap-seconds = Merge gap (seconds)
+prefs-postproc-resizer-split-by-punctuation = Split by punctuation
+prefs-postproc-resizer-punctuation = Punctuation
+prefs-postproc-resizer-split-by-max-length = Split by max length
+prefs-postproc-resizer-max-length = Maximum subtitle length
+prefs-postproc-summary-title = AI Summary
+prefs-postproc-summary-enable = Enable AI Summary
+prefs-postproc-summary-api-url = API base URL
+prefs-postproc-summary-api-key-label = API key
+prefs-postproc-summary-model = Model
+prefs-postproc-summary-prompt = Summarization prompt
+prefs-postproc-summary-save-to-notes = Save summary to Notes
+prefs-postproc-summary-save-to-file = Save summary to a file
+prefs-postproc-summary-output-folder = Output folder (for file)
+prefs-postproc-summary-key-save-error-body = Unable to save AI Summary API key to keyring
+prefs-postproc-docx-title = Export to DOCX
+prefs-postproc-docx-enable = Enable Export to DOCX
+prefs-postproc-docx-output-folder = Output folder
+prefs-postproc-docx-include-timestamps = Include timestamps
+prefs-postproc-output-folder-hint = Leave empty to save next to the source file.
 
 ## Transcript viewer window (views/viewer.rs, F-080)
 

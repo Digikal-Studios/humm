@@ -218,6 +218,7 @@ prefs-tab-general = Allgemein
 prefs-tab-models = Modelle
 prefs-tab-shortcuts = Tastenkombinationen
 prefs-tab-folder-watch = Ordner überwachen
+prefs-tab-postproc = Nachbearbeitung
 prefs-tab-privacy = Datenschutz
 
 ## Preferences General tab, complete (views/prefs_general.rs, F-100,
@@ -320,6 +321,46 @@ prefs-fw-output-folder-placeholder = /pfad/zum/ausgabeordner
 prefs-fw-browse = Durchsuchen
 prefs-fw-delete-checkbox = Verarbeitete Dateien löschen
 prefs-fw-disposition-note = Nach der Transkription wird die Quelldatei in den Ausgabeordner verschoben — oder gelöscht, wenn Verarbeitete Dateien löschen aktiviert ist.
+
+## Preferences Post-processing tab (views/prefs_postproc.rs, ADR-010, design
+## spec §8.5, Task 16). Section titles and field labels/descriptions are
+## Buzz's own de_DE plugin locale JSONs (`plugins/*/locale/de_DE.json`), used
+## verbatim -- Buzz's own translations. The four "Enable …" checkbox labels
+## and `prefs-postproc-header`/`prefs-postproc-summary-key-save-error-body`
+## have no Buzz source (Buzz's plugin enablement lived in the unported
+## Plugins management dialog, ADR-010) -- translated fresh in this
+## catalog's own formal (Sie) register.
+
+prefs-postproc-header = Diese Hooks werden automatisch nach jeder abgeschlossenen Transkription ausgeführt. Ein Hook-Fehler wird protokolliert, führt aber nie zum Scheitern der Transkription selbst.
+prefs-postproc-skip-title = Bereits Transkribierte überspringen
+prefs-postproc-skip-enable = Bereits Transkribierte überspringen aktivieren
+prefs-postproc-skip-check-files = Nach vorhandenen Ergebnisdateien suchen
+prefs-postproc-skip-check-files-desc = Überspringen, wenn eine .txt-, .srt- oder .vtt-Datei mit demselben Audiodateinamen daneben gefunden wird
+prefs-postproc-skip-check-db = In der Transkriptionsdatenbank prüfen
+prefs-postproc-skip-check-db-desc = Überspringen, wenn diese Datei bereits transkribiert wurde und der Eintrag in der Datenbank vorhanden ist
+prefs-postproc-resizer-title = Automatische Transkript-Anpassung
+prefs-postproc-resizer-enable = Automatische Transkript-Anpassung aktivieren
+prefs-postproc-resizer-merge-by-gap = Nach Pause zusammenführen
+prefs-postproc-resizer-merge-gap-seconds = Pause beim Zusammenführen (Sekunden)
+prefs-postproc-resizer-split-by-punctuation = Nach Satzzeichen teilen
+prefs-postproc-resizer-punctuation = Satzzeichen
+prefs-postproc-resizer-split-by-max-length = Nach maximaler Länge teilen
+prefs-postproc-resizer-max-length = Maximale Untertitellänge
+prefs-postproc-summary-title = KI-Zusammenfassung
+prefs-postproc-summary-enable = KI-Zusammenfassung aktivieren
+prefs-postproc-summary-api-url = API-Basis-URL
+prefs-postproc-summary-api-key-label = API-Schlüssel
+prefs-postproc-summary-model = Modell
+prefs-postproc-summary-prompt = Zusammenfassungs-Prompt
+prefs-postproc-summary-save-to-notes = Zusammenfassung in Notizen speichern
+prefs-postproc-summary-save-to-file = Zusammenfassung in einer Datei speichern
+prefs-postproc-summary-output-folder = Ausgabeordner (für Datei)
+prefs-postproc-summary-key-save-error-body = Der KI-Zusammenfassung-API-Schlüssel kann nicht im Schlüsselbund gespeichert werden
+prefs-postproc-docx-title = Als DOCX exportieren
+prefs-postproc-docx-enable = Als DOCX exportieren aktivieren
+prefs-postproc-docx-output-folder = Ausgabeordner
+prefs-postproc-docx-include-timestamps = Zeitstempel einschließen
+prefs-postproc-output-folder-hint = Leer lassen, um neben der Quelldatei zu speichern.
 
 ## Transcript viewer window (views/viewer.rs, F-080)
 
