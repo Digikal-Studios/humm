@@ -19,6 +19,23 @@
 //! GUI-app feature in Buzz — the CLI has no folder-watch surface — and core
 //! stays OS-boundary-free).
 //!
+//! ## Watch identity vs. job template
+//!
+//! A `[folder_watch]` snapshot splits into two halves with very different
+//! restart costs: `input_dir` is the watch's *identity* — changing it means
+//! tearing down and rebuilding the OS-level subscription (FSEvents/
+//! PollWatcher), since that's what the watcher was actually told to watch —
+//! while `output_dir`/`delete_processed_files`/`options` are a **job
+//! template** the running worker thread reads fresh on every rescan via
+//! shared state ([`JobTemplate`], `Arc<Mutex<_>>`) and [`FolderWatchService::
+//! update_template`] can swap out without touching the watcher at all. This
+//! matters because Task 15 lands a live-editable options form for
+//! `folder_watch.options` — without the split, every keystroke committing a
+//! field would restart the FSEvents subscription; with it, only an actual
+//! `input_dir` change (or the feature being turned on/off) ever does.
+//! [`reconcile_folder_watch`] is the pure decision function choosing between
+//! `Restart` (identity changed) and `UpdateTemplate` (only the template did).
+//!
 //! ## Threading model
 //!
 //! One `notify` watcher (kept alive for its `Drop`-based unwatch) forwards
@@ -31,7 +48,32 @@
 //! ([`FolderWatchService::pause`]) still drains events (so they don't pile up
 //! unboundedly) but skips the rescan itself, and never touches the
 //! [`SeenSet`] — resuming picks up exactly where scanning left off, not from
-//! a blank slate.
+//! a blank slate. A `stopping` flag (distinct from `paused`) is observed
+//! before the initial scan and between every candidate in a rescan, so
+//! [`FolderWatchService::stop`]'s join is bounded even if it lands mid-scan —
+//! this matters most for `Restart`, whose caller (`app.rs`, on the UI thread)
+//! calls `stop()` synchronously and would otherwise block on however long a
+//! big directory's scan takes.
+//!
+//! ## `SeenSet` lifetime
+//!
+//! The [`SeenSet`] (Buzz's `paths_emitted`) is **not** owned by this service —
+//! it's passed in as an `Arc<Mutex<SeenSet>>` and shared across every
+//! `start()` for the process's whole lifetime (`app.rs`'s `HummApp` owns the
+//! one instance, constructed once). Buzz's own `paths_emitted` lives on the
+//! single `TranscriptionTaskFolderWatcher` object `MainWindow` constructs
+//! once and reuses across every `set_preferences` call — only a full app
+//! restart clears it. Giving each `start()` a *fresh* `SeenSet` instead (an
+//! earlier revision of this module did exactly that) opens a real race: a
+//! rescan's `queue.enqueue()` is fire-and-forget (the runner's own
+//! `create_task` may not have landed in the store yet), so a Preferences edit
+//! landing in that narrow window could restart the watcher with a blank seen
+//! set and a store that still doesn't (yet) know about the file just
+//! enqueued — double-enqueueing it. Sharing the *same* `SeenSet` across
+//! restarts closes that window unconditionally: rule 6 (`scan`'s "seen at
+//! this exact size/mtime") fires regardless of whether the store has caught
+//! up. Proven end to end by `tests/folder_watch_int.rs::
+//! seen_set_survives_a_rebuild_so_a_recently_enqueued_file_is_not_double_enqueued`.
 //!
 //! `queue`/`store`/`ctx` are all cheaply cloneable, thread-safe handles
 //! (`Arc<QueueHandle>`/`Arc<SqliteStore>`/`egui::Context`) moved into the
@@ -45,10 +87,11 @@
 //! clone — see `app.rs`'s `HummApp::queue`/`on_exit` doc comments.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use humm_core::domain::{Source, SourceDisposition, TranscriptionId};
 use humm_core::folderwatch::{self, SeenSet};
@@ -62,21 +105,27 @@ use crate::views::options_sheet::spec_from_transcriber_settings;
 /// A plain-data snapshot of `settings.folder_watch`, cheap to clone and
 /// compare (`PartialEq`) so `app.rs`'s per-frame reconcile can tell "nothing
 /// changed" from "the service needs a restart" without ever touching the
-/// filesystem or the settings mutex more than once per frame.
+/// filesystem more than once per frame (building one is a small, bounded
+/// clone of a handful of `String`/`Option<String>`/`Vec<String>` fields,
+/// taken under the settings lock — not literally free, but cheap enough to
+/// redo unconditionally every frame).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FolderWatchSnapshot {
     /// Whether folder-watching is turned on at all.
     pub enabled: bool,
-    /// The directory scanned for new media files (Buzz's `input_folder`).
+    /// The directory scanned for new media files (Buzz's `input_folder`) —
+    /// the watch's *identity* (see this module's doc): changing this is the
+    /// only settings change that restarts the OS-level subscription.
     pub input_dir: Option<PathBuf>,
     /// The directory mirrored transcription outputs are written under
-    /// (Buzz's `output_directory`).
+    /// (Buzz's `output_directory`) — part of the job **template**, updated
+    /// in place without a restart.
     pub output_dir: Option<PathBuf>,
     /// Delete (`true`) vs. move-into-output (`false`) processed sources
-    /// (design spec §3.4).
+    /// (design spec §3.4) — part of the job template.
     pub delete_processed_files: bool,
     /// Per-auto-task file-transcription options (Buzz's
-    /// `file_transcription_options` sub-group).
+    /// `file_transcription_options` sub-group) — part of the job template.
     pub options: FileTranscriberSettings,
 }
 
@@ -121,38 +170,86 @@ impl FolderWatchSnapshot {
             .and_then(|dir| dir.file_name())
             .map(|name| name.to_string_lossy().into_owned())
     }
+
+    /// Whether `self` and `other` watch the same directory — the identity
+    /// half of the watch-identity/job-template split (this module's doc).
+    /// Only meaningful when both are already known [`Self::is_active`]
+    /// (callers only ever reach for this once `reconcile_folder_watch` has
+    /// already established both are active and a service is running).
+    #[must_use]
+    fn same_watch_identity(&self, other: &Self) -> bool {
+        self.input_dir == other.input_dir
+    }
+
+    /// The job-template half of this snapshot, for
+    /// [`FolderWatchService::start`]/[`FolderWatchService::update_template`].
+    /// Panics via `expect` if `output_dir` is `None` — callers must only call
+    /// this once [`Self::is_active`] is known `true`.
+    #[must_use]
+    fn template(&self) -> JobTemplate {
+        JobTemplate {
+            output_dir: self
+                .output_dir
+                .clone()
+                .expect("is_active() guarantees output_dir is Some"),
+            delete_processed_files: self.delete_processed_files,
+            options: self.options.clone(),
+        }
+    }
+}
+
+/// The job-template half of a [`FolderWatchSnapshot`] (this module's doc):
+/// everything the running worker thread needs to build a `TaskSpec` for a
+/// new candidate, *except* which directory it's watching. Shared with a
+/// running service via `Arc<Mutex<JobTemplate>>` so
+/// [`FolderWatchService::update_template`] can swap it in without touching
+/// the OS-level watch subscription at all.
+#[derive(Debug, Clone, PartialEq)]
+struct JobTemplate {
+    output_dir: PathBuf,
+    delete_processed_files: bool,
+    options: FileTranscriberSettings,
 }
 
 /// What `app.rs`'s per-frame reconcile should do about the folder-watch
 /// service, given the current settings snapshot, the snapshot the running
-/// service (if any) was last started/restarted with, and whether a service
-/// is currently running at all.
+/// service (if any) was last started/restarted/updated with, and whether a
+/// service is currently running at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconcileAction {
     /// Nothing to do — either already running with this exact snapshot, or
-    /// already stopped and still inactive.
+    /// already stopped/failed with this exact (inactive, or unchanged)
+    /// snapshot already cached, so retrying every frame would just spin.
     NoChange,
     /// No service is running; start one.
     Start,
-    /// A service is running but its snapshot is stale; stop it and start a
-    /// fresh one with the current snapshot.
+    /// A service is running but the watch *identity* (`input_dir`) changed;
+    /// stop it and start a fresh one with the current snapshot.
     Restart,
+    /// A service is running and only the job *template*
+    /// (`output_dir`/`delete_processed_files`/`options`) changed —
+    /// [`FolderWatchService::update_template`] in place, no restart.
+    UpdateTemplate,
     /// A service is running but the snapshot is no longer active (disabled,
     /// or a required directory was cleared); stop it.
     Stop,
 }
 
 /// The pure reconcile decision (design spec §3.2's "rebuild-on-settings-
-/// change" rule), factored out of `app.rs` so the enabled/disabled/snapshot-
-/// change matrix is directly unit-testable without a real watcher, queue, or
-/// store. `cached` is the snapshot the running service (if any) was last
-/// started with; `running` is whether `app.rs`'s own `Option<
-/// FolderWatchService>` is currently `Some` (kept as a separate bool rather
-/// than inferred from `cached.is_some()`, since a `start()` failure leaves
-/// `cached` cleared but the caller may still want to retry on the very next
-/// frame with an unchanged snapshot — see [`ReconcileAction::Start`]'s own
-/// "not running" arm below, which fires whenever `!running` regardless of
-/// whether `cached` happens to equal `current`).
+/// change" rule, refined by this module's watch-identity/job-template
+/// split), factored out of `app.rs` so the whole enabled/disabled/identity-
+/// change/template-change matrix is directly unit-testable without a real
+/// watcher, queue, or store.
+///
+/// `cached` is the snapshot `app.rs` last *reacted to* — not only while a
+/// service is running: `app.rs` caches a `Stop`'s snapshot and a failed
+/// `Start`/`Restart`'s snapshot too (see `app.rs`'s
+/// `HummApp::sync_folder_watch` doc), specifically so this function can
+/// answer "nothing changed since we last handled this" (`NoChange`) even
+/// while `running` is `false` — without that, a `start()` failure (e.g. a
+/// bad path) would retry, and warn, on every single frame at UI frame rate
+/// until the user fixes it. `running` is whether `app.rs`'s own
+/// `Option<FolderWatchService>` is currently `Some`.
 #[must_use]
 pub fn reconcile_folder_watch(
     current: &FolderWatchSnapshot,
@@ -166,12 +263,13 @@ pub fn reconcile_folder_watch(
             ReconcileAction::NoChange
         };
     }
-    if !running {
-        return ReconcileAction::Start;
-    }
     match cached {
         Some(cached) if cached == current => ReconcileAction::NoChange,
-        _ => ReconcileAction::Restart,
+        Some(cached) if running && cached.same_watch_identity(current) => {
+            ReconcileAction::UpdateTemplate
+        }
+        _ if running => ReconcileAction::Restart,
+        _ => ReconcileAction::Start,
     }
 }
 
@@ -208,6 +306,15 @@ pub struct FolderWatchService {
     /// settings has nothing to do with pausing, so this lives only here, not
     /// in `settings.folder_watch`.
     paused: Arc<AtomicBool>,
+    /// Set by [`Self::stop`] before anything else, so the worker's initial
+    /// scan (if not yet run) and the per-candidate loop inside a rescan
+    /// already in flight both notice and bail out promptly — see this
+    /// module's "Threading model" doc.
+    stopping: Arc<AtomicBool>,
+    /// The job-template half of the running snapshot (this module's doc) —
+    /// [`Self::update_template`] swaps it in place; the worker reads a fresh
+    /// clone at the start of every rescan.
+    template: Arc<Mutex<JobTemplate>>,
     /// The worker's message channel: [`Self::stop`] sends
     /// [`WorkerMsg::Shutdown`] on this to wake a worker that might otherwise
     /// be blocked waiting for the next filesystem event; [`Self::pause`]
@@ -228,6 +335,11 @@ impl FolderWatchService {
     /// `true` (`app.rs`'s reconcile function is the sole caller and upholds
     /// this); it panics via `expect` otherwise, since a snapshot with no
     /// input/output directory has nothing meaningful to watch.
+    ///
+    /// `seen` is the `SeenSet` shared across every `start()` for this
+    /// process's whole lifetime (see this module's "`SeenSet` lifetime"
+    /// doc) — `app.rs` constructs it once and passes the same `Arc` every
+    /// time.
     ///
     /// Spawns the worker thread, which performs one initial scan of
     /// whatever's already in `snapshot.input_dir` before waiting on the
@@ -257,8 +369,17 @@ impl FolderWatchService {
         queue: Arc<QueueHandle>,
         store: Arc<SqliteStore>,
         ctx: egui::Context,
+        seen: Arc<Mutex<SeenSet>>,
     ) -> Result<FolderWatchService, notify::Error> {
-        Self::start_with::<RecommendedWatcher>(snapshot, queue, store, ctx, Config::default())
+        Self::start_with::<RecommendedWatcher>(
+            snapshot,
+            queue,
+            store,
+            ctx,
+            seen,
+            false,
+            Config::default(),
+        )
     }
 
     /// Test-only seam: identical to [`Self::start`], except the OS watcher
@@ -268,8 +389,9 @@ impl FolderWatchService {
     /// environment (confirmed with a minimal standalone `notify` probe, not
     /// a bug in this module's own event handling — a plain `notify::
     /// recommended_watcher` closure over a freshly created temp directory
-    /// never received a single event there either); polling has no such
-    /// dependency on OS-level FS-event delivery, at the cost of
+    /// never received a single event there either; the production path was
+    /// separately confirmed to work correctly unsandboxed); polling has no
+    /// such dependency on OS-level FS-event delivery, at the cost of
     /// `poll_interval`-bounded latency instead of near-instant notification.
     /// The production path (`Self::start`) is untouched — this is purely an
     /// integration-test seam (`tests/folder_watch_int.rs`), the same "plain
@@ -278,18 +400,31 @@ impl FolderWatchService {
     /// establish (an integration test links the library's normal,
     /// non-`cfg(test)` build, so a `#[cfg(test)]` item wouldn't even be
     /// visible to it).
+    ///
+    /// `initially_paused` starts the service already paused, set atomically
+    /// at construction (no window at all between "started" and "paused") —
+    /// closes the pause race deterministically for a test that wants to
+    /// assert a drop is ignored from the very first instant, rather than
+    /// calling `start` then immediately `pause(true)` and hoping the worker
+    /// thread hasn't already scheduled and scanned in between (the runtime
+    /// paused-check inside the worker, documented on [`Self::pause`],
+    /// remains the general-purpose safety net either way).
     pub fn start_with_poll_watcher_for_test(
         snapshot: FolderWatchSnapshot,
         queue: Arc<QueueHandle>,
         store: Arc<SqliteStore>,
         ctx: egui::Context,
-        poll_interval: std::time::Duration,
+        seen: Arc<Mutex<SeenSet>>,
+        initially_paused: bool,
+        poll_interval: Duration,
     ) -> Result<FolderWatchService, notify::Error> {
         Self::start_with::<notify::PollWatcher>(
             snapshot,
             queue,
             store,
             ctx,
+            seen,
+            initially_paused,
             Config::default().with_poll_interval(poll_interval),
         )
     }
@@ -302,27 +437,13 @@ impl FolderWatchService {
     /// (both public entry points' callers uphold this); it panics via
     /// `expect` otherwise, since a snapshot with no input/output directory
     /// has nothing meaningful to watch.
-    ///
-    /// Spawns the worker thread, which performs one initial scan of
-    /// whatever's already in `snapshot.input_dir` before waiting on the
-    /// first filesystem event (Buzz's own `find_tasks()` call right after
-    /// constructing the watcher, `main_window.py:172`) — asynchronously:
-    /// this function itself returns as soon as the thread is spawned, not
-    /// once that scan has run, so a caller cannot assume every already-
-    /// present eligible file has been enqueued the instant this returns
-    /// (the queue's own `Queued` event, or the store, is the thing to poll
-    /// if that matters).
-    ///
-    /// `ctx` is cloned into the worker thread and used only for
-    /// `request_repaint()` after a batch of candidates is enqueued, so the
-    /// task table redraws promptly instead of waiting for the next
-    /// naturally-scheduled frame (`egui::Context` is `Send + Sync + Clone`
-    /// by design for exactly this cross-thread use).
     fn start_with<W: Watcher + Send + 'static>(
         snapshot: FolderWatchSnapshot,
         queue: Arc<QueueHandle>,
         store: Arc<SqliteStore>,
         ctx: egui::Context,
+        seen: Arc<Mutex<SeenSet>>,
+        initially_paused: bool,
         config: Config,
     ) -> Result<FolderWatchService, notify::Error> {
         assert!(
@@ -333,16 +454,7 @@ impl FolderWatchService {
             .input_dir
             .clone()
             .expect("is_active() guarantees input_dir is Some");
-        let output_root = snapshot
-            .output_dir
-            .clone()
-            .expect("is_active() guarantees output_dir is Some");
-        let disposition = if snapshot.delete_processed_files {
-            SourceDisposition::Delete
-        } else {
-            SourceDisposition::MoveToOutput
-        };
-        let options = snapshot.options;
+        let template = Arc::new(Mutex::new(snapshot.template()));
 
         let (tx, rx) = mpsc::channel::<WorkerMsg>();
         let event_tx = tx.clone();
@@ -359,18 +471,21 @@ impl FolderWatchService {
         )?;
         watcher.watch(&input_dir, RecursiveMode::Recursive)?;
 
-        let paused = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(initially_paused));
+        let stopping = Arc::new(AtomicBool::new(false));
         let worker_paused = Arc::clone(&paused);
+        let worker_stopping = Arc::clone(&stopping);
+        let worker_template = Arc::clone(&template);
         let worker = std::thread::spawn(move || {
             run_worker(WorkerCtx {
                 input_dir,
-                output_root,
-                options,
-                disposition,
+                template: worker_template,
                 queue,
                 store,
                 ctx,
                 paused: worker_paused,
+                stopping: worker_stopping,
+                seen,
                 rx,
             });
         });
@@ -378,9 +493,23 @@ impl FolderWatchService {
         Ok(FolderWatchService {
             watcher: Box::new(watcher),
             paused,
+            stopping,
+            template,
             worker_tx: tx,
             worker,
         })
+    }
+
+    /// Swaps in a new job template (`output_dir`/`delete_processed_files`/
+    /// `options`) without touching the watcher at all — the `UpdateTemplate`
+    /// half of this module's watch-identity/job-template split. `snapshot`
+    /// must already be known active (`app.rs`'s reconcile function is the
+    /// sole caller and upholds this).
+    pub fn update_template(&self, snapshot: &FolderWatchSnapshot) {
+        *self
+            .template
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = snapshot.template();
     }
 
     /// Pauses (`true`) or resumes (`false`) event handling — the pill's
@@ -408,20 +537,22 @@ impl FolderWatchService {
         self.paused.load(Ordering::Relaxed)
     }
 
-    /// Stops watching and joins the worker thread. Bounded: the watcher is
-    /// dropped first (so no further events arrive), then a
+    /// Stops watching and joins the worker thread. Bounded: `stopping` is
+    /// set first (so the worker's initial scan, if not yet run, and the
+    /// per-candidate loop inside a rescan already in flight both notice and
+    /// return promptly — this module's "Threading model" doc), then the
+    /// watcher is dropped (so no further events arrive), then a
     /// [`WorkerMsg::Shutdown`] wakes a worker that might be blocked in
-    /// `recv`, then the thread is joined — the worker's own loop checks for
-    /// `Shutdown` both at the blocking `recv` and while draining a batch, so
-    /// it always returns promptly rather than this being an unbounded join
-    /// on a stuck loop.
+    /// `recv`, then the thread is joined.
     pub fn stop(self) {
         let FolderWatchService {
             watcher,
+            stopping,
             worker_tx,
             worker,
             ..
         } = self;
+        stopping.store(true, Ordering::Relaxed);
         drop(watcher);
         let _ = worker_tx.send(WorkerMsg::Shutdown);
         if worker.join().is_err() {
@@ -434,34 +565,39 @@ impl FolderWatchService {
 /// lifetime — bundled into one struct purely to keep [`FolderWatchService::start`]'s
 /// `thread::spawn` closure from becoming an unreadable wall of captures.
 struct WorkerCtx {
+    /// The watch's identity — fixed for this worker's whole lifetime (a
+    /// change restarts the service entirely, see this module's doc).
     input_dir: PathBuf,
-    output_root: PathBuf,
-    options: FileTranscriberSettings,
-    disposition: SourceDisposition,
+    /// The job template, shared and possibly updated in place by
+    /// [`FolderWatchService::update_template`] between rescans.
+    template: Arc<Mutex<JobTemplate>>,
     queue: Arc<QueueHandle>,
     store: Arc<SqliteStore>,
     ctx: egui::Context,
     paused: Arc<AtomicBool>,
+    stopping: Arc<AtomicBool>,
+    /// Shared across every `start()` for the process's lifetime — see this
+    /// module's "`SeenSet` lifetime" doc.
+    seen: Arc<Mutex<SeenSet>>,
     rx: mpsc::Receiver<WorkerMsg>,
 }
 
-/// The worker thread's body: one initial scan (skipped if paused — see
-/// below), then drain-all-pending-then-rescan on every subsequent wakeup,
-/// until [`WorkerMsg::Shutdown`] (or a disconnected channel — the same
-/// thing, defensively) ends the loop.
-fn run_worker(mut worker: WorkerCtx) {
-    let mut seen = SeenSet::new();
-    // Gated on `paused` at the moment this actually runs (not captured at
-    // spawn time): `FolderWatchService::start` returns as soon as the thread
-    // is *spawned*, not once this line has run, so a caller that pauses
-    // immediately after `start()` (before this thread has even been
-    // scheduled) must have that respected here too — otherwise this
-    // unconditional initial scan could still enqueue whatever the caller
-    // just tried to pause against, a real (if narrow) race under thread
+/// The worker thread's body: one initial scan (skipped if paused or already
+/// stopping — see below), then drain-all-pending-then-rescan on every
+/// subsequent wakeup, until [`WorkerMsg::Shutdown`] (or a disconnected
+/// channel — the same thing, defensively) ends the loop.
+fn run_worker(worker: WorkerCtx) {
+    // Gated on `paused`/`stopping` at the moment this actually runs (not
+    // captured at spawn time): `FolderWatchService::start` returns as soon
+    // as the thread is *spawned*, not once this line has run, so a caller
+    // that pauses (or immediately stops) right after `start()` — before this
+    // thread has even been scheduled — must have that respected here too;
+    // otherwise this initial scan could still enqueue whatever the caller
+    // just tried to pause/stop against, a real (if narrow) race under thread
     // scheduling delays, not merely a theoretical one (caught by this
     // module's own integration test under load).
-    if !worker.paused.load(Ordering::Relaxed) {
-        rescan_and_enqueue(&mut worker, &mut seen);
+    if !worker.stopping.load(Ordering::Relaxed) && !worker.paused.load(Ordering::Relaxed) {
+        rescan_and_enqueue(&worker);
     }
 
     loop {
@@ -480,21 +616,31 @@ fn run_worker(mut worker: WorkerCtx) {
                         Err(_) => break,
                     }
                 }
+                if worker.stopping.load(Ordering::Relaxed) {
+                    return;
+                }
                 if worker.paused.load(Ordering::Relaxed) {
                     continue;
                 }
-                rescan_and_enqueue(&mut worker, &mut seen);
+                rescan_and_enqueue(&worker);
             }
         }
     }
 }
 
 /// One full rescan of `worker.input_dir`, enqueueing every new candidate and
-/// recording it into `seen` immediately after its `enqueue` call (Buzz
-/// records into `paths_emitted` only after actually emitting the task,
-/// `:120-123`) — repaints once at the end iff at least one candidate was
-/// enqueued, rather than once per candidate.
-fn rescan_and_enqueue(worker: &mut WorkerCtx, seen: &mut SeenSet) {
+/// recording it into the shared `SeenSet` immediately after its `enqueue`
+/// call (Buzz records into `paths_emitted` only after actually emitting the
+/// task, `:120-123`) — repaints once at the end iff at least one candidate
+/// was enqueued, rather than once per candidate. Bails out between
+/// candidates if [`FolderWatchService::stop`] has set `stopping` in the
+/// meantime, so a stop lands promptly even mid-scan.
+fn rescan_and_enqueue(worker: &WorkerCtx) {
+    let template = worker
+        .template
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
     let store = &worker.store;
     let known = |path: &Path| match store.has_task_for_file(path) {
         Ok(known) => known,
@@ -506,15 +652,30 @@ fn rescan_and_enqueue(worker: &mut WorkerCtx, seen: &mut SeenSet) {
             false
         }
     };
-    let candidates = folderwatch::scan(&worker.input_dir, seen, &known);
+
+    let mut seen = worker
+        .seen
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let candidates = folderwatch::scan(&worker.input_dir, &seen, &known);
     if candidates.is_empty() {
         return;
     }
 
+    let disposition = if template.delete_processed_files {
+        SourceDisposition::Delete
+    } else {
+        SourceDisposition::MoveToOutput
+    };
+
     let mut enqueued_any = false;
     for candidate in candidates {
+        if worker.stopping.load(Ordering::Relaxed) {
+            break;
+        }
+
         let mirrored =
-            folderwatch::mirrored_output_dir(&worker.output_root, &candidate.relative_dir);
+            folderwatch::mirrored_output_dir(&template.output_dir, &candidate.relative_dir);
         if let Err(err) = std::fs::create_dir_all(&mirrored) {
             // Non-fatal: the pipeline's own export-writing step performs the
             // identical best-effort `create_dir_all` right before writing
@@ -528,7 +689,7 @@ fn rescan_and_enqueue(worker: &mut WorkerCtx, seen: &mut SeenSet) {
         }
 
         let spec = spec_from_transcriber_settings(
-            &worker.options,
+            &template.options,
             true, // custom_model_available: see this module's doc — folder
             // watch intentionally never gates a stale "Custom" model
             // selection back to "Small" the way the live options sheet
@@ -540,7 +701,7 @@ fn rescan_and_enqueue(worker: &mut WorkerCtx, seen: &mut SeenSet) {
             // actionably, same as any other missing-model case.
             candidate.path.clone(),
             mirrored,
-            worker.disposition,
+            disposition,
         );
         worker
             .queue
@@ -566,6 +727,7 @@ fn rescan_and_enqueue(worker: &mut WorkerCtx, seen: &mut SeenSet) {
             ),
         }
     }
+    drop(seen);
 
     if enqueued_any {
         worker.ctx.request_repaint();
@@ -661,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn active_running_changed_snapshot_restarts() {
+    fn active_running_input_dir_change_restarts() {
         let current =
             FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out")));
         let cached =
@@ -673,15 +835,81 @@ mod tests {
     }
 
     #[test]
-    fn active_but_not_yet_running_starts_even_if_cached_matches() {
-        // A prior `start()` failure clears `cached` in `app.rs`'s own
-        // bookkeeping (see this module's doc), but defensively: even if a
-        // caller somehow still has a matching `cached` snapshot while
-        // `running` is `false`, the right thing is always to (re)try
-        // starting, never to silently do nothing.
+    fn active_running_output_dir_change_updates_template_not_restart() {
+        let current =
+            FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out")));
+        let cached =
+            FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out2")));
+        assert_eq!(
+            reconcile_folder_watch(&current, Some(&cached), true),
+            ReconcileAction::UpdateTemplate
+        );
+    }
+
+    #[test]
+    fn active_running_delete_processed_files_change_updates_template_not_restart() {
+        let current =
+            FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out")));
+        let mut cached = current.clone();
+        cached.delete_processed_files = true;
+        assert_eq!(
+            reconcile_folder_watch(&current, Some(&cached), true),
+            ReconcileAction::UpdateTemplate
+        );
+    }
+
+    #[test]
+    fn active_running_options_change_updates_template_not_restart() {
+        let current =
+            FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out")));
+        let mut cached = current.clone();
+        cached.options.word_timestamps = Some(true);
+        assert_eq!(
+            reconcile_folder_watch(&current, Some(&cached), true),
+            ReconcileAction::UpdateTemplate
+        );
+    }
+
+    #[test]
+    fn disabled_to_enabled_transition_starts_not_restarts() {
+        // Going from inactive (not running) to active is always `Start`,
+        // never `Restart` — there's no watcher to tear down yet.
+        let current =
+            FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out")));
+        let cached =
+            FolderWatchSnapshot::from_settings(&settings(false, Some("/in"), Some("/out")));
+        assert_eq!(
+            reconcile_folder_watch(&current, Some(&cached), false),
+            ReconcileAction::Start
+        );
+    }
+
+    #[test]
+    fn active_but_failed_previously_with_unchanged_snapshot_does_not_retry_every_frame() {
+        // `app.rs` caches the snapshot it last reacted to even when a
+        // `start()` attempt failed (`folder_watch` stays `None`, i.e.
+        // `running` is `false`, but `folder_watch_snapshot` is still
+        // `Some`) — specifically so an unchanged snapshot doesn't retry (and
+        // re-warn) on every single frame at UI frame rate. Retrying only
+        // happens once the snapshot actually changes again.
         let snap = FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out")));
         assert_eq!(
             reconcile_folder_watch(&snap, Some(&snap), false),
+            ReconcileAction::NoChange
+        );
+    }
+
+    #[test]
+    fn active_not_running_with_changed_snapshot_retries() {
+        // The counterpart to the no-spin case above: once the cached
+        // (failed or stopped) snapshot no longer matches the fresh one, a
+        // retry is exactly right.
+        let current =
+            FolderWatchSnapshot::from_settings(&settings(true, Some("/in"), Some("/out")));
+        let cached =
+            FolderWatchSnapshot::from_settings(&settings(true, Some("/in2"), Some("/out")));
+        assert_eq!(
+            reconcile_folder_watch(&current, Some(&cached), false),
             ReconcileAction::Start
         );
     }

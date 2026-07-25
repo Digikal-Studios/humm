@@ -15,6 +15,7 @@ use humm_core::cancel::CancelToken;
 use humm_core::domain::{Backend, ModelSize, ModelSpec, Segment, Source, Status, TranscriptionId};
 use humm_core::env::use_gpu_from_env;
 use humm_core::error::{CoreError, EngineError};
+use humm_core::folderwatch::SeenSet;
 use humm_core::live::{
     ExportSink, RecordingMode, SessionConfig, TranslationApplier, effective_upload_url,
 };
@@ -257,12 +258,34 @@ pub struct HummApp {
     /// (`main_window.py:500-507` disconnects the folder watcher before
     /// `closeEvent` does anything else).
     folder_watch: Option<FolderWatchService>,
-    /// The `[folder_watch]` snapshot the running `folder_watch` service (if
-    /// any) was last started/restarted with — `None` whenever `folder_watch`
-    /// is `None` too (disabled, or a `start()` failure). Compared every
-    /// frame against a freshly read snapshot to decide whether to restart
-    /// (`crate::folder_watch::reconcile_folder_watch`).
+    /// The `[folder_watch]` snapshot [`Self::sync_folder_watch`] last acted
+    /// on — *not* only when `folder_watch` is actually running: a `Stop`, a
+    /// no-op (still-inactive settings), and a failed `start()` all cache
+    /// their snapshot here too, so the very next frame's reconcile sees
+    /// "already handled, nothing changed" (`ReconcileAction::NoChange`)
+    /// instead of retrying (or re-logging a misconfiguration warning) every
+    /// single frame at UI frame rate. Retrying only happens once this
+    /// differs from a fresh snapshot again (e.g. the user fixes a bad path).
     folder_watch_snapshot: Option<FolderWatchSnapshot>,
+    /// The folder-watch service's `SeenSet` (Buzz's `paths_emitted`),
+    /// `Arc<Mutex<_>>`-shared across every `start()`/restart for this
+    /// process's whole lifetime — constructed exactly once, in
+    /// [`Self::build`], and never reset. Buzz's own `paths_emitted` lives on
+    /// the one `TranscriptionTaskFolderWatcher` instance `MainWindow`
+    /// constructs once and reuses across every `set_preferences` call
+    /// (`main_window.py:167-183`); only a full app restart clears it. If
+    /// humm instead gave each `start()` a *fresh* `SeenSet` (as an earlier
+    /// revision of this module did), a prefs edit landing in the narrow
+    /// window between a file being enqueued (`QueueHandle::enqueue` is
+    /// fire-and-forget — the runner's own `create_task` hasn't necessarily
+    /// run yet, so `store.has_task_for_file` can still say "not known") and
+    /// that enqueue's `create_task` actually landing could double-enqueue
+    /// the same file across the resulting restart; keeping the *same*
+    /// `SeenSet` closes that window regardless of store timing, since rule 6
+    /// (`humm_core::folderwatch::scan`, "seen at this exact size/mtime")
+    /// still fires. Proven end to end by
+    /// `tests/folder_watch_int.rs::seen_set_survives_a_rebuild_so_a_recently_enqueued_file_is_not_double_enqueued`.
+    folder_watch_seen: Arc<Mutex<SeenSet>>,
 }
 
 impl HummApp {
@@ -555,6 +578,7 @@ impl HummApp {
             queue,
             folder_watch: None,
             folder_watch_snapshot: None,
+            folder_watch_seen: Arc::new(Mutex::new(SeenSet::new())),
         }
     }
 
@@ -668,25 +692,28 @@ impl HummApp {
     }
 
     /// Re-derives the `[folder_watch]` settings snapshot and starts/
-    /// restarts/stops [`Self::folder_watch`] to match (F-030, design spec
-    /// §3.2). Run every frame (`eframe::App::ui`): a
-    /// [`FolderWatchSnapshot`] comparison is a handful of string/bool/path
-    /// equality checks, no I/O, so doing this unconditionally on every frame
-    /// costs nothing measurable while covering both "startup" (the very
+    /// restarts/updates-in-place/stops [`Self::folder_watch`] to match
+    /// (F-030, design spec §3.2). Run every frame (`eframe::App::ui`):
+    /// building [`FolderWatchSnapshot`] is a small, bounded clone of
+    /// `settings.folder_watch` (a few `String`/`Option<String>`/`Vec<String>`
+    /// fields) taken under the settings lock — not literally free, but cheap
+    /// enough to redo every frame — so this covers both "startup" (the very
     /// first frame, `self.folder_watch` starts `None`) and "a Preferences
     /// edit landed since last frame" with the exact same code path — no
     /// separate one-shot "apply on window close" hook to keep in sync, per
     /// humm's established write-through-on-commit pattern (ledger #L8 in the
     /// design spec).
     ///
-    /// A `start()` failure (e.g. the configured input directory doesn't
-    /// exist) is logged and leaves `folder_watch`/`folder_watch_snapshot`
-    /// both `None` — the next frame's reconcile call sees "not running" and
-    /// retries automatically once the snapshot changes again (e.g. the user
-    /// fixes the path in Preferences); this task's brief keeps the failure
-    /// path simple (log only, no toast) since the Preferences tab that would
-    /// let a user *edit* folder-watch settings from inside the running app
-    /// lands in a later task.
+    /// `self.folder_watch_snapshot` caches the *last snapshot this function
+    /// actually reacted to* — regardless of whether that reaction was
+    /// starting, restarting, updating the template in place, stopping, or
+    /// even doing nothing because settings were already inactive. This
+    /// serves two purposes: a `start()` failure (e.g. a configured directory
+    /// doesn't exist) doesn't spin — the next frame sees an unchanged
+    /// snapshot and takes `ReconcileAction::NoChange`, only retrying once the
+    /// user actually changes something — and an "enabled but not fully
+    /// configured" misconfiguration is logged exactly once per distinct
+    /// snapshot, not every frame.
     fn sync_folder_watch(&mut self, ctx: &egui::Context) {
         let snapshot = {
             let settings = self
@@ -696,6 +723,7 @@ impl HummApp {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             FolderWatchSnapshot::from_settings(&settings.folder_watch)
         };
+        let changed = self.folder_watch_snapshot.as_ref() != Some(&snapshot);
 
         let action = crate::folder_watch::reconcile_folder_watch(
             &snapshot,
@@ -709,35 +737,53 @@ impl HummApp {
                 if let Some(service) = self.folder_watch.take() {
                     service.stop();
                 }
-                self.folder_watch_snapshot = None;
+            }
+            ReconcileAction::UpdateTemplate => {
+                // The watcher itself (identity: `input_dir`) is untouched —
+                // only the job template (`output_dir`/`delete_processed_files`/
+                // `options`) changed, so the running worker just picks up the
+                // new template on its next rescan; no watcher teardown/
+                // rebuild, no lost `SeenSet` progress, no churn (this is
+                // exactly what keeps a future per-keystroke options-form edit
+                // — Task 15 — from restarting the FSEvents/PollWatcher
+                // subscription on every character).
+                if let Some(service) = &self.folder_watch {
+                    service.update_template(&snapshot);
+                }
             }
             ReconcileAction::Start | ReconcileAction::Restart => {
                 if let Some(service) = self.folder_watch.take() {
                     service.stop();
                 }
-                let Some(queue) = self.queue.as_ref().map(Arc::clone) else {
-                    // Only reachable once shutdown has already taken the
-                    // queue — `on_exit` also stops `folder_watch` (before
-                    // that happens), so this frame should never actually
-                    // run again afterward; defensive only.
-                    return;
-                };
-                match FolderWatchService::start(
-                    snapshot.clone(),
-                    queue,
-                    Arc::clone(&self.services.store),
-                    ctx.clone(),
-                ) {
-                    Ok(service) => {
-                        self.folder_watch = Some(service);
-                        self.folder_watch_snapshot = Some(snapshot);
-                    }
-                    Err(err) => {
-                        log::warn!("could not start the folder-watch service: {err}");
-                        self.folder_watch_snapshot = None;
+                if let Some(queue) = self.queue.as_ref().map(Arc::clone) {
+                    match FolderWatchService::start(
+                        snapshot.clone(),
+                        queue,
+                        Arc::clone(&self.services.store),
+                        ctx.clone(),
+                        Arc::clone(&self.folder_watch_seen),
+                    ) {
+                        Ok(service) => self.folder_watch = Some(service),
+                        Err(err) => {
+                            log::warn!("could not start the folder-watch service: {err}");
+                        }
                     }
                 }
+                // `self.queue` is only ever `None` once shutdown has already
+                // taken it (`on_exit` stops `folder_watch` first, so this
+                // frame should never actually run again afterward) —
+                // defensive no-op otherwise.
             }
+        }
+
+        if changed {
+            if snapshot.enabled && !snapshot.is_active() {
+                log::info!(
+                    "folder watch is enabled but not fully configured (input and/or output \
+                     directory not set) — nothing will be watched until both are set"
+                );
+            }
+            self.folder_watch_snapshot = Some(snapshot);
         }
     }
 
