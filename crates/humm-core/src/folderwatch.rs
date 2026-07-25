@@ -33,7 +33,7 @@ pub const VIDEO_EXTENSIONS: [&str; 7] = ["mp4", "webm", "ogm", "mov", "mkv", "av
 /// Whether `path`'s extension (case-insensitive) is one of
 /// [`SUPPORTED_EXTENSIONS`] — Buzz's
 /// `os.path.splitext(filename)[1].lower() in SUPPORTED_EXTENSIONS`
-/// (`:64-65`).
+/// (`:63`, `:72`).
 pub fn has_supported_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -46,7 +46,7 @@ pub fn has_supported_extension(path: &Path) -> bool {
 
 /// Session-scoped memory of files [`scan`] has already yielded, mirroring
 /// Buzz's `self.paths_emitted: Dict[str, Tuple[float, float]]`
-/// (`transcription_task_folder_watcher.py:33`): a file only re-emits once
+/// (`transcription_task_folder_watcher.py:34`): a file only re-emits once
 /// its size or mtime changes since it was last [`record`](SeenSet::record)ed.
 ///
 /// This is deliberately *not* updated by [`scan`] itself — see that
@@ -119,6 +119,15 @@ pub struct Candidate {
 /// entries are sorted before being walked, so the result is deterministic
 /// regardless of the OS's own directory-listing order.
 ///
+/// Symlinked directories are **not** followed — Python's `os.walk` defaults
+/// to `followlinks=False`, so a symlink pointing at a directory is never
+/// descended into (though, like `os.walk`, a symlink pointing at a *file* is
+/// still resolved and run through the six skip rules above like any other
+/// file: only the "walk into a directory" step is skipped for symlinks, not
+/// file classification). This mirrors the sibling
+/// `humm_gui::import::scan_folder`'s established precedent exactly (the
+/// folder-import scanner, same `os.walk` `followlinks=False` default).
+///
 /// A `stat` failure (or a platform that can't report an mtime) on a
 /// candidate file is treated as "skip this file" and logged at `debug` —
 /// Buzz instead calls `os.path.getsize`/`os.path.getmtime` unguarded
@@ -149,7 +158,20 @@ pub fn scan(input_dir: &Path, seen: &SeenSet, known: &dyn Fn(&Path) -> bool) -> 
                 continue;
             };
             let path = entry.path();
-            if file_type.is_dir() {
+            if file_type.is_symlink() {
+                // `DirEntry::file_type` never follows symlinks (it's an
+                // `lstat`, not a `stat`), so the symlink's *target* type is
+                // resolved separately here — a symlinked directory is
+                // skipped (not traversed); a symlinked regular file is
+                // still classified and run through the six skip rules,
+                // same as `scan_folder`'s established precedent
+                // (`humm_gui::import`). A dangling symlink (target
+                // unresolvable) is silently dropped, matching that same
+                // precedent.
+                if std::fs::metadata(&path).is_ok_and(|target| target.is_file()) {
+                    files.push(path);
+                }
+            } else if file_type.is_dir() {
                 let is_hidden = path
                     .file_name()
                     .and_then(|name| name.to_str())
@@ -324,6 +346,22 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         touch(&dir.path().join("talk_speech.mp3"), b"speech output");
         touch(&dir.path().join("_speech.mp3"), b"speech output");
+        // "episode_speech.mp3_final.wav" traced against every other rule to
+        // confirm this case is isolated to rule 4 alone:
+        //   - rule 1 (hidden): doesn't start with `.` — passes.
+        //   - rule 2 (extension): `Path::extension` of the full name is
+        //     `wav`, supported — passes.
+        //   - rule 3 (double extension): `Path::file_stem` of the full name
+        //     is `episode_speech.mp3_final`; *its* extension is
+        //     `mp3_final`, which is not in `SUPPORTED_EXTENSIONS` (it's not
+        //     `mp3`) — passes.
+        //   - rule 4 (`_speech.mp3` substring): the full name contains
+        //     `_speech.mp3` literally (`episode` + `_speech.mp3` +
+        //     `_final.wav`) — fails, skipped here and only here.
+        touch(
+            &dir.path().join("episode_speech.mp3_final.wav"),
+            b"speech output",
+        );
 
         let candidates = scan(dir.path(), &SeenSet::new(), &never_known);
 
@@ -470,6 +508,58 @@ mod tests {
         assert_eq!(
             mirrored_output_dir(output_root, &root_candidate.relative_dir),
             Path::new("/out")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_media_file_is_scanned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target.wav");
+        touch(&target, b"audio");
+        let link = dir.path().join("link.wav");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        let mut candidates = scan(dir.path(), &SeenSet::new(), &never_known);
+        candidates.sort_by(|a, b| a.path.cmp(&b.path));
+
+        let mut expected = vec![
+            Candidate {
+                path: link,
+                relative_dir: PathBuf::new(),
+            },
+            Candidate {
+                path: target,
+                relative_dir: PathBuf::new(),
+            },
+        ];
+        expected.sort_by(|a, b| a.path.cmp(&b.path));
+
+        assert_eq!(candidates, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_directory_not_traversed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real_sub = dir.path().join("real");
+        std::fs::create_dir(&real_sub).expect("create real subdir");
+        let inside = real_sub.join("inside.wav");
+        touch(&inside, b"audio");
+
+        let link = dir.path().join("linked");
+        std::os::unix::fs::symlink(&real_sub, &link).expect("create symlink");
+
+        // The real subdirectory's file is found via the real path; the
+        // symlinked directory is not descended into a second time, so
+        // `inside.wav` appears exactly once (via `real/`, not `linked/`) —
+        // matching `scan_folder`'s own precedent for this exact scenario.
+        assert_eq!(
+            scan(dir.path(), &SeenSet::new(), &never_known),
+            vec![Candidate {
+                path: inside,
+                relative_dir: PathBuf::from("real"),
+            }]
         );
     }
 
