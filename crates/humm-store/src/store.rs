@@ -613,24 +613,27 @@ impl SqliteStore {
             .map_err(query_error)
     }
 
-    /// Finds the newest (`time_queued` descending) `completed` task whose
+    /// Finds the newest (`time_ended` descending) `completed` task whose
     /// `file` column's **basename** matches `name` — Buzz's
     /// `find_completed_transcription_by_filename`
     /// (`skip_already_transcribed/plugin.py:163-166` calls it with
     /// `os.path.basename(file_path)`; the DAO itself matches `file` against
-    /// `%/<name>` or an exact `<name>`, `transcription_dao.py:336-351`).
+    /// `%/<name>` or an exact `<name>`, ordered `time_ended DESC`,
+    /// `transcription_dao.py:336-351` — ordering by completion time, not
+    /// queue time, so a task queued earlier but finishing later still wins).
     ///
     /// The basename comparison is done on the `file` column's *tail* via
-    /// `substr`/`length` rather than a `LIKE` pattern built from `name`, so a
-    /// filename containing SQL wildcard characters (`%`, `_`) is compared
-    /// literally instead of being reinterpreted as a pattern: the trailing
-    /// `length(name)` characters of `file` must equal `name` exactly, and
-    /// either `file` is exactly `name` (no directory component at all) or
-    /// the character immediately before that tail is a path separator (`/`
-    /// or `\`, so a Windows-produced row still basename-matches on any
-    /// host). No index is added on `file` for this lookup — deliberately:
-    /// this table is personal-transcription-history scale (a full scan of a
-    /// few thousand rows costs nothing worth an index for).
+    /// `substr`/`length` rather than a `LIKE` pattern built from `name` — an
+    /// equivalent exact-tail check, so a filename containing SQL wildcard
+    /// characters (`%`, `_`) is compared literally instead of being
+    /// reinterpreted as a pattern: the trailing `length(name)` characters of
+    /// `file` must equal `name` exactly, and either `file` is exactly `name`
+    /// (no directory component at all) or the character immediately before
+    /// that tail is a path separator (`/` or `\`, so a Windows-produced row
+    /// still basename-matches on any host). No index is added on `file` for
+    /// this lookup — deliberately: this table is
+    /// personal-transcription-history scale (a full scan of a few thousand
+    /// rows costs nothing worth an index for).
     pub fn find_completed_by_file_name(
         &self,
         name: &str,
@@ -645,7 +648,7 @@ impl SqliteStore {
                    AND substr(file, -length(?2)) = ?2 \
                    AND (length(file) = length(?2) \
                         OR substr(file, length(file) - length(?2), 1) IN ('/', '\\')) \
-                 ORDER BY time_queued DESC \
+                 ORDER BY time_ended DESC \
                  LIMIT 1",
                 params![Status::Completed.as_str(), name],
                 |row| row.get(0),
@@ -1822,42 +1825,52 @@ mod tests {
 
         let mut spec_a = sample_task_spec();
         spec_a.input = Input::Path(PathBuf::from("/dir/a/x.mp3"));
-        let older = TranscriptionId::new();
+        let queued_earlier_finishes_later = TranscriptionId::new();
         store
-            .create_task(&older, &spec_a, Source::FileImport)
-            .expect("create older");
-        store.mark_completed(&older, &[]).expect("complete older");
+            .create_task(&queued_earlier_finishes_later, &spec_a, Source::FileImport)
+            .expect("create queued_earlier_finishes_later");
+        store
+            .mark_completed(&queued_earlier_finishes_later, &[])
+            .expect("complete queued_earlier_finishes_later");
 
         let mut spec_b = sample_task_spec();
         spec_b.input = Input::Path(PathBuf::from("/dir/b/x.mp3"));
-        let newer = TranscriptionId::new();
+        let queued_later_finishes_earlier = TranscriptionId::new();
         store
-            .create_task(&newer, &spec_b, Source::FileImport)
-            .expect("create newer");
-        store.mark_completed(&newer, &[]).expect("complete newer");
+            .create_task(&queued_later_finishes_earlier, &spec_b, Source::FileImport)
+            .expect("create queued_later_finishes_earlier");
+        store
+            .mark_completed(&queued_later_finishes_earlier, &[])
+            .expect("complete queued_later_finishes_earlier");
 
         // Force a deterministic ordering independent of wall-clock
-        // resolution: rewrite time_queued directly (same pattern as
-        // `list_tasks_orders_by_time_queued_descending`).
+        // resolution, and deliberately *invert* queued-vs-ended order
+        // between the two rows: `queued_earlier_finishes_later` is queued
+        // first but finishes last; `queued_later_finishes_earlier` is queued
+        // second but finishes first. Buzz orders this lookup by `time_ended`
+        // (`transcription_dao.py:336-351`), not `time_queued` — this makes
+        // the test fail if the query orders by the wrong column.
         {
             let conn = store.conn.lock().expect("lock");
             conn.execute(
-                "UPDATE transcription SET time_queued = '2020-01-01T00:00:00' WHERE id = ?1",
-                params![older.to_string()],
+                "UPDATE transcription SET time_queued = '2020-01-01T00:00:00', \
+                 time_ended = '2022-01-01T00:00:00' WHERE id = ?1",
+                params![queued_earlier_finishes_later.to_string()],
             )
-            .expect("update older");
+            .expect("update queued_earlier_finishes_later");
             conn.execute(
-                "UPDATE transcription SET time_queued = '2021-01-01T00:00:00' WHERE id = ?1",
-                params![newer.to_string()],
+                "UPDATE transcription SET time_queued = '2021-01-01T00:00:00', \
+                 time_ended = '2020-06-01T00:00:00' WHERE id = ?1",
+                params![queued_later_finishes_earlier.to_string()],
             )
-            .expect("update newer");
+            .expect("update queued_later_finishes_earlier");
         }
 
         let found = store
             .find_completed_by_file_name("x.mp3")
             .expect("query")
             .expect("found");
-        assert_eq!(found, newer);
+        assert_eq!(found, queued_earlier_finishes_later);
     }
 
     #[test]
