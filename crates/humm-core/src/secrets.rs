@@ -21,6 +21,13 @@ pub enum SecretKey {
     /// The user's OpenAI API key (F-041 the OpenAI-compatible transcription
     /// backend, F-031 LLM translation).
     OpenAiApiKey,
+    /// The AI Summary hook's OpenAI-compatible API key (F-111). Buzz stored
+    /// this as keyring secret `plugin:ai_summary:api_key`
+    /// (`plugins/ai_summary/plugin.py`); humm's own service/entry-name
+    /// scheme is unrelated (ledger #L9) — this key is addressed purely by
+    /// [`SecretKey::entry_name`] under humm's own [`SERVICE`], same as
+    /// every other key here.
+    AiSummaryApiKey,
 }
 
 impl SecretKey {
@@ -31,6 +38,7 @@ impl SecretKey {
     pub fn entry_name(self) -> &'static str {
         match self {
             SecretKey::OpenAiApiKey => "OpenAI API key",
+            SecretKey::AiSummaryApiKey => "AI Summary API key",
         }
     }
 }
@@ -233,6 +241,14 @@ mod tests {
     #[test]
     fn entry_name_matches_buzz_key_value() {
         assert_eq!(SecretKey::OpenAiApiKey.entry_name(), "OpenAI API key");
+    }
+
+    #[test]
+    fn ai_summary_entry_name() {
+        assert_eq!(
+            SecretKey::AiSummaryApiKey.entry_name(),
+            "AI Summary API key"
+        );
     }
 
     #[test]

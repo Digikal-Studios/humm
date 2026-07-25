@@ -18,7 +18,7 @@
 //! `rename` it over the target, so a crash mid-write never corrupts the
 //! previous file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,21 @@ pub struct Settings {
     /// OpenAI-compatible API backend and LLM translation endpoint settings
     /// (F-041, F-031, design spec §9).
     pub openai: OpenAiSettings,
+    /// User-overridden keyboard shortcuts (F-005), keyed by
+    /// [`ShortcutAction::settings_key`]'s `SCREAMING_SNAKE` action name
+    /// (`humm-gui`'s `shortcuts.rs`; Buzz `settings/shortcut.py`). An action
+    /// absent from this map keeps its built-in default sequence. Empty by
+    /// default (no overrides).
+    pub shortcuts: HashMap<String, String>,
+    /// UI-wide display preferences (F-008 locale, design spec §8.1 font
+    /// scaling).
+    pub ui: UiSettings,
+    /// Folder-watch service settings (F-030, design spec §3).
+    pub folder_watch: FolderWatchSettings,
+    /// Post-processing hook settings (ADR-010's four native "plugins":
+    /// F-111 ai_summary, F-113 export_docx, F-115 skip_already_transcribed,
+    /// F-116 transcript_resizer).
+    pub postproc: PostprocSettings,
 }
 
 /// Settings governing model selection (`buzz/model_loader.py` custom-model
@@ -60,6 +75,13 @@ pub struct ModelSettings {
     /// URL to download a user-supplied custom ggml model from. Consumed by
     /// `-s custom` when no model is already cached.
     pub custom_model_url: Option<String>,
+    /// Forces CPU-only inference even when a GPU backend is available
+    /// (Buzz's `BUZZ_FORCE_CPU` env var, read live from a Preferences
+    /// checkbox). humm reads this setting fresh at engine-construction time
+    /// rather than caching it at startup — the same next-task effect as
+    /// Buzz, no restart required. `HUMM_FORCE_CPU` (if set) wins over this
+    /// field. Default `false`.
+    pub force_cpu: bool,
 }
 
 /// Settings governing URL-import downloads (F-022).
@@ -69,6 +91,39 @@ pub struct DownloadSettings {
     /// Cookie file passed through to `yt-dlp` for authenticated downloads
     /// (`HUMM_DOWNLOAD_COOKIEFILE` env var takes precedence over this).
     pub cookie_file: Option<PathBuf>,
+}
+
+/// UI-wide display preferences (F-008 locale negotiation, design spec §8.1
+/// font-size scaling). Every field is `None` by default — a first run
+/// follows the system locale and egui's built-in text size.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiSettings {
+    /// Buzz locale code (e.g. `"de_DE"`) to force the UI into. `None`
+    /// follows the system locale (i18n negotiation, design spec §9).
+    pub locale: Option<String>,
+    /// App-wide text-style scale in points, clamped to
+    /// `[UiSettings::MIN_FONT_SIZE, UiSettings::MAX_FONT_SIZE]` when the
+    /// settings file is loaded ([`UiSettings::clamp`]). `None` uses egui's
+    /// built-in default size.
+    pub font_size: Option<u32>,
+}
+
+impl UiSettings {
+    /// Lower bound on [`UiSettings::font_size`].
+    pub const MIN_FONT_SIZE: u32 = 8;
+    /// Upper bound on [`UiSettings::font_size`].
+    pub const MAX_FONT_SIZE: u32 = 32;
+
+    /// Clamps a stored `font_size` into `[MIN_FONT_SIZE, MAX_FONT_SIZE]`,
+    /// leaving `None` (no override configured) untouched. Applied by
+    /// [`Settings::load`] so downstream readers never see an out-of-range
+    /// font size.
+    pub fn clamp(&mut self) {
+        if let Some(size) = self.font_size {
+            self.font_size = Some(size.clamp(Self::MIN_FONT_SIZE, Self::MAX_FONT_SIZE));
+        }
+    }
 }
 
 /// Settings governing the OpenAI-compatible API backend and LLM translation
@@ -229,6 +284,252 @@ pub struct FileTranscriberSettings {
     /// Last-entered LLM translation prompt, if AI translation was
     /// configured.
     pub llm_prompt: Option<String>,
+    /// Custom output-file-name template (`OutputSpec.file_name_template`)
+    /// applied at every spec-build site (options-sheet `build_specs`, CLI
+    /// `run.rs`, viewer export menu, folder-watch emit). `None` uses
+    /// `export::DEFAULT_EXPORT_TEMPLATE`.
+    pub default_export_template: Option<String>,
+}
+
+/// Folder-watch service settings (F-030), ported from Buzz's
+/// `folder-watch/*` `QSettings` group (`main_window.py:167-183`, design spec
+/// §3). Watching is off by default; every directory is unset until the user
+/// configures the Folder Watch preferences tab.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FolderWatchSettings {
+    /// Whether the folder watcher is running.
+    pub enabled: bool,
+    /// Directory scanned for new media files (Buzz's `input_folder`).
+    pub input_dir: Option<PathBuf>,
+    /// Directory mirrored transcription outputs are written under (Buzz's
+    /// `output_directory`).
+    pub output_dir: Option<PathBuf>,
+    /// Whether a processed source file is deleted (`true`) or moved into
+    /// `output_dir` (`false`) after transcription (design spec §3.4).
+    pub delete_processed_files: bool,
+    /// Per-auto-task file-transcription options applied to every watched
+    /// file (Buzz's `file_transcription_options` sub-group; type reuse —
+    /// its [`FileTranscriberSettings::last_import_folder`] is simply unused
+    /// in this context).
+    pub options: FileTranscriberSettings,
+}
+
+/// Post-processing hook settings (ADR-010's four native "plugins" — F-111
+/// ai_summary, F-113 export_docx, F-115 skip_already_transcribed, F-116
+/// transcript_resizer — implemented as first-class features, not a plugin
+/// mechanism), design spec §1/§2.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PostprocSettings {
+    /// AI-generated transcript summary hook (F-111).
+    pub ai_summary: AiSummarySettings,
+    /// DOCX export hook (F-113).
+    pub export_docx: ExportDocxSettings,
+    /// Skip-if-already-transcribed hook (F-115).
+    pub skip_already_transcribed: SkipSettings,
+    /// Automatic transcript-resizing hook (F-116).
+    pub transcript_resizer: AutoResizeSettings,
+}
+
+/// AI Summary hook settings (F-111), ported from Buzz's
+/// `plugins/ai_summary/plugin.py` config fields. Sends the transcript to an
+/// OpenAI-compatible chat completions API and stores the summary in the
+/// transcription's Notes field and/or a text file. The API key itself is
+/// never stored here — it lives only in the OS keyring via `SecretStore`
+/// ([`crate::secrets::SecretKey::AiSummaryApiKey`], ADR-012).
+///
+/// `#[derive(Default)]` is deliberately not used: `model`, `prompt`, and
+/// `save_to_notes` all have non-derived defaults (an empty `String`/`false`
+/// would be wrong). The manual [`Default`] impl below is the single source
+/// of truth; container-level `#[serde(default)]` fills any missing field
+/// from it, and per-field `#[serde(default = "…")]` attributes make
+/// "section present, key absent" cases explicit (belt-and-braces pattern
+/// matching [`ViewerSettings`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiSummarySettings {
+    /// Whether the hook runs after a completed transcription. Buzz plugins
+    /// default to disabled (`manager.py:219`).
+    pub enabled: bool,
+    /// Base URL for the OpenAI-compatible chat completions API. `None`
+    /// falls back to Buzz's default, `"https://api.openai.com/v1"`.
+    pub api_url: Option<String>,
+    /// Chat completion model id. Default `"gpt-4o-mini"`.
+    #[serde(default = "default_ai_summary_model")]
+    pub model: String,
+    /// System prompt sent with the transcript. Defaults to Buzz's
+    /// `DEFAULT_PROMPT` verbatim (`ai_summary/plugin.py:31-34`).
+    #[serde(default = "default_ai_summary_prompt")]
+    pub prompt: String,
+    /// Whether the summary is written to the transcription's Notes field.
+    /// Default `true`.
+    #[serde(default = "default_true")]
+    pub save_to_notes: bool,
+    /// Whether the summary is written to a text file. Default `false`.
+    pub save_to_file: bool,
+    /// Folder the summary file is written to when `save_to_file` is set.
+    /// `None` writes next to the source file.
+    pub output_folder: Option<PathBuf>,
+}
+
+impl AiSummarySettings {
+    /// Default chat completion model id.
+    pub const DEFAULT_MODEL: &'static str = "gpt-4o-mini";
+    /// Default API base URL used when [`AiSummarySettings::api_url`] is
+    /// `None` (Buzz's `ai_summary/plugin.py:52` default).
+    pub const DEFAULT_API_URL: &'static str = "https://api.openai.com/v1";
+    /// Default system prompt — Buzz's `DEFAULT_PROMPT` verbatim
+    /// (`ai_summary/plugin.py:31-34`).
+    pub const DEFAULT_PROMPT: &'static str = "You are a helpful assistant. Summarise the following transcript into a concise set of key points and action items. Use clear, plain language.";
+}
+
+impl Default for AiSummarySettings {
+    fn default() -> Self {
+        AiSummarySettings {
+            enabled: false,
+            api_url: None,
+            model: Self::DEFAULT_MODEL.to_string(),
+            prompt: Self::DEFAULT_PROMPT.to_string(),
+            save_to_notes: true,
+            save_to_file: false,
+            output_folder: None,
+        }
+    }
+}
+
+fn default_ai_summary_model() -> String {
+    AiSummarySettings::DEFAULT_MODEL.to_string()
+}
+
+fn default_ai_summary_prompt() -> String {
+    AiSummarySettings::DEFAULT_PROMPT.to_string()
+}
+
+/// DOCX export hook settings (F-113), ported from
+/// `plugins/export_docx/plugin.py`. Every field's Buzz default is already
+/// the type's zero value, so this derives [`Default`] directly.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExportDocxSettings {
+    /// Whether the hook runs after a completed transcription. Buzz plugins
+    /// default to disabled.
+    pub enabled: bool,
+    /// Folder the `.docx` file is written to. `None` writes next to the
+    /// source file.
+    pub output_folder: Option<PathBuf>,
+    /// Whether timestamps are included in the exported document.
+    pub include_timestamps: bool,
+}
+
+/// Skip-already-transcribed hook settings (F-115), ported from
+/// `plugins/skip_already_transcribed/plugin.py`.
+///
+/// `#[derive(Default)]` is deliberately not used: `check_result_files`
+/// defaults to `true`, which `bool`'s derived `Default` would get
+/// backwards.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkipSettings {
+    /// Whether the hook runs before a transcription starts. Buzz plugins
+    /// default to disabled.
+    pub enabled: bool,
+    /// Whether to search for an existing result file (TXT/SRT/VTT) next to
+    /// the source. Default `true`.
+    #[serde(default = "default_true")]
+    pub check_result_files: bool,
+    /// Whether to search the store for a completed transcription with the
+    /// same file basename. Default `false`.
+    pub check_database: bool,
+}
+
+impl Default for SkipSettings {
+    fn default() -> Self {
+        SkipSettings {
+            enabled: false,
+            check_result_files: true,
+            check_database: false,
+        }
+    }
+}
+
+/// Automatic transcript-resizer hook settings (F-116), ported from
+/// `plugins/transcript_resizer/plugin.py`. The three numeric-looking fields
+/// are kept as `String` (Buzz's own `ConfigFieldType.TEXT` fields), parsed
+/// at use — Buzz-faithful, not a humm simplification.
+///
+/// `#[derive(Default)]` is deliberately not used: several fields have
+/// non-derived defaults (the three `bool` gates default `true`; the
+/// `String`s are non-empty). The manual [`Default`] impl below is the
+/// single source of truth; per-field `#[serde(default = "…")]` attributes
+/// make "section present, key absent" cases explicit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoResizeSettings {
+    /// Whether the hook runs after a completed transcription (also gated on
+    /// the task having word-level timestamps, design spec §5). Default
+    /// `false`.
+    pub enabled: bool,
+    /// Whether segments are merged across small gaps. Default `true`.
+    #[serde(default = "default_true")]
+    pub merge_by_gap: bool,
+    /// Merge-gap threshold in seconds, as text (Buzz `TEXT` field). Default
+    /// `"0.2"`.
+    #[serde(default = "default_merge_gap_seconds")]
+    pub merge_gap_seconds: String,
+    /// Whether segments are split at sentence-ending punctuation. Default
+    /// `true`.
+    #[serde(default = "default_true")]
+    pub split_by_punctuation: bool,
+    /// Punctuation marks that end a split, as Buzz's slash-separated text
+    /// field. Defaults to Buzz's `DEFAULT_PUNCTUATION` verbatim
+    /// (`transcript_resizer/plugin.py:37`).
+    #[serde(default = "default_punctuation")]
+    pub punctuation: String,
+    /// Whether segments are split once they exceed a maximum length.
+    /// Default `true`.
+    #[serde(default = "default_true")]
+    pub split_by_max_length: bool,
+    /// Maximum subtitle length, as text (Buzz `TEXT` field). Default
+    /// `"42"`.
+    #[serde(default = "default_max_length")]
+    pub max_length: String,
+}
+
+impl AutoResizeSettings {
+    /// Default merge-gap threshold (seconds, as text).
+    pub const DEFAULT_MERGE_GAP_SECONDS: &'static str = "0.2";
+    /// Default punctuation marks — Buzz's `DEFAULT_PUNCTUATION` verbatim
+    /// (`transcript_resizer/plugin.py:37`).
+    pub const DEFAULT_PUNCTUATION: &'static str = ".* /./. /。/?/? /？/!/! /！/,/, ";
+    /// Default maximum subtitle length (as text).
+    pub const DEFAULT_MAX_LENGTH: &'static str = "42";
+}
+
+impl Default for AutoResizeSettings {
+    fn default() -> Self {
+        AutoResizeSettings {
+            enabled: false,
+            merge_by_gap: true,
+            merge_gap_seconds: Self::DEFAULT_MERGE_GAP_SECONDS.to_string(),
+            split_by_punctuation: true,
+            punctuation: Self::DEFAULT_PUNCTUATION.to_string(),
+            split_by_max_length: true,
+            max_length: Self::DEFAULT_MAX_LENGTH.to_string(),
+        }
+    }
+}
+
+fn default_merge_gap_seconds() -> String {
+    AutoResizeSettings::DEFAULT_MERGE_GAP_SECONDS.to_string()
+}
+
+fn default_punctuation() -> String {
+    AutoResizeSettings::DEFAULT_PUNCTUATION.to_string()
+}
+
+fn default_max_length() -> String {
+    AutoResizeSettings::DEFAULT_MAX_LENGTH.to_string()
 }
 
 /// Settings governing telemetry opt-out and the anonymous analytics
@@ -466,6 +767,10 @@ pub struct RecordingSettings {
     /// Last-entered LLM translation prompt, if live AI translation was
     /// configured.
     pub llm_prompt: Option<String>,
+    /// Last-selected backend (`crate::domain::Backend`'s wire string, e.g.
+    /// `"openai_api"`), or `None` for the default whisper.cpp backend
+    /// (F-061 live-API transcription).
+    pub backend: Option<String>,
 }
 
 impl RecordingSettings {
@@ -531,6 +836,7 @@ impl Default for RecordingSettings {
             enable_llm_translation: false,
             llm_model: None,
             llm_prompt: None,
+            backend: None,
         }
     }
 }
@@ -673,6 +979,7 @@ impl Settings {
             ViewerSettings::clamp_playback_rate(settings.viewer.playback_rate);
         settings.recording.clamp();
         settings.presentation.clamp();
+        settings.ui.clamp();
         Ok(settings)
     }
 
@@ -744,8 +1051,10 @@ pub enum SettingsError {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileTranscriberSettings, OpenAiSettings, PresentationSettings, RecordingSettings, Settings,
-        SettingsError, ViewerGeometry, ViewerSettings,
+        AiSummarySettings, AutoResizeSettings, ExportDocxSettings, FileTranscriberSettings,
+        FolderWatchSettings, OpenAiSettings, PostprocSettings, PresentationSettings,
+        RecordingSettings, Settings, SettingsError, SkipSettings, UiSettings, ViewerGeometry,
+        ViewerSettings,
     };
     use std::path::Path;
 
@@ -1394,5 +1703,320 @@ mod tests {
             Some("https://example.com/v1".to_string())
         );
         assert_eq!(loaded.openai.api_model, "whisper-1-custom");
+    }
+
+    // -- M7 groundwork: shortcuts, ui, models.force_cpu, file_transcriber
+    // default_export_template, folder_watch, postproc.*, recording.backend
+    // (F-100, F-030, F-111, F-115, F-116, F-005, F-008) -------------------
+
+    #[test]
+    fn shortcuts_defaults_to_empty_map() {
+        let settings = Settings::default();
+        assert!(settings.shortcuts.is_empty());
+    }
+
+    #[test]
+    fn shortcuts_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+
+        let mut settings = Settings::default();
+        settings
+            .shortcuts
+            .insert("OPEN_RECORD_WINDOW".to_string(), "Ctrl+R".to_string());
+
+        settings.save(&path).expect("save");
+        let loaded = Settings::load(&path).expect("load");
+        assert_eq!(
+            loaded.shortcuts.get("OPEN_RECORD_WINDOW"),
+            Some(&"Ctrl+R".to_string())
+        );
+    }
+
+    #[test]
+    fn ui_settings_defaults_match_spec() {
+        let ui = UiSettings::default();
+        assert!(ui.locale.is_none());
+        assert!(ui.font_size.is_none());
+        // Missing `[ui]` section entirely also yields exactly these.
+        assert_eq!(Settings::default().ui, ui);
+    }
+
+    #[test]
+    fn font_size_clamped_on_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+
+        // Above the max → clamped down to 32.
+        std::fs::write(&path, "[ui]\nfont_size = 99\n").expect("write file");
+        assert_eq!(Settings::load(&path).expect("load").ui.font_size, Some(32));
+
+        // Below the min → clamped up to 8.
+        std::fs::write(&path, "[ui]\nfont_size = 4\n").expect("write file");
+        assert_eq!(Settings::load(&path).expect("load").ui.font_size, Some(8));
+
+        // In range → unchanged.
+        std::fs::write(&path, "[ui]\nfont_size = 16\n").expect("write file");
+        assert_eq!(Settings::load(&path).expect("load").ui.font_size, Some(16));
+
+        // Absent entirely → stays `None`, not clamped into a value.
+        std::fs::write(&path, "[ui]\nlocale = \"de_DE\"\n").expect("write file");
+        assert_eq!(Settings::load(&path).expect("load").ui.font_size, None);
+    }
+
+    #[test]
+    fn model_settings_force_cpu_defaults_false() {
+        let models = super::ModelSettings::default();
+        assert!(!models.force_cpu);
+        assert!(!Settings::default().models.force_cpu);
+    }
+
+    #[test]
+    fn file_transcriber_default_export_template_defaults_none() {
+        let ft = FileTranscriberSettings::default();
+        assert!(ft.default_export_template.is_none());
+    }
+
+    #[test]
+    fn recording_backend_defaults_none() {
+        let rec = RecordingSettings::default();
+        assert!(rec.backend.is_none());
+    }
+
+    #[test]
+    fn folder_watch_settings_defaults_match_spec() {
+        let fw = FolderWatchSettings::default();
+        assert!(!fw.enabled);
+        assert!(fw.input_dir.is_none());
+        assert!(fw.output_dir.is_none());
+        assert!(!fw.delete_processed_files);
+        assert_eq!(fw.options, FileTranscriberSettings::default());
+        // Missing `[folder_watch]` section entirely also yields exactly these.
+        assert_eq!(Settings::default().folder_watch, fw);
+    }
+
+    #[test]
+    fn postproc_ai_summary_defaults_match_buzz() {
+        // Buzz defaults: plugin disabled (`manager.py:219`), API URL falls
+        // back to `https://api.openai.com/v1` when unset, model
+        // `gpt-4o-mini`, `DEFAULT_PROMPT` verbatim
+        // (`ai_summary/plugin.py:31-34`), save-to-notes on, save-to-file off.
+        let summary = AiSummarySettings::default();
+        assert!(!summary.enabled);
+        assert!(summary.api_url.is_none());
+        assert_eq!(summary.model, "gpt-4o-mini");
+        assert_eq!(
+            summary.prompt,
+            "You are a helpful assistant. Summarise the following transcript into a \
+             concise set of key points and action items. Use clear, plain language."
+        );
+        assert!(summary.save_to_notes);
+        assert!(!summary.save_to_file);
+        assert!(summary.output_folder.is_none());
+        assert_eq!(Settings::default().postproc.ai_summary, summary);
+    }
+
+    #[test]
+    fn postproc_export_docx_defaults_match_buzz() {
+        let export_docx = ExportDocxSettings::default();
+        assert!(!export_docx.enabled);
+        assert!(export_docx.output_folder.is_none());
+        assert!(!export_docx.include_timestamps);
+        assert_eq!(Settings::default().postproc.export_docx, export_docx);
+    }
+
+    #[test]
+    fn postproc_skip_already_transcribed_defaults_match_buzz() {
+        let skip = SkipSettings::default();
+        assert!(!skip.enabled);
+        assert!(skip.check_result_files);
+        assert!(!skip.check_database);
+        assert_eq!(Settings::default().postproc.skip_already_transcribed, skip);
+    }
+
+    #[test]
+    fn postproc_transcript_resizer_defaults_match_buzz() {
+        // Buzz defaults (`transcript_resizer/plugin.py:51-88`): all three
+        // bool gates on, merge gap "0.2", `DEFAULT_PUNCTUATION` verbatim
+        // (`:37`), max length "42".
+        let resizer = AutoResizeSettings::default();
+        assert!(!resizer.enabled);
+        assert!(resizer.merge_by_gap);
+        assert_eq!(resizer.merge_gap_seconds, "0.2");
+        assert!(resizer.split_by_punctuation);
+        assert_eq!(resizer.punctuation, ".* /./. /。/?/? /？/!/! /！/,/, ");
+        assert!(resizer.split_by_max_length);
+        assert_eq!(resizer.max_length, "42");
+        assert_eq!(Settings::default().postproc.transcript_resizer, resizer);
+    }
+
+    #[test]
+    fn postproc_defaults_apply_when_sections_present_but_partial() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        std::fs::write(
+            &path,
+            "[postproc.ai_summary]\nenabled = true\n\n\
+             [postproc.transcript_resizer]\nenabled = true\nmax_length = \"80\"\n",
+        )
+        .expect("write file");
+
+        let loaded = Settings::load(&path).expect("load");
+        assert!(loaded.postproc.ai_summary.enabled);
+        // Other ai_summary fields still take their Buzz defaults.
+        assert_eq!(loaded.postproc.ai_summary.model, "gpt-4o-mini");
+        assert!(loaded.postproc.ai_summary.save_to_notes);
+
+        assert!(loaded.postproc.transcript_resizer.enabled);
+        assert_eq!(loaded.postproc.transcript_resizer.max_length, "80");
+        // Other transcript_resizer fields still take their Buzz defaults.
+        assert!(loaded.postproc.transcript_resizer.merge_by_gap);
+        assert_eq!(loaded.postproc.transcript_resizer.merge_gap_seconds, "0.2");
+
+        // Sections not mentioned at all also default.
+        assert_eq!(loaded.postproc.export_docx, ExportDocxSettings::default());
+        assert_eq!(
+            loaded.postproc.skip_already_transcribed,
+            SkipSettings::default()
+        );
+    }
+
+    #[test]
+    fn postproc_and_folder_watch_round_trip_all_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+
+        let mut settings = Settings::default();
+        settings.folder_watch.enabled = true;
+        settings.folder_watch.input_dir = Some(Path::new("/tmp/watch-in").to_path_buf());
+        settings.folder_watch.output_dir = Some(Path::new("/tmp/watch-out").to_path_buf());
+        settings.folder_watch.delete_processed_files = true;
+        settings.folder_watch.options.language = Some("en".to_string());
+        settings.folder_watch.options.model_size = Some("large-v3-turbo".to_string());
+        settings.folder_watch.options.word_timestamps = Some(true);
+        settings.folder_watch.options.export_formats =
+            Some(vec!["srt".to_string(), "vtt".to_string()]);
+
+        settings.postproc.ai_summary.enabled = true;
+        settings.postproc.ai_summary.api_url = Some("https://example.com/v1".to_string());
+        settings.postproc.ai_summary.model = "gpt-4o".to_string();
+        settings.postproc.ai_summary.prompt = "Custom prompt.".to_string();
+        settings.postproc.ai_summary.save_to_notes = false;
+        settings.postproc.ai_summary.save_to_file = true;
+        settings.postproc.ai_summary.output_folder =
+            Some(Path::new("/tmp/summaries").to_path_buf());
+
+        settings.postproc.export_docx.enabled = true;
+        settings.postproc.export_docx.output_folder = Some(Path::new("/tmp/docx").to_path_buf());
+        settings.postproc.export_docx.include_timestamps = true;
+
+        settings.postproc.skip_already_transcribed.enabled = true;
+        settings
+            .postproc
+            .skip_already_transcribed
+            .check_result_files = false;
+        settings.postproc.skip_already_transcribed.check_database = true;
+
+        settings.postproc.transcript_resizer.enabled = true;
+        settings.postproc.transcript_resizer.merge_by_gap = false;
+        settings.postproc.transcript_resizer.merge_gap_seconds = "0.5".to_string();
+        settings.postproc.transcript_resizer.split_by_punctuation = false;
+        settings.postproc.transcript_resizer.punctuation = ".,".to_string();
+        settings.postproc.transcript_resizer.split_by_max_length = false;
+        settings.postproc.transcript_resizer.max_length = "100".to_string();
+
+        settings.save(&path).expect("save");
+        let loaded = Settings::load(&path).expect("load");
+        assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn ui_and_models_force_cpu_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+
+        let mut settings = Settings::default();
+        settings.ui.locale = Some("de_DE".to_string());
+        settings.ui.font_size = Some(20);
+        settings.models.force_cpu = true;
+        settings.file_transcriber.default_export_template =
+            Some("{{ file_name }} export".to_string());
+        settings.recording.backend = Some("openai_api".to_string());
+
+        settings.save(&path).expect("save");
+        let loaded = Settings::load(&path).expect("load");
+        assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn pre_m7_settings_toml_parses_with_all_new_sections_defaulted() {
+        // A representative M6-era settings.toml: every M6 section present,
+        // none of M7's new sections/fields (`[shortcuts]`, `[ui]`,
+        // `models.force_cpu`, `file_transcriber.default_export_template`,
+        // `[folder_watch]`, `[postproc.*]`, `recording.backend`) written at
+        // all. A hand-edited or pre-M7-saved file must still load, with every
+        // new field taking its documented default.
+        const PRE_M7_TOML: &str = r#"
+            [models]
+            custom_model_url = "https://example.com/model.bin"
+
+            [downloads]
+            cookie_file = "/tmp/cookies.txt"
+
+            [updates]
+            last_check = "2026-06-01T00:00:00"
+            available_version = "1.0.0"
+            check_enabled = true
+
+            [gui]
+            task_table_sort_column = "date_added"
+            task_table_sort_descending = true
+
+            [file_transcriber]
+            language = "en"
+            task = "transcribe"
+            model_size = "large-v3-turbo"
+            word_timestamps = true
+
+            [privacy]
+            telemetry_enabled = true
+            user_identifier = "11111111-2222-3333-4444-555555555555"
+
+            [viewer]
+            playback_rate = 1.25
+
+            [recording]
+            language = "fr"
+            silence_threshold = 0.003
+
+            [presentation]
+            text_size = 30
+            theme = "dark"
+
+            [openai]
+            api_model = "whisper-1"
+        "#;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, PRE_M7_TOML).expect("write pre-M7 file");
+
+        let loaded = Settings::load(&path).expect("load pre-M7 file");
+
+        // Old fields parsed as written.
+        assert_eq!(
+            loaded.models.custom_model_url,
+            Some("https://example.com/model.bin".to_string())
+        );
+        assert_eq!(loaded.recording.language, Some("fr".to_string()));
+
+        // Every new M7 field/section takes its documented default.
+        assert!(loaded.shortcuts.is_empty());
+        assert_eq!(loaded.ui, UiSettings::default());
+        assert!(!loaded.models.force_cpu);
+        assert!(loaded.file_transcriber.default_export_template.is_none());
+        assert!(loaded.recording.backend.is_none());
+        assert_eq!(loaded.folder_watch, FolderWatchSettings::default());
+        assert_eq!(loaded.postproc, PostprocSettings::default());
     }
 }
