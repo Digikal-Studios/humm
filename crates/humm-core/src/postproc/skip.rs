@@ -431,6 +431,10 @@ mod tests {
                 Ok(self.segments.clone())
             }
         }
+
+        fn set_task_notes(&self, _id: &TranscriptionId, _notes: &str) -> Result<(), StoreError> {
+            unreachable!("check() never writes notes (that's postproc::summary's job)")
+        }
     }
 
     fn seg(start: i64, end: i64, text: &str) -> Segment {

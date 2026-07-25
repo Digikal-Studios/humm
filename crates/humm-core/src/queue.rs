@@ -1469,6 +1469,12 @@ mod tests {
         fn segments_for(&self, _id: &TranscriptionId) -> Result<Vec<Segment>, StoreError> {
             Ok(Vec::new())
         }
+
+        fn set_task_notes(&self, _id: &TranscriptionId, _notes: &str) -> Result<(), StoreError> {
+            // No queue-level test exercises the ai_summary hook (that's
+            // `postproc::summary`'s own unit tests) -- unreachable here.
+            unreachable!("queue tests never call set_task_notes")
+        }
     }
 
     // -- Fake decoder / prober (reused from the pipeline test patterns) ------

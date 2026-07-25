@@ -91,6 +91,41 @@ pub enum ApiFailure {
     },
 }
 
+/// Builds a blocking client whose default per-request timeout is `timeout`,
+/// without ever panicking (design spec §6.1's carried one-liner: the
+/// translator worker's client-build fallback used to silently drop to an
+/// untimed [`reqwest::blocking::Client::new`] on the — practically
+/// unreachable — failure branch; every caller of this helper gets the
+/// timeout-preserving version instead).
+///
+/// `ClientBuilder::build` for the blocking client can fail even when only
+/// `.timeout(..)` is configured: internally it spins up a background thread
+/// running its own async runtime, and *that spawn* can fail under transient
+/// resource pressure (e.g. the process is near its thread/fd limit) —
+/// nothing to do with `timeout` itself. That means a failure here is not
+/// guaranteed to recur: this retries the identical timed build exactly once
+/// (logged) before giving up and falling back to
+/// [`reqwest::blocking::Client::new`]'s own untimed default as an absolute
+/// last resort — the same non-`expect` fallback pattern `openai::engine`/
+/// `live::export`/`telemetry` already use for reqwest client builds, so a
+/// client is always returned rather than propagating a panic up through
+/// task construction.
+pub(crate) fn build_client(timeout: Duration) -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .unwrap_or_else(|e| {
+            log::error!(
+                "failed to build an HTTP client with a {timeout:?} timeout ({e}); retrying \
+                 once before falling back to an untimed client"
+            );
+            reqwest::blocking::Client::builder()
+                .timeout(timeout)
+                .build()
+                .unwrap_or_else(|_| reqwest::blocking::Client::new())
+        })
+}
+
 /// Runs `send` to completion on its own short-lived, named thread, and
 /// blocks the calling thread on the result — polling `cancel` roughly every
 /// 100 ms while it waits.
@@ -171,6 +206,18 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Instant;
+
+    // -- build_client -----------------------------------------------------
+    //
+    // The failure/retry branches are practically unreachable (a client with
+    // only `.timeout(..)` configured is documented-impossible to fail to
+    // build, same as `openai::engine`'s identical fallback) -- this pins
+    // only the happy path: a client is returned, not a panic.
+
+    #[test]
+    fn build_client_happy_path_returns_a_client() {
+        let _client = build_client(Duration::from_secs(5));
+    }
 
     // -- effective_base -------------------------------------------------
 

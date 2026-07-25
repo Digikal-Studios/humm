@@ -5,6 +5,7 @@
 //! `docs/superpowers/specs/2026-07-25-m7-completeness-design.md` §2, §4.
 
 pub mod skip;
+pub mod summary;
 
 use crate::domain::Millis;
 use crate::settings::{AiSummarySettings, AutoResizeSettings, ExportDocxSettings, SkipSettings};

@@ -1514,6 +1514,15 @@ impl TaskStore for SqliteStore {
     fn segments_for(&self, id: &TranscriptionId) -> Result<Vec<Segment>, StoreError> {
         self.get_segments(id)
     }
+
+    fn set_task_notes(&self, id: &TranscriptionId, notes: &str) -> Result<(), StoreError> {
+        // Rust prefers the inherent method of the same name over this trait
+        // method when resolving a `self.set_task_notes(...)` call, so this
+        // reaches the inherent method above, not itself -- see the trait's
+        // own doc comment (`boundary.rs`) for why that's safe here, unlike
+        // `find_completed_by_file_name`/`segments_for` just above.
+        self.set_task_notes(id, notes)
+    }
 }
 
 #[cfg(test)]

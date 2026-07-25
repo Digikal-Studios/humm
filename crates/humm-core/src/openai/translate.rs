@@ -26,12 +26,12 @@ use std::thread;
 use std::time::Duration;
 
 use regex::Regex;
-use serde_json::Value;
 
 use crate::cancel::CancelToken;
 use crate::secrets::{SecretKey, SecretStore};
 
-use super::client::{ApiFailure, OpenAiAuth, effective_base};
+use super::chat;
+use super::client::{OpenAiAuth, build_client};
 
 /// Buzz's fixed translation-queue batch size (`translator.py:17`): the
 /// worker drains up to this many queued items into a single numbered-batch
@@ -500,10 +500,7 @@ fn worker_loop(
     receiver: flume::Receiver<TranslatorMsg>,
     mut on_result: Box<dyn FnMut(String, Option<i64>) + Send>,
 ) {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .unwrap_or_else(|_| reqwest::blocking::Client::new());
+    let client = build_client(REQUEST_TIMEOUT);
 
     loop {
         // Step 1: block for the next batch's first item.
@@ -577,7 +574,7 @@ fn translate_single(
     cfg: &TranslatorConfig,
     text: &str,
 ) -> String {
-    match post_chat_completion(client, cfg, &cfg.prompt, text) {
+    match chat::complete(client, &cfg.auth, &cfg.model, &cfg.prompt, text) {
         Ok(content) => content,
         Err(e) => {
             log::error!("Translation error! Server response: {e}");
@@ -601,77 +598,19 @@ fn translate_batch(
     let system_content = batch_system_prompt(&cfg.prompt, n);
     let user_content = combine_numbered(texts);
 
-    match post_chat_completion(client, cfg, &system_content, &user_content) {
+    match chat::complete(
+        client,
+        &cfg.auth,
+        &cfg.model,
+        &system_content,
+        &user_content,
+    ) {
         Ok(content) => parse_batch_response(&content, n),
         Err(e) => {
             log::error!("Batch translation error! Server response: {e}");
             vec![String::new(); n]
         }
     }
-}
-
-/// Issues one `POST {base}/chat/completions` request and extracts
-/// `choices[0].message.content` — the shape both the single-item and batch
-/// forms share (Buzz `:62-69`/`:102-106` build the request;
-/// `completion.choices[0].message.content` extracts the result, `:76`/
-/// `:120`). No retries; [`REQUEST_TIMEOUT`] is applied at the client level.
-///
-/// Every error path's `detail` is built only from the effective base URL,
-/// the response status/body, and a transport error's own message — never
-/// from the request's `Authorization` header — so a failure can never leak
-/// the API key (design spec §2), matching [`ApiFailure`]'s own contract.
-fn post_chat_completion(
-    client: &reqwest::blocking::Client,
-    cfg: &TranslatorConfig,
-    system_content: &str,
-    user_content: &str,
-) -> Result<String, ApiFailure> {
-    let base = effective_base(&cfg.auth.base_url);
-    let url = format!("{base}/chat/completions");
-
-    let body = serde_json::json!({
-        "model": cfg.model,
-        "messages": [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_content},
-        ],
-    });
-
-    let response = client
-        .post(&url)
-        .bearer_auth(&cfg.auth.api_key)
-        .json(&body)
-        .send()
-        .map_err(|e| ApiFailure::Http {
-            detail: format!("request to {base} failed: {e}"),
-        })?;
-
-    let status = response.status();
-    let text = response.text().map_err(|e| ApiFailure::Http {
-        detail: format!("failed reading response from {base}: {e}"),
-    })?;
-
-    if !status.is_success() {
-        return Err(ApiFailure::Http {
-            detail: format!("{base} returned HTTP {status}"),
-        });
-    }
-
-    let value: Value = serde_json::from_str(&text).map_err(|e| ApiFailure::Shape {
-        detail: format!("{base} returned a non-JSON response body (HTTP {status}): {e}"),
-    })?;
-
-    value
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| ApiFailure::Shape {
-            detail: format!("{base} response missing choices[0].message.content"),
-        })
 }
 
 // ============================================================================
@@ -784,6 +723,7 @@ pub trait LlmEndpointSource: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     // ------------------------------------------------- real-API contract (gated)
 

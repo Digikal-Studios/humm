@@ -12,6 +12,7 @@
 //! `Debug`-printed, logged, serialized, or placed in a subprocess argv
 //! (design spec §2).
 
+pub(crate) mod chat;
 pub mod client;
 pub mod engine;
 pub mod parse;
