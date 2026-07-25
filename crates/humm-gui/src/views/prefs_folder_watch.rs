@@ -17,6 +17,22 @@
 //! path/text field uses), and the embedded options form's controls commit as
 //! one `SheetState::write_to` call whenever anything in that block changes.
 //!
+//! **Browse-cancel divergence (deliberate, not a port)**: Buzz's own
+//! `on_click_browse_input_folder`/`on_click_browse_output_folder`
+//! (`:114-117`, `:123-126`) call `line_edit.setText(folder)` unconditionally,
+//! even when `QFileDialog.getExistingDirectory` returns `""` on cancel —
+//! clearing an already-configured field just by opening and canceling the
+//! dialog. This looks like an unintentional quirk local to this one widget,
+//! not a deliberate Buzz behavior: the app's own general convention guards
+//! exactly this case (`main_window.py`'s `on_import_folder_action_
+//! triggered`, `:290-292`, `if not folder: return`). [`ui`]'s own `if let
+//! Some(picked) = dialogs.pick_folder(..)` only ever updates the buffer on
+//! an actual pick, leaving it untouched on cancel — the same "cancel is a
+//! no-op" convention every other Browse-button call site in this codebase
+//! already follows (`views/recording_advanced.rs`'s own export-folder
+//! Browse), so this is a non-port of an unintentional Buzz quirk, not a
+//! tracked deviation from an intentional one.
+//!
 //! ## Watcher rebuild: no extra wiring needed
 //!
 //! Every write this tab makes lands in `settings.folder_watch.*` under the
@@ -24,9 +40,12 @@
 //! `app.rs::HummApp::sync_folder_watch` already re-derives a
 //! `FolderWatchSnapshot` from `settings.folder_watch` fresh every frame
 //! (design spec §3.2's "rebuild-on-commit") and reconciles the running
-//! service against it — `input_dir`/the enabled/disabled transition resolve
-//! to `ReconcileAction::Restart`, everything else
-//! (`output_dir`/`delete_processed_files`/`options`) to
+//! service against it — an `input_dir` change while already running
+//! resolves to `ReconcileAction::Restart`; the enabled/disabled transition
+//! itself resolves to `Start`/`Stop`, not `Restart` (pinned by
+//! `folder_watch.rs`'s own `disabled_to_enabled_transition_starts_not_
+//! restarts` test); everything else
+//! (`output_dir`/`delete_processed_files`/`options`) resolves to
 //! `ReconcileAction::UpdateTemplate` (no watcher teardown at all). This
 //! module needs no direct handle on the service, no "changed" flag of its
 //! own, and no call into `folder_watch.rs` — the existing per-frame compare
