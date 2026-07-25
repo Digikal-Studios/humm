@@ -153,14 +153,16 @@ fn apple_silicon_load_note_applicable() -> bool {
 
 /// Renders the recording window's full content.
 ///
-/// `custom_model_available`/`measured_speed` are precomputed by `app.rs` from
-/// `Services.settings` (this module never locks `Settings` itself for
-/// *those two* reads, matching `options_sheet::ui`'s own
-/// `custom_model_available: bool` convention). `settings`/`settings_path`
-/// are threaded through to the advanced sheet and the presentation bar
-/// instead (Task 12), which — unlike the rest of this module — *do* need
-/// live read/write access for their own immediate-save fields
-/// (`views/resizer.rs::ui`'s identical `settings: &Mutex<Settings>,
+/// `custom_model_available`/`include_lumii`/`measured_speed` are precomputed
+/// by `app.rs` from `Services.settings` (this module never locks `Settings`
+/// itself for *those three* reads, matching `options_sheet::ui`'s own
+/// `custom_model_available: bool` convention — `include_lumii` is the same
+/// locale-derived Lumii gate every model-size combo threads through, F-044/
+/// J-9, design spec §8.2, `crate::i18n::lumii_locale_requested`).
+/// `settings`/`settings_path` are threaded through to the advanced sheet and
+/// the presentation bar instead (Task 12), which — unlike the rest of this
+/// module — *do* need live read/write access for their own immediate-save
+/// fields (`views/resizer.rs::ui`'s identical `settings: &Mutex<Settings>,
 /// settings_path: &Path` convention).
 #[allow(clippy::too_many_arguments)]
 pub fn recording_ui(
@@ -168,6 +170,7 @@ pub fn recording_ui(
     vm: &mut RecordingVm,
     deps: &RecordingDeps,
     custom_model_available: bool,
+    include_lumii: bool,
     measured_speed: &BTreeMap<String, f32>,
     settings: &Mutex<Settings>,
     settings_path: &Path,
@@ -180,6 +183,7 @@ pub fn recording_ui(
             "humm-recording-model-size",
             &mut vm.options.model_size,
             custom_model_available,
+            include_lumii,
         );
         if apple_silicon_load_note_applicable() {
             ui.label("\u{24d8}")

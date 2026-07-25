@@ -108,7 +108,7 @@ fn privacy_toggles_persist_to_the_settings_file() {
         state: PreferencesState {
             tab: PrefsTab::Privacy,
             general: GeneralTabState::new(secrets.as_ref(), &Settings::default()),
-            models: ModelsTabState::new(model_root_dir.path(), None),
+            models: ModelsTabState::new(model_root_dir.path(), None, false),
         },
         model_root: model_root_dir.path().to_path_buf(),
         settings,
@@ -193,7 +193,7 @@ fn general_harness(
         state: PreferencesState {
             tab: PrefsTab::General,
             general: GeneralTabState::new(secrets.as_ref(), &Settings::default()),
-            models: ModelsTabState::new(&model_root, None),
+            models: ModelsTabState::new(&model_root, None, false),
         },
         model_root,
         settings: Arc::new(Mutex::new(Settings::default())),
@@ -599,7 +599,7 @@ fn models_tab_shows_planted_tiny_as_downloaded_and_delete_confirm_removes_it() {
     sentinel_name.push(SENTINEL_SUFFIX);
     std::fs::write(ggml_path.with_file_name(sentinel_name), b"").expect("write sentinel");
 
-    let state = ModelsTabState::new(root.path(), None);
+    let state = ModelsTabState::new(root.path(), None, false);
     // Premise: refresh already found the planted Tiny model as Downloaded.
     let tiny = state
         .rows
@@ -667,7 +667,7 @@ fn models_tab_shows_planted_tiny_as_downloaded_and_delete_confirm_removes_it() {
 fn custom_url_field_persists_on_lost_focus_not_per_keystroke() {
     let root = tempfile::tempdir().expect("model root tempdir");
     let settings_path = root.path().join("settings.toml");
-    let state = ModelsTabState::new(root.path(), None);
+    let state = ModelsTabState::new(root.path(), None, false);
 
     let fixture = ModelsFixture {
         state,
@@ -717,6 +717,119 @@ fn custom_url_field_persists_on_lost_focus_not_per_keystroke() {
         reloaded.models.custom_model_url.as_deref(),
         Some("https://example.com/custom.bin")
     );
+}
+
+// -- Models tab: measured-speed badge (J-9 ✚, design spec §8.2) -------------
+
+fn models_harness(fixture: ModelsFixture) -> Harness<'static, ModelsFixture> {
+    Harness::new_ui_state(
+        |ui, fixture: &mut ModelsFixture| {
+            models_ui::ui(
+                ui,
+                &mut fixture.state,
+                &fixture.root,
+                &fixture.settings,
+                &fixture.settings_path,
+            );
+        },
+        fixture,
+    )
+}
+
+#[test]
+fn models_tab_shows_speed_badge_when_measured() {
+    let root = tempfile::tempdir().expect("model root tempdir");
+    let mut settings = Settings::default();
+    settings
+        .recording
+        .measured_speed
+        .insert("tiny".to_string(), 2.5);
+
+    let fixture = ModelsFixture {
+        state: ModelsTabState::new(root.path(), None, false),
+        root: root.path().to_path_buf(),
+        settings: Arc::new(Mutex::new(settings)),
+        settings_path: root.path().join("unused-settings.toml"),
+    };
+
+    let mut harness = models_harness(fixture);
+    harness.run();
+
+    // Two separate `contains` checks, not one spanning string: Fluent's
+    // default `use_isolating` wraps the interpolated `{ $ratio }` value in
+    // invisible bidi-isolation marks, so "2.5" and the literal "× realtime"
+    // that follows it in the catalog are not byte-adjacent in the rendered
+    // label.
+    harness.get_by_label_contains("2.5");
+    harness.get_by_label_contains("realtime");
+}
+
+#[test]
+fn models_tab_shows_no_badge_without_a_measured_entry() {
+    let root = tempfile::tempdir().expect("model root tempdir");
+    let fixture = ModelsFixture {
+        state: ModelsTabState::new(root.path(), None, false),
+        root: root.path().to_path_buf(),
+        settings: Arc::new(Mutex::new(Settings::default())),
+        settings_path: root.path().join("unused-settings.toml"),
+    };
+
+    let mut harness = models_harness(fixture);
+    harness.run();
+
+    assert!(
+        harness.query_by_label_contains("realtime").is_none(),
+        "a fresh install (empty measured_speed) must render no badge at all"
+    );
+}
+
+// -- Models tab: Lumii row gated on the lv_LV locale (F-044, design spec §8.2) --
+
+#[test]
+fn models_tab_hides_lumii_without_lv_locale() {
+    let root = tempfile::tempdir().expect("model root tempdir");
+    let settings = Settings::default();
+    let include_lumii = i18n::lumii_locale_requested(&settings, None);
+    assert!(
+        !include_lumii,
+        "premise: en-locale settings never gate Lumii open"
+    );
+
+    let fixture = ModelsFixture {
+        state: ModelsTabState::new(root.path(), None, include_lumii),
+        root: root.path().to_path_buf(),
+        settings: Arc::new(Mutex::new(settings)),
+        settings_path: root.path().join("unused-settings.toml"),
+    };
+
+    let mut harness = models_harness(fixture);
+    harness.run();
+
+    assert!(harness.query_by_label_contains("Lumii").is_none());
+}
+
+#[test]
+fn models_tab_shows_lumii_under_lv_locale() {
+    let root = tempfile::tempdir().expect("model root tempdir");
+    let mut settings = Settings::default();
+    settings.ui.locale = Some("lv_LV".to_string());
+    let include_lumii = i18n::lumii_locale_requested(&settings, None);
+    assert!(
+        include_lumii,
+        "premise: an explicit lv_LV setting gates Lumii open"
+    );
+
+    let fixture = ModelsFixture {
+        state: ModelsTabState::new(root.path(), None, include_lumii),
+        root: root.path().to_path_buf(),
+        settings: Arc::new(Mutex::new(settings)),
+        settings_path: root.path().join("unused-settings.toml"),
+    };
+
+    let mut harness = models_harness(fixture);
+    harness.run();
+
+    harness.get_by_label_contains("Lumii");
 }
 
 // -- Toolbar update chip: appears once an Available notice lands -------------

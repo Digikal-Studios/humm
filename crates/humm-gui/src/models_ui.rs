@@ -11,6 +11,7 @@
 //! inside an ordinary `egui::CentralPanel` in a kittest harness (it needs no
 //! OS viewport — only `app.rs`'s wrapping call does).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -23,7 +24,7 @@ use humm_core::models::registry::{
 };
 use humm_core::settings::Settings;
 
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_args};
 use crate::views::options_sheet::{selectable_model_sizes, title_case};
 
 /// Live progress/outcome of one in-flight download, shared between the
@@ -86,18 +87,23 @@ pub struct ModelRow {
 }
 
 /// Scans `root` and builds one [`ModelRow`] per size
-/// [`selectable_model_sizes`] lists (the 12 ggml sizes; `Lumii` never
-/// listed, en-locale-only), plus a trailing `Custom` row iff `custom_url` is
-/// `Some` (same gate the options sheet's model-size combo uses —
-/// `settings.models.custom_model_url.is_some()`).
+/// [`selectable_model_sizes`] lists (the 12 ggml sizes), plus a trailing
+/// `Custom` row iff `custom_url` is `Some` (same gate the options sheet's
+/// model-size combo uses — `settings.models.custom_model_url.is_some()`),
+/// plus a trailing `Lumii` row iff `include_lumii` (F-044/J-9, design spec
+/// §8.2 — same locale gate as every other model-size combo,
+/// [`crate::i18n::lumii_locale_requested`]). A listed `Lumii` row behaves
+/// exactly like any other size row: download/delete/reveal all work, since
+/// [`ModelDownloader::resolve_model`] already has a `Lumii` arm (F-042, the
+/// CLI's `-s lumii` already exercises it).
 ///
 /// A row already mid-download is *not* something this function can see or
 /// preserve — it always returns `Downloaded`/`Available` rows, computed
 /// fresh from disk. A caller that has live `Downloading` rows to keep
 /// splices this function's result in only for the rows it isn't already
 /// tracking in flight (see [`ModelsTabState::refresh_from_disk`]).
-pub fn refresh(root: &Path, custom_url: Option<&str>) -> Vec<ModelRow> {
-    selectable_model_sizes(custom_url.is_some())
+pub fn refresh(root: &Path, custom_url: Option<&str>, include_lumii: bool) -> Vec<ModelRow> {
+    selectable_model_sizes(custom_url.is_some(), include_lumii)
         .into_iter()
         .map(|size| ModelRow {
             size,
@@ -276,17 +282,27 @@ pub struct ModelsTabState {
     /// The size a Delete click wants to confirm, if the confirm modal is
     /// open.
     pub delete_confirm: Option<ModelSize>,
+    /// Whether the `Lumii` row is included (F-044/J-9, design spec §8.2) —
+    /// snapshotted once at [`ModelsTabState::new`] time (the tab has no
+    /// locale picker of its own to react to; `PreferencesState::new`'s own
+    /// contract already rebuilds this whole tab fresh on every Preferences
+    /// window (re)open, which is when a locale change made elsewhere would
+    /// take effect here too). Carried across [`ModelsTabState::refresh_from_disk`]
+    /// calls so a custom-URL edit or a delete doesn't silently drop the row.
+    pub include_lumii: bool,
 }
 
 impl ModelsTabState {
     /// Builds the tab's initial state: `rows` from [`refresh`], `custom_url`
-    /// from the current setting.
-    pub fn new(root: &Path, custom_url: Option<&str>) -> Self {
+    /// from the current setting, `include_lumii` from the caller's
+    /// locale-derived gate (see [`crate::i18n::lumii_locale_requested`]).
+    pub fn new(root: &Path, custom_url: Option<&str>, include_lumii: bool) -> Self {
         ModelsTabState {
-            rows: refresh(root, custom_url),
+            rows: refresh(root, custom_url, include_lumii),
             custom_url: custom_url.unwrap_or_default().to_string(),
             error: None,
             delete_confirm: None,
+            include_lumii,
         }
     }
 
@@ -297,7 +313,7 @@ impl ModelsTabState {
     /// call any time otherwise.
     pub fn refresh_from_disk(&mut self, root: &Path) {
         let custom_url = non_empty(&self.custom_url);
-        let mut fresh = refresh(root, custom_url.as_deref());
+        let mut fresh = refresh(root, custom_url.as_deref(), self.include_lumii);
         for row in &mut fresh {
             if let Some(existing) = self
                 .rows
@@ -332,13 +348,47 @@ enum RowAction {
     Reveal,
 }
 
-/// Renders one row: its title-cased name, a size/progress readout, and its
+/// The measured-speed ratio for `size`'s row, if `measured_speed` (a
+/// snapshot of `settings.recording.measured_speed`, M5 design spec §2.8) has
+/// an entry keyed by its exact wire string — `None` for a fresh install (the
+/// map is empty) and, just as importantly, for any *other* key the map might
+/// carry: a future backend-qualified entry (e.g. an `openai_api`-prefixed
+/// key, Task 18) simply never equals any [`ModelSize::as_str`] value, so it
+/// is skipped by construction rather than needing an explicit exclusion —
+/// see `non_size_keys_ignored` below.
+fn measured_ratio_for(measured_speed: &BTreeMap<String, f32>, size: ModelSize) -> Option<f32> {
+    measured_speed.get(size.as_str()).copied()
+}
+
+/// The measured-speed badge's own display text (J-9 ✚, design spec §8.2):
+/// `"{ratio:.1}× realtime"`, localized via the `models-speed-badge` Fluent
+/// key. The `.1`-precision formatting happens here, in Rust, before the
+/// value ever reaches Fluent — passed through as a preformatted string arg
+/// rather than a numeric placeable, so this function (not each locale's
+/// number-formatting rules) controls the precision.
+fn speed_badge_text(ratio: f32) -> String {
+    let ratio_text = format!("{ratio:.1}");
+    tr_args("models-speed-badge", &[("ratio", ratio_text.as_str())])
+}
+
+/// Renders one row: its title-cased name, the measured-speed badge (J-9 ✚,
+/// design spec §8.2 — only when `measured_speed` has an entry for this row's
+/// size; never rendered otherwise), a size/progress readout, and its
 /// Buzz-parity action buttons — `[Download]` while `Available`, a progress
 /// bar + `[Cancel]` while `Downloading`, `[Delete]` + `[Show file location]`
 /// while `Downloaded` (`models_preferences_widget.py`'s visibility rules).
-fn row_ui(ui: &mut egui::Ui, row: &ModelRow, actions: &mut Vec<RowAction>) {
+fn row_ui(
+    ui: &mut egui::Ui,
+    row: &ModelRow,
+    measured_speed: &BTreeMap<String, f32>,
+    actions: &mut Vec<RowAction>,
+) {
     ui.horizontal(|ui| {
         ui.label(title_case(row.size.as_str()));
+        if let Some(ratio) = measured_ratio_for(measured_speed, row.size) {
+            ui.label(speed_badge_text(ratio))
+                .on_hover_text(tr("models-speed-badge-tip"));
+        }
         match &row.state {
             RowState::Downloaded(bytes) => {
                 ui.label(format_bytes(*bytes));
@@ -395,7 +445,11 @@ fn format_bytes(bytes: u64) -> String {
 /// (carried M3 ticket, spec §8.3 — not per keystroke, which would otherwise
 /// hit disk on every character typed); egui's single-line `TextEdit`
 /// surrenders focus on Enter, so pressing Enter also commits, blank meaning
-/// `None` (binding decision).
+/// `None` (binding decision). Also reads `settings.recording.measured_speed`
+/// fresh every frame (J-9 ✚, design spec §8.2) for the per-row speed badge —
+/// a cheap, read-only snapshot clone, same "read live settings straight from
+/// the already-threaded `Arc<Mutex<Settings>>`" convention every other
+/// per-frame read in this function already uses.
 pub fn ui(
     ui: &mut egui::Ui,
     state: &mut ModelsTabState,
@@ -409,6 +463,13 @@ pub fn ui(
         poll_downloads(root, rows, &mut |message| *error = Some(message));
     }
 
+    let measured_speed = {
+        let guard = settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.recording.measured_speed.clone()
+    };
+
     let mut actions: Vec<RowAction> = Vec::new();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -418,7 +479,7 @@ pub fn ui(
             .iter()
             .filter(|row| matches!(row.state, RowState::Downloaded(_)))
         {
-            row_ui(ui, row, &mut actions);
+            row_ui(ui, row, &measured_speed, &mut actions);
         }
 
         ui.separator();
@@ -428,7 +489,7 @@ pub fn ui(
             .iter()
             .filter(|row| !matches!(row.state, RowState::Downloaded(_)))
         {
-            row_ui(ui, row, &mut actions);
+            row_ui(ui, row, &measured_speed, &mut actions);
         }
     });
 
@@ -532,7 +593,7 @@ mod tests {
     #[test]
     fn refresh_on_empty_root_lists_all_twelve_ggml_sizes_as_available() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let rows = refresh(dir.path(), None);
+        let rows = refresh(dir.path(), None, false);
         assert_eq!(rows.len(), 12);
         assert!(
             rows.iter()
@@ -549,7 +610,7 @@ mod tests {
         std::fs::write(&ggml_path, b"01234567890123456789").expect("write ggml");
         std::fs::write(sentinel_path(&ggml_path), b"").expect("write sentinel");
 
-        let rows = refresh(dir.path(), None);
+        let rows = refresh(dir.path(), None, false);
         let small = rows
             .iter()
             .find(|row| row.size == ModelSize::Small)
@@ -568,7 +629,7 @@ mod tests {
         let ggml_path = dir.path().join(ggml_file_name(ModelSize::Small));
         std::fs::write(&ggml_path, b"partial").expect("write ggml");
 
-        let rows = refresh(dir.path(), None);
+        let rows = refresh(dir.path(), None, false);
         let small = rows
             .iter()
             .find(|row| row.size == ModelSize::Small)
@@ -580,13 +641,34 @@ mod tests {
     fn refresh_appends_custom_row_only_when_url_configured() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert!(
-            !refresh(dir.path(), None)
+            !refresh(dir.path(), None, false)
                 .iter()
                 .any(|row| row.size == ModelSize::Custom)
         );
-        let rows = refresh(dir.path(), Some("https://example.com/model.bin"));
+        let rows = refresh(dir.path(), Some("https://example.com/model.bin"), false);
         assert_eq!(rows.len(), 13);
         assert!(rows.iter().any(|row| row.size == ModelSize::Custom));
+    }
+
+    #[test]
+    fn refresh_lists_lumii_row_when_included() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(
+            !refresh(dir.path(), None, false)
+                .iter()
+                .any(|row| row.size == ModelSize::Lumii),
+            "include_lumii: false must not list the Lumii row"
+        );
+        let rows = refresh(dir.path(), None, true);
+        assert_eq!(rows.len(), 13);
+        let lumii = rows
+            .iter()
+            .find(|row| row.size == ModelSize::Lumii)
+            .expect("lumii row present when included");
+        assert!(
+            matches!(lumii.state, RowState::Available),
+            "a never-downloaded Lumii row is Available like any other size"
+        );
     }
 
     #[test]
@@ -596,7 +678,7 @@ mod tests {
         std::fs::write(&ggml_path, b"0123456789").expect("write ggml");
         std::fs::write(sentinel_path(&ggml_path), b"").expect("write sentinel");
 
-        let rows = refresh(dir.path(), Some("https://example.com/model.bin"));
+        let rows = refresh(dir.path(), Some("https://example.com/model.bin"), false);
         let custom = rows
             .iter()
             .find(|row| row.size == ModelSize::Custom)
@@ -768,20 +850,102 @@ mod tests {
         assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
     }
 
+    // -- speed badge (J-9 ✚, design spec §8.2) ---------------------------------
+
+    #[test]
+    fn speed_badge_text_formats_one_decimal() {
+        // `.contains` rather than `assert_eq!`: Fluent's default
+        // `use_isolating` wraps each interpolated placeable value in
+        // invisible bidi-isolation marks (U+2068/U+2069), so the rendered
+        // string is not byte-identical to the plain concatenation — the
+        // same reason every other `tr_args` assertion in this crate
+        // (`main_window.rs`'s folder-watch pill test, the placeable-survives
+        // suite in `i18n.rs`) checks substrings, not exact equality.
+        let one_decimal = speed_badge_text(2.0);
+        assert!(one_decimal.contains("2.0"), "got {one_decimal:?}");
+        assert!(one_decimal.contains("realtime"), "got {one_decimal:?}");
+
+        let rounded = speed_badge_text(3.1789);
+        assert!(rounded.contains("3.2"), "got {rounded:?}");
+    }
+
+    #[test]
+    fn measured_ratio_for_matches_the_sizes_own_wire_string() {
+        let mut measured_speed = BTreeMap::new();
+        measured_speed.insert("small".to_string(), 2.5);
+        assert_eq!(
+            measured_ratio_for(&measured_speed, ModelSize::Small),
+            Some(2.5)
+        );
+        assert_eq!(measured_ratio_for(&measured_speed, ModelSize::Tiny), None);
+    }
+
+    #[test]
+    fn measured_ratio_for_none_on_an_empty_map() {
+        assert_eq!(measured_ratio_for(&BTreeMap::new(), ModelSize::Small), None);
+    }
+
+    /// A future backend-qualified entry (e.g. an `openai_api`-prefixed key,
+    /// Task 18) must never match a size row, and must never panic — it
+    /// simply isn't any [`ModelSize::as_str`] value, so a plain `BTreeMap`
+    /// lookup already skips it without any special-case code.
+    #[test]
+    fn non_size_keys_ignored() {
+        let mut measured_speed = BTreeMap::new();
+        measured_speed.insert("openai_api".to_string(), 3.0);
+        measured_speed.insert("openai_api:gpt-4o-mini-transcribe".to_string(), 1.2);
+        for size in [
+            ModelSize::Tiny,
+            ModelSize::Small,
+            ModelSize::Large,
+            ModelSize::Custom,
+            ModelSize::Lumii,
+        ] {
+            assert_eq!(
+                measured_ratio_for(&measured_speed, size),
+                None,
+                "non-size key must not match {size:?}"
+            );
+        }
+    }
+
     // -- ModelsTabState::new / refresh_from_disk -------------------------------
 
     #[test]
     fn new_seeds_custom_url_buffer_from_the_setting() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let state = ModelsTabState::new(dir.path(), Some("https://example.com/m.bin"));
+        let state = ModelsTabState::new(dir.path(), Some("https://example.com/m.bin"), false);
         assert_eq!(state.custom_url, "https://example.com/m.bin");
         assert!(state.rows.iter().any(|row| row.size == ModelSize::Custom));
     }
 
     #[test]
+    fn new_seeds_lumii_row_only_when_included() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let without = ModelsTabState::new(dir.path(), None, false);
+        assert!(!without.include_lumii);
+        assert!(!without.rows.iter().any(|row| row.size == ModelSize::Lumii));
+
+        let with = ModelsTabState::new(dir.path(), None, true);
+        assert!(with.include_lumii);
+        assert!(with.rows.iter().any(|row| row.size == ModelSize::Lumii));
+    }
+
+    #[test]
+    fn refresh_from_disk_carries_include_lumii_across_calls() {
+        // `include_lumii` is snapshotted once at `new` time (the tab has no
+        // locale picker of its own) — a later `refresh_from_disk` (e.g. after
+        // a custom-URL edit) must not silently drop the Lumii row.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = ModelsTabState::new(dir.path(), None, true);
+        state.refresh_from_disk(dir.path());
+        assert!(state.rows.iter().any(|row| row.size == ModelSize::Lumii));
+    }
+
+    #[test]
     fn refresh_from_disk_preserves_an_in_flight_downloading_row() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut state = ModelsTabState::new(dir.path(), None);
+        let mut state = ModelsTabState::new(dir.path(), None, false);
         let status = Arc::new(Mutex::new(DownloadStatus::default()));
         let cancel = CancelToken::new();
         if let Some(row) = state

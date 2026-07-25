@@ -273,18 +273,20 @@ pub struct ShowResult {
 /// on top).
 ///
 /// `ui` is the root viewport's `egui::Ui` (eframe 0.35 hands this directly).
-/// `custom_model_available`/`yt_dlp_available` are precomputed by `app.rs`
-/// from `Services` (`settings.models.custom_model_url.is_some()` /
-/// `capabilities.yt_dlp`) — this module never reads `Services` directly.
-/// `current_version` is `env!("CARGO_PKG_VERSION")`, threaded in for the
-/// update dialog's "Current version: …" line. `secrets` is threaded
-/// straight through to the options sheet's Api Key row (F-041, Task 14) —
-/// the one piece of `Services` this module passes on without touching
-/// itself, same as `custom_model_available`/`yt_dlp_available`. `folder_watch_pill`
-/// is `app.rs`'s own precomputed pill state (F-030, design spec §3.3) —
-/// `None` hides the pill entirely; this module never reaches into
-/// `crate::folder_watch` itself, same "app.rs computes, this module only
-/// renders" split as everything else in this list.
+/// `custom_model_available`/`include_lumii`/`yt_dlp_available` are
+/// precomputed by `app.rs` from `Services`
+/// (`settings.models.custom_model_url.is_some()` /
+/// `crate::i18n::lumii_locale_requested` / `capabilities.yt_dlp`) — this
+/// module never reads `Services` directly. `current_version` is
+/// `env!("CARGO_PKG_VERSION")`, threaded in for the update dialog's
+/// "Current version: …" line. `secrets` is threaded straight through to the
+/// options sheet's Api Key row (F-041, Task 14) — the one piece of
+/// `Services` this module passes on without touching itself, same as
+/// `custom_model_available`/`include_lumii`/`yt_dlp_available`.
+/// `folder_watch_pill` is `app.rs`'s own precomputed pill state (F-030,
+/// design spec §3.3) — `None` hides the pill entirely; this module never
+/// reaches into `crate::folder_watch` itself, same "app.rs computes, this
+/// module only renders" split as everything else in this list.
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
@@ -295,6 +297,7 @@ pub fn show(
     state: &mut ActionState,
     now: Instant,
     custom_model_available: bool,
+    include_lumii: bool,
     yt_dlp_available: bool,
     current_version: &str,
     secrets: &Arc<dyn SecretStore>,
@@ -332,6 +335,7 @@ pub fn show(
         ui.ctx(),
         &mut state.options_sheet,
         custom_model_available,
+        include_lumii,
         secrets,
     );
     let url_dialog_result = url_dialog::ui(ui.ctx(), &mut state.url_dialog);

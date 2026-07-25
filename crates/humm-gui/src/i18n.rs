@@ -33,6 +33,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fluent::{FluentArgs, FluentBundle, FluentResource, FluentValue};
+use humm_core::settings::Settings;
 
 /// One embedded UI-locale catalog: a Buzz locale code, the BCP-47 language
 /// tag Fluent/`unic-langid` needs, and the catalog source itself.
@@ -309,6 +310,8 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "models-delete-confirm-body",
         "models-download-error-title",
         "models-download-failed",
+        "models-speed-badge",
+        "models-speed-badge-tip",
         // Transcript viewer window (views/viewer.rs, F-080)
         "viewer-view",
         "viewer-mode-text",
@@ -596,6 +599,39 @@ fn active_entry() -> &'static LocaleEntry {
 /// as a second, parallel code path that could drift from it.
 pub fn active_locale() -> &'static str {
     active_entry().buzz_code
+}
+
+/// Whether Buzz's Lumii (Latvian whisper.cpp) model-size gate is open for
+/// `settings` — ported from `models_preferences_widget.py:214-215`
+/// (`model_size == LUMII and (model_type != WHISPER_CPP or self.ui_locale !=
+/// "lv_LV")`) and its sibling in the shared size-combo widget
+/// (`transcription_options_group_box.py:216,219`, used by both the options
+/// sheet and the recording window); humm's single local backend *is* Buzz's
+/// whisper.cpp group, so both collapse to the locale half alone: exactly
+/// `"lv_LV"`.
+///
+/// Reads the **raw requested locale** — `settings.ui.locale` verbatim, or
+/// (only when that's unset) `system_locale` — *never* the negotiated one
+/// ([`active_locale`]). Buzz's own gate reads `settings.value(UI_LOCALE)`
+/// straight off the stored setting, with no negotiation step at all
+/// (`transcription_options_group_box.py:40`: `self.ui_locale =
+/// self.settings.value(Settings.Key.UI_LOCALE, QLocale().name())`); humm's
+/// [`negotiate`] exists only to resolve a request against the *subset* of
+/// Buzz's 15 locale catalogs humm currently embeds, and with only
+/// `en_US`/`de_DE`/`es_ES`/`zh_CN` embedded it can never actually resolve to
+/// `lv_LV` — it falls back to `en_US`. Gating on [`active_locale`] instead
+/// would therefore make this permanently unreachable even when a user
+/// explicitly requests `lv_LV` — design spec §9.3 calls this out explicitly:
+/// "the lv_LV Lumii gate reads the *setting*, so it works even before the lv
+/// catalog is ported (parity with Buzz, whose gate also reads the setting,
+/// not the translation files)".
+///
+/// `system_locale` is an **injected** value, never read here — the caller
+/// derives it from [`locale_from_env_vars`] the same way `HummApp::new`'s
+/// own startup negotiation does, so this function stays a pure comparison
+/// with no real environment access to fight in a test.
+pub fn lumii_locale_requested(settings: &Settings, system_locale: Option<&str>) -> bool {
+    settings.ui.locale.as_deref().or(system_locale) == Some("lv_LV")
 }
 
 /// Serializes every test — in this module or any integration test — that
@@ -1108,6 +1144,52 @@ mod tests {
         assert_eq!(negotiate_in(&registry, Some("   ")).buzz_code, "en_US");
     }
 
+    // -- lumii_locale_requested -------------------------------------------------
+
+    #[test]
+    fn lumii_locale_requested_true_for_explicit_lv_lv_setting() {
+        let mut settings = Settings::default();
+        settings.ui.locale = Some("lv_LV".to_string());
+        assert!(lumii_locale_requested(&settings, None));
+    }
+
+    #[test]
+    fn lumii_locale_requested_true_via_system_locale_fallback() {
+        // `settings.ui.locale` unset — Buzz's own default
+        // (`self.settings.value(Settings.Key.UI_LOCALE, QLocale().name())`)
+        // falls back to the system locale, which this test injects directly
+        // rather than touching the real process environment.
+        let settings = Settings::default();
+        assert!(lumii_locale_requested(&settings, Some("lv_LV")));
+    }
+
+    #[test]
+    fn lumii_locale_requested_setting_wins_over_system_locale_fallback() {
+        let mut settings = Settings::default();
+        settings.ui.locale = Some("en_US".to_string());
+        assert!(!lumii_locale_requested(&settings, Some("lv_LV")));
+    }
+
+    #[test]
+    fn lumii_locale_requested_false_when_neither_setting_nor_system_is_lv_lv() {
+        let settings = Settings::default();
+        assert!(!lumii_locale_requested(&settings, None));
+        assert!(!lumii_locale_requested(&settings, Some("en_US")));
+    }
+
+    /// The gate's whole reason for existing (design spec §9.3): with only
+    /// `en_US`/`de_DE`/`es_ES`/`zh_CN` embedded, [`negotiate`] can never
+    /// resolve `"lv_LV"` to itself — proving [`active_locale`] would be the
+    /// wrong thing to gate on, and [`lumii_locale_requested`]'s raw-request
+    /// read is what actually makes the gate reachable pre-lv-catalog.
+    #[test]
+    fn negotiate_never_resolves_lv_lv_while_lumii_locale_requested_still_does() {
+        assert_ne!(negotiate(Some("lv_LV")).buzz_code, "lv_LV");
+        let mut settings = Settings::default();
+        settings.ui.locale = Some("lv_LV".to_string());
+        assert!(lumii_locale_requested(&settings, None));
+    }
+
     // -- set_locale / generation ----------------------------------------------
 
     #[test]
@@ -1287,6 +1369,7 @@ mod tests {
                 &[("size", "Large"), ("ratio", "0.4")],
             ),
             ("recording-model-downloading", &[("percent", "42")]),
+            ("models-speed-badge", &[("ratio", "2.5")]),
         ];
 
         // Drift guard: a new `tr_args` key added to the catalog without a row

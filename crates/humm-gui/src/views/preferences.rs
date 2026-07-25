@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use humm_core::secrets::SecretStore;
 use humm_core::settings::Settings;
 
-use crate::i18n::tr;
+use crate::i18n::{self, tr};
 use crate::models_ui::{self, ModelsTabState};
 use crate::views::prefs_general::{self, GeneralTabState, ValidateFn};
 
@@ -67,17 +67,27 @@ impl PreferencesState {
     /// (a full snapshot the caller takes when the window opens — General
     /// now reads `openai`, `ui.{locale,font_size}`,
     /// `file_transcriber.default_export_template`, and `models.force_cpu`,
-    /// F-100 complete).
+    /// F-100 complete). The Models tab's Lumii row (F-044/J-9, design spec
+    /// §8.2) is gated by [`i18n::lumii_locale_requested`] against `settings`
+    /// plus the real `LC_ALL`/`LANG` system-locale fallback — the same raw
+    /// derivation `HummApp::new`'s own startup locale negotiation uses,
+    /// computed fresh here since a Preferences window (re)open is exactly
+    /// when a locale change made elsewhere takes effect on this tab too.
     pub fn new(
         root: &Path,
         custom_url: Option<&str>,
         secrets: &Arc<dyn SecretStore>,
         settings: &Settings,
     ) -> Self {
+        let system_locale = i18n::locale_from_env_vars(
+            std::env::var("LC_ALL").ok().as_deref(),
+            std::env::var("LANG").ok().as_deref(),
+        );
+        let include_lumii = i18n::lumii_locale_requested(settings, system_locale.as_deref());
         PreferencesState {
             tab: PrefsTab::General,
             general: GeneralTabState::new(secrets.as_ref(), settings),
-            models: ModelsTabState::new(root, custom_url),
+            models: ModelsTabState::new(root, custom_url, include_lumii),
         }
     }
 }
@@ -205,6 +215,42 @@ mod tests {
         let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
         let state = PreferencesState::new(dir.path(), None, &secrets, &Settings::default());
         assert_eq!(state.tab, PrefsTab::General);
+    }
+
+    #[test]
+    fn new_hides_lumii_row_without_lv_locale_setting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let state = PreferencesState::new(dir.path(), None, &secrets, &Settings::default());
+        assert!(
+            !state
+                .models
+                .rows
+                .iter()
+                .any(|row| row.size == humm_core::domain::ModelSize::Lumii)
+        );
+    }
+
+    /// The actual production wiring, end to end: `settings.ui.locale =
+    /// Some("lv_LV")` reaches the Models tab's Lumii row through
+    /// `PreferencesState::new`'s own `i18n::lumii_locale_requested` call —
+    /// design spec §9.3's "the lv_LV Lumii gate reads the *setting*" made
+    /// concrete, without needing an egui context (this constructor is plain
+    /// data, no rendering involved).
+    #[test]
+    fn new_includes_lumii_row_when_lv_locale_requested() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let mut settings = Settings::default();
+        settings.ui.locale = Some("lv_LV".to_string());
+        let state = PreferencesState::new(dir.path(), None, &secrets, &settings);
+        assert!(
+            state
+                .models
+                .rows
+                .iter()
+                .any(|row| row.size == humm_core::domain::ModelSize::Lumii)
+        );
     }
 
     #[test]

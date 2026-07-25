@@ -273,6 +273,8 @@ models-delete-confirm-title = Eliminar modelo
 models-delete-confirm-body = ¿Confirma que quiere eliminar el modelo seleccionado?
 models-download-error-title = Error
 models-download-failed = Descarga fallida
+models-speed-badge = { $ratio }× tiempo real
+models-speed-badge-tip = Velocidad en tiempo real medida en las sesiones de grabación en vivo de este equipo
 
 ## Transcript viewer window (views/viewer.rs, F-080)
 

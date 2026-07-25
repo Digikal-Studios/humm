@@ -707,6 +707,27 @@ impl HummApp {
         self.custom_model_url().is_some()
     }
 
+    /// Whether Buzz's Lumii (Latvian whisper.cpp) model size is currently
+    /// selectable — gates every model-size combo's "Lumii" entry (options
+    /// sheet, recording window, and the Preferences → Models tab; F-044/J-9,
+    /// design spec §8.2). Delegates the actual comparison to
+    /// [`crate::i18n::lumii_locale_requested`]; this method's only job is
+    /// gathering its two raw inputs (`settings.ui.locale`, and the
+    /// `LC_ALL`/`LANG` system-locale fallback) exactly the way `Self::new`'s
+    /// own startup locale negotiation does.
+    fn lumii_gate(&self) -> bool {
+        let system_locale = i18n::locale_from_env_vars(
+            std::env::var("LC_ALL").ok().as_deref(),
+            std::env::var("LANG").ok().as_deref(),
+        );
+        let settings = self
+            .services
+            .settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        i18n::lumii_locale_requested(&settings, system_locale.as_deref())
+    }
+
     /// The current `settings.models.custom_model_url` value — the Models
     /// tab's own custom-URL row gate (F-044) needs the value itself, not
     /// just [`Self::custom_model_available`]'s boolean.
@@ -2376,8 +2397,10 @@ impl HummApp {
     /// Renders the live-recording window as a deferred egui viewport (F-060,
     /// mirroring [`Self::show_viewer_viewports`]/[`Self::show_resizer_viewports`]),
     /// a no-op while [`Self::recording`] is `None`. Reads
-    /// `settings.models.custom_model_url`/`settings.recording.measured_speed`
-    /// fresh every render (both are cheap, read-only per-frame lookups —
+    /// `settings.models.custom_model_url`/`settings.recording.measured_speed`,
+    /// plus the Lumii locale gate (F-044/J-9, design spec §8.2,
+    /// [`crate::i18n::lumii_locale_requested`]), fresh every render (all
+    /// cheap, read-only per-frame lookups —
     /// [`crate::views::recording::recording_ui`] never locks `Settings`
     /// itself, matching `options_sheet::ui`'s own convention).
     ///
@@ -2413,13 +2436,18 @@ impl HummApp {
                 let mut vm = vm_for_cb
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let (custom_model_available, measured_speed) = {
+                let (custom_model_available, measured_speed, include_lumii) = {
+                    let system_locale = i18n::locale_from_env_vars(
+                        std::env::var("LC_ALL").ok().as_deref(),
+                        std::env::var("LANG").ok().as_deref(),
+                    );
                     let settings = settings
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     (
                         settings.models.custom_model_url.is_some(),
                         settings.recording.measured_speed.clone(),
+                        i18n::lumii_locale_requested(&settings, system_locale.as_deref()),
                     )
                 };
                 egui::CentralPanel::default().show(ctx, |ui| {
@@ -2428,6 +2456,7 @@ impl HummApp {
                         &mut vm,
                         &deps,
                         custom_model_available,
+                        include_lumii,
                         &measured_speed,
                         &settings,
                         &settings_path,
@@ -3712,6 +3741,7 @@ impl eframe::App for HummApp {
         }
 
         let custom_model_available = self.custom_model_available();
+        let include_lumii = self.lumii_gate();
         let yt_dlp_available = self.services.capabilities.yt_dlp;
         let folder_watch_pill = self.folder_watch_pill();
 
@@ -3724,6 +3754,7 @@ impl eframe::App for HummApp {
             &mut self.action_state,
             now,
             custom_model_available,
+            include_lumii,
             yt_dlp_available,
             CURRENT_VERSION,
             &self.services.secrets,

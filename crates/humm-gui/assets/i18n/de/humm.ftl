@@ -271,6 +271,8 @@ models-delete-confirm-title = Modell löschen
 models-delete-confirm-body = Sind Sie sicher, dass Sie das ausgewählte Modell löschen möchten?
 models-download-error-title = Fehler
 models-download-failed = Der Download ist fehlgeschlagen
+models-speed-badge = { $ratio }× Echtzeit
+models-speed-badge-tip = Gemessene Echtzeit-Geschwindigkeit aus den Live-Aufnahmesitzungen auf diesem Gerät
 
 ## Transcript viewer window (views/viewer.rs, F-080)
 

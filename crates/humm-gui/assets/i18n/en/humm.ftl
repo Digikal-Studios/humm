@@ -268,6 +268,8 @@ models-delete-confirm-title = Delete Model
 models-delete-confirm-body = Are you sure you want to delete the selected model?
 models-download-error-title = Error
 models-download-failed = Download failed
+models-speed-badge = { $ratio }× realtime
+models-speed-badge-tip = Measured realtime speed from this machine's live recording sessions
 
 ## Transcript viewer window (views/viewer.rs, F-080)
 

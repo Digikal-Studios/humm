@@ -581,15 +581,26 @@ pub(crate) fn spec_from_transcriber_settings(
 
 /// The 12 non-Custom, non-Lumii model sizes, in [`ModelSize`]'s own
 /// declaration order, plus `Custom` appended iff `custom_available` (Buzz:
-/// `settings.models.custom_model_url.is_some()`). `Lumii` is never listed
-/// (en-locale-only per the binding decision — Buzz itself gates it to the
-/// `lv_LV` UI locale, which this milestone never is).
+/// `settings.models.custom_model_url.is_some()`), plus `Lumii` appended iff
+/// `include_lumii` (F-044/J-9, design spec §8.2) — Buzz's own Lumii gate,
+/// `models_preferences_widget.py:214-215`:
+/// `model_size == LUMII and (model_type != WHISPER_CPP or self.ui_locale !=
+/// "lv_LV")`; humm's single local backend *is* that whisper.cpp group, so
+/// humm's gate collapses to the locale half alone
+/// ([`crate::i18n::lumii_locale_requested`]). `Custom` then `Lumii` mirrors
+/// both [`ModelSize`]'s own declaration order and Buzz's combo-population
+/// order (`transcription_options_group_box.py:187-222`: the base list
+/// excludes both, `Custom` is conditionally appended first, `Lumii` is
+/// conditionally appended after).
 ///
 /// `pub(crate)`: also used by [`crate::models_ui::refresh`] (Preferences →
 /// Models, F-044) — the same fixed size set applies there, since it's the
-/// same Buzz gate (Custom row only when configured, Lumii never), just
-/// listing on-disk state rather than a picker.
-pub(crate) fn selectable_model_sizes(custom_available: bool) -> Vec<ModelSize> {
+/// same Buzz gate (Custom row only when configured, Lumii only under the
+/// `lv_LV` gate), just listing on-disk state rather than a picker.
+pub(crate) fn selectable_model_sizes(
+    custom_available: bool,
+    include_lumii: bool,
+) -> Vec<ModelSize> {
     let mut sizes = vec![
         ModelSize::Tiny,
         ModelSize::TinyEn,
@@ -606,6 +617,9 @@ pub(crate) fn selectable_model_sizes(custom_available: bool) -> Vec<ModelSize> {
     ];
     if custom_available {
         sizes.push(ModelSize::Custom);
+    }
+    if include_lumii {
+        sizes.push(ModelSize::Lumii);
     }
     sizes
 }
@@ -693,21 +707,26 @@ fn summary_text(state: &SheetState) -> String {
 /// The model-size combo row, shared verbatim by the options sheet and the
 /// recording window (Buzz: both share one `TranscriptionOptionsGroupBox`,
 /// `show_recording_settings` just adds rows — the size combo itself is
-/// identical either way). `id_salt` keeps the two call sites' widget ids
-/// distinct (they can render in the same frame — the sheet is a modal over
-/// the main window, the recording window is a separate viewport).
+/// identical either way, including the Lumii gate,
+/// `transcription_options_group_box.py:212-222`). `id_salt` keeps the two
+/// call sites' widget ids distinct (they can render in the same frame — the
+/// sheet is a modal over the main window, the recording window is a
+/// separate viewport). `include_lumii` is the same locale-derived flag both
+/// call sites thread through (design spec §8.2) — see
+/// [`selectable_model_sizes`].
 pub(crate) fn render_model_combo(
     ui: &mut egui::Ui,
     id_salt: &str,
     model_size: &mut ModelSize,
     custom_available: bool,
+    include_lumii: bool,
 ) {
     ui.horizontal(|ui| {
         ui.label(tr("options-model-label"));
         egui::ComboBox::from_id_salt(id_salt)
             .selected_text(title_case(model_size.as_str()))
             .show_ui(ui, |ui| {
-                for size in selectable_model_sizes(custom_available) {
+                for size in selectable_model_sizes(custom_available, include_lumii) {
                     ui.selectable_value(model_size, size, title_case(size.as_str()));
                 }
             });
@@ -926,11 +945,16 @@ pub(crate) fn render_llm_model_prompt_fields(
 /// `secrets` seeds/commits the Api Key row (F-041) — the same store
 /// Preferences' General tab reads/writes (`main_window::show`'s own
 /// `secrets: &Arc<dyn SecretStore>` parameter, threaded from `app.rs`'s
-/// `Services.secrets`).
+/// `Services.secrets`). `include_lumii` gates the size combo's Lumii entry
+/// (F-044/J-9, design spec §8.2) — precomputed by `app.rs` every frame from
+/// `Services.settings`/the system locale (`crate::i18n::lumii_locale_requested`),
+/// same "app.rs computes, this module only renders" split as
+/// `custom_model_available`.
 pub fn ui(
     ctx: &egui::Context,
     sheet: &mut Option<OptionsSheet>,
     custom_model_available: bool,
+    include_lumii: bool,
     secrets: &Arc<dyn SecretStore>,
 ) -> Option<SheetOutcome> {
     let OptionsSheet {
@@ -970,6 +994,7 @@ pub fn ui(
                 "humm-options-model-size",
                 &mut state.model_size,
                 custom_model_available,
+                include_lumii,
             );
         }
         if api_key_row_visible(state) {
@@ -1606,14 +1631,37 @@ mod tests {
 
     #[test]
     fn custom_is_listed_only_when_available() {
-        assert!(!selectable_model_sizes(false).contains(&ModelSize::Custom));
-        assert!(selectable_model_sizes(true).contains(&ModelSize::Custom));
+        assert!(!selectable_model_sizes(false, false).contains(&ModelSize::Custom));
+        assert!(selectable_model_sizes(true, false).contains(&ModelSize::Custom));
     }
 
     #[test]
-    fn lumii_is_never_listed() {
-        assert!(!selectable_model_sizes(false).contains(&ModelSize::Lumii));
-        assert!(!selectable_model_sizes(true).contains(&ModelSize::Lumii));
+    fn selectable_model_sizes_includes_lumii_only_when_flagged() {
+        assert!(!selectable_model_sizes(false, false).contains(&ModelSize::Lumii));
+        assert!(!selectable_model_sizes(true, false).contains(&ModelSize::Lumii));
+        assert!(selectable_model_sizes(false, true).contains(&ModelSize::Lumii));
+        assert!(selectable_model_sizes(true, true).contains(&ModelSize::Lumii));
+    }
+
+    /// Buzz's own `WhisperModelSize` enum order (`model_loader.py:128-142`)
+    /// places `LUMII` immediately after `CUSTOM` — its combo-population code
+    /// mirrors that (`transcription_options_group_box.py:187-222`: the base
+    /// list excludes both, `Custom` is conditionally appended first, `Lumii`
+    /// conditionally appended after) — so `Lumii` must sit last, right after
+    /// `Custom`, whenever both are present.
+    #[test]
+    fn lumii_sits_immediately_after_custom_in_list_order() {
+        let sizes = selectable_model_sizes(true, true);
+        assert_eq!(sizes.last(), Some(&ModelSize::Lumii));
+        let custom_index = sizes
+            .iter()
+            .position(|size| *size == ModelSize::Custom)
+            .expect("custom present");
+        let lumii_index = sizes
+            .iter()
+            .position(|size| *size == ModelSize::Lumii)
+            .expect("lumii present");
+        assert_eq!(lumii_index, custom_index + 1);
     }
 
     // -- Api Key row: seeding + commit (F-041, Task 14) ------------------------
