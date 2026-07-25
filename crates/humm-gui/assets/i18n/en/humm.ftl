@@ -1,10 +1,18 @@
 ## humm-gui — English (en) catalog.
 ##
 ## Every user-visible string in humm-gui is keyed here and resolved through
-## `i18n::tr`/`i18n::tr_args`. Locale negotiation and live switching land
-## this milestone (F-008a); only this `en` catalog is embedded so far --
-## Task 12 ports `de`/`es`/`zh` catalogs alongside it. Keys are kebab-case,
-## grouped by the view that renders them.
+## `i18n::tr`/`i18n::tr_args`. Keys are kebab-case, grouped by the view that
+## renders them.
+##
+## This is the source catalog: `en` is `AVAILABLE_LOCALES[0]`, every
+## negotiation's final fallback, and the key set every other catalog is
+## tested against (`i18n::tests::every_locale_has_exactly_the_en_key_set`,
+## both directions). Three sibling catalogs are embedded alongside it as of
+## F-008b -- `../de`, `../es`, `../zh-CN` -- so **adding or renaming a key
+## here is not a local edit**: it must land in all four catalogs in the same
+## commit, or the completeness tests fail. Buzz's remaining 11 locales are
+## mechanical additions of the same shape (catalog + registry entry +
+## `locale-name-*` keys, no code).
 
 ## Locale display names (i18n::display_name, F-008a) -- one key per
 ## i18n::AVAILABLE_LOCALES entry; every catalog carries the *whole* set, so

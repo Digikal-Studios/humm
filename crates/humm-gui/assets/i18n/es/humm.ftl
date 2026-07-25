@@ -13,11 +13,16 @@
 ## rather than being harmonized, so the Buzz lineage stays auditable.
 ##
 ## Two mechanical corrections to the Buzz source, both upstream artifacts
-## rather than translation choices: (1) a handful of Buzz msgstrs are two
-## merged translation variants concatenated with no separator (e.g.
-## "…transcripciónActivar/desactivar la reproducción…"); this catalog takes the
-## second (revised) variant alone. (2) Strings naming the product "Buzz" are
-## re-pointed at "humm", matching the en catalog's own substitution.
+## rather than translation choices: (1) six Buzz msgids carry two merged
+## translation variants concatenated with no separator (e.g.
+## "…transcripciónActivar/desactivar la reproducción…") — 11 locale-key
+## instances across Buzz's de and es catalogs, of which this catalog is
+## affected by five (`prefs-general-force-cpu-tooltip`,
+## `recording-model-load-note`, `viewer-loop-segment-tooltip`,
+## `resizer-resize-disabled-tooltip`, `resizer-merge-disabled-tooltip`; es's
+## own `prefs-general-key-save-error-body` is clean, unlike de's); each takes
+## the second (revised) variant alone. (2) Strings naming the product "Buzz"
+## are re-pointed at "humm", matching the en catalog's own substitution.
 ##
 ## Product name "humm" is never translated. Technical terms Buzz itself leaves
 ## untranslated in es (API, GPU, CPU, Whisper, URL, TXT/SRT/VTT) are left alone

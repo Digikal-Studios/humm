@@ -12,9 +12,14 @@
 ## consistently formal (Sie), never du.
 ##
 ## Two mechanical corrections to the Buzz source, both upstream artifacts
-## rather than translation choices: (1) a handful of Buzz msgstrs are two
-## merged translation variants concatenated with no separator (e.g. "…werdenDer
-## OpenAI-API-Schlüssel kann nicht…"); this catalog takes the second (revised)
+## rather than translation choices: (1) six Buzz msgids carry two merged
+## translation variants concatenated with no separator (e.g. "…werdenDer
+## OpenAI-API-Schlüssel kann nicht…") — 11 locale-key instances across Buzz's
+## de and es catalogs, of which this catalog is affected by all six
+## (`prefs-general-force-cpu-tooltip`, `recording-model-load-note`,
+## `viewer-loop-segment-tooltip`, `resizer-resize-disabled-tooltip`,
+## `resizer-merge-disabled-tooltip`, `prefs-general-key-save-error-body` — the
+## last of which is doubled in de only); each takes the second (revised)
 ## variant alone. (2) Strings naming the product "Buzz" are re-pointed at
 ## "humm", matching the en catalog's own substitution.
 ##

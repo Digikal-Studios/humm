@@ -10,13 +10,26 @@
 ## muscle memory carry over; everything else is translated fresh in the same
 ## concise UI register. Buzz's zh translators render "transcription" as 识别
 ## (recognition) rather than 转录 in most surfaces, and that term is kept
-## wherever Buzz used it — including the places Buzz itself is inconsistent, so
-## the lineage stays auditable rather than silently harmonized.
+## wherever Buzz used it.
 ##
-## One mechanical correction to the Buzz source: strings naming the product
-## "Buzz" are re-pointed at "humm", matching the en catalog's own substitution.
-## (The concatenated-variant artifacts that affect Buzz's de/es catalogs do not
-## occur in the zh strings this catalog draws on.)
+## Corrections to the Buzz source. Strings naming the product "Buzz" are
+## re-pointed at "humm", matching the en catalog's own substitution. (The
+## concatenated-variant artifacts that affect Buzz's de/es catalogs — six
+## msgids, 11 locale-key instances — do not occur in the zh strings this
+## catalog draws on: every zh msgstr used here is a single clean variant.)
+##
+## Two deliberate divergences from Buzz's zh po, both translation bugs rather
+## than translation choices. humm's parity obligation is to Buzz's *capability*,
+## not to defects in its localization, so these are fixed here and named
+## explicitly so the divergence stays auditable:
+##
+## - `clear-confirm-body`: Buzz says 所选录制 ("the selected recordings"), but
+##   the dialog clears *transcriptions*, and 录制 is this app's live-recording
+##   term — the same dialog's own `clear-error` already says 识别结果. Corrected
+##   to 识别结果, which also makes the dialog internally consistent.
+## - `prefs-general-base-url-label`: Buzz's "OpenAI 基于 url" parses as "OpenAI
+##   based url" — 基于 is the preposition "based on", not the modifier "base",
+##   and the unit is left lowercase. Corrected to "OpenAI 基础 URL".
 ##
 ## Typography: full-width punctuation (：？！（）) is used where Buzz's own zh
 ## catalog uses it, and Buzz's half-width choices are likewise kept verbatim —
@@ -87,10 +100,12 @@ menu-help-preferences = 偏好设置…
 ## Buzz's zh po keeps the English "Ok" spelling for its relabelled dialog
 ## buttons, so clear-confirm-ok/url-dialog-ok/recording-advanced-ok/dialog-ok
 ## stay "Ok" here — Buzz's own zh lineage, not untranslated English.
-## clear-confirm-body is Buzz's string verbatim, including its 录制 wording.
+## clear-confirm-body corrects Buzz's 所选录制 to 所选识别结果 (see the header's
+## deliberate-divergences note): this dialog clears transcriptions, not
+## recordings, and clear-error below already uses 识别结果.
 
 clear-confirm-title = 清除历史纪录
-clear-confirm-body = 您确定要删除所选录制吗？此操作无法撤消。
+clear-confirm-body = 您确定要删除所选识别结果吗？此操作无法撤消。
 clear-confirm-ok = Ok
 clear-confirm-cancel = 取消
 clear-error = 无法删除所选识别结果
@@ -231,7 +246,7 @@ prefs-general-invalid-key-title = 无效的API key
 prefs-general-invalid-key-body = API只支持 base64字符（A-Za-z0-9+/=_-）。其他字符在API密钥中可能导致错误。
 prefs-general-key-save-error-title = 错误
 prefs-general-key-save-error-body = 无法将OpenAI API密钥保存到密钥串
-prefs-general-base-url-label = OpenAI 基于 url
+prefs-general-base-url-label = OpenAI 基础 URL
 prefs-general-base-url-placeholder = https://api.openai.com/v1
 prefs-general-model-label = OpenAI API 模型
 prefs-general-model-placeholder = whisper-1
@@ -370,7 +385,7 @@ recording-advanced-translation-heading = 翻译设置
 recording-advanced-llm-enable = 启用AI翻译
 recording-advanced-recording-heading = 录制设置
 recording-advanced-silence-threshold-label = 静音阈值：
-recording-advanced-mode-label = 实时录制模式:
+recording-advanced-mode-label = 实时录制模式：
 recording-advanced-mode-append-below = 增加下方
 recording-advanced-mode-append-above = 增加上方
 recording-advanced-mode-append-and-correct = 增加并纠正

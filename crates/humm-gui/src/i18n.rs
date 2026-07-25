@@ -829,19 +829,55 @@ mod tests {
     /// bogus id fails the suite rather than weakening it.
     fn catalog_keys(ftl: &str) -> BTreeSet<String> {
         ftl.lines()
-            .filter_map(|line| {
-                if line.starts_with('#') || line.starts_with(char::is_whitespace) {
-                    return None;
-                }
-                let (id, _) = line.split_once('=')?;
-                let id = id.trim_end();
-                let is_message_id = !id.is_empty()
-                    && id
-                        .chars()
-                        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-');
-                is_message_id.then(|| id.to_string())
-            })
+            .filter_map(|line| message_id(line).map(str::to_string))
             .collect()
+    }
+
+    /// The message id a line declares, if it declares one — `None` for
+    /// comments, blank lines, and the indented continuation lines of a
+    /// multi-line value. The shared shape both catalog scanners key off.
+    fn message_id(line: &str) -> Option<&str> {
+        if line.starts_with('#') || line.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let (id, _) = line.split_once('=')?;
+        let id = id.trim_end();
+        let is_message_id = !id.is_empty()
+            && id
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-');
+        is_message_id.then_some(id)
+    }
+
+    /// The message ids whose value carries at least one `{ $… }` placeable.
+    /// Continuation lines are attributed to the message they belong to, so a
+    /// multi-line value with a placeable on its second line still counts.
+    fn catalog_keys_with_placeables(ftl: &str) -> BTreeSet<String> {
+        let mut found = BTreeSet::new();
+        let mut current: Option<&str> = None;
+        for line in ftl.lines() {
+            if line.starts_with('#') {
+                continue;
+            }
+            if line.starts_with(char::is_whitespace) {
+                if line.contains("{ $")
+                    && let Some(id) = current
+                {
+                    found.insert(id.to_string());
+                }
+                continue;
+            }
+            match message_id(line) {
+                Some(id) => {
+                    if line.contains("{ $") {
+                        found.insert(id.to_string());
+                    }
+                    current = Some(id);
+                }
+                None => current = None,
+            }
+        }
+        found
     }
 
     #[test]
@@ -1223,47 +1259,65 @@ mod tests {
         }
     }
 
-    /// Placeables survive translation in every locale: the argument's value
+    /// Placeables survive translation in every locale: each argument's value
     /// lands in the rendered string, and no unsubstituted `{ $… }` syntax is
-    /// left behind (which is what a mistyped or dropped placeable name in a
-    /// translated value looks like at runtime).
+    /// left behind — which is exactly what a mistyped or dropped placeable
+    /// name in a translated value looks like at runtime, since Fluent
+    /// resolves an unknown argument to the literal placeable text rather than
+    /// failing.
+    ///
+    /// Table-driven over *every* placeable-bearing key, cross-checked against
+    /// the catalog so the table cannot silently fall behind it, and run under
+    /// every locale in [`AVAILABLE_LOCALES`].
     #[test]
     fn every_locale_substitutes_placeables() {
         let _guard = lock_locale_for_test();
-        for entry in AVAILABLE_LOCALES {
-            set_locale(entry.buzz_code);
-
-            // Two arguments in one value, one of them adjacent to a literal
-            // `×` — the hardest placeable in the catalog to reposition
-            // correctly when the sentence is reordered for another language.
-            let warning = tr_args(
+        // Argument values are deliberately distinctive: a `contains` check
+        // against them can't pass by coincidence on surrounding prose.
+        let cases: &[(&str, &[(&str, &str)])] = &[
+            ("folderwatch-pill-watching", &[("name", "my-clips")]),
+            ("viewer-find-prev-tooltip", &[("shortcut", "Shift+Cmd+G")]),
+            ("viewer-find-next-tooltip", &[("shortcut", "Cmd+G")]),
+            ("export-written", &[("path", "/tmp/humm-out.srt")]),
+            // Two arguments in one value, one adjacent to a literal `×` — the
+            // hardest placeable in the catalog to reposition correctly when
+            // the sentence is reordered for another language.
+            (
                 "recording-realtime-warning",
                 &[("size", "Large"), ("ratio", "0.4")],
-            );
-            for expected in ["Large", "0.4"] {
+            ),
+            ("recording-model-downloading", &[("percent", "42")]),
+        ];
+
+        // Drift guard: a new `tr_args` key added to the catalog without a row
+        // here would otherwise ship with its placeables untested in every
+        // locale. Compared against `en`, which the key-set test already pins
+        // as the shape every other catalog shares.
+        let covered: BTreeSet<String> = cases.iter().map(|(key, _)| (*key).to_string()).collect();
+        assert_eq!(
+            covered,
+            catalog_keys_with_placeables(EN_FTL),
+            "the placeable test table has drifted from the en catalog — add a \
+             row for each newly placeable-bearing key"
+        );
+
+        for entry in AVAILABLE_LOCALES {
+            set_locale(entry.buzz_code);
+            for (key, args) in cases {
+                let rendered = tr_args(key, args);
+                for (name, value) in *args {
+                    assert!(
+                        rendered.contains(value),
+                        "{}: {key} dropped argument {name:?} ({value:?}) — got {rendered:?}",
+                        entry.buzz_code
+                    );
+                }
                 assert!(
-                    warning.contains(expected),
-                    "{}: recording-realtime-warning dropped {expected:?} — got {warning:?}",
+                    !rendered.contains("{$") && !rendered.contains("{ $"),
+                    "{}: {key} left an unsubstituted placeable — got {rendered:?}",
                     entry.buzz_code
                 );
             }
-            assert!(
-                !warning.contains("{$") && !warning.contains("{ $"),
-                "{}: recording-realtime-warning left an unsubstituted placeable — got {warning:?}",
-                entry.buzz_code
-            );
-
-            let pill = tr_args("folderwatch-pill-watching", &[("name", "my-clips")]);
-            assert!(
-                pill.contains("my-clips"),
-                "{}: folderwatch-pill-watching dropped its name argument — got {pill:?}",
-                entry.buzz_code
-            );
-            assert!(
-                !pill.contains("{$") && !pill.contains("{ $"),
-                "{}: folderwatch-pill-watching left an unsubstituted placeable — got {pill:?}",
-                entry.buzz_code
-            );
         }
     }
 

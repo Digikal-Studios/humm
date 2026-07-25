@@ -313,9 +313,18 @@ impl HummApp {
         // `LC_ALL`/`LANG`, which a Finder/Dock-launched macOS GUI process
         // essentially never has set (documented platform difference,
         // design spec §9.1) — in practice this resolves to `en_US` on a
-        // typical macOS launch whenever `settings.ui.locale` is also
-        // unset, which is a fine outcome for now since `en_US` is the only
-        // catalog embedded until Task 12 anyway.
+        // typical macOS launch whenever `settings.ui.locale` is also unset.
+        //
+        // That deviation is now user-visible, where before the F-008b
+        // catalogs landed it was inert: with `de_DE`/`es_ES`/`zh_CN`
+        // embedded, a macOS user whose OS language is German gets English on
+        // first launch, because the env vars Buzz's `QLocale()` doesn't need
+        // simply aren't there. The Preferences › General language combo is
+        // the working path around it — one explicit pick persists
+        // `settings.ui.locale`, which takes precedence here forever after.
+        // Closing the gap properly needs a native macOS locale lookup
+        // (`NSLocale.preferredLanguages`); tracked as the §9.1 platform
+        // deviation, not fixed here.
         let (requested_locale, startup_font_size) = {
             let settings = services
                 .settings
