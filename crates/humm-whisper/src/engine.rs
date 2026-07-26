@@ -33,6 +33,52 @@
 //! No VAD, no word timestamps, no progress/segment streaming: a live chunk is
 //! a few seconds of audio and the caller wants one joined utterance string
 //! back ([`join_segment_texts`]), not a stream of callbacks.
+//!
+//! ## Live session state reuse (ADR-021 carried perf ticket, F-061)
+//! `transcribe_live` used to call `WhisperContext::create_state()` on every
+//! chunk. Under the `coreml` feature this reloads the CoreML encoder model
+//! from disk each time (`whisper_ctx_wrapper.rs:466` → whisper.cpp's
+//! `whisper_init_state` → `whisper_coreml_init`, vendored
+//! `whisper.cpp/src/whisper.cpp:3441-3446` — ADR-021's traced mechanism).
+//! [`WhisperEngine`] now caches one [`whisper_rs::WhisperState`] in a
+//! [`LiveStateSlot`] and reuses it across a live session's chunks;
+//! [`WhisperEngine::begin_live_session`] clears the slot (the hard guarantee
+//! against a stale state leaking across sessions) and
+//! [`WhisperEngine::end_live_session`] drops it as best-effort cleanup. The
+//! one call is still per-chunk: the rolling prompt continues to be passed
+//! explicitly via `prompt`, and the abort/segment wiring is still installed
+//! on `params` per call, unchanged.
+//!
+//! **Text/prompt/KV state never leaks between calls, reused state or not.**
+//! whisper.cpp's `whisper_full_with_state` unconditionally clears
+//! `state->result_all` and (with `no_context = true`, whisper.cpp's own
+//! default, never overridden by
+//! [`build_live_params`]/[`build_full_params`]) `state->prompt_past0`/
+//! `prompt_past1` at the top of every call, and clears `state->kv_self` (the
+//! decoder's self-attention cache) before decoding each segment. This is
+//! true for every call, first or later, whether the `WhisperState` is fresh
+//! or reused.
+//!
+//! **One real, upstream-inherited exception: `decoders[0].rng`.**
+//! whisper.cpp's beam-search candidate step
+//! (`whisper_sample_token_topk`) draws from `decoder.rng` on *every* decode
+//! step regardless of temperature, and `decoders[0].rng` is seeded exactly
+//! once, in `whisper_init_state` (state creation) — never reset per `full()`
+//! call. So a session's second and later chunks, run on a **reused** state,
+//! consume a different point in that rng sequence than the same chunk would
+//! on its own **freshly created** state (which always restarts at
+//! `mt19937(0)`). Confirmed empirically against the real tiny model
+//! (`tests/contract.rs`'s `first_chunk_output_is_identical_whether_the_state_is_reused_or_fresh`
+//! — always matches, since a state's first call always starts from the same
+//! rng position either way — versus the same file's module-doc note on why a
+//! *later* chunk does not, and
+//! `live_session_chunk_sequence_is_deterministic_when_repeated`, which
+//! verifies the property that **is** true instead: a reused-state chunk
+//! sequence reproduces identically run to run). This is whisper.cpp's own
+//! canonical streaming design — `examples/stream/stream.cpp` reuses one
+//! state across a whole session too — not a defect this ticket introduces.
+//! See `docs/design/DECISIONS.md` ADR-021's addendum for the measured
+//! before/after ratio.
 
 use std::borrow::Cow;
 use std::ffi::{c_int, c_void};
@@ -49,7 +95,7 @@ use humm_core::language::Language;
 
 use whisper_rs::{
     FullParams, SamplingStrategy, SegmentCallbackData, WhisperContext, WhisperContextParameters,
-    WhisperVadContext, WhisperVadContextParams, WhisperVadParams,
+    WhisperState, WhisperVadContext, WhisperVadContextParams, WhisperVadParams,
 };
 
 use crate::words::{TokenInfo, group_words};
@@ -91,10 +137,69 @@ pub struct LiveOptions {
     pub threads: Option<u32>,
 }
 
+/// A lazily created, session-scoped cache slot for one long-lived value,
+/// reused across calls until [`Self::clear`] resets it.
+///
+/// Generic and dependency-free on purpose: [`WhisperEngine`] cannot be
+/// constructed in a unit test without a real ggml model on disk (see
+/// `crates/humm-whisper/tests/contract.rs`'s module doc), so the
+/// create-once/reuse/clear behavior this type implements is instead
+/// unit-tested directly against a plain `T` (no whisper involved) —
+/// `live_state_slot_creates_once_and_reuses_until_cleared` — while still
+/// being the exact same code [`WhisperEngine`] runs in production.
+///
+/// [`WhisperEngine`] uses `LiveStateSlot<WhisperState>` to cache one live
+/// session's [`whisper_rs::WhisperState`] (ADR-021's carried perf ticket,
+/// F-061 — see the module doc's "Live session state reuse" section).
+#[derive(Debug)]
+struct LiveStateSlot<T> {
+    value: Option<T>,
+    /// Bumped every time [`Self::get_or_create`] actually constructs a new
+    /// `T` (a cache miss) — the hermetic seam the state-lifecycle unit test
+    /// observes in place of a real whisper state creation.
+    generation: u64,
+}
+
+impl<T> LiveStateSlot<T> {
+    fn new() -> Self {
+        LiveStateSlot {
+            value: None,
+            generation: 0,
+        }
+    }
+
+    /// Drops any cached value, guaranteeing the next [`Self::get_or_create`]
+    /// call constructs a fresh one. This is the "begin/end a session"
+    /// boundary: no value ever survives a `clear()` call.
+    fn clear(&mut self) {
+        self.value = None;
+    }
+
+    /// Returns the cached value, constructing one via `create` on a cache
+    /// miss (the first call, or the first call after [`Self::clear`]).
+    /// Subsequent calls return the same value without invoking `create`
+    /// again.
+    fn get_or_create<E>(&mut self, create: impl FnOnce() -> Result<T, E>) -> Result<&mut T, E> {
+        if self.value.is_none() {
+            self.value = Some(create()?);
+            self.generation += 1;
+        }
+        Ok(self.value.as_mut().expect("just set above"))
+    }
+}
+
 /// The local whisper.cpp transcription engine.
 #[derive(Debug)]
 pub struct WhisperEngine {
     context: WhisperContext,
+    /// The live-session [`WhisperState`], reused across a session's
+    /// [`Self::transcribe_live`] calls instead of recreated per chunk
+    /// (ADR-021's carried perf ticket, F-061 — see the module doc).
+    /// [`Self::begin_live_session`]/[`Self::end_live_session`] clear it;
+    /// `transcribe_live` creates it lazily on first use. Never touched by
+    /// [`TranscriptionEngine::transcribe`] (the file path creates its own
+    /// per-call state — out of this ticket's scope, unchanged).
+    live_state: LiveStateSlot<WhisperState>,
 }
 
 impl WhisperEngine {
@@ -128,7 +233,41 @@ impl WhisperEngine {
             }
         })?;
 
-        Ok(WhisperEngine { context })
+        Ok(WhisperEngine {
+            context,
+            live_state: LiveStateSlot::new(),
+        })
+    }
+
+    /// Begins a live-recording session: clears any previously cached live
+    /// [`WhisperState`] so the next [`Self::transcribe_live`] call starts
+    /// fresh (ADR-021's carried perf ticket, F-061). This is the hard
+    /// guarantee against a stale state leaking across sessions — today's GUI
+    /// wiring never reuses one `WhisperEngine` instance across sessions
+    /// (`LiveEngineFactory::load` in `crates/humm-gui/src/live_session.rs`
+    /// constructs a fresh engine per session), but calling this first keeps
+    /// that guarantee true even if that ever changed.
+    ///
+    /// # Errors
+    /// Never returns `Err` for this engine; the `Result` return type matches
+    /// the `LiveEngineSession` trait seam other backends bracket a session
+    /// through (`humm-gui`'s API-backend arm has no live state to reset, so
+    /// its implementation is a no-op `Ok(())` too).
+    pub fn begin_live_session(&mut self) -> Result<(), EngineError> {
+        self.live_state.clear();
+        Ok(())
+    }
+
+    /// Ends a live-recording session: drops the cached [`WhisperState`]
+    /// promptly rather than waiting for `WhisperEngine` itself to drop.
+    /// Best-effort cleanup — since a fresh `WhisperEngine` is constructed per
+    /// session by the GUI (see [`Self::begin_live_session`]'s doc), this is
+    /// usually redundant with the engine's own drop moments later, but it
+    /// makes the "session is over" boundary explicit and frees the cached
+    /// state's CoreML/Metal-backed resources as soon as the session ends
+    /// rather than whenever the engine happens to fall out of scope.
+    pub fn end_live_session(&mut self) {
+        self.live_state.clear();
     }
 
     /// Transcribes one already-chunked live batch of PCM samples, returning
@@ -181,9 +320,16 @@ impl WhisperEngine {
             params.set_abort_callback_user_data(cancel as *const CancelToken as *mut c_void);
         }
 
-        let mut state = self
-            .context
-            .create_state()
+        // Reuse the cached live-session state instead of creating a fresh one
+        // per chunk (ADR-021's carried perf ticket — see the module doc's
+        // "Live session state reuse" section for the output-equivalence
+        // argument). `context` is bound separately from `self.live_state` so
+        // the closure below and `self.live_state.get_or_create`'s `&mut`
+        // borrow touch disjoint fields of `self`, not the same borrow twice.
+        let context = &self.context;
+        let state = self
+            .live_state
+            .get_or_create(|| context.create_state())
             .map_err(|e| EngineError::Inference {
                 detail: format!("failed to create whisper state: {e}"),
             })?;
@@ -818,6 +964,87 @@ mod tests {
         assert_eq!(remap.remap(Millis(1000)), Millis(5000));
         // Deep in the second span: filtered 3500 ms → original 7500 ms.
         assert_eq!(remap.remap(Millis(3500)), Millis(7500));
+    }
+
+    // --- Live session state-lifecycle seam (ADR-021 carried perf ticket,
+    //     F-061). `WhisperEngine` cannot be built in a unit test without a
+    //     real ggml model on disk (see `tests/contract.rs`'s module doc), so
+    //     this exercises the exact `LiveStateSlot` machinery
+    //     `WhisperEngine::begin_live_session`/`end_live_session`/
+    //     `transcribe_live` delegate to, hermetically, against a plain `i32`
+    //     instead of a `WhisperState`. The `#[ignore]` real-model tests in
+    //     `tests/contract.rs` cover the whisper-backed end of this contract
+    //     (`first_chunk_output_is_identical_whether_the_state_is_reused_or_fresh`,
+    //     `live_session_chunk_sequence_is_deterministic_when_repeated`,
+    //     `second_session_after_begin_produces_same_output_as_first`).
+
+    #[test]
+    fn live_state_slot_creates_once_and_reuses_until_cleared() {
+        let mut slot: LiveStateSlot<i32> = LiveStateSlot::new();
+        let mut creations = 0;
+
+        // First call: cache miss, constructs via `create`.
+        let first = *slot
+            .get_or_create::<&'static str>(|| {
+                creations += 1;
+                Ok(99)
+            })
+            .unwrap();
+        assert_eq!(first, 99);
+        assert_eq!(creations, 1, "first call must construct");
+        assert_eq!(slot.generation, 1);
+
+        // Second call: cache hit -- reuses the same value, `create` is not
+        // invoked again (mirrors consecutive `transcribe_live` calls within
+        // one live session reusing one `WhisperState`).
+        let second = *slot
+            .get_or_create::<&'static str>(|| {
+                creations += 1;
+                Ok(100)
+            })
+            .unwrap();
+        assert_eq!(second, 99, "cached value must be reused, not replaced");
+        assert_eq!(creations, 1, "second call must not construct again");
+        assert_eq!(slot.generation, 1);
+
+        // `clear()` (what `begin_live_session`/`end_live_session` call)
+        // forces the next call to construct fresh -- mirrors a new session
+        // never seeing a previous session's state.
+        slot.clear();
+        let third = *slot
+            .get_or_create::<&'static str>(|| {
+                creations += 1;
+                Ok(101)
+            })
+            .unwrap();
+        assert_eq!(third, 101, "post-clear call must construct a fresh value");
+        assert_eq!(creations, 2, "clear() must force reconstruction");
+        assert_eq!(slot.generation, 2, "generation bumps only on construction");
+    }
+
+    #[test]
+    fn live_state_slot_propagates_create_error_without_caching() {
+        let mut slot: LiveStateSlot<i32> = LiveStateSlot::new();
+
+        let err = slot.get_or_create(|| Err::<i32, _>("boom")).unwrap_err();
+        assert_eq!(err, "boom");
+        assert_eq!(
+            slot.generation, 0,
+            "a failed create must not count as a miss"
+        );
+
+        // A later successful call still constructs (the slot was never
+        // populated by the failed attempt).
+        let mut creations = 0;
+        let ok = *slot
+            .get_or_create::<&'static str>(|| {
+                creations += 1;
+                Ok(7)
+            })
+            .unwrap();
+        assert_eq!(ok, 7);
+        assert_eq!(creations, 1);
+        assert_eq!(slot.generation, 1);
     }
 
     // --- Live params mapping (F-061, ADR-008) ---

@@ -149,6 +149,17 @@ impl LiveStore for SqliteStore {
 /// [`WhisperEngine::transcribe_live`] in production) -- the per-session
 /// object [`LiveEngineFactory::load`] hands back.
 pub trait LiveEngineSession: Send {
+    /// Brackets the start of a live session (ADR-021's carried perf ticket,
+    /// F-061): [`WhisperEngine`]'s override clears its cached live
+    /// [`humm_whisper`] state so no previous session's state can leak into
+    /// this one -- the hard guarantee, per
+    /// [`WhisperEngine::begin_live_session`]'s doc. Defaulted to a no-op
+    /// `Ok(())` so backends with no live state to reset (the API arm, every
+    /// pre-this-task kittest fake) need no changes.
+    fn begin_live_session(&mut self) -> Result<(), EngineError> {
+        Ok(())
+    }
+
     /// See [`WhisperEngine::transcribe_live`].
     fn transcribe_live(
         &mut self,
@@ -157,9 +168,18 @@ pub trait LiveEngineSession: Send {
         prompt: &str,
         cancel: &CancelToken,
     ) -> Result<String, EngineError>;
+
+    /// Brackets the end of a live session: best-effort cleanup, see
+    /// [`WhisperEngine::end_live_session`]'s doc. Defaulted to a no-op for
+    /// the same reason as [`Self::begin_live_session`].
+    fn end_live_session(&mut self) {}
 }
 
 impl LiveEngineSession for WhisperEngine {
+    fn begin_live_session(&mut self) -> Result<(), EngineError> {
+        WhisperEngine::begin_live_session(self)
+    }
+
     fn transcribe_live(
         &mut self,
         samples: &[f32],
@@ -168,6 +188,10 @@ impl LiveEngineSession for WhisperEngine {
         cancel: &CancelToken,
     ) -> Result<String, EngineError> {
         WhisperEngine::transcribe_live(self, samples, opts, prompt, cancel)
+    }
+
+    fn end_live_session(&mut self) {
+        WhisperEngine::end_live_session(self)
     }
 }
 
@@ -834,6 +858,15 @@ pub fn run_live_session(
             }
         }
     };
+    // ADR-021 carried perf ticket (F-061): brackets the session so the
+    // engine's cached live state (`WhisperEngine`'s reused `WhisperState`)
+    // never carries anything over from a previous session -- see
+    // `LiveEngineSession::begin_live_session`'s doc.
+    if let Err(err) = engine.begin_live_session() {
+        sink(SessionMessage::Error(err.to_string()));
+        sink(SessionMessage::Stopped { measurement: None });
+        return;
+    }
     if cancel.is_canceled() {
         sink(SessionMessage::Stopped { measurement: None });
         return;
@@ -958,6 +991,13 @@ pub fn run_live_session(
         &RealClock,
         &RealSleeper,
     );
+
+    // ADR-021 carried perf ticket (F-061): best-effort teardown of the
+    // engine's cached live state -- see
+    // `LiveEngineSession::end_live_session`'s doc. `run_session` above was
+    // the last call through `engine_call`, so this reborrow of `engine` is
+    // free of that closure's mutable borrow.
+    engine.end_live_session();
 
     // `run_session` always calls the sink with exactly one `Stopped` as its
     // very last action before returning -- so this is always `Some`.
