@@ -115,13 +115,28 @@ impl MediaFetcher for YtDlpFetcher {
         if let Some(cookie_file) = &self.cookie_file {
             command.arg("--cookies").arg(cookie_file);
         }
+        // Spawn into its own process group (unix) — see `demucs.rs`'s module
+        // doc / `crate::kill_process_group`'s doc for why: yt-dlp can invoke
+        // `ffmpeg` itself as an external downloader/post-processor (HLS
+        // streams, format merges, fixups), and a single-PID kill would leave
+        // that descendant running, holding this function's reader threads'
+        // pipes open until it exits naturally on its own.
+        crate::spawn_own_process_group(&mut command);
 
         let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|err| map_spawn_error("yt-dlp", "HUMM_YTDLP", &self.binary, err))?;
+            .map_err(|err| {
+                map_spawn_error(
+                    "yt-dlp",
+                    "HUMM_YTDLP",
+                    "install it (e.g. `brew install yt-dlp`)",
+                    &self.binary,
+                    err,
+                )
+            })?;
 
         let stdout = child.stdout.take().expect("stdout was piped at spawn");
         let stderr = child.stderr.take().expect("stderr was piped at spawn");
@@ -147,7 +162,12 @@ impl MediaFetcher for YtDlpFetcher {
         let mut last_line: Option<String> = None;
         loop {
             if cancel.is_canceled() {
-                let _ = child.kill();
+                // Group-SIGKILL (unix) + direct `Child::kill()` fallback —
+                // see the `spawn_own_process_group` call above. Keeps
+                // yt-dlp's existing immediate-SIGKILL cancellation
+                // semantics (no grace-period ladder, unlike `DemucsIsolator`'s
+                // SIGTERM-then-SIGKILL) — just aimed at the whole group now.
+                crate::kill_process_group(&mut child);
                 let _ = child.wait();
                 let _ = stdout_handle.join();
                 let _ = stderr_handle.join();
@@ -356,5 +376,53 @@ mod tests {
             .fetch(&url, &dest, &mut |_| {}, &cancel)
             .expect_err("should be canceled");
         assert!(matches!(err, MediaError::Canceled));
+    }
+
+    /// Regression test for the same bug class found and fixed in
+    /// `DemucsIsolator` (`demucs.rs`'s module doc, task-5 review): a stub
+    /// `yt-dlp` whose last statement is `sleep 30` forks a real grandchild
+    /// process for it on this platform (not exec-tail-call optimized) — a
+    /// single-PID kill would leave that grandchild running, holding
+    /// `fetch`'s stdout reader thread's pipe open and blocking `join()`
+    /// until it exits naturally 30s later. Asserts cancellation still acks
+    /// promptly now that the child is killed by process group.
+    #[test]
+    #[cfg(unix)]
+    fn cancel_kills_grandchild_process_not_just_direct_child() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Instant;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stub = dir.path().join("yt-dlp-stub.sh");
+        std::fs::write(&stub, "#!/bin/sh\nsleep 30\n").expect("write stub script");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub script");
+
+        let dest_dir = tempfile::tempdir().expect("tempdir");
+        let cancel = CancelToken::new();
+        let cancel_from_main = cancel.clone();
+        let url = url::Url::parse("https://example.com/video").expect("valid url");
+
+        let start = Instant::now();
+        let handle = thread::spawn(move || {
+            let fetcher = YtDlpFetcher::with_binary(&stub, None);
+            let mut noop = |_: FetchProgress| {};
+            fetcher.fetch(&url, dest_dir.path(), &mut noop, &cancel)
+        });
+
+        thread::sleep(Duration::from_millis(200));
+        cancel_from_main.cancel();
+
+        let result = handle.join().expect("fetch thread should not panic");
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(result, Err(MediaError::Canceled)),
+            "expected Canceled, got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "expected cancellation to ack within ~2s, took {elapsed:?}"
+        );
     }
 }
