@@ -1368,6 +1368,17 @@ impl Runner {
                     audio_input = isolated;
                 }
                 Err(err) => {
+                    // A cancellation mid-isolation (the isolator kills its
+                    // child process and reports `MediaError::Canceled`, or
+                    // any other cooperative-cancel error, per
+                    // `SpeechIsolator::isolate`'s doc) must end the task
+                    // `Canceled`, not `Failed` with a misleading
+                    // "isolation failed" message — checked before the
+                    // no-audio/actionable-failure classification below, same
+                    // as every other cancel check in this chain.
+                    if token.is_canceled() {
+                        return Terminal::Canceled;
+                    }
                     // Buzz's `IndexError -> "no_audio"` arm (`:80-83`): a
                     // silent video (or any other input with no audio stream)
                     // degrades to the original file instead of failing.
@@ -1480,6 +1491,11 @@ impl Runner {
                         }));
                     match outcome {
                         Ok(Ok(Some(lang))) => {
+                            // Same mid-job store-write convention `fetch_url`'s
+                            // `update_file` write already uses (ADR-018):
+                            // log + emit `StoreWriteFailed`, never abort the
+                            // run over a DB hiccup — the detected language
+                            // still reaches `run_file_job` below either way.
                             if let Err(err) = self.store.update_language(&id, lang.code()) {
                                 self.store_write_failed(id, "update_language", &err);
                             }
@@ -2440,6 +2456,11 @@ mod tests {
     enum IsolateScript {
         Ok(PathBuf),
         Err(MediaError),
+        /// Trips `cancel` (mirroring a real isolator's cooperative-cancel
+        /// kill, `SpeechIsolator::isolate`'s doc) as its last act, then
+        /// returns `Err(MediaError::Canceled)` — the isolation
+        /// cancel-vs-failed test's setup.
+        Cancel,
     }
 
     /// Scripted [`SpeechIsolator`]: records every `isolate` call's input
@@ -2450,7 +2471,7 @@ mod tests {
     }
 
     impl SpeechIsolator for ScriptedIsolator {
-        fn isolate(&self, input: &Path, _cancel: &CancelToken) -> Result<PathBuf, MediaError> {
+        fn isolate(&self, input: &Path, cancel: &CancelToken) -> Result<PathBuf, MediaError> {
             self.calls
                 .lock()
                 .expect("isolator calls lock")
@@ -2463,6 +2484,10 @@ mod tests {
             {
                 Some(IsolateScript::Ok(path)) => Ok(path),
                 Some(IsolateScript::Err(err)) => Err(err),
+                Some(IsolateScript::Cancel) => {
+                    cancel.cancel();
+                    Err(MediaError::Canceled)
+                }
                 None => Ok(input.to_path_buf()),
             }
         }
@@ -5672,6 +5697,48 @@ mod tests {
             "message should mention the possible first-run model download: {msg}"
         );
         // Never reaches the decoder/engine.
+        assert!(h.decoded.lock().expect("decoded").is_empty());
+    }
+
+    #[test]
+    fn isolation_cancel_yields_canceled_not_failed() {
+        // A cancellation mid-isolation must end the task `Canceled`, never
+        // `Failed` with the (misleading, in this case) actionable-demucs
+        // message — self-review finding: the no-audio-vs-actionable-failure
+        // classification must not shadow an in-flight cancel.
+        let isolator = Arc::new(ScriptedIsolator {
+            scripts: Arc::new(Mutex::new(VecDeque::from([IsolateScript::Cancel]))),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            isolator: Some(isolator),
+            ..Cfg::default()
+        });
+
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let mut spec = path_task(h.input_file("clip.mp3"));
+        spec.options.extract_speech = true;
+        q.enqueue(a, spec, Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Canceled)),
+            "expected a Canceled event: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Failed { .. })),
+            "a cancellation must never surface as Failed: {events:?}"
+        );
         assert!(h.decoded.lock().expect("decoded").is_empty());
     }
 
