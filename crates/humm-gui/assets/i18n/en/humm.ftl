@@ -52,6 +52,13 @@ table-menu-notes = Add/Edit Notes
 task-transcribe = Transcribe
 task-translate = Translate to English
 
+## Task table — status-column phase text (format.rs, F-027, M8) -- a humm
+## addition (design spec UX_SPEC.md's ✚ phase list), not a Buzz string, so
+## unlike this file's other status texts it goes through `tr` rather than
+## staying a literal byte-exact Buzz string.
+
+status-isolating-speech = isolating speech
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = Record

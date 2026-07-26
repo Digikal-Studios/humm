@@ -276,6 +276,7 @@ fn sample_task_spec() -> TaskSpec {
             initial_prompt: String::new(),
             temperature: DEFAULT_TEMPERATURE.to_vec(),
             llm: None,
+            extract_speech: false,
         },
         output: OutputSpec {
             formats: [OutputFormat::Txt].into_iter().collect(),

@@ -152,6 +152,8 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "table-menu-notes",
         "task-transcribe",
         "task-translate",
+        // Task table — status-column phase text (format.rs, F-027, M8)
+        "status-isolating-speech",
         // Toolbar (F-004, Task 8; Record unlocked F-004/F-060, Task 10)
         "toolbar-record",
         "toolbar-new-file",

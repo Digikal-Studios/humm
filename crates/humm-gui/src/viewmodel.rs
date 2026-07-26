@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use humm_core::domain::{ModelSpec, Status, TaskKind, TranscriptionId};
-use humm_core::queue::{TaskEvent, TaskEventKind};
+use humm_core::queue::{TaskEvent, TaskEventKind, TaskPhase};
 use humm_store::{SqliteStore, TaskRow};
 
 use crate::i18n::tr;
@@ -42,6 +42,12 @@ pub enum Phase {
     /// `TaskEventKind::DownloadProgress` is only ever emitted while the
     /// total size is known (`humm_core::queue` module doc).
     Media(f32),
+    /// Isolating speech from background noise/music with demucs before
+    /// transcription (F-027, M8, `TaskEventKind::PhaseChanged { phase:
+    /// TaskPhase::IsolatingSpeech }`). No fraction: the subprocess only
+    /// emits human-oriented progress on stderr (Standing Policy rule 3
+    /// forbids parsing it), so this phase is indeterminate.
+    Isolating,
 }
 
 /// One task-table row, derived from a [`TaskRow`] plus (when available) its
@@ -316,9 +322,10 @@ impl TasksVm {
     ///   text needs).
     /// - [`TaskEventKind::Progress`] /
     ///   [`TaskEventKind::ModelDownloadProgress`] /
-    ///   [`TaskEventKind::DownloadProgress`]: mutate the row in place — no
-    ///   store read. `Progress` clears `phase`; the two download-progress
-    ///   kinds set it (F-025).
+    ///   [`TaskEventKind::DownloadProgress`] / [`TaskEventKind::PhaseChanged`]:
+    ///   mutate the row in place — no store read. `Progress` clears `phase`;
+    ///   the two download-progress kinds and `PhaseChanged` (M8, F-027) set
+    ///   it.
     /// - [`TaskEventKind::SegmentAdded`]: no-op (`RowVm` doesn't track
     ///   segment text).
     /// - Terminal ([`TaskEventKind::Completed`]/[`TaskEventKind::Failed`]/
@@ -371,6 +378,15 @@ impl TasksVm {
                 self.mutate(ev.task_id, |row| {
                     row.status = Status::InProgress;
                     row.phase = Phase::Media(fraction);
+                });
+            }
+            TaskEventKind::PhaseChanged { phase } => {
+                let phase = *phase;
+                self.mutate(ev.task_id, |row| {
+                    row.status = Status::InProgress;
+                    row.phase = match phase {
+                        TaskPhase::IsolatingSpeech => Phase::Isolating,
+                    };
                 });
             }
             TaskEventKind::SegmentAdded(_) => {}
@@ -750,6 +766,7 @@ mod tests {
                 initial_prompt: String::new(),
                 temperature: DEFAULT_TEMPERATURE.to_vec(),
                 llm: None,
+                extract_speech: false,
             },
             output: OutputSpec::default(),
         }
@@ -1115,6 +1132,41 @@ mod tests {
         );
 
         assert_eq!(vm.sorted_rows()[0].phase, Phase::Media(0.6));
+    }
+
+    #[test]
+    fn apply_phase_changed_sets_isolating_phase() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut vm = TasksVm::default();
+        let id = TranscriptionId::new();
+        let spec = sample_spec(Input::Path(PathBuf::from("/tmp/a.wav")));
+        store
+            .create_task(&id, &spec, Source::FileImport)
+            .expect("create");
+        vm.apply(
+            &TaskEvent {
+                task_id: id,
+                kind: TaskEventKind::Queued,
+            },
+            &store,
+        );
+        // Delete the underlying row, same as `apply_progress_mutates_in_
+        // place_without_reading_the_store` above — proving this is an
+        // in-place mutation, not a store read.
+        store.delete_tasks(&[id]).expect("delete");
+
+        vm.apply(
+            &TaskEvent {
+                task_id: id,
+                kind: TaskEventKind::PhaseChanged {
+                    phase: TaskPhase::IsolatingSpeech,
+                },
+            },
+            &store,
+        );
+
+        assert_eq!(vm.sorted_rows()[0].phase, Phase::Isolating);
+        assert_eq!(vm.sorted_rows()[0].status, Status::InProgress);
     }
 
     #[test]

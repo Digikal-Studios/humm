@@ -63,6 +63,11 @@ table-menu-notes = Notizen hinzufügen/bearbeiten
 task-transcribe = Transkribieren
 task-translate = Ins Englische übersetzen
 
+## Task table — status-column phase text (format.rs, F-027, M8) -- a humm
+## addition, not a Buzz string; translated fresh.
+
+status-isolating-speech = Sprache wird isoliert
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = Aufnehmen

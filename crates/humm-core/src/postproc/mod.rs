@@ -11,7 +11,10 @@ pub mod skip;
 pub mod summary;
 
 use crate::domain::Millis;
-use crate::settings::{AiSummarySettings, AutoResizeSettings, ExportDocxSettings, SkipSettings};
+use crate::settings::{
+    AiSummarySettings, AutoResizeSettings, ExportDocxSettings, LangDetectSettings,
+    NoiseReductionSettings, SkipSettings,
+};
 
 /// A point-in-time snapshot of every post-processing hook's settings, taken
 /// once per task ([`crate::queue::RunnerDeps::postproc`], design spec §2.4)
@@ -45,6 +48,12 @@ pub struct PostprocConfig {
     /// export hooks, resolved once per snapshot (design spec §7 ledger #L7;
     /// see [`crate::viewer::text_view::paragraph_split_from_env`]).
     pub paragraph_split: Millis,
+    /// F-112 noise-reduction settings (M8), a plain copy — no secret to
+    /// redact.
+    pub noise_reduction: NoiseReductionSettings,
+    /// F-114 enhanced-language-detection settings (M8), a plain copy — no
+    /// secret to redact.
+    pub language_detection: LangDetectSettings,
 }
 
 impl std::fmt::Debug for PostprocConfig {
@@ -60,6 +69,8 @@ impl std::fmt::Debug for PostprocConfig {
             .field("docx", &self.docx)
             .field("resize", &self.resize)
             .field("paragraph_split", &self.paragraph_split)
+            .field("noise_reduction", &self.noise_reduction)
+            .field("language_detection", &self.language_detection)
             .finish()
     }
 }
@@ -85,6 +96,8 @@ mod tests {
             docx: ExportDocxSettings::default(),
             resize: AutoResizeSettings::default(),
             paragraph_split: Millis(2000),
+            noise_reduction: NoiseReductionSettings::default(),
+            language_detection: LangDetectSettings::default(),
         }
     }
 
@@ -102,5 +115,14 @@ mod tests {
         let text = format!("{:?}", cfg);
         assert!(!text.contains("redacted"));
         assert!(text.contains("summary_api_key: \"None\""));
+    }
+
+    #[test]
+    fn debug_shows_m8_sections_plainly() {
+        // Neither new M8 section carries a secret, so both print normally
+        // (unlike `summary_api_key`, which the impl above redacts).
+        let text = format!("{:?}", sample());
+        assert!(text.contains("noise_reduction"));
+        assert!(text.contains("language_detection"));
     }
 }

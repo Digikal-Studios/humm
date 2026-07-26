@@ -508,6 +508,14 @@ pub struct TranscriptionOptions {
     /// key) to `None`.
     #[serde(default)]
     pub llm: Option<LlmTranslationOptions>,
+    /// Whether to isolate speech from background noise/music with demucs
+    /// before transcription (F-027, design spec §3): `true` runs the
+    /// decode input through a [`crate::boundary`]-defined `SpeechIsolator`
+    /// (wired in a later M8 task) first. `#[serde(default)]` resolves every
+    /// pre-M8 `options_json` row — which has no `extract_speech` key at
+    /// all — to `false`.
+    #[serde(default)]
+    pub extract_speech: bool,
 }
 
 impl Default for TranscriptionOptions {
@@ -528,6 +536,7 @@ impl Default for TranscriptionOptions {
             initial_prompt: String::new(),
             temperature: DEFAULT_TEMPERATURE.to_vec(),
             llm: None,
+            extract_speech: false,
         }
     }
 }
@@ -804,6 +813,7 @@ mod tests {
                 initial_prompt: String::new(),
                 temperature: DEFAULT_TEMPERATURE.to_vec(),
                 llm: None,
+                extract_speech: false,
             }
         );
     }
@@ -1006,6 +1016,7 @@ mod tests {
                 initial_prompt: "hello there".to_string(),
                 temperature: vec![0.1, 0.3],
                 llm: None,
+                extract_speech: true,
             },
             output: OutputSpec {
                 formats: [OutputFormat::Srt, OutputFormat::Vtt].into_iter().collect(),
@@ -1021,6 +1032,7 @@ mod tests {
         assert!(json.contains("\"large-v3-turbo\""));
         assert!(json.contains("\"url\":\"https://example.com/audio.mp3\""));
         assert!(json.contains("\"source_disposition\":\"move_to_output\""));
+        assert!(json.contains("\"extract_speech\":true"));
 
         let round_tripped: TaskSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(round_tripped, spec);
@@ -1148,5 +1160,21 @@ mod tests {
 
         let spec: TaskSpec = serde_json::from_str(m6_json).expect("M6-era row deserializes");
         assert_eq!(spec.output.source_disposition, None);
+    }
+
+    // -- extract_speech (M8, F-027) -----------------------------------------
+
+    #[test]
+    fn old_options_json_without_extract_speech_deserializes() {
+        // A real M7-era `TaskSpec` shape: `backend`/`llm` (M6) and
+        // `source_disposition` (M7) already exist, but `options` has no
+        // `"extract_speech"` key at all, since M8 is what introduces it.
+        // Every `options_json` row persisted before this milestone looks
+        // like this — `#[serde(default)]` on the new field must resolve it
+        // to `false`, not fail to deserialize.
+        let m7_json = r#"{"input":{"path":"/audio/sample.mp3"},"options":{"language":"fr","task":"transcribe","model":{"backend":"whisper","size":"small","hf_repo":null},"word_timestamps":false,"initial_prompt":"","temperature":[0.0,0.2,0.4,0.6,0.8,1.0],"llm":null},"output":{"formats":["srt"],"directory":null,"file_name_template":null,"paragraph_split":2000,"source_disposition":null}}"#;
+
+        let spec: TaskSpec = serde_json::from_str(m7_json).expect("M7-era row deserializes");
+        assert!(!spec.options.extract_speech);
     }
 }

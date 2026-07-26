@@ -66,7 +66,7 @@ use humm_core::paths;
 use humm_core::pipeline::EngineTuning;
 use humm_core::postproc::{PostprocConfig, PostprocConfigSource};
 use humm_core::queue::{
-    EngineFactory, QueueHandle, RunnerDeps, TaskEvent, TaskEventKind, spawn_task_runner,
+    EngineFactory, QueueHandle, RunnerDeps, TaskEvent, TaskEventKind, TaskPhase, spawn_task_runner,
 };
 use humm_core::secrets::{SecretKey, SecretStore};
 use humm_core::settings::{OpenAiSettings, PostprocSettings, Settings};
@@ -242,6 +242,12 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         // No CLI flag yet enables LLM translation (F-031 wiring is a later
         // M6 task).
         llm: None,
+        // `validate_add_args` above still usage-fails whenever this is
+        // `true` (Task 5 flips that to a real demucs-presence check and
+        // wires the isolator), so this is always `false` here today — but
+        // threading the real field through means that flip needs no
+        // further change at this call site.
+        extract_speech: args.extract_speech,
     };
     let output = OutputSpec {
         formats,
@@ -594,6 +600,8 @@ impl PostprocConfigSource for CliPostprocSource {
             docx: self.postproc.export_docx.clone(),
             resize: self.postproc.transcript_resizer.clone(),
             paragraph_split: humm_core::viewer::text_view::paragraph_split_from_env(),
+            noise_reduction: self.postproc.noise_reduction.clone(),
+            language_detection: self.postproc.language_detection.clone(),
         }
     }
 }
@@ -872,9 +880,31 @@ impl<'a> HumanRenderer<'a> {
                     eprintln!("warning: post-processing: {err}");
                 }
             }
+            TaskEventKind::PhaseChanged { phase } => {
+                if self.quiet {
+                    return;
+                }
+                let label = self.label(&event.task_id);
+                match phase {
+                    // Indeterminate (module doc on `TaskPhase::IsolatingSpeech`):
+                    // no fraction to render, just the phase name — a distinct
+                    // key namespace from `Progress`'s `0..100` and
+                    // `DownloadProgress`'s negative range keeps this from
+                    // being mistaken for either.
+                    TaskPhase::IsolatingSpeech => {
+                        self.line
+                            .update(PHASE_ISOLATING_KEY, &isolating_speech_line(&label));
+                    }
+                }
+            }
         }
     }
 }
+
+/// [`ProgressLine`] key for [`TaskPhase::IsolatingSpeech`] — outside both
+/// `Progress`'s `0..100` and `DownloadProgress`'s `-1..-101` ranges, so it
+/// can never collide with either.
+const PHASE_ISOLATING_KEY: i64 = i64::MIN;
 
 /// The stderr line printed for a `Skipped` event's terminal state, human
 /// mode: `<label>  skipped (already transcribed)` — the progress line's own
@@ -882,6 +912,15 @@ impl<'a> HumanRenderer<'a> {
 /// counts a skip toward "quit on complete", `main_window.py:435-443`).
 fn skipped_line(label: &str) -> String {
     format!("{label}  skipped (already transcribed)")
+}
+
+/// The progress-line text rendered for [`TaskEventKind::PhaseChanged`]'s
+/// [`TaskPhase::IsolatingSpeech`], human mode: `<label>  isolating speech` —
+/// the progress line's own `<label>  NN%` convention, but for a phase with
+/// no fraction to report (demucs only emits human-oriented tqdm on stderr,
+/// which Standing Policy rule 3 forbids parsing).
+fn isolating_speech_line(label: &str) -> String {
+    format!("{label}  isolating speech")
 }
 
 /// Throttled single-line progress renderer: rewrites the same terminal line via
@@ -1013,6 +1052,18 @@ enum JsonEvent<'a> {
         written: Vec<String>,
         errors: &'a [String],
     },
+    Phase {
+        task_id: String,
+        phase: &'static str,
+    },
+}
+
+/// Maps a [`TaskPhase`] to its stable `--json` wire string (`docs/HUMM_SURFACE.md`
+/// §3): `snake_case`, matching the schema's other event/field naming.
+fn task_phase_wire_str(phase: TaskPhase) -> &'static str {
+    match phase {
+        TaskPhase::IsolatingSpeech => "isolating_speech",
+    }
 }
 
 /// Maps a [`TaskEvent`] to its [`JsonEvent`] and prints it as one line on
@@ -1076,6 +1127,10 @@ fn emit_json(event: &TaskEvent, labels: &HashMap<TranscriptionId, String>) {
             // event (`report_download`, above), which is unaffected.
             return;
         }
+        TaskEventKind::PhaseChanged { phase } => JsonEvent::Phase {
+            task_id,
+            phase: task_phase_wire_str(*phase),
+        },
     };
     if let Some(text) = to_json_line(&value) {
         println!("{text}");
@@ -1214,6 +1269,10 @@ mod tests {
                 // arm of `json_for` with it.
                 unreachable!("ModelDownloadProgress is never routed through emit_json/json_for")
             }
+            TaskEventKind::PhaseChanged { phase } => JsonEvent::Phase {
+                task_id: task_id_str,
+                phase: task_phase_wire_str(*phase),
+            },
         };
         to_json_line(&value).expect("serializes")
     }
@@ -1373,6 +1432,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn json_phase_matches_schema() {
+        assert_eq!(
+            json_for(
+                TaskEventKind::PhaseChanged {
+                    phase: TaskPhase::IsolatingSpeech,
+                },
+                ID,
+                ""
+            ),
+            r#"{"event":"phase","task_id":"550e8400-e29b-41d4-a716-446655440000","phase":"isolating_speech"}"#
+        );
+    }
+
     // -- Human-mode rendering (Step 2) ----------------------------------------
 
     #[test]
@@ -1384,6 +1457,17 @@ mod tests {
         assert_eq!(
             skipped_line("clip.mp3"),
             "clip.mp3  skipped (already transcribed)"
+        );
+    }
+
+    #[test]
+    fn isolating_speech_line_renders_phase_text() {
+        // Same "no injectable writer" rationale as `skipped_line_reports_
+        // already_transcribed` above: pins the exact text `on_event`'s
+        // `PhaseChanged` arm passes to the progress line.
+        assert_eq!(
+            isolating_speech_line("clip.mp3"),
+            "clip.mp3  isolating speech"
         );
     }
 

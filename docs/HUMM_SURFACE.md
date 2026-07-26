@@ -77,6 +77,7 @@ One JSON object per line on **stdout**; nothing else is written to stdout in
 {"event":"store_write_failed","task_id":"550e8400-e29b-41d4-a716-446655440000","operation":"mark_started","detail":"..."}
 {"event":"skipped","task_id":"550e8400-e29b-41d4-a716-446655440000"}
 {"event":"post_processed","task_id":"550e8400-e29b-41d4-a716-446655440000","notes_updated":true,"segments_replaced":false,"written":["/out.docx"],"errors":[]}
+{"event":"phase","task_id":"550e8400-e29b-41d4-a716-446655440000","phase":"isolating_speech"}
 ```
 
 Per task the order is `queued` → `started` → (`download_progress`* for URL
@@ -108,6 +109,22 @@ from `humm add` (there is deliberately no CLI *flag* for post-processing;
 settings are the only switch). Post-hooks are off by default, so a default
 configuration emits neither.
 
+`phase` (F-027, M8, additive) reports a mid-run phase transition that isn't a
+plain progress fraction (`TaskEventKind::PhaseChanged`): today the only value
+`phase` ever carries is `"isolating_speech"` (demucs speech isolation running
+before transcription), `snake_case` of the corresponding `TaskPhase` variant —
+the field is extensible to future phases without a schema change. It has no
+producer yet as of this commit: `TaskEventKind::PhaseChanged` exists in
+`humm-core::queue` and is wired into `--json`/human-mode rendering, but the
+demucs pre-pass that actually emits it (`run_job`'s before-transcription seam,
+gated on `TranscriptionOptions::extract_speech`) lands in a later M8 task —
+the same "vocabulary now, producer later" shape `skipped`/`post_processed` had
+in M6 before M7 wired their hooks (see the paragraph above). Once wired it
+will appear anywhere between `started` and the terminal event, never terminal
+itself; human mode renders it as a progress-style line (`<input>  isolating
+speech`), so `--quiet` suppresses it exactly like `download_progress`/
+`progress`.
+
 LLM translation (F-031) adds **no new `--json` event** in M6 — the schema
 above is unchanged: `humm add` has no LLM-translation flag (`humm-cli`'s
 grammar has no equivalent of the options sheet's/recording window's "Enable
@@ -119,9 +136,10 @@ path either)" — an absence, not an omission: the same out-of-band-and-additive
 spirit as `store_write_failed` above (ADR-018), just with nothing to add.
 
 Human mode instead prints, to **stderr**, a per-task progress line
-`<input>  NN% — ETA: <eta>` (ETA rendered `NNm NNs` or `NNs`, Buzz's formula)
-and a URL download phase line `downloading <url>  NN%`; written export paths go
-to **stdout** (one per line); failures print `error: <input>: <cause>` to
+`<input>  NN% — ETA: <eta>` (ETA rendered `NNm NNs` or `NNs`, Buzz's formula),
+a URL download phase line `downloading <url>  NN%`, and (once a later M8 task
+wires a producer) a `phase` line `<input>  isolating speech`; written export
+paths go to **stdout** (one per line); failures print `error: <input>: <cause>` to
 stderr; a `store_write_failed` event prints `warning: history not recorded
 (<operation>): <detail>` to stderr. A `skipped` event's terminal line is
 `<input>  skipped (already transcribed)`, to stderr, in the same slot a
@@ -314,6 +332,7 @@ fields for the backend selector and per-task LLM translation (F-041/F-031):
 | `enable_llm_translation` | bool | `false` | Whether AI translation was last enabled in the options sheet (F-031). |
 | `llm_model` | `Option<String>` | `None` | Last-entered LLM translation model id, if AI translation was configured. |
 | `llm_prompt` | `Option<String>` | `None` | Last-entered LLM translation prompt, if AI translation was configured. |
+| `extract_speech` (M8) | bool | `false` | Whether speech isolation (F-027, demucs) was last enabled in the options sheet — the sticky counterpart of `TranscriptionOptions::extract_speech`. The options-sheet checkbox itself is wired to this field in a later M8 task. |
 
 ### 6.4 OpenAI-compatible API backend settings (`[openai]`, M6, F-041/F-031)
 
@@ -401,11 +420,15 @@ costs a boolean check. Sub-tables, in the fixed execution order they run in
 | `transcript_resizer` | F-116 | `enabled` (false), `merge_by_gap`, `merge_gap_seconds`, `split_by_punctuation`, `punctuation`, `split_by_max_length`, `max_length` |
 | `ai_summary` | F-111 | `enabled` (false), `api_url`, `model`, `prompt`, `save_to_notes`, `save_to_file`, `output_folder` — **the key is not here**, it is the keyring entry in §6's table |
 | `export_docx` | F-113 | `enabled` (false), `output_folder`, `include_timestamps` |
+| `noise_reduction` (M8) | F-112 | `enabled` (false), `keep_denoised_file` (false) — whether the DeepFilterNet-denoised `<input_stem>_DeepFilterNet3.wav` is kept next to the input rather than cleaned up |
+| `language_detection` (M8) | F-114 | `enabled` (false), `download_tiny_if_missing` (**true**) — whether the `tiny` model is fetched automatically when no already-downloaded model is available to detect with |
 
 A hook failure is logged and reported in the `post_processed` event's `errors`
 array (§3); it **never** fails the transcription. Both binaries read this same
 table — the CLI has no post-processing flags, so `settings.toml` is the only
-switch (§3).
+switch (§3). `noise_reduction`/`language_detection` are vocabulary as of this
+commit — a later M8 task wires their before-transcription hooks into
+`run_job`.
 
 ## 7. First-run migration
 

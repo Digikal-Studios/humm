@@ -245,6 +245,8 @@ impl PostprocConfigSource for GuiPostprocSource {
             docx: postproc.export_docx,
             resize: postproc.transcript_resizer,
             paragraph_split: paragraph_split_from_env(),
+            noise_reduction: postproc.noise_reduction,
+            language_detection: postproc.language_detection,
         }
     }
 }

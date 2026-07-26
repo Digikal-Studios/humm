@@ -392,6 +392,14 @@ mod tests {
             unreachable!("check() never updates the file path")
         }
 
+        fn update_language(
+            &self,
+            _id: &TranscriptionId,
+            _language: &str,
+        ) -> Result<(), StoreError> {
+            unreachable!("check() never updates the language")
+        }
+
         fn mark_completed(
             &self,
             _id: &TranscriptionId,

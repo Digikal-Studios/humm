@@ -559,6 +559,10 @@ fn transcription_options_from_state(state: &SheetState) -> TranscriptionOptions 
         initial_prompt: state.initial_prompt.clone(),
         temperature: DEFAULT_TEMPERATURE.to_vec(),
         llm: llm_options(state),
+        // `SheetState` has no `extract_speech` field yet — the options-sheet
+        // checkbox is still a decoy local (a later M8 task binds it to a
+        // real field and threads it through here).
+        extract_speech: false,
     }
 }
 

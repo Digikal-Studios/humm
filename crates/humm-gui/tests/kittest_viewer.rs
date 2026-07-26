@@ -208,6 +208,7 @@ fn spec_for(file: &str) -> TaskSpec {
             initial_prompt: String::new(),
             temperature: vec![0.0],
             llm: None,
+            extract_speech: false,
         },
         output: OutputSpec::default(),
     }

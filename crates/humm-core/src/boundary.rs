@@ -545,6 +545,14 @@ pub trait TaskStore: Send + Sync {
     /// [`crate::domain::Input::Url`] task's download completes.
     fn update_file(&self, id: &TranscriptionId, path: &Path) -> Result<(), StoreError>;
 
+    /// Updates the task's `language` column to `language` (a
+    /// [`crate::language::Language::code`] wire string), e.g. once F-114
+    /// enhanced language detection resolves an effective language for a
+    /// task whose language was unset (or, per Buzz's own quirk, explicitly
+    /// English) — so later viewer exports and the task table see the
+    /// detected language (`plugins/enhanced_language_detection/plugin.py:104-112`).
+    fn update_language(&self, id: &TranscriptionId, language: &str) -> Result<(), StoreError>;
+
     /// Marks the task `completed`, sets `time_ended`, and persists
     /// `segments` (in order) as the task's transcript.
     fn mark_completed(&self, id: &TranscriptionId, segments: &[Segment]) -> Result<(), StoreError>;

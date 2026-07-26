@@ -208,7 +208,10 @@ mod tests {
     use super::*;
     use crate::domain::{Millis, Segment};
     use crate::error::StoreError;
-    use crate::settings::{AiSummarySettings, ExportDocxSettings, SkipSettings};
+    use crate::settings::{
+        AiSummarySettings, ExportDocxSettings, LangDetectSettings, NoiseReductionSettings,
+        SkipSettings,
+    };
     use std::path::Path;
 
     // -- a minimal `TaskStore` double: only `segments_for`/
@@ -246,6 +249,14 @@ mod tests {
 
         fn update_file(&self, _id: &TranscriptionId, _path: &Path) -> Result<(), StoreError> {
             unreachable!("run() never updates the file path")
+        }
+
+        fn update_language(
+            &self,
+            _id: &TranscriptionId,
+            _language: &str,
+        ) -> Result<(), StoreError> {
+            unreachable!("run() never updates the language")
         }
 
         fn mark_completed(
@@ -327,6 +338,8 @@ mod tests {
             docx: ExportDocxSettings::default(),
             resize: AutoResizeSettings::default(),
             paragraph_split: Millis(2000),
+            noise_reduction: NoiseReductionSettings::default(),
+            language_detection: LangDetectSettings::default(),
         }
     }
 

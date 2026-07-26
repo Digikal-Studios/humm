@@ -58,6 +58,7 @@ fn sample_spec(name_hint: &str) -> TaskSpec {
             initial_prompt: String::new(),
             temperature: DEFAULT_TEMPERATURE.to_vec(),
             llm: None,
+            extract_speech: false,
         },
         output: OutputSpec::default(),
     }

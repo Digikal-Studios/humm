@@ -310,12 +310,22 @@ impl SqliteStore {
         })
     }
 
-    /// Locks the connection mutex, mapping poisoning (a prior panic while
-    /// held) to [`StoreError::Query`] rather than panicking.
-    fn lock(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
-        self.conn.lock().map_err(|_| StoreError::Query {
-            detail: "database connection mutex poisoned".to_string(),
-        })
+    /// Locks the connection mutex, recovering the guard if a previous
+    /// holder panicked while it was held — the workspace `lock_recover`
+    /// convention (humm-core's `queue::lock_recover` helper and its
+    /// documented rationale, `crates/humm-core/src/queue.rs:334-343`): a
+    /// `rusqlite::Connection` is safe to keep using
+    /// after a panicked holder (any transaction the panicking thread had
+    /// open is rolled back when its `Transaction` guard drops during
+    /// unwind, so there is no in-progress mutation left to distrust,
+    /// unlike an arbitrary poisoned `Mutex<T>`). Recovering — rather than
+    /// mapping poisoning to `StoreError::Query`, which would permanently
+    /// wedge every later call on this store — keeps it usable for the rest
+    /// of the process even after one panicked caller.
+    fn lock(&self) -> MutexGuard<'_, Connection> {
+        self.conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Flips every `queued`/`in_progress` task to `canceled`, setting
@@ -340,7 +350,7 @@ impl SqliteStore {
     /// filter needed there.
     pub fn cancel_stale_tasks(&self) -> Result<usize, StoreError> {
         let now = now_iso();
-        let conn = self.lock()?;
+        let conn = self.lock();
 
         let live_completed = conn
             .execute(
@@ -374,7 +384,7 @@ impl SqliteStore {
     /// `true` once [`Self::import_buzz_db`] has completed successfully at
     /// least once (`humm_meta['buzz_import_done']` is set).
     pub fn buzz_import_done(&self) -> Result<bool, StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         let value: Option<String> = conn
             .query_row(
                 "SELECT value FROM humm_meta WHERE key = ?1",
@@ -419,7 +429,7 @@ impl SqliteStore {
             });
         }
 
-        let mut conn = self.lock()?;
+        let mut conn = self.lock();
         let uri = buzz_attach_uri(buzz_db);
         conn.execute("ATTACH DATABASE ?1 AS buzz", params![uri])
             .map_err(query_error)?;
@@ -535,7 +545,7 @@ impl SqliteStore {
 
     /// Fetches one task's row by id; `Ok(None)` if it doesn't exist.
     pub fn get_task(&self, id: &TranscriptionId) -> Result<Option<TaskRow>, StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         let raw = conn
             .query_row(
                 &format!("SELECT {SELECT_TASK_COLUMNS} FROM transcription WHERE id = ?1"),
@@ -549,7 +559,7 @@ impl SqliteStore {
 
     /// Lists all tasks, most recently queued first (`time_queued DESC`).
     pub fn list_tasks(&self) -> Result<Vec<TaskRow>, StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         let mut stmt = conn
             .prepare(&format!(
                 "SELECT {SELECT_TASK_COLUMNS} FROM transcription ORDER BY time_queued DESC"
@@ -566,7 +576,7 @@ impl SqliteStore {
     /// `Ok(None)` if the task doesn't exist or its `options_json` column is
     /// `NULL` (e.g. an imported foreign row).
     pub fn load_task_spec(&self, id: &TranscriptionId) -> Result<Option<TaskSpec>, StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         let json: Option<String> = conn
             .query_row(
                 "SELECT options_json FROM transcription WHERE id = ?1",
@@ -592,7 +602,7 @@ impl SqliteStore {
 
     /// Fetches all segments for `id`, in insertion order.
     pub fn get_segments(&self, id: &TranscriptionId) -> Result<Vec<Segment>, StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         let mut stmt = conn
             .prepare(
                 "SELECT start_time, end_time, text, translation FROM transcription_segment \
@@ -638,7 +648,7 @@ impl SqliteStore {
         &self,
         name: &str,
     ) -> Result<Option<TranscriptionId>, StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         let raw: Option<String> = conn
             .query_row(
                 "SELECT id FROM transcription \
@@ -668,7 +678,7 @@ impl SqliteStore {
     /// a basename search (contrast
     /// [`Self::find_completed_transcription_by_basename`]).
     pub fn has_task_for_file(&self, path: &Path) -> Result<bool, StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM transcription WHERE file = ?1)",
             params![path.display().to_string()],
@@ -683,7 +693,7 @@ impl SqliteStore {
     /// exist (`query.numRowsAffected() == 0`); this returns
     /// `Err(StoreError::Query)` in that case.
     pub fn set_task_name(&self, id: &TranscriptionId, name: &str) -> Result<(), StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         let affected = conn
             .execute(
                 "UPDATE transcription SET name = ?1 WHERE id = ?2",
@@ -714,7 +724,7 @@ impl SqliteStore {
         id: &TranscriptionId,
         notes: &str,
     ) -> Result<(), StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         let affected = conn
             .execute(
                 "UPDATE transcription SET notes = ?1 WHERE id = ?2",
@@ -743,7 +753,7 @@ impl SqliteStore {
         if ids.is_empty() {
             return Ok(0);
         }
-        let conn = self.lock()?;
+        let conn = self.lock();
         let placeholders = vec!["?"; ids.len()].join(", ");
         let sql = format!("DELETE FROM transcription WHERE id IN ({placeholders})");
         let id_strings: Vec<String> = ids.iter().map(TranscriptionId::to_string).collect();
@@ -773,7 +783,7 @@ impl SqliteStore {
     /// restart, which hardcodes `initial_prompt=""` and never restores
     /// temperature either.
     pub fn spec_from_columns(&self, id: &TranscriptionId) -> Result<Option<TaskSpec>, StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         let row = conn
             .query_row(
                 "SELECT file, url, language, task, whisper_model_size, \
@@ -847,6 +857,10 @@ impl SqliteStore {
             // restart path reads from — matching Buzz's own restart, which
             // hardcodes AI translation off (`transcription_tasks_table_widget.py:762`).
             llm: None,
+            // Likewise no `extract_speech` restoration here: this restart
+            // path predates F-027 too, and Buzz's own restart hardcodes
+            // every feature it predates off rather than reading it back.
+            extract_speech: false,
         };
 
         // Tolerant, comma-split (Buzz's own restart splits on `','` and
@@ -889,7 +903,7 @@ impl SqliteStore {
         &self,
         id: &TranscriptionId,
     ) -> Result<Option<ModelDisplayColumns>, StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         conn.query_row(
             "SELECT model_type, whisper_model_size FROM transcription WHERE id = ?1",
             params![id.to_string()],
@@ -905,7 +919,7 @@ impl SqliteStore {
     /// ascending id order — the order they were inserted in, and the order
     /// the viewer table displays them.
     pub fn get_segment_rows(&self, id: TranscriptionId) -> Result<Vec<SegmentRow>, StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         let mut stmt = conn
             .prepare(
                 "SELECT id, start_time, end_time, text, translation \
@@ -938,7 +952,7 @@ impl SqliteStore {
         start: Millis,
         end: Millis,
     ) -> Result<(), StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         conn.execute(
             "UPDATE transcription_segment SET start_time = ?1, end_time = ?2 WHERE id = ?3",
             params![start.0, end.0, seg],
@@ -950,7 +964,7 @@ impl SqliteStore {
     /// Updates one segment row's `text` in place. See
     /// [`Self::update_segment_times`] for the `seg` id contract.
     pub fn update_segment_text(&self, seg: i64, text: &str) -> Result<(), StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         conn.execute(
             "UPDATE transcription_segment SET text = ?1 WHERE id = ?2",
             params![text, seg],
@@ -966,7 +980,7 @@ impl SqliteStore {
         seg: i64,
         translation: &str,
     ) -> Result<(), StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         conn.execute(
             "UPDATE transcription_segment SET translation = ?1 WHERE id = ?2",
             params![translation, seg],
@@ -985,7 +999,7 @@ impl SqliteStore {
         id: TranscriptionId,
         segs: &[Segment],
     ) -> Result<(), StoreError> {
-        let mut conn = self.lock()?;
+        let mut conn = self.lock();
         let tx = conn.transaction().map_err(query_error)?;
         tx.execute(
             "DELETE FROM transcription_segment WHERE transcription_id = ?1",
@@ -1028,7 +1042,7 @@ impl SqliteStore {
     pub fn copy_transcription(&self, id: TranscriptionId) -> Result<TranscriptionId, StoreError> {
         let new_id = TranscriptionId::new();
         let now = now_iso();
-        let conn = self.lock()?;
+        let conn = self.lock();
         let affected = conn
             .execute(
                 "INSERT INTO transcription (
@@ -1070,7 +1084,7 @@ impl SqliteStore {
         segs: &[Segment],
     ) -> Result<(), StoreError> {
         let now = now_iso();
-        let mut conn = self.lock()?;
+        let mut conn = self.lock();
         let tx = conn.transaction().map_err(query_error)?;
         tx.execute(
             "UPDATE transcription SET status = ?1, time_ended = ?2 WHERE id = ?3",
@@ -1102,7 +1116,7 @@ impl SqliteStore {
         fraction: f64,
     ) -> Result<(), StoreError> {
         let clamped = fraction.clamp(0.0, 1.0);
-        let conn = self.lock()?;
+        let conn = self.lock();
         conn.execute(
             "UPDATE transcription SET progress = ?1 WHERE id = ?2",
             params![clamped, id.to_string()],
@@ -1118,7 +1132,7 @@ impl SqliteStore {
         id: TranscriptionId,
         dir: &Path,
     ) -> Result<(), StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         conn.execute(
             "UPDATE transcription SET last_export_folder = ?1 WHERE id = ?2",
             params![dir.display().to_string(), id.to_string()],
@@ -1131,7 +1145,7 @@ impl SqliteStore {
     /// doesn't exist and when no folder has been set yet — callers fall
     /// back to the input file's directory either way.
     pub fn last_export_folder(&self, id: TranscriptionId) -> Result<Option<PathBuf>, StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         let value: Option<String> = conn
             .query_row(
                 "SELECT last_export_folder FROM transcription WHERE id = ?1",
@@ -1194,7 +1208,7 @@ impl SqliteStore {
             "Whisper.cpp"
         };
 
-        let conn = self.lock()?;
+        let conn = self.lock();
         conn.execute(
             "INSERT INTO transcription (
                 id, file, url, language, model_type, source, status, task,
@@ -1261,7 +1275,7 @@ impl SqliteStore {
         end: Millis,
         text: &str,
     ) -> Result<i64, StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         let status: Option<String> = conn
             .query_row(
                 "SELECT status FROM transcription WHERE id = ?1",
@@ -1302,7 +1316,7 @@ impl SqliteStore {
     /// call for `id` errs (see its doc comment).
     pub fn complete_live_session(&self, id: TranscriptionId) -> Result<(), StoreError> {
         let now = now_iso();
-        let conn = self.lock()?;
+        let conn = self.lock();
         conn.execute(
             "UPDATE transcription SET status = ?1, time_ended = ?2 WHERE id = ?3",
             params![Status::Completed.as_str(), now, id.to_string()],
@@ -1346,7 +1360,7 @@ impl TaskStore for SqliteStore {
             detail: format!("serializing task spec: {err}"),
         })?;
 
-        let conn = self.lock()?;
+        let conn = self.lock();
         conn.execute(
             "INSERT INTO transcription (
                 id, export_formats, file, output_folder, language, model_type,
@@ -1372,10 +1386,9 @@ impl TaskStore for SqliteStore {
                 spec.options.model.size.as_str(),
                 spec.options.model.hf_repo,
                 spec.options.word_timestamps,
-                // No `TaskSpec` field carries this yet — Demucs speech
-                // extraction (F-027) is a later milestone; every task is
-                // created with `extract_speech = 0` until it exists.
-                false,
+                // F-027: the real option, now that `TaskSpec` carries it
+                // (was hardcoded `0`/`false` before M8).
+                spec.options.extract_speech,
                 options_json,
             ],
         )
@@ -1384,7 +1397,7 @@ impl TaskStore for SqliteStore {
     }
 
     fn requeue_task(&self, id: &TranscriptionId) -> Result<(), StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         let affected = conn
             .execute(
                 "UPDATE transcription SET status = ?1, progress = 0.0, time_started = NULL, \
@@ -1402,7 +1415,7 @@ impl TaskStore for SqliteStore {
 
     fn mark_started(&self, id: &TranscriptionId) -> Result<(), StoreError> {
         let now = now_iso();
-        let conn = self.lock()?;
+        let conn = self.lock();
         conn.execute(
             "UPDATE transcription SET status = ?1, time_started = ?2 WHERE id = ?3",
             params![Status::InProgress.as_str(), now, id.to_string()],
@@ -1413,7 +1426,7 @@ impl TaskStore for SqliteStore {
 
     fn update_progress(&self, id: &TranscriptionId, fraction: f64) -> Result<(), StoreError> {
         let clamped = fraction.clamp(0.0, 1.0);
-        let conn = self.lock()?;
+        let conn = self.lock();
         conn.execute(
             "UPDATE transcription SET status = ?1, progress = ?2 WHERE id = ?3",
             params![Status::InProgress.as_str(), clamped, id.to_string()],
@@ -1423,7 +1436,7 @@ impl TaskStore for SqliteStore {
     }
 
     fn update_file(&self, id: &TranscriptionId, path: &Path) -> Result<(), StoreError> {
-        let conn = self.lock()?;
+        let conn = self.lock();
         conn.execute(
             "UPDATE transcription SET file = ?1 WHERE id = ?2",
             params![path.display().to_string(), id.to_string()],
@@ -1432,9 +1445,19 @@ impl TaskStore for SqliteStore {
         Ok(())
     }
 
+    fn update_language(&self, id: &TranscriptionId, language: &str) -> Result<(), StoreError> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE transcription SET language = ?1 WHERE id = ?2",
+            params![language, id.to_string()],
+        )
+        .map_err(query_error)?;
+        Ok(())
+    }
+
     fn mark_completed(&self, id: &TranscriptionId, segments: &[Segment]) -> Result<(), StoreError> {
         let now = now_iso();
-        let mut conn = self.lock()?;
+        let mut conn = self.lock();
         let tx = conn.transaction().map_err(query_error)?;
         tx.execute(
             "UPDATE transcription SET status = ?1, time_ended = ?2 WHERE id = ?3",
@@ -1462,7 +1485,7 @@ impl TaskStore for SqliteStore {
 
     fn mark_failed(&self, id: &TranscriptionId, error: &str) -> Result<(), StoreError> {
         let now = now_iso();
-        let conn = self.lock()?;
+        let conn = self.lock();
         conn.execute(
             "UPDATE transcription SET status = ?1, time_ended = ?2, error_message = ?3 \
              WHERE id = ?4",
@@ -1474,7 +1497,7 @@ impl TaskStore for SqliteStore {
 
     fn mark_canceled(&self, id: &TranscriptionId) -> Result<(), StoreError> {
         let now = now_iso();
-        let conn = self.lock()?;
+        let conn = self.lock();
         conn.execute(
             "UPDATE transcription SET status = ?1, time_ended = ?2 WHERE id = ?3",
             params![Status::Canceled.as_str(), now, id.to_string()],
@@ -1485,7 +1508,7 @@ impl TaskStore for SqliteStore {
 
     fn mark_skipped(&self, id: &TranscriptionId, segments: &[Segment]) -> Result<(), StoreError> {
         let now = now_iso();
-        let mut conn = self.lock()?;
+        let mut conn = self.lock();
         let tx = conn.transaction().map_err(query_error)?;
         tx.execute(
             "UPDATE transcription SET status = ?1, time_ended = ?2 WHERE id = ?3",
@@ -1571,6 +1594,7 @@ mod tests {
                 initial_prompt: String::new(),
                 temperature: DEFAULT_TEMPERATURE.to_vec(),
                 llm: None,
+                extract_speech: false,
             },
             output: OutputSpec {
                 formats: [OutputFormat::Txt, OutputFormat::Srt].into_iter().collect(),
@@ -1612,7 +1636,7 @@ mod tests {
     }
 
     fn fetch_full_row(store: &SqliteStore, id: &TranscriptionId) -> FullRow {
-        let conn = store.conn.lock().expect("lock");
+        let conn = store.lock();
         conn.query_row(
             "SELECT error_message, export_formats, file, output_folder, progress, language, \
              model_type, source, status, task, time_ended, time_queued, time_started, url, \
@@ -1686,6 +1710,63 @@ mod tests {
         let round_tripped: TaskSpec =
             serde_json::from_str(&row.options_json.expect("options_json set")).expect("parses");
         assert_eq!(round_tripped, spec);
+    }
+
+    #[test]
+    fn insert_writes_extract_speech_column() {
+        // F-027: `create_task` used to hardcode this column to `0`/`false`
+        // regardless of the option; it must now write the real value.
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        let mut spec = sample_task_spec();
+        spec.options.extract_speech = true;
+        store
+            .create_task(&id, &spec, Source::FileImport)
+            .expect("create");
+
+        let row = fetch_full_row(&store, &id);
+        assert!(row.extract_speech);
+    }
+
+    #[test]
+    fn update_language_persists_and_reads_back() {
+        // F-114: enhanced language detection writes its result back through
+        // `TaskStore::update_language` so later viewer exports/the task
+        // table see it.
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        let spec = sample_task_spec();
+        store
+            .create_task(&id, &spec, Source::FileImport)
+            .expect("create");
+        assert_eq!(fetch_full_row(&store, &id).language.as_deref(), Some("en"));
+
+        store.update_language(&id, "fr").expect("update_language");
+
+        assert_eq!(fetch_full_row(&store, &id).language.as_deref(), Some("fr"));
+    }
+
+    #[test]
+    fn store_survives_a_panicked_lock_holder() {
+        // §7.3: a caller that panics while holding the connection-mutex
+        // guard must not permanently wedge the store for every later
+        // caller — `lock()` recovers the poisoned guard rather than
+        // returning `Err` forever.
+        let store = SqliteStore::open_in_memory().expect("open");
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store.lock();
+            panic!("simulated panic while holding the connection lock");
+        }));
+        assert!(panicked.is_err(), "the panic must have actually unwound");
+
+        // A later write through the now-poisoned mutex must still succeed.
+        let id = TranscriptionId::new();
+        let spec = sample_task_spec();
+        store
+            .create_task(&id, &spec, Source::FileImport)
+            .expect("create_task succeeds after the lock recovers from poisoning");
+        assert!(!fetch_full_row(&store, &id).time_queued.is_empty());
     }
 
     #[test]
@@ -1899,7 +1980,7 @@ mod tests {
         // (`transcription_dao.py:336-351`), not `time_queued` — this makes
         // the test fail if the query orders by the wrong column.
         {
-            let conn = store.conn.lock().expect("lock");
+            let conn = store.lock();
             conn.execute(
                 "UPDATE transcription SET time_queued = '2020-01-01T00:00:00', \
                  time_ended = '2022-01-01T00:00:00' WHERE id = ?1",
@@ -2144,7 +2225,7 @@ mod tests {
         // NULL) must round-trip to `Ok(None)`, not error.
         let foreign_id = TranscriptionId::new();
         {
-            let conn = store.conn.lock().expect("lock");
+            let conn = store.lock();
             conn.execute(
                 "INSERT INTO transcription (id, status, time_queued, kind) \
                  VALUES (?1, 'completed', ?2, 'file')",
@@ -2160,7 +2241,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("open");
         let id = TranscriptionId::new();
         {
-            let conn = store.conn.lock().expect("lock");
+            let conn = store.lock();
             conn.execute(
                 "INSERT INTO transcription (id, status, source, time_queued, kind) \
                  VALUES (?1, 'completed', 'some_legacy_source', ?2, 'file')",
@@ -2189,7 +2270,7 @@ mod tests {
         let tasks = store.list_tasks().expect("list");
         assert_eq!(tasks.len(), 1);
 
-        let conn = store.conn.lock().expect("lock");
+        let conn = store.lock();
         let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .expect("journal_mode");
@@ -2211,7 +2292,7 @@ mod tests {
         // Force a deterministic ordering independent of wall-clock
         // resolution: rewrite time_queued directly.
         {
-            let conn = store.conn.lock().expect("lock");
+            let conn = store.lock();
             conn.execute(
                 "UPDATE transcription SET time_queued = '2020-01-01T00:00:00' WHERE id = ?1",
                 params![first.to_string()],
@@ -2432,7 +2513,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("open");
         let id = TranscriptionId::new();
         {
-            let conn = store.conn.lock().expect("lock");
+            let conn = store.lock();
             conn.execute(
                 "INSERT INTO transcription (
                     id, file, url, language, task, whisper_model_size,
@@ -2535,7 +2616,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("open");
         let id = TranscriptionId::new();
         {
-            let conn = store.conn.lock().expect("lock");
+            let conn = store.lock();
             conn.execute(
                 "INSERT INTO transcription (id, status, time_queued, kind) \
                  VALUES (?1, 'completed', ?2, 'file')",
@@ -2607,7 +2688,7 @@ mod tests {
 
         let store = SqliteStore::open(&db_path).expect("reopen migrates to v2");
 
-        let conn = store.conn.lock().expect("lock");
+        let conn = store.lock();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("user_version");
@@ -2951,6 +3032,7 @@ mod tests {
             initial_prompt: "hello there".to_string(),
             temperature: DEFAULT_TEMPERATURE.to_vec(),
             llm: None,
+            extract_speech: false,
         }
     }
 

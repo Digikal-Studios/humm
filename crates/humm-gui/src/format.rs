@@ -17,6 +17,7 @@ use chrono::NaiveDateTime;
 use humm_core::domain::Status;
 use humm_core::format::format_eta;
 
+use crate::i18n::tr;
 use crate::viewmodel::{Phase, RowVm};
 
 /// The task store's naive-local ISO-8601 timestamp format
@@ -91,6 +92,13 @@ fn percent(fraction: f32) -> i64 {
 /// `now` is a parameter (rather than read internally via
 /// `chrono::Local::now()`) so the in-progress/ETA branch is deterministic
 /// and unit-testable against synthetic timestamps.
+///
+/// [`Phase::Isolating`] (M8, F-027) is the one phase text that goes through
+/// [`tr`] rather than a literal Buzz string: every other branch here pins a
+/// byte-exact Buzz status (the module doc's "Fluent would break the
+/// byte-exact contract" rule), but "isolating speech" has no Buzz precedent
+/// to be exact *about* — it's a humm addition (`docs/design/UX_SPEC.md`'s ✚
+/// phase list), so it is translated like any other UI string instead.
 pub fn status_text(row: &RowVm, now: NaiveDateTime) -> String {
     if row.status == Status::InProgress {
         match row.phase {
@@ -101,6 +109,7 @@ pub fn status_text(row: &RowVm, now: NaiveDateTime) -> String {
             Phase::Media(fraction) => {
                 return format!("Downloading media ({}%)", percent(fraction));
             }
+            Phase::Isolating => return tr("status-isolating-speech"),
             Phase::None => {}
         }
     }
@@ -363,6 +372,20 @@ mod tests {
         assert_eq!(
             status_text(&row, dt("2026-07-21T09:00:00.0")),
             "Downloading media (75%)"
+        );
+    }
+
+    #[test]
+    fn status_text_isolating_speech_phase() {
+        // Locale-independent by construction: compares against `tr` calling
+        // the same key, rather than a hardcoded English string, since this
+        // (unlike every other branch in this file) is a translated humm
+        // addition, not a byte-exact Buzz string.
+        let mut row = base_row(Status::InProgress);
+        row.phase = Phase::Isolating;
+        assert_eq!(
+            status_text(&row, dt("2026-07-21T09:00:00.0")),
+            crate::i18n::tr("status-isolating-speech")
         );
     }
 

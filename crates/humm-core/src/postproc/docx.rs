@@ -163,7 +163,8 @@ mod tests {
     use crate::domain::Millis;
     use crate::error::StoreError;
     use crate::settings::{
-        AiSummarySettings, AutoResizeSettings, ExportDocxSettings, SkipSettings,
+        AiSummarySettings, AutoResizeSettings, ExportDocxSettings, LangDetectSettings,
+        NoiseReductionSettings, SkipSettings,
     };
     use tempfile::TempDir;
 
@@ -200,6 +201,14 @@ mod tests {
 
         fn update_file(&self, _id: &TranscriptionId, _path: &Path) -> Result<(), StoreError> {
             unreachable!("run() never updates the file path")
+        }
+
+        fn update_language(
+            &self,
+            _id: &TranscriptionId,
+            _language: &str,
+        ) -> Result<(), StoreError> {
+            unreachable!("run() never updates the language")
         }
 
         fn mark_completed(
@@ -272,6 +281,8 @@ mod tests {
             docx: ExportDocxSettings::default(),
             resize: AutoResizeSettings::default(),
             paragraph_split: Millis(2000),
+            noise_reduction: NoiseReductionSettings::default(),
+            language_detection: LangDetectSettings::default(),
         }
     }
 

@@ -457,6 +457,7 @@ mod tests {
                 initial_prompt: String::new(),
                 temperature: DEFAULT_TEMPERATURE.to_vec(),
                 llm: None,
+                extract_speech: false,
             },
             output: OutputSpec::default(),
         }

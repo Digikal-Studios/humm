@@ -73,6 +73,11 @@ table-menu-notes = 添加/编辑备注
 task-transcribe = 识别
 task-translate = 翻译成英语
 
+## Task table — status-column phase text (format.rs, F-027, M8) -- a humm
+## addition, not a Buzz string; translated fresh.
+
+status-isolating-speech = 正在分离人声
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = 录制

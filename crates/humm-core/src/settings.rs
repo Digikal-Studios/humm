@@ -289,6 +289,11 @@ pub struct FileTranscriberSettings {
     /// `run.rs`, viewer export menu, folder-watch emit). `None` uses
     /// `export::DEFAULT_EXPORT_TEMPLATE`.
     pub default_export_template: Option<String>,
+    /// Whether speech isolation (F-027, demucs) was last enabled in the
+    /// options sheet — the sticky counterpart of
+    /// [`crate::domain::TranscriptionOptions::extract_speech`]. Defaults to
+    /// `false`.
+    pub extract_speech: bool,
 }
 
 /// Folder-watch service settings (F-030), ported from Buzz's
@@ -321,7 +326,8 @@ pub struct FolderWatchSettings {
 /// Post-processing hook settings (ADR-010's four native "plugins" — F-111
 /// ai_summary, F-113 export_docx, F-115 skip_already_transcribed, F-116
 /// transcript_resizer — implemented as first-class features, not a plugin
-/// mechanism), design spec §1/§2.
+/// mechanism), design spec §1/§2. M8 (F-027/F-112/F-114) adds the
+/// pre-transcription hooks' settings alongside these post-run ones.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PostprocSettings {
@@ -333,6 +339,10 @@ pub struct PostprocSettings {
     pub skip_already_transcribed: SkipSettings,
     /// Automatic transcript-resizing hook (F-116).
     pub transcript_resizer: AutoResizeSettings,
+    /// Noise-reduction hook (F-112, M8).
+    pub noise_reduction: NoiseReductionSettings,
+    /// Enhanced language-detection hook (F-114, M8).
+    pub language_detection: LangDetectSettings,
 }
 
 /// AI Summary hook settings (F-111), ported from Buzz's
@@ -533,6 +543,58 @@ fn default_punctuation() -> String {
 
 fn default_max_length() -> String {
     AutoResizeSettings::DEFAULT_MAX_LENGTH.to_string()
+}
+
+/// Noise-reduction hook settings (F-112, M8 design spec §4), ported from
+/// Buzz's `plugins/deep_filter_net/plugin.py` `config_fields`. Every field's
+/// Buzz default is already the type's zero value (plugins default-disabled;
+/// the denoised file is cleaned up unless kept), so this derives [`Default`]
+/// directly — the same all-false shape as [`ExportDocxSettings`].
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NoiseReductionSettings {
+    /// Whether the hook runs before transcription. Buzz plugins default to
+    /// disabled.
+    pub enabled: bool,
+    /// Whether the denoised `<input_stem>_DeepFilterNet3.wav` is kept next
+    /// to the input as a user artifact, rather than cleaned up on every
+    /// terminal path. Default `false`.
+    pub keep_denoised_file: bool,
+}
+
+/// Enhanced language-detection hook settings (F-114, M8 design spec §5),
+/// ported from Buzz's `plugins/enhanced_language_detection/plugin.py`
+/// `config_fields`.
+///
+/// `#[derive(Default)]` is deliberately not used: `download_tiny_if_missing`
+/// must default to `true` (Buzz parity — a missing model is fetched rather
+/// than silently skipping detection), which `bool`'s derived `Default`
+/// (`false`) would get backwards. Same manual-`Default`-plus-field-default
+/// pattern as [`UpdateSettings::check_enabled`]; see that field's doc
+/// comment for the full missing-key-vs-missing-section contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LangDetectSettings {
+    /// Whether the hook runs before transcription. Buzz plugins default to
+    /// disabled.
+    pub enabled: bool,
+    /// Whether the `tiny` model is downloaded automatically when no
+    /// already-downloaded model is available to detect with. Defaults to
+    /// `true` whether the `[postproc.language_detection]` section is absent
+    /// entirely, present but missing this key, or present with only
+    /// `enabled` set — only an explicit `download_tiny_if_missing = false`
+    /// turns it off.
+    #[serde(default = "default_true")]
+    pub download_tiny_if_missing: bool,
+}
+
+impl Default for LangDetectSettings {
+    fn default() -> Self {
+        LangDetectSettings {
+            enabled: false,
+            download_tiny_if_missing: true,
+        }
+    }
 }
 
 /// Settings governing telemetry opt-out and the anonymous analytics
@@ -1055,9 +1117,9 @@ pub enum SettingsError {
 mod tests {
     use super::{
         AiSummarySettings, AutoResizeSettings, ExportDocxSettings, FileTranscriberSettings,
-        FolderWatchSettings, OpenAiSettings, PostprocSettings, PresentationSettings,
-        RecordingSettings, Settings, SettingsError, SkipSettings, UiSettings, ViewerGeometry,
-        ViewerSettings,
+        FolderWatchSettings, LangDetectSettings, NoiseReductionSettings, OpenAiSettings,
+        PostprocSettings, PresentationSettings, RecordingSettings, Settings, SettingsError,
+        SkipSettings, UiSettings, ViewerGeometry, ViewerSettings,
     };
     use std::path::Path;
 
@@ -1101,6 +1163,7 @@ mod tests {
         settings.file_transcriber.enable_llm_translation = true;
         settings.file_transcriber.llm_model = Some("gpt-4o-mini".to_string());
         settings.file_transcriber.llm_prompt = Some("Translate to English.".to_string());
+        settings.file_transcriber.extract_speech = true;
         settings.openai.base_url = Some("https://example.com/v1".to_string());
         settings.openai.api_model = "whisper-1-custom".to_string();
         settings.privacy.telemetry_enabled = false;
@@ -1854,6 +1917,43 @@ mod tests {
     }
 
     #[test]
+    fn postproc_noise_reduction_defaults_match_buzz() {
+        // Buzz plugins default disabled; the denoised file is not kept.
+        let noise_reduction = NoiseReductionSettings::default();
+        assert!(!noise_reduction.enabled);
+        assert!(!noise_reduction.keep_denoised_file);
+        assert_eq!(
+            Settings::default().postproc.noise_reduction,
+            noise_reduction
+        );
+    }
+
+    #[test]
+    fn postproc_language_detection_defaults_match_buzz() {
+        // Buzz plugin default: disabled, but a missing model is downloaded
+        // (`enhanced_language_detection/plugin.py`).
+        let language_detection = LangDetectSettings::default();
+        assert!(!language_detection.enabled);
+        assert!(language_detection.download_tiny_if_missing);
+        assert_eq!(
+            Settings::default().postproc.language_detection,
+            language_detection
+        );
+    }
+
+    #[test]
+    fn language_detection_download_tiny_defaults_true_when_section_present_key_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "[postproc.language_detection]\nenabled = true\n")
+            .expect("write file");
+
+        let loaded = Settings::load(&path).expect("load");
+        assert!(loaded.postproc.language_detection.enabled);
+        assert!(loaded.postproc.language_detection.download_tiny_if_missing);
+    }
+
+    #[test]
     fn postproc_defaults_apply_when_sections_present_but_partial() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("settings.toml");
@@ -1881,6 +1981,14 @@ mod tests {
         assert_eq!(
             loaded.postproc.skip_already_transcribed,
             SkipSettings::default()
+        );
+        assert_eq!(
+            loaded.postproc.noise_reduction,
+            NoiseReductionSettings::default()
+        );
+        assert_eq!(
+            loaded.postproc.language_detection,
+            LangDetectSettings::default()
         );
     }
 
@@ -1927,6 +2035,15 @@ mod tests {
         settings.postproc.transcript_resizer.punctuation = ".,".to_string();
         settings.postproc.transcript_resizer.split_by_max_length = false;
         settings.postproc.transcript_resizer.max_length = "100".to_string();
+
+        settings.postproc.noise_reduction.enabled = true;
+        settings.postproc.noise_reduction.keep_denoised_file = true;
+
+        settings.postproc.language_detection.enabled = true;
+        settings
+            .postproc
+            .language_detection
+            .download_tiny_if_missing = false;
 
         settings.save(&path).expect("save");
         let loaded = Settings::load(&path).expect("load");
@@ -2021,5 +2138,54 @@ mod tests {
         assert!(loaded.recording.backend.is_none());
         assert_eq!(loaded.folder_watch, FolderWatchSettings::default());
         assert_eq!(loaded.postproc, PostprocSettings::default());
+    }
+
+    #[test]
+    fn pre_m8_settings_toml_parses_with_new_sections_defaulted() {
+        // A representative M7-era settings.toml: `[postproc.*]` sections
+        // exist (M7 introduced them), but neither of M8's new
+        // `[postproc.noise_reduction]`/`[postproc.language_detection]`
+        // sections is written at all, and `[file_transcriber]` has no
+        // `extract_speech` key. A hand-edited or pre-M8-saved file must
+        // still load, with every new field taking its documented default.
+        const PRE_M8_TOML: &str = r#"
+            [file_transcriber]
+            language = "en"
+            task = "transcribe"
+            model_size = "large-v3-turbo"
+            word_timestamps = true
+
+            [postproc.ai_summary]
+            enabled = true
+            model = "gpt-4o"
+
+            [postproc.transcript_resizer]
+            enabled = true
+            max_length = "80"
+        "#;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, PRE_M8_TOML).expect("write pre-M8 file");
+
+        let loaded = Settings::load(&path).expect("load pre-M8 file");
+
+        // Old fields parsed as written.
+        assert_eq!(loaded.file_transcriber.language, Some("en".to_string()));
+        assert!(loaded.postproc.ai_summary.enabled);
+        assert_eq!(loaded.postproc.ai_summary.model, "gpt-4o");
+        assert!(loaded.postproc.transcript_resizer.enabled);
+
+        // Every new M8 field/section takes its documented default.
+        assert!(!loaded.file_transcriber.extract_speech);
+        assert_eq!(
+            loaded.postproc.noise_reduction,
+            NoiseReductionSettings::default()
+        );
+        assert_eq!(
+            loaded.postproc.language_detection,
+            LangDetectSettings::default()
+        );
+        assert!(loaded.postproc.language_detection.download_tiny_if_missing);
     }
 }

@@ -2894,6 +2894,10 @@ impl HummApp {
             // checked+non-empty-model gate the file path uses), so the
             // persisted options honestly reflect the run.
             llm: llm_snapshot,
+            // Speech isolation (F-027) is a file-transcription-only feature
+            // (Buzz has no demucs pre-pass for live recording either) —
+            // always off for a recording session's persisted snapshot.
+            extract_speech: false,
         };
 
         let request = LiveSessionRequest {

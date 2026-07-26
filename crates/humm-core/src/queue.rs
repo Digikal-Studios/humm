@@ -184,6 +184,29 @@ pub enum TaskEventKind {
         /// task itself.
         errors: Vec<String>,
     },
+    /// The task moved into a distinguishable mid-run phase that isn't a
+    /// plain progress fraction (M8, design spec §3/§8) — additive, like
+    /// [`Self::Skipped`]/[`Self::PostProcessed`] before it. Currently
+    /// emitted only for [`TaskPhase::IsolatingSpeech`] (F-027's demucs
+    /// pre-pass, wired in a later M8 task); extensible to future phases
+    /// without another `TaskEventKind` variant.
+    PhaseChanged {
+        /// Which phase the task entered.
+        phase: TaskPhase,
+    },
+}
+
+/// A distinguishable mid-run phase reported by [`TaskEventKind::PhaseChanged`]
+/// (M8, design spec §3/§8). `#[non_exhaustive]` is deliberately not used —
+/// exhaustive matches on this enum are this crate's convention, so adding a
+/// future phase is a compile-time-visible change at every match site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskPhase {
+    /// Isolating speech from background noise/music with demucs before
+    /// transcription (F-027). Indeterminate progress: the subprocess only
+    /// emits human-oriented tqdm output on stderr, which Standing Policy
+    /// rule 3 forbids parsing, so no fraction accompanies this phase.
+    IsolatingSpeech,
 }
 
 /// A [`TaskEventKind`] tagged with the task it belongs to.
@@ -1539,7 +1562,8 @@ mod tests {
     use crate::openai::{LlmEndpoint, OpenAiAuth};
     use crate::postproc::{PostprocConfig, PostprocConfigSource};
     use crate::settings::{
-        AiSummarySettings, AutoResizeSettings, ExportDocxSettings, SkipSettings,
+        AiSummarySettings, AutoResizeSettings, ExportDocxSettings, LangDetectSettings,
+        NoiseReductionSettings, SkipSettings,
     };
     use pretty_assertions::assert_eq;
     use std::path::Path;
@@ -1693,6 +1717,16 @@ mod tests {
 
         fn update_file(&self, id: &TranscriptionId, path: &Path) -> Result<(), StoreError> {
             self.record(StoreCall::UpdateFile(*id, path.to_path_buf()));
+            Ok(())
+        }
+
+        fn update_language(
+            &self,
+            _id: &TranscriptionId,
+            _language: &str,
+        ) -> Result<(), StoreError> {
+            // No queue-level test exercises this yet — F-114's
+            // before-transcription seam lands in a later M8 task.
             Ok(())
         }
 
@@ -2208,6 +2242,8 @@ mod tests {
             docx: ExportDocxSettings::default(),
             resize: AutoResizeSettings::default(),
             paragraph_split: Millis(2000),
+            noise_reduction: NoiseReductionSettings::default(),
+            language_detection: LangDetectSettings::default(),
         }
     }
 
@@ -2227,6 +2263,8 @@ mod tests {
             docx,
             resize,
             paragraph_split: Millis(2000),
+            noise_reduction: NoiseReductionSettings::default(),
+            language_detection: LangDetectSettings::default(),
         }
     }
 
