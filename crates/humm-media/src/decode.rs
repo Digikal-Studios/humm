@@ -111,7 +111,15 @@ fn run_ffmpeg_pcm(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|err| map_spawn_error("ffmpeg", "HUMM_FFMPEG", binary, err))?;
+        .map_err(|err| {
+            map_spawn_error(
+                "ffmpeg",
+                "HUMM_FFMPEG",
+                "install it (e.g. `brew install ffmpeg`)",
+                binary,
+                err,
+            )
+        })?;
 
     let mut stdout = child.stdout.take().expect("stdout was piped at spawn");
     let mut stderr = child.stderr.take().expect("stderr was piped at spawn");

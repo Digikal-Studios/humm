@@ -509,7 +509,8 @@ pub trait TranscriptionEngine: Send {
 ///
 /// Implemented by `humm-media`'s `DemucsIsolator` (a killable `demucs`
 /// subprocess, ADR-023) — wired into [`crate::queue::RunnerDeps::isolator`]
-/// (`None` until Task 5). Ported from Buzz's demucs pre-pass
+/// (Task 5: the CLI's `-e` always wires a real one; the GUI still passes
+/// `None` until a later M8 task). Ported from Buzz's demucs pre-pass
 /// (`file_transcriber_queue_worker.py:60-91,180-206`).
 pub trait SpeechIsolator: Send + Sync {
     /// Writes an isolated-vocals file next to `input` (Buzz naming:

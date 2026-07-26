@@ -43,7 +43,15 @@ impl AudioEncoder for FfmpegDecoder {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|err| map_spawn_error("ffmpeg", "HUMM_FFMPEG", self.binary(), err))?;
+            .map_err(|err| {
+                map_spawn_error(
+                    "ffmpeg",
+                    "HUMM_FFMPEG",
+                    "install it (e.g. `brew install ffmpeg`)",
+                    self.binary(),
+                    err,
+                )
+            })?;
 
         let mut stdin = child.stdin.take().expect("stdin was piped at spawn");
         let mut stdout = child.stdout.take().expect("stdout was piped at spawn");

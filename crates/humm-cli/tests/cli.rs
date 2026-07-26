@@ -251,7 +251,8 @@ fn e_flag_accepted_with_stub_demucs() {
         std::env::var("PATH").unwrap_or_default()
     );
 
-    env.cmd()
+    let output = env
+        .cmd()
         .env("PATH", path_var)
         .arg("add")
         .arg(&wav)
@@ -259,10 +260,30 @@ fn e_flag_accepted_with_stub_demucs() {
         .arg("-s")
         .arg("tiny")
         .arg("-e")
+        .arg("--json")
         .arg("-d")
         .arg(out.path())
         .assert()
         .code(0);
+
+    // Review fix (Important 3): every assertion below (exit 0, one
+    // completed row, `_speech.mp3` absent afterward) would pass identically
+    // if the isolator were never wired at all — `-e` skips isolation
+    // silently whenever `RunnerDeps.isolator` is `None`, and a task that
+    // never isolates also never leaves a `_speech.mp3` to clean up. The
+    // `--json` stream's `phase`/`isolating_speech` event is the one
+    // observable that actually proves the isolator ran (design spec §3,
+    // `TaskEventKind::PhaseChanged`) — `json_phase_matches_schema` (`run.rs`
+    // unit tests) pins its exact shape.
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    let saw_isolating_phase = stdout.lines().any(|line| {
+        let value: serde_json::Value = serde_json::from_str(line).expect("valid json line");
+        value["event"] == "phase" && value["phase"] == "isolating_speech"
+    });
+    assert!(
+        saw_isolating_phase,
+        "expected a phase=isolating_speech event proving the isolator actually ran: {stdout}"
+    );
 
     let store = env.store();
     let tasks = store.list_tasks().expect("list");

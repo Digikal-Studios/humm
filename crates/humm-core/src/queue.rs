@@ -1375,9 +1375,10 @@ impl Runner {
         // (1) F-027 speech isolation — gated on the task's own option
         // (`extract_speech` is a per-task choice, not a Preferences hook, so
         // it is deliberately *not* gated on `postproc_cfg`) and an isolator
-        // actually being wired (`self.isolator`, `None` until Task 5). Not
-        // `catch_unwind`-contained beyond `run_task`'s existing outer
-        // containment: a genuine isolation panic fails the task (Buzz
+        // actually being wired (`self.isolator` — Task 5 always wires a real
+        // one on the CLI; the GUI still passes `None` until a later M8
+        // task). Not `catch_unwind`-contained beyond `run_task`'s existing
+        // outer containment: a genuine isolation panic fails the task (Buzz
         // parity) — unlike reduction/detection below, which degrade instead.
         if job.options.extract_speech
             && let Some(isolator) = self.isolator.clone()

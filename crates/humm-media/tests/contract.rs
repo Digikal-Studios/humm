@@ -952,12 +952,21 @@ fn yt_dlp_capability_probe_reports_version_when_present() {
 #[test]
 #[ignore = "requires a real demucs install (set HUMM_DEMUCS_CONTRACT=1); see doc comment for provisioning"]
 fn real_demucs_isolates_vocals_from_whisper_french() {
+    // Skip (not panic/fail) when the extra gate isn't set — this test is
+    // still `#[ignore]`d like every other contract test in this file, but
+    // CLAUDE.md's documented `cargo test -p humm-media -- --ignored` gate
+    // (needing only ffmpeg/yt-dlp) must stay green even when someone runs
+    // exactly that command without also provisioning a real demucs (task-5
+    // review, Important 2 — the original `panic!` here made that documented
+    // command always fail this one test).
     if std::env::var("HUMM_DEMUCS_CONTRACT").as_deref() != Ok("1") {
-        panic!(
-            "HUMM_DEMUCS_CONTRACT is not set to 1 — provision a real demucs \
+        eprintln!(
+            "SKIP real_demucs_isolates_vocals_from_whisper_french: \
+             HUMM_DEMUCS_CONTRACT is not set to 1 — provision a real demucs \
              install first (see this test's doc comment) and point HUMM_DEMUCS \
              at it if it isn't a plain `demucs` on PATH"
         );
+        return;
     }
 
     // Copied into a scratch dir so the isolated `_speech.mp3` derivative

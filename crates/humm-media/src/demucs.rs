@@ -10,28 +10,57 @@
 //! produces `<scratch>/htdemucs/vocals.mp3` (+ `no_vocals.mp3`, ignored) —
 //! the `--filename` override (literal demucs template placeholders, not
 //! Rust-formatted) omits `{track}`, so demucs never nests a per-input
-//! subfolder. No `-d` flag: demucs's own cuda-else-cpu default is exactly
-//! Buzz's device rule (`file_transcriber_queue_worker.py:183-188`). The
-//! vocals file is renamed to `<input_stem>_speech.mp3` beside `input` (Buzz
-//! naming, `:191`) — **only after** a fully successful run, so no partial or
-//! failed-run artifact is ever written next to the user's file; every
-//! intermediate byte lives in a `tempfile::tempdir()` scratch directory that
-//! is deleted (recursively, on `Drop`) on every exit path, including a
-//! cancellation or a panic unwind. This is also the whole mechanism behind
-//! the Task 4 review's cleanup contract ("on any `Err`, remove partial/
-//! produced output") — there is nothing beside the input to remove, because
-//! nothing is ever written there before success is confirmed.
+//! subfolder. No `-d` flag: demucs is left to its own cuda-else-cpu default.
+//! **Stated honestly, not claimed as exact Buzz parity**: Buzz's own device
+//! selection checks `BUZZ_FORCE_CPU` *first*, falling back to cuda-else-cpu
+//! only when it's unset (`file_transcriber_queue_worker.py:183-188`);
+//! ADR-023 forbids passing `-d` to this subprocess at all, so `HUMM_FORCE_CPU`
+//! (which does gate the main whisper engine, `env::use_gpu_resolution`) has
+//! no effect on the demucs step specifically — a `HUMM_FORCE_CPU=true` user
+//! still gets CUDA-if-available for isolation alone. Not fixed here
+//! (ledgered for the docs sweep's deviations list). The vocals file is
+//! renamed to `<input_stem>_speech.mp3` beside `input` (Buzz naming, `:191`)
+//! — **only after** a fully successful run, so no partial or failed-run
+//! artifact is ever written next to the user's file; every intermediate
+//! byte lives in a `tempfile::tempdir()` scratch directory that is deleted
+//! (recursively, on `Drop`) on every exit path, including a cancellation or
+//! a panic unwind, and the final placement itself
+//! ([`copy_then_rename`]) is a same-directory copy-to-temp-then-atomic-
+//! rename, so even the cross-device fallback can never leave a partial or
+//! orphaned file at the destination. This is also the whole mechanism
+//! behind the Task 4 review's cleanup contract ("on any `Err`, remove
+//! partial/produced output") — there is nothing beside the input to remove,
+//! because nothing is ever written there before success is confirmed.
 //!
 //! Cancellation mirrors Buzz's `_terminate_speech_extractor_process`
 //! (`:339-350`): SIGTERM, a 5 s grace period (polled every ~100 ms via
 //! `try_wait`, never a blocking `wait()`), then SIGKILL. `std::process::Child`
 //! has no SIGTERM (`Child::kill` is always SIGKILL), so the unix path sends
 //! it via `nix::sys::signal::kill` (already resolved in this workspace's
-//! dependency graph via `humm-cli`'s `ctrlc`); non-unix targets have no
-//! separate terminate/kill distinction to make (Windows' own
-//! `TerminateProcess`, which `Child::kill` already calls, is immediate —
-//! matching Python `multiprocessing.Process.terminate()`'s own Windows
-//! behavior) so they go straight to `Child::kill()`.
+//! dependency graph via `humm-cli`'s `ctrlc`) through the shared
+//! [`crate::signal_process_group`]/[`crate::kill_process_group`] helpers;
+//! non-unix targets have no separate terminate/kill distinction to make
+//! (Windows' own `TerminateProcess`, which `Child::kill` already calls, is
+//! immediate — matching Python `multiprocessing.Process.terminate()`'s own
+//! Windows behavior) so they go straight to `Child::kill()`.
+//!
+//! **Why the whole process group, not just the direct child** (earned
+//! empirically mid-task-5, not anticipated by the spike, which never
+//! exercised cancellation): a `/bin/sh` script whose last statement is
+//! `sleep 30` forks a genuine child process for it on this platform (not
+//! exec-tail-call optimized); signaling only the `sh` PID leaves that
+//! `sleep` grandchild running for its full duration, which in turn keeps
+//! the stdout/stderr pipes open and blocks this module's reader threads
+//! until it exits naturally. A real `demucs` (a Python program) is equally
+//! likely to have descendants of its own. [`crate::spawn_own_process_group`]
+//! puts the child in a *new* process group at spawn time — which also
+//! detaches it from this terminal session's foreground process group, so a
+//! user's Ctrl-C no longer reaches demucs directly the way it would a
+//! same-group child; the covering path is humm's own SIGINT handler (`humm-cli`'s
+//! `ctrlc`-based Ctrl-C-cancels-tasks flow) flipping the task's
+//! `CancelToken`, which this module's own cancellation check then reaches
+//! via the explicit group-SIGTERM/SIGKILL above, not by relying on the
+//! terminal to deliver a signal to demucs itself.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -138,24 +167,19 @@ impl SpeechIsolator for DemucsIsolator {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // Spawn into its own process group (unix): `demucs` (a Python
-        // program) is very likely to fork further descendants of its own,
-        // and a shell-script test stub reliably does (confirmed empirically:
-        // a plain `Child::kill()`/SIGTERM aimed only at the direct child PID
-        // leaves a `sleep`-under-`/bin/sh` grandchild running for its full
-        // duration, holding the stdout/stderr pipes open and blocking this
-        // function's reader threads until it exits naturally). Signaling the
-        // *negative* pid (the process group) below reaches every descendant,
-        // not just the immediate child.
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
+        // See this module's doc comment ("why the whole process group") for
+        // why the child is spawned into its own group here.
+        crate::spawn_own_process_group(&mut cmd);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|err| map_spawn_error("demucs", "HUMM_DEMUCS", &self.binary, err))?;
+        let mut child = cmd.spawn().map_err(|err| {
+            map_spawn_error(
+                "demucs",
+                "HUMM_DEMUCS",
+                "install it (e.g. `pipx install demucs`)",
+                &self.binary,
+                err,
+            )
+        })?;
 
         let mut stdout = child.stdout.take().expect("stdout was piped at spawn");
         let mut stderr = child.stderr.take().expect("stderr was piped at spawn");
@@ -164,12 +188,10 @@ impl SpeechIsolator for DemucsIsolator {
         // goes to stderr and could in principle write enough to stdout too
         // that either pipe fills and blocks demucs mid-write while we wait
         // on the other — same deadlock hazard `FfmpegDecoder`/`YtDlpFetcher`
-        // guard against. stdout content is discarded; stderr keeps a bounded
-        // tail for diagnostics.
-        let stdout_handle = thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = stdout.read_to_end(&mut buf);
-        });
+        // guard against. stdout content is discarded to a sink rather than
+        // an unbounded growing buffer (there's nothing in it worth keeping,
+        // unlike stderr's bounded diagnostic tail below).
+        let stdout_handle = thread::spawn(move || std::io::copy(&mut stdout, &mut std::io::sink()));
         let stderr_handle = thread::spawn(move || read_stderr_tail(&mut stderr));
 
         let status = match wait_checking_cancel(&mut child, cancel) {
@@ -208,9 +230,8 @@ impl SpeechIsolator for DemucsIsolator {
         let dest = input.with_file_name(dest_name);
 
         // Rename last, on confirmed full success only (this function's doc
-        // comment) — `move_file` mirrors `humm_core::pipeline`'s own
-        // rename-with-copy-fallback helper (that one is private to
-        // `humm-core`, so this crate can't reuse it directly).
+        // comment) — `move_file`'s cross-device fallback (`copy_then_rename`)
+        // is itself atomic; see that function's doc for why.
         move_file(&vocals, &dest).map_err(MediaError::Io)?;
 
         Ok(dest)
@@ -242,7 +263,7 @@ fn wait_checking_cancel(
             Ok(Some(status)) => return Ok(status),
             Ok(None) => thread::sleep(POLL_INTERVAL),
             Err(err) => {
-                kill_hard(child);
+                crate::kill_process_group(child);
                 let _ = child.wait();
                 return Err(MediaError::Io(err));
             }
@@ -250,8 +271,10 @@ fn wait_checking_cancel(
     }
 }
 
-/// SIGTERM, then poll for up to [`TERM_GRACE`], then a hard kill — always
-/// returns `MediaError::Canceled` once the child is reaped either way.
+/// SIGTERM (whole process group, unix — see this module's doc comment),
+/// then poll for up to [`TERM_GRACE`], then [`crate::kill_process_group`] —
+/// always returns `MediaError::Canceled` once the child is reaped either
+/// way.
 fn terminate_then_kill(child: &mut Child) -> MediaError {
     send_terminate(child);
 
@@ -265,49 +288,20 @@ fn terminate_then_kill(child: &mut Child) -> MediaError {
         }
     }
 
-    kill_hard(child);
+    crate::kill_process_group(child);
     let _ = child.wait();
     MediaError::Canceled
 }
 
-/// Sends SIGTERM to `child`'s whole process group (unix) — see the
-/// `process_group(0)` call at spawn time in [`SpeechIsolator::isolate`] for
-/// why this targets the group (the negative pid) rather than just the
-/// direct child: a `demucs`/shell-script descendant otherwise keeps running
-/// and holds the stdout/stderr pipes open.
 #[cfg(unix)]
 fn send_terminate(child: &mut Child) {
-    use nix::sys::signal::{Signal, kill};
-    use nix::unistd::Pid;
-
-    let _ = kill(Pid::from_raw(-(child.id() as i32)), Signal::SIGTERM);
+    crate::signal_process_group(child, nix::sys::signal::Signal::SIGTERM);
 }
 
 #[cfg(not(unix))]
 fn send_terminate(child: &mut Child) {
     // No separate terminate/kill distinction on this target — `Child::kill`
     // is already the platform's immediate-terminate call.
-    let _ = child.kill();
-}
-
-/// SIGKILL, targeting the same process group [`send_terminate`] does (unix);
-/// `Child::kill()` (which only ever reaches the single direct child) on
-/// every other target.
-#[cfg(unix)]
-fn kill_hard(child: &mut Child) {
-    use nix::sys::signal::{Signal, kill};
-    use nix::unistd::Pid;
-
-    let _ = kill(Pid::from_raw(-(child.id() as i32)), Signal::SIGKILL);
-    // Belt-and-suspenders: also signal the direct child by plain PID in case
-    // it was never actually made its own group leader (e.g. it exited and
-    // was reaped between spawn and this call, or a target-specific quirk) —
-    // `Child::kill` on an already-dead child is a harmless no-op error.
-    let _ = child.kill();
-}
-
-#[cfg(not(unix))]
-fn kill_hard(child: &mut Child) {
     let _ = child.kill();
 }
 
@@ -333,18 +327,61 @@ fn read_stderr_tail(stderr: &mut impl Read) -> String {
     String::from_utf8_lossy(&buf).trim().to_string()
 }
 
-/// Renames `from` to `to`, falling back to a copy-then-delete when the
+/// Renames `from` to `to`, falling back to [`copy_then_rename`] when the
 /// rename fails (`fs::rename` cannot cross filesystem/device boundaries —
 /// demucs's scratch tempdir and the input's own directory are very often on
-/// different filesystems, e.g. `/tmp` vs. a user media directory). Mirrors
-/// `humm_core::pipeline`'s private `move_file` helper exactly; duplicated
-/// here rather than shared because that one isn't `pub`.
+/// different filesystems, e.g. `/tmp` vs. a user media directory).
 fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
-        Err(_) => {
-            std::fs::copy(from, to)?;
-            std::fs::remove_file(from)
+        Err(_) => copy_then_rename(from, to),
+    }
+}
+
+/// Cross-device fallback for [`move_file`]: copies `from` to a sibling temp
+/// file in **`to`'s own directory** (same filesystem as the eventual
+/// destination), then `rename`s that temp file into place as the one
+/// atomic last step — a same-filesystem rename can't itself fail with a
+/// cross-device error, and rename is atomic, so `to` either doesn't exist
+/// yet or is fully, correctly present; never partial.
+///
+/// Review fix (task-5 Important 1): the original version called
+/// `fs::copy(from, to)` directly, writing straight to the final
+/// destination. A copy failing partway (disk full, I/O error) could leave a
+/// partial file *at* `to`; worse, if the copy fully succeeded but the
+/// following `remove_file(from)` failed, the function still returned `Err`
+/// even though `to` now held a complete file — the caller's `?` propagates
+/// that error, so `isolate` returns `Err` and the queue's cleanup guard
+/// never learns `to`'s path, permanently orphaning it. This version never
+/// writes to `to` directly: the temp file is removed on *any* failure
+/// (copy or rename), and `to` only ever comes into existence via one atomic
+/// `rename` once the copy is already known-complete. Mirrors
+/// `Settings::save`'s `<file_name>.tmp-<pid>` atomic-write convention
+/// (`settings.rs`) — same-directory temp name, rename-into-place last.
+fn copy_then_rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    let parent = to.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = to
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".to_string());
+    let temp = parent.join(format!("{file_name}.tmp-{}", std::process::id()));
+
+    match std::fs::copy(from, &temp).and_then(|_| std::fs::rename(&temp, to)) {
+        Ok(_) => {
+            // `from` lives in the isolator's own ephemeral scratch tempdir
+            // (deleted wholesale on drop regardless of what happens here) —
+            // a failure removing it doesn't undo the now-complete,
+            // correctly-placed `to`, so it isn't treated as this
+            // function's own failure.
+            let _ = std::fs::remove_file(from);
+            Ok(())
+        }
+        Err(err) => {
+            // Never leave a partial/orphaned file behind: on *any* failure
+            // (the copy itself, or the rename-into-place), the temp file is
+            // removed and `to` is never touched at all.
+            let _ = std::fs::remove_file(&temp);
+            Err(err)
         }
     }
 }
@@ -552,6 +589,11 @@ printf 'fake no_vocals data' > "$outdir/htdemucs/no_vocals.mp3"
             MediaError::BinaryMissing { hint, .. } => {
                 assert!(hint.contains("HUMM_DEMUCS"), "hint was: {hint}");
                 assert!(hint.contains("demucs not found"), "hint was: {hint}");
+                // Minor 6 (task-5 review): demucs isn't a Homebrew package —
+                // the hint must name a real install method for it, not the
+                // generic `brew install <program>` every other adapter uses.
+                assert!(hint.contains("pipx install demucs"), "hint was: {hint}");
+                assert!(!hint.contains("brew"), "hint was: {hint}");
             }
             other => panic!("expected BinaryMissing, got {other:?}"),
         }
@@ -570,12 +612,14 @@ printf 'fake no_vocals data' > "$outdir/htdemucs/no_vocals.mp3"
     }
 
     #[test]
-    fn move_file_falls_back_to_copy_across_devices() {
-        // Simulate the "rename fails" branch directly: renaming across two
-        // genuinely different tempdirs on the same filesystem still
-        // succeeds via `fs::rename` normally, so this instead proves the
-        // *fallback* path alone works when invoked directly (the
-        // cross-device case itself isn't reproducible portably in a test).
+    fn move_file_uses_plain_rename_when_possible() {
+        // Two tempdirs on the same filesystem: `fs::rename` succeeds
+        // directly, so `move_file` never actually reaches `copy_then_rename`
+        // here — this test is honest about testing only the primary-rename
+        // branch (the review's Important 1 finding: the old version of this
+        // test claimed to exercise the fallback but never did, since rename
+        // across same-filesystem tempdirs just succeeds). The fallback
+        // itself is tested directly, below.
         let from_dir = tempfile::tempdir().expect("tempdir");
         let to_dir = tempfile::tempdir().expect("tempdir");
         let from = from_dir.path().join("source.mp3");
@@ -586,5 +630,83 @@ printf 'fake no_vocals data' > "$outdir/htdemucs/no_vocals.mp3"
 
         assert_eq!(std::fs::read_to_string(&to).unwrap(), "payload");
         assert!(!from.exists());
+    }
+
+    #[test]
+    fn copy_then_rename_places_file_atomically() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let from = dir.path().join("source.mp3");
+        let to = dir.path().join("dest.mp3");
+        std::fs::write(&from, b"payload").expect("write source");
+
+        copy_then_rename(&from, &to).expect("copy_then_rename should succeed");
+
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "payload");
+        assert!(
+            !from.exists(),
+            "source should be removed after a successful move"
+        );
+        // No leftover temp file beside the destination.
+        let siblings: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(
+            siblings.len(),
+            1,
+            "expected only the destination file, no leftover temp: {siblings:?}"
+        );
+    }
+
+    #[test]
+    fn copy_then_rename_cleans_up_temp_on_copy_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Source doesn't exist: the initial `fs::copy` fails immediately,
+        // before any temp file is even created.
+        let from = dir.path().join("does-not-exist.mp3");
+        let to = dir.path().join("dest.mp3");
+
+        let err = copy_then_rename(&from, &to).expect_err("missing source should fail the copy");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+
+        let siblings: Vec<_> = std::fs::read_dir(dir.path()).expect("read_dir").collect();
+        assert!(
+            siblings.is_empty(),
+            "expected no leftover files after a failed copy: {siblings:?}"
+        );
+    }
+
+    #[test]
+    fn copy_then_rename_cleans_up_temp_on_rename_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let from = dir.path().join("source.mp3");
+        std::fs::write(&from, b"payload").expect("write source");
+        // `to` is an existing directory: a file can't be renamed onto a
+        // directory, giving a copy-succeeds/rename-fails case.
+        let to = dir.path().join("dest-is-a-dir");
+        std::fs::create_dir(&to).expect("create directory at dest path");
+
+        let result = copy_then_rename(&from, &to);
+        assert!(
+            result.is_err(),
+            "renaming a file onto an existing directory should fail"
+        );
+
+        // Regardless of the exact (platform-dependent) error kind: no
+        // leftover temp file, and `to` is still the empty directory it was
+        // (never touched).
+        let siblings: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(
+            siblings.len(),
+            2,
+            "expected only source + the dest dir, no leftover temp: {siblings:?}"
+        );
+        assert!(
+            to.is_dir(),
+            "dest path should still be the untouched directory"
+        );
     }
 }

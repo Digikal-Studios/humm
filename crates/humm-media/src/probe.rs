@@ -49,7 +49,15 @@ impl MediaProber for FfprobeProber {
             .arg(path)
             .stdin(Stdio::null())
             .output()
-            .map_err(|err| map_spawn_error("ffprobe", "HUMM_FFPROBE", &self.binary, err))?;
+            .map_err(|err| {
+                map_spawn_error(
+                    "ffprobe",
+                    "HUMM_FFPROBE",
+                    "install it (e.g. `brew install ffprobe`)",
+                    &self.binary,
+                    err,
+                )
+            })?;
 
         if !output.status.success() {
             let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();

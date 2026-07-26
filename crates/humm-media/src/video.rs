@@ -141,7 +141,15 @@ impl FfmpegFrameStream {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|err| map_spawn_error("ffmpeg", "HUMM_FFMPEG", binary, err))?;
+            .map_err(|err| {
+                map_spawn_error(
+                    "ffmpeg",
+                    "HUMM_FFMPEG",
+                    "install it (e.g. `brew install ffmpeg`)",
+                    binary,
+                    err,
+                )
+            })?;
 
         let stdout = child.stdout.take().expect("stdout was piped at spawn");
         // RGBA: 4 bytes/pixel (deviations ledger #10; Buzz's rgb24 is 3).
