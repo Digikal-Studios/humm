@@ -23,23 +23,40 @@ Usage:
   python3 oai_shim.py --listen 18080 --upstream http://127.0.0.1:18081 &
   HUMM_OPENAI_TEST_BASE=http://127.0.0.1:18080/v1 cargo test -p humm-cli \
       --test cli -- --ignored real_api
+
+`--request-log <path>` (M7 Task 20) appends one `<epoch_ms> <METHOD> <path>
+<bytes>` line per request. It exists so an acceptance run can *prove* which
+OpenAI route a client actually hit — specifically that a live session with
+task=Translate posts to `/audio/translations`, not `/audio/transcriptions`
+(deviation ledger #L15's closure, Task 18). Nothing else about the shim's
+behavior changes; the log never records body bytes, only the count.
 """
 
 import argparse
 import http.server
 import json
+import time
 import urllib.error
 import urllib.request
 
 
-def make_handler(upstream: str):
+def make_handler(upstream: str, request_log):
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt, *args):  # quiet
             pass
 
+        def record(self, nbytes=0):
+            if request_log is None:
+                return
+            request_log.write(
+                f"{int(time.time() * 1000)} {self.command} {self.path} {nbytes}\n"
+            )
+            request_log.flush()
+
         def do_GET(self):
+            self.record()
             if self.path.rstrip("/").endswith("/models"):
                 body = json.dumps(
                     {"object": "list", "data": [{"id": "whisper-local", "object": "model"}]}
@@ -55,6 +72,8 @@ def make_handler(upstream: str):
             self.end_headers()
 
         def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            self.record(length)
             if not self.path.endswith("/audio/transcriptions") and not self.path.endswith(
                 "/audio/translations"
             ):
@@ -62,7 +81,6 @@ def make_handler(upstream: str):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
-            length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length)
             req = urllib.request.Request(
                 upstream.rstrip("/") + "/inference",
@@ -94,8 +112,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--listen", type=int, default=18080)
     ap.add_argument("--upstream", default="http://127.0.0.1:18081")
+    ap.add_argument(
+        "--request-log",
+        default=None,
+        help="append '<epoch_ms> <METHOD> <path> <bytes>' per request to this file",
+    )
     args = ap.parse_args()
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", args.listen), make_handler(args.upstream))
+    request_log = open(args.request_log, "a", encoding="utf-8") if args.request_log else None
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", args.listen), make_handler(args.upstream, request_log)
+    )
     print(f"oai_shim: 127.0.0.1:{args.listen} -> {args.upstream}/inference", flush=True)
     server.serve_forever()
 
