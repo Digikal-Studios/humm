@@ -44,21 +44,23 @@
 //!   rolling prompt uniformly for every backend (`session.rs`'s `prompt =
 //!   text.clone()`), so Task 18's closure gets Buzz's evidently-intended
 //!   behavior rather than its actual bug.
-//! - **Scope gap, not ported: task-based endpoint selection.** `:330-343`
-//!   picks `/audio/transcriptions` when
+//! - **Task-based endpoint selection (closed, Task 18).** `:330-343` picks
+//!   `/audio/transcriptions` when
 //!   `self.transcription_options.task == Task.TRANSCRIBE` (or the request is
-//!   actually headed to a local whisper.cpp server) and
-//!   `/audio/translations` otherwise — i.e. Buzz's live-API arm **does**
-//!   support the Translate task. [`Self::transcribe_chunk`]'s signature
-//!   (fixed by this task's binding contract) always posts to
-//!   `/audio/transcriptions` and has no task parameter: a live session with
-//!   `TaskKind::Translate` selected against the API backend will transcribe
-//!   instead of translate. humm-gui's recording options already carry a
-//!   `TaskKind` field (`crates/humm-gui/src/recording.rs:175`, settable to
-//!   `Translate`, `:1022`), so this gap is reachable, not theoretical.
-//!   Recorded honestly as a scope gap (design spec ledger, addendum) for
-//!   whoever wires Task 18/a follow-up to close, rather than silently
-//!   dropped.
+//!   actually headed to a local whisper.cpp server — irrelevant here,
+//!   ADR-008 removed that half) and `/audio/translations` otherwise — i.e.
+//!   Buzz's live-API arm **does** support the Translate task.
+//!   [`Self::transcribe_chunk`] now takes a [`TaskKind`] parameter and
+//!   applies the identical rule the file engine's
+//!   [`super::engine::OpenAiEngine::transcribe`] already uses
+//!   (`engine.rs:121-124`): `Transcribe` → `/audio/transcriptions`,
+//!   `Translate` → `/audio/translations`. `language` is gated the same way
+//!   Buzz's own call sites are (`:336-343`: the `language` kwarg is passed
+//!   only to `transcriptions.create`, never to `translations.create`) —
+//!   sent only when `task == Transcribe` **and** `language` is `Some`. This
+//!   closes design spec ledger #L15 (the scope gap Task 17 recorded and left
+//!   for this task to close, since the binding contract it was given fixed
+//!   this exact signature with no task parameter at the time).
 //! - **Response parsing reuses the existing shape-fallback, not a bespoke
 //!   one.** `:345-353` joins `" ".join(segment["text"] for segment in ...)`
 //!   when the body carries `segments`, else uses `transcript.text` directly.
@@ -95,7 +97,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::cancel::CancelToken;
-use crate::domain::Segment;
+use crate::domain::{Segment, TaskKind};
 use crate::error::EngineError;
 use crate::wav::write_wav_16k_mono_i16;
 
@@ -139,19 +141,27 @@ impl LiveApiTranscriber {
         LiveApiTranscriber { cfg, client }
     }
 
-    /// Transcribes one live-recording chunk: encodes `pcm` (16 kHz mono
-    /// samples) to an in-memory WAV ([`crate::wav::write_wav_16k_mono_i16`])
-    /// and uploads it to `{base}/audio/transcriptions`, returning the
-    /// recognized text.
+    /// Transcribes (or translates — see below) one live-recording chunk:
+    /// encodes `pcm` (16 kHz mono samples) to an in-memory WAV
+    /// ([`crate::wav::write_wav_16k_mono_i16`]) and uploads it to
+    /// `{base}/audio/transcriptions` or `{base}/audio/translations`,
+    /// returning the recognized text.
     ///
-    /// `prompt` is sent as the request's `prompt` field only when
-    /// non-empty; `language` is sent only when `Some` — see the [module
-    /// docs](self) for why (and Buzz's own apparent bug threading the
-    /// rolling prompt). The whole request runs through [`cancelable`], so a
-    /// cancel mid-upload is acknowledged within ~100 ms and returns
-    /// [`EngineError::Canceled`] — the same benign, silent-stop signal
-    /// [`crate::live::session::run_session`] already expects from any engine
-    /// closure.
+    /// `task` selects the endpoint exactly like the file engine's
+    /// [`super::engine::OpenAiEngine::transcribe`] does (`engine.rs:121-124`,
+    /// Buzz `recording_transcriber.py:330-343`, ledger #L15 closure):
+    /// [`TaskKind::Transcribe`] → `/audio/transcriptions`,
+    /// [`TaskKind::Translate`] → `/audio/translations`. `prompt` is sent as
+    /// the request's `prompt` field only when non-empty; `language` is sent
+    /// only when `task == Transcribe` **and** `Some` (the translations
+    /// endpoint never receives a `language` part, matching Buzz's own
+    /// `translations.create(**options)` call, which has no `language`
+    /// kwarg at all) — see the [module docs](self) for why the prompt
+    /// threading is what it is (Buzz's own apparent bug). The whole request
+    /// runs through [`cancelable`], so a cancel mid-upload is acknowledged
+    /// within ~100 ms and returns [`EngineError::Canceled`] — the same
+    /// benign, silent-stop signal [`crate::live::session::run_session`]
+    /// already expects from any engine closure.
     ///
     /// # Errors
     ///
@@ -165,6 +175,7 @@ impl LiveApiTranscriber {
         pcm: &[f32],
         prompt: &str,
         language: Option<&str>,
+        task: TaskKind,
         cancel: &CancelToken,
     ) -> Result<String, EngineError> {
         // Cooperative cancel before any work, matching
@@ -180,7 +191,14 @@ impl LiveApiTranscriber {
         })?;
 
         let base = effective_base(&self.cfg.auth.base_url);
-        let url = format!("{base}/audio/transcriptions");
+        // Buzz `:330-343`: transcribe -> transcriptions, translate ->
+        // translations (ledger #L15 closure; same rule as
+        // `OpenAiEngine::transcribe_one`, `engine.rs:121-124`).
+        let endpoint = match task {
+            TaskKind::Transcribe => "audio/transcriptions",
+            TaskKind::Translate => "audio/translations",
+        };
+        let url = format!("{base}/{endpoint}");
         let host = host_of(&url);
 
         let mut form = reqwest::blocking::multipart::Form::new()
@@ -200,7 +218,12 @@ impl LiveApiTranscriber {
         if !prompt.is_empty() {
             form = form.text("prompt", prompt.to_string());
         }
-        if let Some(language) = language {
+        // `language` goes only to the transcriptions endpoint, matching
+        // Buzz's `translations.create(**options)` call, which never
+        // receives a `language` kwarg at all (`:336-343`).
+        if task == TaskKind::Transcribe
+            && let Some(language) = language
+        {
             form = form.text("language", language.to_string());
         }
 
@@ -333,7 +356,13 @@ mod tests {
         let transcriber = transcriber_for(&server, "whisper-1");
         let cancel = CancelToken::new();
 
-        let result = transcriber.transcribe_chunk(&[0.0f32; 1600], "rolling prompt", None, &cancel);
+        let result = transcriber.transcribe_chunk(
+            &[0.0f32; 1600],
+            "rolling prompt",
+            None,
+            TaskKind::Transcribe,
+            &cancel,
+        );
         assert_eq!(result.expect("ok"), "hello world");
 
         let requests = server.requests();
@@ -371,7 +400,7 @@ mod tests {
         let cancel = CancelToken::new();
 
         transcriber
-            .transcribe_chunk(&[0.0f32; 1600], "", None, &cancel)
+            .transcribe_chunk(&[0.0f32; 1600], "", None, TaskKind::Transcribe, &cancel)
             .expect("ok");
 
         assert!(!contains(&server.requests()[0].body, b"name=\"prompt\""));
@@ -389,12 +418,53 @@ mod tests {
         let cancel = CancelToken::new();
 
         transcriber
-            .transcribe_chunk(&[0.0f32; 1600], "", Some("fr"), &cancel)
+            .transcribe_chunk(
+                &[0.0f32; 1600],
+                "",
+                Some("fr"),
+                TaskKind::Transcribe,
+                &cancel,
+            )
             .expect("ok");
 
         let body = &server.requests()[0].body;
         assert!(contains(body, b"name=\"language\""));
         assert!(contains(body, b"fr"));
+    }
+
+    #[test]
+    fn translate_task_hits_translations_endpoint_and_omits_language() {
+        // Mirrors `openai::engine`'s own
+        // `translate_task_hits_translations_endpoint_and_omits_language`
+        // (ledger #L15 closure): a language is configured, but the
+        // translations endpoint must still never receive a `language` part
+        // (Buzz `:336-343`).
+        let server = TestServer::start();
+        server.set_route(
+            "/audio/translations",
+            Canned::ok(br#"{"text":"bonjour le monde"}"#.to_vec()),
+        );
+
+        let transcriber = transcriber_for(&server, "whisper-1");
+        let cancel = CancelToken::new();
+
+        let result = transcriber
+            .transcribe_chunk(
+                &[0.0f32; 1600],
+                "rolling prompt",
+                Some("fr"),
+                TaskKind::Translate,
+                &cancel,
+            )
+            .expect("ok");
+
+        assert_eq!(result, "bonjour le monde");
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/audio/translations");
+        assert!(!contains(&requests[0].body, b"name=\"language\""));
+        // `prompt` still goes through -- only `language` is endpoint-gated.
+        assert!(contains(&requests[0].body, b"name=\"prompt\""));
     }
 
     #[test]
@@ -412,7 +482,7 @@ mod tests {
         let cancel = CancelToken::new();
 
         let result = transcriber
-            .transcribe_chunk(&[0.0f32; 1600], "", None, &cancel)
+            .transcribe_chunk(&[0.0f32; 1600], "", None, TaskKind::Transcribe, &cancel)
             .expect("ok");
 
         assert_eq!(result, "hello world");
@@ -432,7 +502,8 @@ mod tests {
         let transcriber = transcriber_for(&server, "whisper-1");
         let cancel = CancelToken::new();
 
-        let result = transcriber.transcribe_chunk(&[0.0f32; 1600], "", None, &cancel);
+        let result =
+            transcriber.transcribe_chunk(&[0.0f32; 1600], "", None, TaskKind::Transcribe, &cancel);
 
         let error = result.expect_err("a 401 must fail");
         assert!(matches!(error, EngineError::Api { .. }), "got {error:?}");
@@ -460,7 +531,8 @@ mod tests {
         let cancel = CancelToken::new();
         cancel.cancel();
 
-        let result = transcriber.transcribe_chunk(&[0.0f32; 1600], "", None, &cancel);
+        let result =
+            transcriber.transcribe_chunk(&[0.0f32; 1600], "", None, TaskKind::Transcribe, &cancel);
 
         assert!(
             matches!(result, Err(EngineError::Canceled)),
@@ -528,7 +600,13 @@ mod tests {
         });
 
         let start = std::time::Instant::now();
-        let result = transcriber.transcribe_chunk(&[0.0f32; 1600], "prompt", None, &cancel);
+        let result = transcriber.transcribe_chunk(
+            &[0.0f32; 1600],
+            "prompt",
+            None,
+            TaskKind::Transcribe,
+            &cancel,
+        );
         let elapsed = start.elapsed();
 
         assert!(

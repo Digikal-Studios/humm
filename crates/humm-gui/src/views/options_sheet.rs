@@ -859,25 +859,35 @@ pub(crate) fn render_backend_combo(ui: &mut egui::Ui, id_salt: &str, backend: &m
 /// in separately rather than the whole `&mut OptionsSheet` — [`ui`] already
 /// holds `state`/`modal` as separate locals after destructuring the sheet.
 ///
+/// `api_key`/`api_key_visible` are taken directly (Task 18 narrowing,
+/// mirroring [`render_export_checkboxes`]'s identical "narrow signature, not
+/// `&mut SheetState`" precedent) rather than `&mut SheetState`, so a caller
+/// whose own live state isn't a `SheetState` at all can reuse this row too —
+/// `crate::recording::RecordingOptions`'s own Api Key fields (F-061b, the
+/// recording window's backend selector) — without forcing that struct to
+/// become (or embed) a `SheetState`.
+///
 /// `pub(crate)`: promoted (Task 15) for the Folder Watch preferences tab
 /// (`views/prefs_folder_watch.rs`, F-030c, design spec §8.4), whose embedded
 /// options form renders this exact row over its own `SheetState`/`modal`
-/// pair — same keyring entry, same commit behavior either way.
+/// pair — same keyring entry, same commit behavior either way — and further
+/// promoted (Task 18) for the recording window's own Api Key row.
 pub(crate) fn render_api_key_row(
     ui: &mut egui::Ui,
-    state: &mut SheetState,
+    api_key: &mut String,
+    api_key_visible: &mut bool,
     modal: &mut Option<SheetModal>,
     secrets: &Arc<dyn SecretStore>,
 ) {
     let response = secret_field::masked_field_row(
         ui,
         tr("options-api-key-label"),
-        &mut state.api_key,
-        &mut state.api_key_visible,
+        api_key,
+        api_key_visible,
         tr("prefs-general-openai-key-placeholder"),
     );
     if response.lost_focus() {
-        *modal = commit_api_key(&state.api_key, secrets);
+        *modal = commit_api_key(api_key, secrets);
     }
 }
 
@@ -1013,7 +1023,13 @@ pub fn ui(
             );
         }
         if api_key_row_visible(state) {
-            render_api_key_row(ui, state, modal, secrets);
+            render_api_key_row(
+                ui,
+                &mut state.api_key,
+                &mut state.api_key_visible,
+                modal,
+                secrets,
+            );
         }
         render_task_combo(ui, "humm-options-task", &mut state.task);
         render_language_combo(ui, "humm-options-language", &mut state.language);

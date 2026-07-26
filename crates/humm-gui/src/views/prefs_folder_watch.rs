@@ -365,7 +365,13 @@ pub fn ui(
             );
         }
         if api_key_row_visible(&state.sheet) {
-            render_api_key_row(ui, &mut state.sheet, &mut state.modal, secrets);
+            render_api_key_row(
+                ui,
+                &mut state.sheet.api_key,
+                &mut state.sheet.api_key_visible,
+                &mut state.modal,
+                secrets,
+            );
         }
         render_task_combo(ui, "humm-prefs-fw-task", &mut state.sheet.task);
         render_language_combo(ui, "humm-prefs-fw-language", &mut state.sheet.language);

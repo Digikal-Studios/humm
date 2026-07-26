@@ -332,38 +332,15 @@ impl GuiEngineFactory {
     }
 
     /// Builds an [`OpenAiEngine`] from the keyring key + `[openai]` settings
-    /// (design spec §3). The key read degrades gracefully: a keyring backend
-    /// error is logged and treated as "no key" (design spec §5), surfacing the
-    /// same actionable [`Self::missing_api_key_error`] as a genuinely absent
-    /// entry — either way there is no key to transcribe with.
+    /// (design spec §3), via the shared [`resolve_openai_config`]. The key
+    /// read degrades gracefully: a keyring backend error is logged and
+    /// treated as "no key" (design spec §5), surfacing the same actionable
+    /// [`Self::missing_api_key_error`] as a genuinely absent entry — either
+    /// way there is no key to transcribe with.
     fn create_openai(&self) -> Result<Box<dyn TranscriptionEngine>, CoreError> {
-        let api_key = match self.secrets.get(SecretKey::OpenAiApiKey) {
-            Ok(Some(key)) if !key.is_empty() => key,
-            Ok(_) => return Err(Self::missing_api_key_error()),
-            Err(err) => {
-                log::warn!("could not read the OpenAI API key from the keyring: {err}");
-                return Err(Self::missing_api_key_error());
-            }
-        };
-
-        let (base_url, api_model) = {
-            let guard = self
-                .settings
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            (
-                guard.openai.base_url.clone(),
-                guard.openai.api_model.clone(),
-            )
-        };
-
-        let engine = OpenAiEngine::new(
-            OpenAiEngineConfig {
-                auth: OpenAiAuth { base_url, api_key },
-                api_model,
-            },
-            Arc::clone(&self.encoder),
-        );
+        let cfg = resolve_openai_config(&self.settings, self.secrets.as_ref())
+            .map_err(|()| Self::missing_api_key_error())?;
+        let engine = OpenAiEngine::new(cfg, Arc::clone(&self.encoder));
         Ok(Box::new(engine) as Box<dyn TranscriptionEngine>)
     }
 
@@ -410,6 +387,48 @@ impl GuiEngineFactory {
             .map(|engine| Box::new(engine) as Box<dyn TranscriptionEngine>)
             .map_err(CoreError::from)
     }
+}
+
+/// Resolves an [`OpenAiEngineConfig`] from the keyring key + `[openai]`
+/// settings, read fresh at the call site (design spec §3, §10): the shared
+/// resolution both [`GuiEngineFactory::create_openai`] (file transcription)
+/// and `app.rs::start_live_session`'s F-061b missing-key precheck (live
+/// recording via the API backend) need — one place decides what "a usable
+/// OpenAI key" means so the two call sites can never quietly disagree.
+///
+/// `Err(())` means no usable key is available: the keyring entry is empty or
+/// absent, or the read itself failed — both degrade to "no key" (design spec
+/// §5, the same shape `viewer::keyring_key_present` and
+/// [`GuiEngineFactory::missing_api_key_error`] already use). The caller
+/// decides what to say about it — a `CoreError` for the queue engine, a
+/// plain inline dialog for the recording window.
+pub(crate) fn resolve_openai_config(
+    settings: &Mutex<Settings>,
+    secrets: &dyn SecretStore,
+) -> Result<OpenAiEngineConfig, ()> {
+    let api_key = match secrets.get(SecretKey::OpenAiApiKey) {
+        Ok(Some(key)) if !key.is_empty() => key,
+        Ok(_) => return Err(()),
+        Err(err) => {
+            log::warn!("could not read the OpenAI API key from the keyring: {err}");
+            return Err(());
+        }
+    };
+
+    let (base_url, api_model) = {
+        let guard = settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (
+            guard.openai.base_url.clone(),
+            guard.openai.api_model.clone(),
+        )
+    };
+
+    Ok(OpenAiEngineConfig {
+        auth: OpenAiAuth { base_url, api_key },
+        api_model,
+    })
 }
 
 impl EngineFactory for GuiEngineFactory {

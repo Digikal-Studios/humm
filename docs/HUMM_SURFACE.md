@@ -247,16 +247,23 @@ to queue-executed tasks) is preserved.
 Live recording (F-060..F-065, M5) adds two `settings.toml` sections, saved via
 the same diff-on-change pattern as `[viewer]` — `mode`/`hide_unconfirmed`/every
 export field/`upload_url` save **immediately** (Buzz's own `on_*_changed`
-handlers write straight through); `language`/`task`/`model_size`/
+handlers write straight through); `language`/`task`/`model_size`/`backend`/
 `initial_prompt`/`silence_threshold`/`line_separator`/`transcription_step` are
 mutated live on the shared `RecordingOptions` object and only persisted when
 the recording window closes (Buzz's `_do_close`/`closeEvent` save, spec §6).
+`backend` (F-061b, M7 Task 18) joins this close-persisted group rather than
+saving immediately: Buzz's own model-*type* combo (the closest analogue) has
+no immediate-save handler either — it's written only inside `_do_close`
+(`recording_transcriber_widget.py:1231-1233`), alongside language/task/model/
+initial-prompt, so humm's `backend` field follows the identical save-timing
+split.
 
 `[recording]`:
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `language` / `task` / `model_size` / `initial_prompt` | `Option<String>` | `None` | Sticky options-group prefill, same resolution rule as the file-transcriber sheet. |
+| `backend` (M7, F-061b) | `Option<String>` | `None` | Last-selected live-session backend wire string (e.g. `"openai_api"`); `None` = the default local whisper.cpp backend. Close-persisted (see above), same vocabulary as `file_transcriber.backend`. |
 | `silence_threshold` | f32 | `0.0025` | RMS floor below which a batch is skipped. Clamped `0.0..=1.0` on load. |
 | `line_separator` | String | `"\n\n"` | Separator between append-below/append-above utterances (stored literal; the advanced sheet edits it escaped). |
 | `transcription_step` | f64 | `3.5` | Append-and-correct chunk size (seconds). Clamped `2.0..=5.0` on load. |
@@ -267,7 +274,7 @@ the recording window closes (Buzz's `_do_close`/`closeEvent` save, spec §6).
 | `export_file_type` | String | `"txt"` | `"txt"` or `"csv"`. |
 | `export_max_entries` | u32 | `0` | `0` = keep all entries; else cap, range `0..=99` (clamped on load). |
 | `upload_url` | `Option<String>` | `None` | ✚ Advanced-sheet upload URL field; `HUMM_UPLOAD_URL` env still wins (§5.1). |
-| `measured_speed` | `BTreeMap<String, f32>` | `{}` | ✚ Per-model-size measured realtime ratio (spec §2.8), keyed by model-size wire string, last-run-wins; a value `< 1.0` drives the inline realtime-fit warning. |
+| `measured_speed` | `BTreeMap<String, f32>` | `{}` | ✚ Per-model-size measured realtime ratio (spec §2.8), keyed by model-size wire string, last-run-wins; a value `< 1.0` drives the inline realtime-fit warning. API-backend sessions (M7, F-061b) key their own measurement under `Backend::OpenAiApi`'s wire string (`"openai_api"`) instead of a model size — a slow network run must never poison (or be poisoned by) a local model size's own numbers (ledger #L14). |
 | `enable_llm_translation` (M6, F-063) | bool | `false` | Whether live AI translation is enabled. Persisted on window close alongside `llm_model`/`llm_prompt` (design spec §7.4). |
 | `llm_model` (M6, F-063) | `Option<String>` | `None` | Last-entered LLM translation model id, if live AI translation was configured. |
 | `llm_prompt` (M6, F-063) | `Option<String>` | `None` | Last-entered LLM translation prompt, if live AI translation was configured. |

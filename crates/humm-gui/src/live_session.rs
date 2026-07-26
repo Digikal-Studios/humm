@@ -64,12 +64,14 @@ use humm_core::boundary::MeterSnapshot;
 use humm_core::cancel::CancelToken;
 use humm_core::domain::{Millis, ModelSpec, TranscriptionId, TranscriptionOptions};
 use humm_core::error::{CoreError, EngineError, ModelError, StoreError};
+use humm_core::language::Language;
 use humm_core::live::{
     ExportFileType, ExportSink, LiveEvent, LiveMeasurement, RealClock, RealSleeper, RecordingMode,
     SessionConfig, UploadClient, filter_text, run_session,
 };
 use humm_core::live::{LIVE_DATETIME_FORMAT, MergeState, PanelText};
 use humm_core::models::download::DownloadProgress;
+use humm_core::openai::{LiveApiTranscriber, OpenAiEngineConfig};
 use humm_store::SqliteStore;
 use humm_whisper::{LiveOptions, WhisperEngine};
 
@@ -182,9 +184,41 @@ pub trait LiveEngineFactory: Send + Sync {
         model_path: &Path,
         use_gpu: bool,
     ) -> Result<Box<dyn LiveEngineSession>, EngineError>;
+
+    /// Builds the API backend's [`LiveEngineSession`] from a resolved `cfg`
+    /// (F-061b, design spec §10): `run_live_session`'s API arm calls this
+    /// instead of [`Self::load`] whenever `LiveSessionRequest::api_config`
+    /// is `Some`, skipping model resolution/download and `load` entirely --
+    /// there is no local model for this backend. Unlike `load`, this cannot
+    /// fail: `app.rs::start_live_session` already confirmed a usable key
+    /// before ever spawning this thread (F-061b's missing-key precheck), so
+    /// building the [`LiveApiTranscriber`]-backed session is just
+    /// constructing a bounded-timeout HTTP client, no I/O.
+    ///
+    /// Defaulted to `unreachable!` so every pre-F-061b implementor --
+    /// including every scripted kittest fake that predates this task --
+    /// keeps compiling unchanged, and a test that somehow reached this path
+    /// without scripting one fails loudly instead of silently making a real
+    /// HTTP request (the same "prove nothing reaches it by accident"
+    /// contract `app.rs`'s `UnwiredUploadFactory` already uses).
+    /// [`RealLiveEngineFactory`] is the only production override; a kittest
+    /// fake that wants API-arm coverage overrides it too, to return a
+    /// scripted [`LiveEngineSession`] instead of a real
+    /// [`LiveApiTranscriber`] (brief: "do NOT bind TCP in kittest" --
+    /// `openai::live`'s own mock-server tests already carry the HTTP truth
+    /// for `LiveApiTranscriber::transcribe_chunk` itself).
+    fn load_api(&self, cfg: OpenAiEngineConfig) -> Box<dyn LiveEngineSession> {
+        let _ = cfg;
+        unreachable!(
+            "LiveEngineFactory::load_api has no real implementation here -- override it (or \
+             script one via a test fake) before a session selects the OpenAI API backend"
+        )
+    }
 }
 
-/// The real [`LiveEngineFactory`]: wraps [`WhisperEngine::load`].
+/// The real [`LiveEngineFactory`]: wraps [`WhisperEngine::load`] for the
+/// local backend, [`ApiLiveEngineSession`]/[`LiveApiTranscriber`] for the
+/// API backend (F-061b).
 pub struct RealLiveEngineFactory;
 
 impl LiveEngineFactory for RealLiveEngineFactory {
@@ -195,6 +229,50 @@ impl LiveEngineFactory for RealLiveEngineFactory {
     ) -> Result<Box<dyn LiveEngineSession>, EngineError> {
         WhisperEngine::load(model_path, use_gpu)
             .map(|engine| Box::new(engine) as Box<dyn LiveEngineSession>)
+    }
+
+    fn load_api(&self, cfg: OpenAiEngineConfig) -> Box<dyn LiveEngineSession> {
+        Box::new(ApiLiveEngineSession::new(cfg))
+    }
+}
+
+/// The API-backend arm of [`LiveEngineSession`] (F-061b): wraps
+/// [`LiveApiTranscriber`], built by [`RealLiveEngineFactory::load_api`]
+/// whenever a session's `LiveSessionRequest::api_config` is `Some`. No local
+/// model, no engine load -- just a bounded-timeout HTTP client built once
+/// per session. `transcribe_live` threads `opts.task`/`opts.language`
+/// straight through to [`LiveApiTranscriber::transcribe_chunk`], whose own
+/// endpoint selection (transcriptions vs. translations, ledger #L15 closure)
+/// and language-gating apply exactly as the file engine's do -- this wrapper
+/// makes no decisions of its own, it only maps field names across the two
+/// crates' `LiveOptions`/`transcribe_chunk` shapes.
+struct ApiLiveEngineSession {
+    transcriber: LiveApiTranscriber,
+}
+
+impl ApiLiveEngineSession {
+    fn new(cfg: OpenAiEngineConfig) -> Self {
+        ApiLiveEngineSession {
+            transcriber: LiveApiTranscriber::new(cfg),
+        }
+    }
+}
+
+impl LiveEngineSession for ApiLiveEngineSession {
+    fn transcribe_live(
+        &mut self,
+        samples: &[f32],
+        opts: &LiveOptions,
+        prompt: &str,
+        cancel: &CancelToken,
+    ) -> Result<String, EngineError> {
+        self.transcriber.transcribe_chunk(
+            samples,
+            prompt,
+            opts.language.map(Language::code),
+            opts.task,
+            cancel,
+        )
     }
 }
 
@@ -374,6 +452,15 @@ pub struct LiveSessionRequest {
     /// through to [`SessionApplier::with_translation_enqueue`] so the session
     /// thread enqueues each accepted utterance for translation.
     pub translation_enqueue: Option<TranslationEnqueue>,
+    /// The API backend's resolved config (F-061b, design spec §10), or
+    /// `None` for the local whisper.cpp backend. `app.rs::start_live_session`
+    /// resolves this (keyring key + `settings.openai`) **before** ever
+    /// spawning this session -- a missing/empty key aborts the Record click
+    /// inline instead of ever reaching this struct, so `Some` here always
+    /// carries a usable key. [`run_live_session`] branches on this field to
+    /// skip model resolution/download and [`LiveEngineFactory::load`]
+    /// entirely, calling [`LiveEngineFactory::load_api`] instead.
+    pub api_config: Option<OpenAiEngineConfig>,
 }
 
 /// The session-thread handle `RecordingVm` holds while a real session is
@@ -448,18 +535,21 @@ pub fn export_request_from_settings(
     })
 }
 
-/// Records `ratio` as `size`'s measured live-transcription speed
-/// (spec §2.8: last-run-wins per model size — a later session for the same
-/// size simply overwrites the earlier entry, `BTreeMap::insert`'s own
-/// contract already gives this for free; named here only so the "last
-/// run wins" behavior has one obviously-correct, directly testable
-/// definition).
+/// Records `ratio` as `key`'s measured live-transcription speed (spec §2.8:
+/// last-run-wins per key — a later session for the same key simply
+/// overwrites the earlier entry, `BTreeMap::insert`'s own contract already
+/// gives this for free; named here only so the "last run wins" behavior has
+/// one obviously-correct, directly testable definition). `key` is
+/// [`crate::recording::measured_speed_key`]'s output — a model-size wire
+/// string for the local whisper.cpp backend, or the API backend's own
+/// backend-qualified key (F-061b, ledger #L14) — this function itself makes
+/// no backend distinction, it just records whatever key the caller resolved.
 pub fn record_measured_speed(
     measured_speed: &mut std::collections::BTreeMap<String, f32>,
-    size: humm_core::domain::ModelSize,
+    key: &str,
     ratio: f64,
 ) {
-    measured_speed.insert(size.as_str().to_string(), ratio as f32);
+    measured_speed.insert(key.to_string(), ratio as f32);
 }
 
 /// Spawns [`run_live_session`] on its own thread, returning the
@@ -701,37 +791,47 @@ pub fn run_live_session(
     sink: &dyn Fn(SessionMessage),
     cancel: &CancelToken,
 ) {
-    let mut progress_cb = |update: DownloadProgress| {
-        sink(SessionMessage::Preparing(PrepUpdate::Downloading {
-            downloaded: update.downloaded,
-            total: update.total,
-        }));
-    };
-    let model_path = match deps
-        .model_ensurer
-        .ensure_model(&request.model, &mut progress_cb, cancel)
-    {
-        Ok(path) => path,
-        Err(err) => {
-            if !is_model_ensure_cancellation(&err) {
-                sink(SessionMessage::Error(err.to_string()));
-            }
+    // F-061b: the API backend has no local model to resolve/download and no
+    // engine to `load` (`LiveSessionRequest::api_config`'s own doc) --
+    // `deps.engine_factory.load_api` just constructs a bounded-timeout HTTP
+    // client, so this branch skips `model_ensurer`/`load` entirely rather
+    // than routing a no-op model resolution through them.
+    let mut engine: Box<dyn LiveEngineSession> = if let Some(api_cfg) = request.api_config.take() {
+        deps.engine_factory.load_api(api_cfg)
+    } else {
+        let mut progress_cb = |update: DownloadProgress| {
+            sink(SessionMessage::Preparing(PrepUpdate::Downloading {
+                downloaded: update.downloaded,
+                total: update.total,
+            }));
+        };
+        let model_path =
+            match deps
+                .model_ensurer
+                .ensure_model(&request.model, &mut progress_cb, cancel)
+            {
+                Ok(path) => path,
+                Err(err) => {
+                    if !is_model_ensure_cancellation(&err) {
+                        sink(SessionMessage::Error(err.to_string()));
+                    }
+                    sink(SessionMessage::Stopped { measurement: None });
+                    return;
+                }
+            };
+
+        sink(SessionMessage::Preparing(PrepUpdate::LoadingEngine));
+        if cancel.is_canceled() {
             sink(SessionMessage::Stopped { measurement: None });
             return;
         }
-    };
-
-    sink(SessionMessage::Preparing(PrepUpdate::LoadingEngine));
-    if cancel.is_canceled() {
-        sink(SessionMessage::Stopped { measurement: None });
-        return;
-    }
-    let mut engine = match deps.engine_factory.load(&model_path, request.use_gpu) {
-        Ok(engine) => engine,
-        Err(err) => {
-            sink(SessionMessage::Error(err.to_string()));
-            sink(SessionMessage::Stopped { measurement: None });
-            return;
+        match deps.engine_factory.load(&model_path, request.use_gpu) {
+            Ok(engine) => engine,
+            Err(err) => {
+                sink(SessionMessage::Error(err.to_string()));
+                sink(SessionMessage::Stopped { measurement: None });
+                return;
+            }
         }
     };
     if cancel.is_canceled() {
@@ -1322,20 +1422,33 @@ mod tests {
     // -- record_measured_speed -------------------------------------------------
 
     #[test]
-    fn record_measured_speed_last_run_wins_per_size() {
+    fn record_measured_speed_last_run_wins_per_key() {
         let mut measured = std::collections::BTreeMap::new();
-        record_measured_speed(&mut measured, humm_core::domain::ModelSize::Small, 2.0);
+        record_measured_speed(&mut measured, "small", 2.0);
         assert_eq!(measured.get("small"), Some(&2.0));
 
-        record_measured_speed(&mut measured, humm_core::domain::ModelSize::Small, 0.5);
+        record_measured_speed(&mut measured, "small", 0.5);
         assert_eq!(
             measured.get("small"),
             Some(&0.5),
-            "a later session for the same size overwrites the earlier entry"
+            "a later session for the same key overwrites the earlier entry"
         );
 
-        record_measured_speed(&mut measured, humm_core::domain::ModelSize::Base, 3.0);
-        assert_eq!(measured.len(), 2, "a different size is a separate entry");
+        record_measured_speed(&mut measured, "base", 3.0);
+        assert_eq!(measured.len(), 2, "a different key is a separate entry");
+    }
+
+    #[test]
+    fn record_measured_speed_keys_the_api_backend_separately_from_any_model_size() {
+        // Ledger #L14: an API-backend session's measurement lives under its
+        // own backend-qualified key, never touching a local size's entry.
+        let mut measured = std::collections::BTreeMap::new();
+        record_measured_speed(&mut measured, "small", 1.5);
+        record_measured_speed(&mut measured, "openai_api", 0.6);
+
+        assert_eq!(measured.get("small"), Some(&1.5));
+        assert_eq!(measured.get("openai_api"), Some(&0.6));
+        assert_eq!(measured.len(), 2);
     }
 
     // -- run_live_session: capture-teardown-before-Stopped ordering ---------
@@ -1500,6 +1613,7 @@ mod tests {
             upload_url: None,
             meter: Arc::new(MeterSnapshot::new()),
             translation_enqueue: None,
+            api_config: None,
         }
     }
 
@@ -1515,6 +1629,7 @@ mod tests {
             engine_factory: Arc::new(OrderingOkEngineFactory),
             upload_factory: Arc::new(OrderingNeverCalledUploadFactory),
             dialogs: Arc::new(crate::import::RfdFileDialogs),
+            secrets: Arc::new(humm_core::secrets::MemorySecretStore::new()),
         };
         let cancel = CancelToken::new();
 

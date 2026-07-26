@@ -36,16 +36,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use humm_core::boundary::{AudioCapture, AudioDevice, CaptureHandle, MeterSnapshot, SAMPLE_RATE};
 use humm_core::cancel::CancelToken;
-use humm_core::domain::{ModelSize, TaskKind, TranscriptionId};
+use humm_core::domain::{Backend, ModelSize, TaskKind, TranscriptionId};
 use humm_core::language::Language;
 use humm_core::live::{RealSleeper, Sleeper};
 use humm_core::queue::ArtifactEnsurer;
+use humm_core::secrets::{SecretKey, SecretStore};
 use humm_core::settings::{PresentationSettings, RecordingSettings, Settings};
 
 use crate::import::FileDialogs;
 use crate::live_session::{ActiveSession, LiveEngineFactory, LiveStore, PrepUpdate, UploadFactory};
 use crate::live_translation::LiveTranslator;
-use crate::views::options_sheet::{DEFAULT_LLM_MODEL, DEFAULT_LLM_PROMPT};
+use crate::views::options_sheet::{DEFAULT_LLM_MODEL, DEFAULT_LLM_PROMPT, SheetModal};
 use crate::views::presentation::PresentationVm;
 use crate::views::recording::CopyLabelState;
 use crate::views::recording_advanced::AdvancedSheetState;
@@ -167,8 +168,33 @@ pub enum RecordingIntent {
 /// [`ModelSize::Small`]/[`TaskKind::Transcribe`]/no forced language/empty
 /// prompt, and a persisted `Custom` size resets to `Small` when
 /// `custom_model_available` is false (the combo wouldn't list it either).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct RecordingOptions {
+    /// Which engine runs this session (F-061b): local whisper.cpp, or the
+    /// OpenAI-compatible HTTP API. Gates the size-combo/Api-Key-row
+    /// visibility in `views::recording::recording_ui` the same way
+    /// `views::options_sheet::{size_combo_visible, api_key_row_visible}`
+    /// gate the file-options sheet's own rows, and maps straight onto
+    /// `ModelSpec.backend` at session-start (`app.rs::start_live_session`).
+    /// Close-persisted alongside every other field below (Buzz parity: the
+    /// model-*type* combo is written only in `_do_close`,
+    /// `recording_transcriber_widget.py:1231-1233` — no immediate-save
+    /// handler exists for it, unlike the export/mode fields the advanced
+    /// sheet owns).
+    pub backend: Backend,
+    /// The Api Key row's live buffer (F-061b), shown only while
+    /// `backend == Backend::OpenAiApi`. Seeded from the keyring at
+    /// [`RecordingVm::open`] time (mirrors
+    /// `views::options_sheet::OptionsSheet::new`'s identical seeding for the
+    /// file-options sheet's own Api Key row) and committed straight through
+    /// to the keyring on blur/Enter ([`crate::views::options_sheet::
+    /// render_api_key_row`]) — **never** persisted by [`Self::write_to`]/read
+    /// by [`Self::from_settings`] (same "the key travels only through
+    /// `SecretStore`, never `settings.toml`" invariant as
+    /// `SheetState::api_key`).
+    pub api_key: String,
+    /// Whether the Api Key row currently renders unmasked (the eye toggle).
+    pub api_key_visible: bool,
     /// The whisper.cpp model size.
     pub model_size: ModelSize,
     /// Transcribe, or translate to English.
@@ -219,6 +245,30 @@ pub struct RecordingOptions {
     pub llm_prompt: String,
 }
 
+/// Manual `Debug` (not derived) so [`RecordingOptions::api_key`] never
+/// prints in plaintext — the same redaction discipline
+/// `views::options_sheet::SheetState`'s own manual `Debug` impl already
+/// established for its identical field.
+impl std::fmt::Debug for RecordingOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecordingOptions")
+            .field("backend", &self.backend)
+            .field("api_key", &"«redacted»")
+            .field("api_key_visible", &self.api_key_visible)
+            .field("model_size", &self.model_size)
+            .field("task", &self.task)
+            .field("language", &self.language)
+            .field("initial_prompt", &self.initial_prompt)
+            .field("silence_threshold", &self.silence_threshold)
+            .field("line_separator", &self.line_separator)
+            .field("transcription_step", &self.transcription_step)
+            .field("enable_llm_translation", &self.enable_llm_translation)
+            .field("llm_model", &self.llm_model)
+            .field("llm_prompt", &self.llm_prompt)
+            .finish()
+    }
+}
+
 impl RecordingOptions {
     /// Prefills from `settings.recording`'s sticky fields (Buzz parity:
     /// window-open reads sticky prefs; see the module doc for the shared
@@ -238,6 +288,16 @@ impl RecordingOptions {
         }
 
         RecordingOptions {
+            backend: settings
+                .backend
+                .as_deref()
+                .and_then(|s| Backend::from_str(s).ok())
+                .unwrap_or_default(),
+            // Seeded separately by `RecordingVm::open` (needs the secret
+            // store, which this settings-only prefill has no access to) —
+            // mirrors `SheetState::from_settings`'s identical split.
+            api_key: String::new(),
+            api_key_visible: false,
             model_size,
             task: settings
                 .task
@@ -288,6 +348,10 @@ impl RecordingOptions {
         // `settings.llm_model = Some(self.llm_model.clone())`.
         settings.llm_model = Some(self.llm_model.clone());
         settings.llm_prompt = Some(self.llm_prompt.clone());
+        // F-061b: close-persisted alongside every field above (Buzz parity —
+        // see this field's own doc comment); `api_key`/`api_key_visible` are
+        // deliberately never written here, same as `SheetState::write_to`.
+        settings.backend = Some(self.backend.as_str().to_string());
     }
 }
 
@@ -306,17 +370,31 @@ pub fn default_device_selection(devices: &[AudioDevice]) -> Option<String> {
         .map(|device| device.id.clone())
 }
 
-/// Whether the realtime-fit caution label is visible (spec §2.8): the
-/// selected model size has a stored measured-speed ratio strictly below
-/// `1.0`. No stored entry (never measured, or a different size was measured
-/// last) means no warning — first run is the measurement.
+/// The key [`realtime_fit_warning_visible`]/[`crate::live_session::
+/// record_measured_speed`] read/write into `settings.recording.measured_speed`
+/// for the current backend/model-size combination (F-061b, design spec §10
+/// ledger #L14): the model size's own wire string for the local whisper.cpp
+/// backend, or [`Backend::OpenAiApi`]'s own wire string (`"openai_api"`) for
+/// every API-backend session regardless of size — a slow network's measured
+/// ratio must never poison a local model size's own numbers, and the API
+/// backend has no size dimension to begin with (its size combo is hidden,
+/// `views::recording::recording_ui`'s own gate).
+pub fn measured_speed_key(backend: Backend, model_size: ModelSize) -> &'static str {
+    match backend {
+        Backend::OpenAiApi => Backend::OpenAiApi.as_str(),
+        Backend::Whisper => model_size.as_str(),
+    }
+}
+
+/// Whether the realtime-fit caution label is visible (spec §2.8): `key`
+/// (see [`measured_speed_key`]) has a stored measured-speed ratio strictly
+/// below `1.0`. No stored entry (never measured, or a different key was
+/// measured last) means no warning — first run is the measurement.
 pub fn realtime_fit_warning_visible(
     measured_speed: &std::collections::BTreeMap<String, f32>,
-    model_size: ModelSize,
+    key: &str,
 ) -> bool {
-    measured_speed
-        .get(model_size.as_str())
-        .is_some_and(|ratio| *ratio < 1.0)
+    measured_speed.get(key).is_some_and(|ratio| *ratio < 1.0)
 }
 
 /// The bundle of adapter handles the recording window's render closure and
@@ -367,6 +445,17 @@ pub struct RecordingDeps {
     /// convention (no test in this workspace clicks Browse — kittest can't
     /// drive a real rfd dialog).
     pub dialogs: Arc<dyn FileDialogs>,
+    /// The secret store the Api Key row's live buffer is seeded from
+    /// ([`RecordingVm::open`]) and committed straight through to
+    /// ([`crate::views::options_sheet::render_api_key_row`]), and the same
+    /// store `app.rs::start_live_session`'s F-061b missing-key precheck
+    /// resolves the session's key from (`crate::engine_factory::
+    /// resolve_openai_config`) — the OS keyring in production, a
+    /// `MemorySecretStore` in tests. One source of truth for "does this
+    /// recording window have a usable OpenAI key", matching the rest of
+    /// this struct's "real adapter in production, scripted/in-memory fake in
+    /// tests" shape.
+    pub secrets: Arc<dyn SecretStore>,
 }
 
 /// The pure accumulate-and-average logic behind Buzz's
@@ -553,6 +642,12 @@ pub struct RecordingVm {
     /// while no error is showing. The render fn shows this as a dismissible
     /// `egui::Modal`; dismissing clears it.
     pub error_dialog: Option<String>,
+    /// The Api Key row's commit-failure modal (F-061b), if a commit this
+    /// frame produced one — the recording window's own instance of
+    /// [`crate::views::options_sheet::OptionsSheet::modal`]'s identical role
+    /// for the file-options sheet. Rendered by `views::recording::
+    /// recording_ui` via [`crate::views::options_sheet::sheet_modal_title_and_body`].
+    pub api_key_modal: Option<SheetModal>,
 
     /// The active live session, `None` while [`RecordingStatus::Stopped`].
     /// Owned by `app.rs`'s harvest (`start`/`stop`/drain) — see
@@ -612,7 +707,18 @@ impl RecordingVm {
         };
         let selected_device = default_device_selection(&devices);
         let custom_model_available = settings.models.custom_model_url.is_some();
-        let options = RecordingOptions::from_settings(&settings.recording, custom_model_available);
+        let mut options =
+            RecordingOptions::from_settings(&settings.recording, custom_model_available);
+        // F-061b: seed the Api Key row from the keyring here (needs
+        // `deps.secrets`, which `RecordingOptions::from_settings` has no
+        // access to) — mirrors `OptionsSheet::new`'s identical seeding of
+        // `SheetState::api_key` for the file-options sheet.
+        options.api_key = deps
+            .secrets
+            .get(SecretKey::OpenAiApiKey)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
 
         let mut vm = RecordingVm {
             status: RecordingStatus::Stopped,
@@ -635,6 +741,7 @@ impl RecordingVm {
             pending_close: false,
             prep: None,
             error_dialog: None,
+            api_key_modal: None,
             session: None,
             session_id: None,
             live_translator: None,
@@ -958,6 +1065,9 @@ mod tests {
     fn from_settings_on_a_fresh_install_matches_buzz_defaults() {
         let settings = RecordingSettings::default();
         let options = RecordingOptions::from_settings(&settings, false);
+        assert_eq!(options.backend, Backend::Whisper);
+        assert_eq!(options.api_key, "");
+        assert!(!options.api_key_visible);
         assert_eq!(options.model_size, ModelSize::Small);
         assert_eq!(options.task, TaskKind::Transcribe);
         assert_eq!(options.language, None);
@@ -1018,6 +1128,7 @@ mod tests {
     #[test]
     fn options_round_trip_through_settings() {
         let mut options = RecordingOptions::from_settings(&RecordingSettings::default(), false);
+        options.backend = Backend::OpenAiApi;
         options.model_size = ModelSize::LargeV3Turbo;
         options.task = TaskKind::Translate;
         options.language = Language::parse("fr");
@@ -1059,38 +1170,74 @@ mod tests {
         assert_eq!(reloaded.llm_prompt, "Custom instructions.");
     }
 
+    // -- measured_speed_key ------------------------------------------------------
+
+    #[test]
+    fn measured_speed_key_is_the_model_size_for_the_whisper_backend() {
+        assert_eq!(
+            measured_speed_key(Backend::Whisper, ModelSize::Small),
+            "small"
+        );
+        assert_eq!(
+            measured_speed_key(Backend::Whisper, ModelSize::LargeV3Turbo),
+            "large-v3-turbo"
+        );
+    }
+
+    #[test]
+    fn measured_speed_key_is_backend_qualified_for_the_api_backend_regardless_of_size() {
+        assert_eq!(
+            measured_speed_key(Backend::OpenAiApi, ModelSize::Small),
+            "openai_api"
+        );
+        assert_eq!(
+            measured_speed_key(Backend::OpenAiApi, ModelSize::LargeV3Turbo),
+            "openai_api"
+        );
+    }
+
     // -- realtime_fit_warning_visible -------------------------------------------
 
     #[test]
     fn no_measured_entry_hides_the_warning() {
-        assert!(!realtime_fit_warning_visible(
-            &BTreeMap::new(),
-            ModelSize::Small
-        ));
+        assert!(!realtime_fit_warning_visible(&BTreeMap::new(), "small"));
     }
 
     #[test]
     fn a_ratio_at_or_above_one_hides_the_warning() {
         let mut measured = BTreeMap::new();
         measured.insert("small".to_string(), 1.2);
-        assert!(!realtime_fit_warning_visible(&measured, ModelSize::Small));
+        assert!(!realtime_fit_warning_visible(&measured, "small"));
 
         measured.insert("small".to_string(), 1.0);
-        assert!(!realtime_fit_warning_visible(&measured, ModelSize::Small));
+        assert!(!realtime_fit_warning_visible(&measured, "small"));
     }
 
     #[test]
     fn a_ratio_below_one_shows_the_warning() {
         let mut measured = BTreeMap::new();
         measured.insert("small".to_string(), 0.8);
-        assert!(realtime_fit_warning_visible(&measured, ModelSize::Small));
+        assert!(realtime_fit_warning_visible(&measured, "small"));
     }
 
     #[test]
-    fn a_measured_entry_for_a_different_size_does_not_apply() {
+    fn a_measured_entry_for_a_different_key_does_not_apply() {
         let mut measured = BTreeMap::new();
         measured.insert("base".to_string(), 0.5);
-        assert!(!realtime_fit_warning_visible(&measured, ModelSize::Small));
+        assert!(!realtime_fit_warning_visible(&measured, "small"));
+    }
+
+    #[test]
+    fn a_ratio_below_one_under_the_api_backend_key_shows_the_warning_without_touching_local_sizes()
+    {
+        // Ledger #L14: the network-speed measurement lives under its own
+        // backend-qualified key, never poisoning (or being poisoned by) a
+        // local model size's own numbers.
+        let mut measured = BTreeMap::new();
+        measured.insert("small".to_string(), 1.5); // local size stays fast
+        measured.insert("openai_api".to_string(), 0.6); // slow network run
+        assert!(!realtime_fit_warning_visible(&measured, "small"));
+        assert!(realtime_fit_warning_visible(&measured, "openai_api"));
     }
 
     // -- MeterOnlyDrain ----------------------------------------------------------
@@ -1223,6 +1370,7 @@ mod tests {
             engine_factory: Arc::new(NeverCalledEngineFactory),
             upload_factory: Arc::new(NeverCalledUploadFactory),
             dialogs: Arc::new(crate::import::RfdFileDialogs),
+            secrets: Arc::new(humm_core::secrets::MemorySecretStore::new()),
         }
     }
 
@@ -1232,6 +1380,28 @@ mod tests {
         let vm = RecordingVm::open(&deps, &Settings::default());
         assert_eq!(vm.status, RecordingStatus::Stopped);
         assert_eq!(vm.selected_device, Some("a".to_string()));
+    }
+
+    #[test]
+    fn open_seeds_the_api_key_row_from_the_keyring() {
+        // F-061b: mirrors `OptionsSheet::new`'s identical seeding of
+        // `SheetState::api_key` for the file-options sheet.
+        let secrets: Arc<dyn SecretStore> = Arc::new(humm_core::secrets::MemorySecretStore::new());
+        secrets.set(SecretKey::OpenAiApiKey, "sk-test-123").unwrap();
+        let deps = RecordingDeps {
+            secrets,
+            ..mock_deps(vec![device("a", "Device A", true)])
+        };
+        let vm = RecordingVm::open(&deps, &Settings::default());
+        assert_eq!(vm.options.api_key, "sk-test-123");
+        assert!(!vm.options.api_key_visible);
+    }
+
+    #[test]
+    fn open_with_no_stored_key_seeds_an_empty_api_key_row() {
+        let deps = mock_deps(vec![device("a", "Device A", true)]);
+        let vm = RecordingVm::open(&deps, &Settings::default());
+        assert_eq!(vm.options.api_key, "");
     }
 
     #[test]

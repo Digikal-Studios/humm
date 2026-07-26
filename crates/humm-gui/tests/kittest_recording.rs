@@ -30,7 +30,7 @@ use egui_kittest::{Harness, HarnessBuilder};
 use humm_audio::MockCapture;
 use humm_core::boundary::{AudioCapture, AudioDevice, CaptureHandle, MeterSnapshot};
 use humm_core::cancel::CancelToken;
-use humm_core::domain::{ModelSpec, Status, TranscriptionId};
+use humm_core::domain::{Backend, ModelSpec, Status, TranscriptionId};
 use humm_core::error::{AudioError, CoreError, EngineError};
 use humm_core::models::download::DownloadProgress;
 use humm_core::queue::{ArtifactEnsurer, EngineFactory};
@@ -177,6 +177,7 @@ fn fixture_with_devices(devices: Vec<AudioDevice>) -> Fixture {
         engine_factory: Arc::new(NeverCalledLiveEngineFactory),
         upload_factory: Arc::new(NeverCalledUploadFactory),
         dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
+        secrets: Arc::new(MemorySecretStore::new()),
     };
     let settings = Settings::default();
     let vm = RecordingVm::open(&deps, &settings);
@@ -239,6 +240,60 @@ fn window_renders_the_record_button_and_microphone_label() {
     harness.get_by_label("Record");
     harness.get_by_label("Microphone:");
     harness.get_by_label("Advanced...");
+}
+
+// -- Task 18: backend selector + Api Key row (F-061b) ------------------------
+
+/// Selecting the API backend hides the model-size combo (+ its Apple-Silicon
+/// load-note icon) and shows the Api Key row; switching back to Whisper
+/// restores it — the recording window's own instance of
+/// `kittest_import.rs::api_backend_selection_hides_size_combo_and_shows_api_key_row`'s
+/// identical assertion for the file-options sheet. Driven directly via
+/// `fixture.vm.options.backend` (this workspace has no kittest precedent for
+/// driving an `egui::ComboBox` selection by click, per that test's own doc).
+#[test]
+fn api_backend_selection_hides_size_combo_and_shows_api_key_row() {
+    let mut harness = build_harness(fixture());
+    harness.step();
+
+    // Whisper is the default backend: the size combo shows, the Api Key row
+    // doesn't.
+    harness.get_by_label("Model:");
+    assert!(harness.query_by_label("Api Key:").is_none());
+
+    harness.state_mut().vm.options.backend = Backend::OpenAiApi;
+    harness.step();
+
+    assert!(
+        harness.query_by_label("Model:").is_none(),
+        "the size combo must hide once the API backend is selected"
+    );
+    harness.get_by_label("Api Key:");
+
+    harness.state_mut().vm.options.backend = Backend::Whisper;
+    harness.step();
+
+    harness.get_by_label("Model:");
+    assert!(harness.query_by_label("Api Key:").is_none());
+}
+
+/// The backend combo is part of the window-close save group, exactly like
+/// `model_size`/`task`/`language` (Buzz `_do_close:1231-1233` — no
+/// immediate-save handler exists for the model-*type* combo, the task
+/// report's own finding): a selection made in the window survives
+/// `RecordingVm::close` -> `RecordingOptions::write_to` -> reload via
+/// `RecordingOptions::from_settings`.
+#[test]
+fn backend_selection_persists_through_window_close() {
+    let mut fixture = fixture();
+    fixture.vm.options.backend = Backend::OpenAiApi;
+
+    let mut settings = RecordingSettings::default();
+    fixture.vm.close(&mut settings);
+
+    assert_eq!(settings.backend.as_deref(), Some("openai_api"));
+    let reloaded = humm_gui::recording::RecordingOptions::from_settings(&settings, false);
+    assert_eq!(reloaded.backend, Backend::OpenAiApi);
 }
 
 // -- Record click state machine ----------------------------------------------
@@ -1015,6 +1070,7 @@ fn scripted_end_to_end_record_two_utterances_then_stop() {
             calls: Arc::clone(&upload_calls),
         }),
         dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
+        secrets: Arc::new(MemorySecretStore::new()),
     };
 
     let mut harness = HarnessBuilder::default()
@@ -1190,6 +1246,289 @@ fn scripted_end_to_end_record_two_utterances_then_stop() {
     assert_eq!(reopened_segments[1].text, "utterance two");
 }
 
+// -- Task 18: API backend end-to-end (F-061b) --------------------------------
+//
+// Record -> 2 scripted utterances -> Stop against `Backend::OpenAiApi`,
+// driven through the same real `HummApp` wiring as the Whisper-arm e2e test
+// above. Per the task brief ("do NOT bind TCP in kittest"), this proves the
+// *wiring* -- `run_live_session` selects the API arm and calls
+// `LiveEngineFactory::load_api` instead of `ensure_model`/`load` -- via a
+// scripted `LiveEngineFactory` whose `load_api` returns a canned
+// `LiveEngineSession` and whose `load`/the model ensurer both panic if ever
+// reached (proving the local-engine path is genuinely skipped, not merely
+// undocumented). The real `LiveApiTranscriber`/HTTP request shape is instead
+// covered by `humm-core`'s own `openai::live` mock-server tests (task
+// report) -- this test never touches the network.
+
+/// Overrides only [`LiveEngineFactory::load_api`] (F-061b); `load` panics if
+/// ever called, proving `run_live_session`'s API arm never reaches the
+/// local-engine path.
+struct ScriptedApiEngineFactory {
+    capture: Arc<Mutex<MockCapture>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl LiveEngineFactory for ScriptedApiEngineFactory {
+    fn load(
+        &self,
+        _model_path: &Path,
+        _use_gpu: bool,
+    ) -> Result<Box<dyn LiveEngineSession>, EngineError> {
+        unreachable!("the API backend must never call LiveEngineFactory::load")
+    }
+
+    fn load_api(&self, _cfg: humm_core::openai::OpenAiEngineConfig) -> Box<dyn LiveEngineSession> {
+        Box::new(ScriptedEngine {
+            capture: Arc::clone(&self.capture),
+            calls: Arc::clone(&self.calls),
+        })
+    }
+}
+
+/// Panics if ever asked to ensure a model -- the API backend has none to
+/// resolve (F-061b: `run_live_session` skips `model_ensurer` entirely
+/// whenever `LiveSessionRequest::api_config` is `Some`).
+struct NeverCalledEnsurerForApi;
+
+impl ArtifactEnsurer for NeverCalledEnsurerForApi {
+    fn ensure_model(
+        &self,
+        _model: &ModelSpec,
+        _progress: &mut dyn FnMut(DownloadProgress),
+        _cancel: &CancelToken,
+    ) -> Result<PathBuf, CoreError> {
+        unreachable!("the API backend must never call ArtifactEnsurer::ensure_model")
+    }
+
+    fn ensure_vad(
+        &self,
+        _progress: &mut dyn FnMut(DownloadProgress),
+        _cancel: &CancelToken,
+    ) -> Option<PathBuf> {
+        None
+    }
+}
+
+#[test]
+fn api_backend_scripted_end_to_end_record_two_utterances_then_stop() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("humm.sqlite3");
+    let store = Arc::new(SqliteStore::open(&db_path).expect("open store"));
+
+    let mut settings = Settings::default();
+    // F-061b: select the API backend before the window ever opens --
+    // `RecordingVm::open` prefills `RecordingOptions` from exactly this
+    // sticky field (`RecordingOptions::from_settings`).
+    settings.recording.backend = Some("openai_api".to_string());
+
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+    // The window's own Api Key row seeds from this same store
+    // (`RecordingVm::open`), and `app.rs::start_live_session`'s F-061b
+    // missing-key precheck resolves the session's key from it too
+    // (`RecordingDeps::secrets`) -- a real (if fake) key here means the
+    // precheck passes and a session actually starts.
+    secrets
+        .set(SecretKey::OpenAiApiKey, "sk-test-key")
+        .expect("seed a fake key");
+
+    let services = services::init_with(TestDeps {
+        store: Arc::clone(&store),
+        media_dir: dir.path().join("media"),
+        model_root: dir.path().join("models"),
+        settings,
+        settings_path: dir.path().join("settings.toml"),
+        engines: Box::new(NeverCalledEngineFactory),
+        fetcher: None,
+        capabilities: Capabilities::default(),
+        artifacts: None,
+        secrets: services::default_test_secrets(),
+        translate: services::default_test_translate(),
+        llm: None,
+        validate: services::default_test_validate(),
+    });
+
+    let mock_capture = Arc::new(Mutex::new(MockCapture::new(vec![0.5; 2 * BATCH_SAMPLES])));
+    let engine_calls = Arc::new(AtomicUsize::new(0));
+
+    let scripted_deps = RecordingDeps {
+        capture: Mutex::new(Box::new(SharedMockCapture(Arc::clone(&mock_capture)))),
+        store: Arc::clone(&store) as Arc<dyn LiveStore>,
+        model_ensurer: Arc::new(NeverCalledEnsurerForApi),
+        engine_factory: Arc::new(ScriptedApiEngineFactory {
+            capture: Arc::clone(&mock_capture),
+            calls: Arc::clone(&engine_calls),
+        }),
+        upload_factory: Arc::new(NeverCalledUploadFactory),
+        dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
+        secrets: Arc::clone(&secrets),
+    };
+
+    let mut harness = HarnessBuilder::default()
+        .with_size(egui::Vec2::new(1000.0, 600.0))
+        .build_eframe(move |_cc| {
+            let mut app = HummApp::new_for_test(services);
+            app.set_recording_deps_for_test(scripted_deps);
+            app
+        });
+    harness.step();
+
+    harness.state_mut().open_recording_window_for_test();
+    harness.step();
+    let vm_arc = harness
+        .state()
+        .recording_vm_for_test()
+        .expect("window is open");
+    assert_eq!(
+        vm_arc
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .options
+            .backend,
+        humm_core::domain::Backend::OpenAiApi,
+        "the window opened with the sticky API backend selected"
+    );
+    let deps_arc = harness.state().recording_deps_for_test();
+
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    harness.step();
+
+    wait_for(&mut harness, "the second utterance to land on the panel", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            vm_arc
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .panel_text
+                .contains("utterance two")
+        }
+    });
+    assert_eq!(
+        vm_arc.lock().unwrap_or_else(|p| p.into_inner()).panel_text,
+        "utterance one\n\nutterance two"
+    );
+    // No missing-key inline error fired (the precheck passed) -- the
+    // ordinary transcription flow ran instead.
+    assert_eq!(
+        vm_arc
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .error_dialog,
+        None
+    );
+
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    wait_for(&mut harness, "the session to stop", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            vm_arc.lock().unwrap_or_else(|p| p.into_inner()).status == RecordingStatus::Stopped
+        }
+    });
+
+    let tasks = TasksVm::load(&store);
+    let row = tasks
+        .sorted_rows()
+        .first()
+        .expect("exactly one live session row");
+    assert_eq!(row.status, Status::Completed);
+    let segments = store.get_segment_rows(row.id).expect("segments");
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0].text, "utterance one");
+    assert_eq!(segments[1].text, "utterance two");
+    assert_eq!(
+        engine_calls.load(Ordering::SeqCst),
+        2,
+        "load_api's scripted engine ran exactly twice, never load/ensure_model"
+    );
+}
+
+#[test]
+fn api_backend_missing_key_shows_an_inline_error_and_never_starts_a_session() {
+    // F-061b: unlike Buzz (no precheck at all -- see the task report), a
+    // missing/empty key aborts the Record click inline, before any session
+    // thread is ever spawned.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(SqliteStore::open_in_memory().expect("open store"));
+
+    let mut settings = Settings::default();
+    settings.recording.backend = Some("openai_api".to_string());
+
+    let services = services::init_with(TestDeps {
+        store: Arc::clone(&store),
+        media_dir: dir.path().join("media"),
+        model_root: dir.path().join("models"),
+        settings,
+        settings_path: dir.path().join("settings.toml"),
+        engines: Box::new(NeverCalledEngineFactory),
+        fetcher: None,
+        capabilities: Capabilities::default(),
+        artifacts: None,
+        secrets: services::default_test_secrets(),
+        translate: services::default_test_translate(),
+        llm: None,
+        validate: services::default_test_validate(),
+    });
+
+    // `RecordingDeps::secrets` is left with no stored key at all (a fresh
+    // `MemorySecretStore`) -- the precheck must degrade this to "missing",
+    // same as a keyring read error would.
+    let scripted_deps = RecordingDeps {
+        capture: Mutex::new(Box::new(MockCapture::new(Vec::new()))),
+        store: Arc::clone(&store) as Arc<dyn LiveStore>,
+        model_ensurer: Arc::new(NeverCalledEnsurerForApi),
+        engine_factory: Arc::new(ScriptedApiEngineFactory {
+            capture: Arc::new(Mutex::new(MockCapture::new(Vec::new()))),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }),
+        upload_factory: Arc::new(NeverCalledUploadFactory),
+        dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
+        secrets: Arc::new(MemorySecretStore::new()),
+    };
+
+    let mut harness = HarnessBuilder::default()
+        .with_size(egui::Vec2::new(1000.0, 600.0))
+        .build_eframe(move |_cc| {
+            let mut app = HummApp::new_for_test(services);
+            app.set_recording_deps_for_test(scripted_deps);
+            app
+        });
+    harness.step();
+
+    harness.state_mut().open_recording_window_for_test();
+    harness.step();
+    let vm_arc = harness
+        .state()
+        .recording_vm_for_test()
+        .expect("window is open");
+
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&harness.state().recording_deps_for_test());
+    harness.step();
+    harness.step(); // settle: `harvest_recording_intent` runs the precheck this frame.
+
+    let vm = vm_arc.lock().unwrap_or_else(|p| p.into_inner());
+    assert_eq!(
+        vm.status,
+        RecordingStatus::Stopped,
+        "the optimistic Stopped->Recording flip must be reverted, not left stranded"
+    );
+    assert!(
+        vm.error_dialog.is_some(),
+        "a missing key must show an inline error"
+    );
+    drop(vm);
+
+    // No store row at all: no session thread was ever spawned to insert one.
+    assert!(TasksVm::load(&store).sorted_rows().is_empty());
+}
+
 // -- Task 11 review finding 2: session-thread panic recovery -----------------
 
 #[test]
@@ -1229,6 +1568,7 @@ fn session_thread_panic_recovers_the_window_and_completes_the_store_row() {
         }),
         upload_factory: Arc::new(NeverCalledUploadFactory),
         dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
+        secrets: Arc::new(MemorySecretStore::new()),
     };
 
     let mut harness = HarnessBuilder::default()
@@ -1377,6 +1717,7 @@ fn live_translation_end_to_end_panel_export_and_store() {
         }),
         upload_factory: Arc::new(NeverCalledUploadFactory),
         dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
+        secrets: Arc::new(MemorySecretStore::new()),
     };
 
     let mut harness = HarnessBuilder::default()
@@ -1561,6 +1902,7 @@ fn late_translation_arrivals_after_stop_reach_panel_store_and_export() {
         }),
         upload_factory: Arc::new(NeverCalledUploadFactory),
         dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
+        secrets: Arc::new(MemorySecretStore::new()),
     };
 
     let mut harness = HarnessBuilder::default()
@@ -1747,6 +2089,7 @@ fn live_translation_disabled_spawns_no_translator_and_persists_no_translations()
         }),
         upload_factory: Arc::new(NeverCalledUploadFactory),
         dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
+        secrets: Arc::new(MemorySecretStore::new()),
     };
 
     let mut harness = HarnessBuilder::default()

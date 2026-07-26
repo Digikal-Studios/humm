@@ -11,25 +11,38 @@
 //! F-065 §2.6, Task 12), transcription panel, copy bar
 //! ([`copy_click_outcome`]/[`CopyLabelState`] below, F-065 §2.7, Task 12),
 //! then the advanced settings sheet (`views::recording_advanced::ui`, an
-//! `egui::Modal` overlay, Task 12) and the error-dialog modal, both rendered
-//! last so they paint over everything above. The **translation panel** (F-063,
+//! `egui::Modal` overlay, Task 12), the Api Key row's commit-failure modal
+//! (F-061b, Task 18), and the error-dialog modal, all rendered last so they
+//! paint over everything above. The **translation panel** (F-063,
 //! spec §7.4) renders directly below the transcription panel, read-only, shown
 //! iff `options.enable_llm_translation` (live show/hide on toggle — Buzz
 //! `:544-547`), with the placeholder `"Waiting for AI translation..."`.
+//!
+//! **Options-group row order (F-061b, Task 18)**: backend combo
+//! (`render_backend_combo`), then — mirroring `views::options_sheet::ui`'s
+//! own order exactly — the model-size combo + Apple-Silicon load note (only
+//! while `Backend::Whisper`) or the Api Key row (only while
+//! `Backend::OpenAiApi`), then task/language combos and the Advanced…
+//! button. Buzz's own model-*type* combo is this group's first row too
+//! (`transcription_options_group_box.py:107-126`).
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use humm_core::domain::Backend;
 use humm_core::settings::Settings;
 
 use crate::i18n::{tr, tr_args};
 use crate::live_session::PrepUpdate;
-use crate::recording::{RecordingDeps, RecordingStatus, RecordingVm, realtime_fit_warning_visible};
+use crate::recording::{
+    RecordingDeps, RecordingStatus, RecordingVm, measured_speed_key, realtime_fit_warning_visible,
+};
 use crate::views::audio_meter::audio_meter;
 use crate::views::options_sheet::{
-    render_language_combo, render_model_combo, render_task_combo, title_case,
+    render_api_key_row, render_backend_combo, render_language_combo, render_model_combo,
+    render_task_combo, sheet_modal_title_and_body, title_case,
 };
 use crate::views::presentation;
 use crate::views::recording_advanced;
@@ -178,16 +191,33 @@ pub fn recording_ui(
     let stopped = vm.status == RecordingStatus::Stopped;
 
     ui.add_enabled_ui(stopped, |ui| {
-        render_model_combo(
-            ui,
-            "humm-recording-model-size",
-            &mut vm.options.model_size,
-            custom_model_available,
-            include_lumii,
-        );
-        if apple_silicon_load_note_applicable() {
-            ui.label("\u{24d8}")
-                .on_hover_text(tr("recording-model-load-note"));
+        // F-061b: the backend combo sits above the size row, mirroring the
+        // options sheet's own order (`options_sheet::ui`: backend, then
+        // size-if-visible, then the Api Key row-if-visible, then task/
+        // language) — Buzz's model-*type* combo is likewise this group's
+        // first row (`transcription_options_group_box.py:107-126`).
+        render_backend_combo(ui, "humm-recording-backend", &mut vm.options.backend);
+        if vm.options.backend == Backend::Whisper {
+            render_model_combo(
+                ui,
+                "humm-recording-model-size",
+                &mut vm.options.model_size,
+                custom_model_available,
+                include_lumii,
+            );
+            if apple_silicon_load_note_applicable() {
+                ui.label("\u{24d8}")
+                    .on_hover_text(tr("recording-model-load-note"));
+            }
+        }
+        if vm.options.backend == Backend::OpenAiApi {
+            render_api_key_row(
+                ui,
+                &mut vm.options.api_key,
+                &mut vm.options.api_key_visible,
+                &mut vm.api_key_modal,
+                &deps.secrets,
+            );
         }
         render_task_combo(ui, "humm-recording-task", &mut vm.options.task);
         render_language_combo(ui, "humm-recording-language", &mut vm.options.language);
@@ -225,12 +255,16 @@ pub fn recording_ui(
 
     ui.add_space(4.0);
 
-    if realtime_fit_warning_visible(measured_speed, vm.options.model_size) {
-        let ratio = measured_speed
-            .get(vm.options.model_size.as_str())
-            .copied()
-            .unwrap_or(0.0);
-        let size_text = title_case(vm.options.model_size.as_str());
+    let measured_key = measured_speed_key(vm.options.backend, vm.options.model_size);
+    if realtime_fit_warning_visible(measured_speed, measured_key) {
+        let ratio = measured_speed.get(measured_key).copied().unwrap_or(0.0);
+        // The API backend has no model size of its own -- its own display
+        // name (Buzz's `"OpenAI Whisper API"`) fills the `$size` placeholder
+        // instead (ledger #L14).
+        let size_text = match vm.options.backend {
+            Backend::OpenAiApi => tr("options-backend-openai-api"),
+            Backend::Whisper => title_case(vm.options.model_size.as_str()),
+        };
         let ratio_text = format!("{ratio:.1}");
         ui.colored_label(
             ui.visuals().warn_fg_color,
@@ -336,6 +370,26 @@ pub fn recording_ui(
         settings_path,
         deps.dialogs.as_ref(),
     );
+
+    // The Api Key row's own commit-failure modal (F-061b) -- a second,
+    // independent `egui::Modal` stacked over everything above, mirroring
+    // `options_sheet::ui`'s and `prefs_folder_watch::ui`'s identical
+    // pattern for their own embedded Api Key rows.
+    if let Some(modal) = vm.api_key_modal {
+        let (title, body) = sheet_modal_title_and_body(modal);
+        let mut close = false;
+        let modal_response =
+            egui::Modal::new(egui::Id::new("humm-recording-key-modal")).show(ui.ctx(), |ui| {
+                ui.heading(title);
+                ui.label(body);
+                if ui.button(tr("dialog-ok")).clicked() {
+                    close = true;
+                }
+            });
+        if close || modal_response.should_close() {
+            vm.api_key_modal = None;
+        }
+    }
 
     // Buzz's error dialog (`QMessageBox.critical`, byte-exact text) --
     // egui's non-native `egui::Modal` equivalent (`models_ui::ui`'s own

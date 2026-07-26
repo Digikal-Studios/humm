@@ -27,7 +27,7 @@ use humm_core::settings::{FileTranscriberSettings, GuiSettings, Settings, Viewer
 use humm_media::{FfmpegDecoder, FfmpegVideoStreamer, FfprobeProber};
 use humm_whisper::LiveOptions;
 
-use crate::engine_factory::DownloaderEnsurer;
+use crate::engine_factory::{DownloaderEnsurer, resolve_openai_config};
 use crate::events::{self, SharedEventQueue};
 use crate::folder_watch::{FolderWatchService, FolderWatchSnapshot, ReconcileAction};
 use crate::i18n::{self, tr};
@@ -38,7 +38,7 @@ use crate::live_session::{
     SessionMessage, UploadFactory,
 };
 use crate::live_translation::LiveTranslator;
-use crate::recording::{RecordingDeps, RecordingStatus, RecordingVm};
+use crate::recording::{RecordingDeps, RecordingStatus, RecordingVm, measured_speed_key};
 use crate::services::{self, Services, UpdateNotice};
 use crate::shortcuts::ShortcutMap;
 use crate::viewer::{ViewerDeps, ViewerVm};
@@ -598,6 +598,7 @@ impl HummApp {
             engine_factory,
             upload_factory,
             dialogs: Arc::new(RfdFileDialogs),
+            secrets: Arc::clone(&services.secrets),
         });
         let (app_event_tx, app_event_rx) = mpsc::channel();
 
@@ -2736,6 +2737,42 @@ impl HummApp {
         if let Some(old) = old_translator {
             old.stop();
         }
+
+        // F-061b: the API backend needs a resolvable key *before* the
+        // session is ever allowed to start -- a deliberate, documented
+        // improvement over Buzz, whose own live-API arm has no precheck at
+        // all and instead surfaces a bad/missing key as fake "Error: ..."
+        // transcript text on the very first chunk
+        // (`recording_transcriber.py:355-359`; see the task report for the
+        // full source read). Resolved fresh here (keyring + `settings.openai`,
+        // via the shared `resolve_openai_config`), matching the "read fresh
+        // at record-start" contract `Self::force_cpu_setting`/
+        // `GuiEngineFactory::create_openai` already use. A missing/empty key
+        // aborts the click inline: the optimistic Stopped->Recording UI flip
+        // `RecordingVm::on_record_clicked` already made is reverted via the
+        // same `flush_finish_stopping` every other early-Stop path uses, and
+        // no session thread is ever spawned.
+        let api_config = if options.backend == Backend::OpenAiApi {
+            match resolve_openai_config(
+                &self.services.settings,
+                self.recording_deps.secrets.as_ref(),
+            ) {
+                Ok(cfg) => Some(cfg),
+                Err(()) => {
+                    let deps = Arc::clone(&self.recording_deps);
+                    let mut vm = vm_arc
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    vm.error_dialog = Some(tr("viewer-translate-key-required-body"));
+                    self.flush_finish_stopping(&mut vm, &deps);
+                    ctx.request_repaint();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
         let recording_settings = {
             let settings = self
                 .services
@@ -2746,10 +2783,14 @@ impl HummApp {
         };
 
         let model = ModelSpec {
-            // Live recording via the API backend is deferred (M6 design
-            // spec §0): the recording window keeps its local-engine-only
-            // options group, so this is always whisper.cpp.
-            backend: Backend::Whisper,
+            // F-061b: the live session's actual selected backend -- the
+            // resolved `api_config` above (`Some` only when `options.backend
+            // == Backend::OpenAiApi`) is `run_live_session`'s own signal to
+            // skip model resolution/download and `WhisperEngine::load`
+            // entirely, so this field only drives the persisted
+            // `options_snapshot` below for the API backend, not the ensure/
+            // load path.
+            backend: options.backend,
             size: options.model_size,
             hf_repo: None,
         };
@@ -2850,6 +2891,7 @@ impl HummApp {
             upload_url,
             meter,
             translation_enqueue,
+            api_config,
         };
 
         let session = live_session::spawn_live_session(
@@ -3257,11 +3299,11 @@ impl HummApp {
         vm_arc: &Arc<Mutex<RecordingVm>>,
         measurement: Option<humm_core::live::LiveMeasurement>,
     ) {
-        let model_size = {
+        let measured_key = {
             let vm = vm_arc
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            vm.options.model_size
+            measured_speed_key(vm.options.backend, vm.options.model_size)
         };
         if let Some(ratio) = measurement.and_then(|m| m.realtime_ratio()) {
             let mut settings = self
@@ -3271,7 +3313,7 @@ impl HummApp {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             live_session::record_measured_speed(
                 &mut settings.recording.measured_speed,
-                model_size,
+                measured_key,
                 ratio,
             );
             if let Err(err) = settings.save(&self.services.settings_path) {

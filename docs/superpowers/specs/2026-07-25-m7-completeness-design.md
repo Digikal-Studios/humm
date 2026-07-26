@@ -658,14 +658,19 @@ backends).
   module — **not** `soundfile`, corrected on Task 17's source re-read
   (`recording_transcriber.py:6,309-316`) — humm builds the same container in
   memory — same bytes-on-the-wire shape, no disk churn) → multipart
-  `/audio/transcriptions` with the caller-supplied prompt as `prompt` (ledger
-  #L16 — Buzz's own live-API arm never actually threads its rolling prompt,
-  an apparent defect this port does not carry), under `cancelable` + a
-  60 s timeout scaled to a chunk's size (`LiveApiTranscriber::REQUEST_TIMEOUT`,
-  not the file engine's 600 s). Language maps exactly as the file engine's;
-  task does not — `transcribe_chunk` always posts to `/audio/transcriptions`
-  with no task parameter, a scope gap against Buzz's task-conditional
-  endpoint selection (ledger #L15).
+  `/audio/transcriptions` (or `/audio/translations`, see below) with the
+  caller-supplied prompt as `prompt` (ledger #L16 — Buzz's own live-API arm
+  never actually threads its rolling prompt, an apparent defect this port
+  does not carry), under `cancelable` + a 60 s timeout scaled to a chunk's
+  size (`LiveApiTranscriber::REQUEST_TIMEOUT`, not the file engine's 600 s).
+  Language maps exactly as the file engine's; task now does too — **Task 18
+  closes ledger #L15**: `transcribe_chunk` gained a `task: TaskKind`
+  parameter, selecting `/audio/transcriptions` for `Transcribe` and
+  `/audio/translations` for `Translate` (the same rule
+  `OpenAiEngine::transcribe_one` already applies, `engine.rs:121-124`), and
+  gating `language` to the transcriptions endpoint only — exactly matching
+  Buzz's own `translations.create(**options)` call, which never receives a
+  `language` kwarg at all.
 - **Realtime-fit warning**: the measured-speed map is keyed by model size — API
   sessions record under a backend-qualified key (e.g. `openai_api`) so a slow
   network doesn't poison the local sizes' numbers (✚ detail, ledger #L14).
@@ -749,7 +754,7 @@ backends).
 | L12 | "Reduce GPU RAM" (int8) omitted | consumers are the unported HF/Faster-Whisper backends (ADR-008); dead surface otherwise |
 | L13 | Live-API chunks built as in-memory WAV, not temp files | same wire bytes; no disk churn; Buzz's temp file was a **`wave`**-module artifact (Task 17 re-read corrected this row's own text: `recording_transcriber.py:6,309-316` imports and uses the stdlib `wave` module, not `soundfile` — no `soundfile` import exists in that file) |
 | L14 | API live sessions record measured speed under a backend-qualified key | network speed must not poison local model-size numbers the realtime-fit warning reads |
-| L15 | `LiveApiTranscriber::transcribe_chunk` (`openai/live.rs`) always posts to `/audio/transcriptions`, with no task parameter — a live session with `TaskKind::Translate` selected against the API backend transcribes instead of translating | Task 17's binding contract fixed this exact signature; Buzz's own live-API arm *does* conditionally post to `/audio/translations` when `task == Task.TRANSLATE` (`recording_transcriber.py:330-343`), and humm-gui's recording options already carry a settable `TaskKind` (`recording.rs:175,1022`), so this is a real, reachable scope gap, not theoretical — recorded for Task 18/a follow-up to close, not silently dropped |
+| L15 | **CLOSED (Task 18).** `LiveApiTranscriber::transcribe_chunk` (`openai/live.rs`) previously always posted to `/audio/transcriptions`, with no task parameter — a live session with `TaskKind::Translate` selected against the API backend transcribed instead of translating | Task 17's binding contract fixed that signature deliberately (its own report recorded the gap for follow-up, not silently); Buzz's own live-API arm *does* conditionally post to `/audio/translations` when `task == Task.TRANSLATE` (`recording_transcriber.py:330-343`), and humm-gui's recording options already carry a settable `TaskKind` (`recording.rs:175,1022`), so this was a real, reachable scope gap, not theoretical. **Closure**: `transcribe_chunk` gained a `task: TaskKind` parameter (Task 18), applying the file engine's own rule (`engine.rs:121-124`): `Transcribe` → `/audio/transcriptions`, `Translate` → `/audio/translations`, `language` gated to the transcriptions endpoint only (Buzz's `translations.create(**options)` never receives `language` at all) |
 | L16 | `LiveApiTranscriber::transcribe_chunk` sends whatever rolling `prompt` its caller supplies (via `run_session`'s uniform per-backend prompt threading), rather than Buzz's literal live-API behavior | Buzz's `_transcribe_via_api(self, samples, initial_prompt)` (`recording_transcriber.py:306`) accepts the rolling prompt as a parameter but never reads it — `:323` sends the static `self.transcription_options.initial_prompt` instead, unconditionally, for every chunk of the session. The same parameter-vs-static mixup recurs in `_transcribe_faster_whisper` (`:278`); only `_transcribe_whisper` (`:261`) actually threads the rolling value. Read as an oversight, not a deliberate choice — house precedent (`openai::parse`'s `offset_ms` fix for the whisper.cpp branch) is to fix accidental upstream corruption rather than port it byte-faithfully |
 
 ---
