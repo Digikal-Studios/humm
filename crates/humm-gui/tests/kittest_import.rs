@@ -23,6 +23,7 @@ use humm_core::domain::{
 use humm_core::error::{CoreError, EngineError};
 use humm_core::secrets::{FailingSecretStore, MemorySecretStore, SecretKey, SecretStore};
 use humm_gui::app::HummApp;
+use humm_gui::i18n::tr;
 use humm_gui::import::ImportRequest;
 use humm_gui::services::{self, Capabilities, Services, TestDeps};
 use humm_store::SqliteStore;
@@ -228,6 +229,17 @@ fn extract_speech_checkbox_enabled_when_demucs_present() {
 /// checkbox renders disabled with an actionable missing-binary tooltip
 /// (`options-extract-speech-missing-tooltip`) — replaces the old
 /// always-disabled assertion this milestone retires.
+///
+/// The tooltip text itself is asserted, not just the disabled state:
+/// `egui::Context::memory_mut(|mem| mem.set_everything_is_visible(true))`
+/// makes `Tooltip::should_show_tooltip` return unconditionally `true`
+/// (vendored egui-0.35.0 `containers/tooltip.rs:199-201`,
+/// `memory/mod.rs:1132-1142`) — no pointer hover or hover-delay timing
+/// needed, and no child viewport either (`on_disabled_hover_text`'s tooltip
+/// renders its `Label` straight into this same call's `egui::Ui`, so its
+/// accesskit node lands in the very same tree `get_by_label` already
+/// queries). Set right before the final `harness.run()` so it takes effect
+/// for that pass's tooltip evaluation.
 #[test]
 fn extract_speech_checkbox_disabled_with_tooltip_when_demucs_absent() {
     let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
@@ -244,6 +256,13 @@ fn extract_speech_checkbox_disabled_with_tooltip_when_demucs_absent() {
         checkbox.accesskit_node().is_disabled(),
         "Extract speech must be disabled while demucs is absent"
     );
+
+    harness
+        .ctx
+        .memory_mut(|mem| mem.set_everything_is_visible(true));
+    harness.run();
+
+    harness.get_by_label(&tr("options-extract-speech-missing-tooltip"));
 }
 
 // -- Run -> enqueue -> sticky prefs -------------------------------------------

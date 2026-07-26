@@ -579,7 +579,15 @@ pub struct TestDeps {
     /// actionably, same as a real machine with no yt-dlp).
     pub fetcher: Option<Arc<dyn MediaFetcher>>,
     /// Reported capabilities (defaults to all-`false`; a test overrides this
-    /// to simulate ffmpeg/yt-dlp being present).
+    /// to simulate ffmpeg/yt-dlp being present). Intentional test/production
+    /// asymmetry for `demucs`: a test can set `capabilities.demucs = true` to
+    /// exercise the options-sheet checkbox's enabled-state UI gating (Task 6
+    /// kittests do exactly this) while [`init_with`]'s own `RunnerDeps`
+    /// always wires `isolator: None` regardless — no kittest here drives a
+    /// real `SpeechIsolator` run end-to-end (that's `humm_core::queue`'s
+    /// scripted-`ScriptedIsolator` test double's job); the two are unrelated
+    /// knobs the real [`init`] happens to keep in sync (same isolator
+    /// instance) but a test fixture is free not to.
     pub capabilities: Capabilities,
     /// Artifact ensurer, if the test needs one (`None` — the common case —
     /// means every enqueued task already carries a runnable engine/model, as
