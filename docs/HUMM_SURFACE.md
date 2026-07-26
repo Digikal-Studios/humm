@@ -331,7 +331,7 @@ fields for the backend selector and per-task LLM translation (F-041/F-031):
 | `enable_llm_translation` | bool | `false` | Whether AI translation was last enabled in the options sheet (F-031). |
 | `llm_model` | `Option<String>` | `None` | Last-entered LLM translation model id, if AI translation was configured. |
 | `llm_prompt` | `Option<String>` | `None` | Last-entered LLM translation prompt, if AI translation was configured. |
-| `extract_speech` (M8) | bool | `false` | Whether speech isolation (F-027, demucs) was last enabled in the options sheet — the sticky counterpart of `TranscriptionOptions::extract_speech`. The options-sheet checkbox itself is wired to this field in a later M8 task. |
+| `extract_speech` (M8) | bool | `false` | Whether speech isolation (F-027, demucs) was last enabled in the options sheet — the sticky counterpart of `TranscriptionOptions::extract_speech`. **Wired as of M8 Task 6**: the options-sheet checkbox is bound to this field directly, disabled (with an actionable install-hint tooltip) only when `services::Capabilities::demucs` is `false` (probed once at startup from the same `DemucsIsolator` wired into `RunnerDeps::isolator`). |
 
 ### 6.4 OpenAI-compatible API backend settings (`[openai]`, M6, F-041/F-031)
 

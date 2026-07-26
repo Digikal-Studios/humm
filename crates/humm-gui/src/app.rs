@@ -3922,6 +3922,7 @@ impl eframe::App for HummApp {
         let custom_model_available = self.custom_model_available();
         let include_lumii = self.lumii_gate();
         let yt_dlp_available = self.services.capabilities.yt_dlp;
+        let demucs_available = self.services.capabilities.demucs;
         let folder_watch_pill = self.folder_watch_pill();
 
         let result = views::main_window::show(
@@ -3935,6 +3936,7 @@ impl eframe::App for HummApp {
             custom_model_available,
             include_lumii,
             yt_dlp_available,
+            demucs_available,
             CURRENT_VERSION,
             &self.services.secrets,
             folder_watch_pill.as_ref(),

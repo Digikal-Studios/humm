@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::NaiveDateTime;
 
-use humm_core::boundary::{AudioEncoder, MediaFetcher, TaskStore};
+use humm_core::boundary::{AudioEncoder, MediaFetcher, SpeechIsolator, TaskStore};
 use humm_core::env::{threads_from_env, use_gpu_from_env};
 use humm_core::error::StoreError;
 use humm_core::openai::LlmEndpointSource;
@@ -42,7 +42,9 @@ use humm_core::settings::{Settings, SettingsError};
 use humm_core::telemetry::{Event, NoopTelemetry, PostHogTelemetry, Telemetry, telemetry_enabled};
 use humm_core::update::{self, UpdateInfo};
 use humm_core::viewer::text_view::paragraph_split_from_env;
-use humm_media::{FfmpegDecoder, FfprobeProber, MediaCapabilities, YtDlpFetcher, probe_binaries};
+use humm_media::{
+    DemucsIsolator, FfmpegDecoder, FfprobeProber, MediaCapabilities, YtDlpFetcher, probe_binaries,
+};
 use humm_store::{KeyringSecretStore, SqliteStore};
 
 use crate::engine_factory::{DownloaderEnsurer, GuiEngineFactory};
@@ -65,6 +67,17 @@ pub struct Capabilities {
     pub ffprobe: bool,
     /// Whether yt-dlp was found (URL import).
     pub yt_dlp: bool,
+    /// Whether `demucs` was found (F-027 speech isolation,
+    /// [`humm_media::DemucsIsolator::available`]). Gates the options sheet's
+    /// "Extract speech" checkbox the same way `yt_dlp` gates URL import — set
+    /// in [`init`] from the same isolator instance wired into
+    /// `RunnerDeps::isolator`, so the probe and the actual runner see
+    /// identical availability. Not derived from [`MediaCapabilities`]
+    /// (unlike the other three fields): demucs is a separate, much slower
+    /// probe (its own doc: spawning it just to check presence would pull in
+    /// PyTorch) so it's set explicitly in [`init`] rather than folded into
+    /// the `From<&MediaCapabilities>` impl below.
+    pub demucs: bool,
 }
 
 impl From<&MediaCapabilities> for Capabilities {
@@ -73,6 +86,11 @@ impl From<&MediaCapabilities> for Capabilities {
             ffmpeg: media.ffmpeg_version.is_some(),
             ffprobe: media.ffprobe_version.is_some(),
             yt_dlp: media.yt_dlp.is_some(),
+            // Not derivable from `MediaCapabilities` (see `demucs`'s own doc)
+            // — `init` overwrites this with the real probe right after
+            // converting; `false` here is only ever observed by a caller
+            // that skips that step entirely (none currently does).
+            demucs: false,
         }
     }
 }
@@ -278,7 +296,15 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
     apply_stale_flip(&store, sole_instance);
 
     let media_caps = probe_binaries();
-    let capabilities = Capabilities::from(&media_caps);
+    let mut capabilities = Capabilities::from(&media_caps);
+
+    // The one isolator instance both probes availability (`capabilities.demucs`,
+    // gating the options sheet's checkbox) and is wired into `RunnerDeps`
+    // below — a single `available()` cache so the capability the checkbox
+    // renders against and the isolator the queue actually runs are never out
+    // of sync (design spec §3/§8).
+    let isolator = Arc::new(DemucsIsolator::new());
+    capabilities.demucs = isolator.available();
 
     let decoder = Arc::new(FfmpegDecoder::new());
     let prober = Arc::new(FfprobeProber::new());
@@ -351,11 +377,16 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
             settings: Arc::clone(&settings),
             secrets: Arc::clone(&secrets),
         }) as Arc<dyn PostprocConfigSource>),
-        // M8 pre-transcription seam: wired in Tasks 5-8 (isolator, reducer,
-        // language detector adapters land there). `None` for now means the
-        // seam never runs, exactly like every field here did before it
-        // existed.
-        isolator: None,
+        // M8 pre-transcription seam (F-027): the same isolator instance
+        // `capabilities.demucs` was just probed from, above — a task only
+        // ever runs it when its own `options.extract_speech` is set
+        // (`queue::Runner::run_job`'s gate), so this is wired unconditionally
+        // rather than behind `if capabilities.demucs` (an absent binary still
+        // degrades per-task, via `SpeechIsolator::isolate`'s own error path,
+        // not by leaving the seam `None`). `reducer`/`lang_detector` land in
+        // later M8 tasks; `None` for now keeps that seam inert exactly like
+        // every field here did before it existed.
+        isolator: Some(isolator as Arc<dyn SpeechIsolator>),
         reducer: None,
         lang_detector: None,
     };
@@ -893,6 +924,7 @@ mod tests {
                 ffmpeg: true,
                 ffprobe: false,
                 yt_dlp: true,
+                demucs: false,
             }
         );
     }

@@ -216,7 +216,7 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "language-detect",
         "options-word-timestamps",
         "options-extract-speech",
-        "options-extract-speech-tooltip",
+        "options-extract-speech-missing-tooltip",
         "options-export-label",
         "options-export-txt",
         "options-export-srt",

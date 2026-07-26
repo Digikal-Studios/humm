@@ -116,6 +116,18 @@ pub struct SheetState {
     pub language: Option<Language>,
     /// Whether to request word-level timestamps.
     pub word_timestamps: bool,
+    /// Whether to isolate speech via demucs before transcription (F-027,
+    /// design spec §3). Seeded from `FileTranscriberSettings.extract_speech`,
+    /// persisted back the same way, and threaded verbatim into the enqueued
+    /// [`TranscriptionOptions::extract_speech`] ([`transcription_options_from_state`]).
+    /// The checkbox itself renders disabled — with an actionable
+    /// missing-binary tooltip — whenever `demucs` isn't on `PATH`
+    /// ([`services::Capabilities::demucs`](crate::services::Capabilities::demucs),
+    /// [`ui`]'s `demucs_available` parameter); this field can still hold
+    /// `true` from an earlier session even while temporarily un-renderable
+    /// (same "state persists, availability just gates the widget" shape as
+    /// `hf_repo`/`custom_model_available`).
+    pub extract_speech: bool,
     /// Priming text for the model.
     pub initial_prompt: String,
     /// Free-text Hugging Face repo id. Non-empty overrides `model_size` at
@@ -222,6 +234,7 @@ impl SheetState {
                 .unwrap_or(TaskKind::Transcribe),
             language: prefill.language.as_deref().and_then(Language::parse),
             word_timestamps: prefill.word_timestamps.unwrap_or(false),
+            extract_speech: prefill.extract_speech,
             initial_prompt: prefill.initial_prompt.clone().unwrap_or_default(),
             hf_repo: prefill.hf_repo.clone().unwrap_or_default(),
             formats,
@@ -249,6 +262,7 @@ impl SheetState {
         settings.model_size = Some(self.model_size.as_str().to_string());
         settings.hf_repo = non_empty_trimmed(&self.hf_repo);
         settings.word_timestamps = Some(self.word_timestamps);
+        settings.extract_speech = self.extract_speech;
         settings.initial_prompt = Some(self.initial_prompt.clone());
         settings.export_formats = Some(
             self.formats
@@ -273,6 +287,7 @@ impl std::fmt::Debug for SheetState {
             .field("task", &self.task)
             .field("language", &self.language)
             .field("word_timestamps", &self.word_timestamps)
+            .field("extract_speech", &self.extract_speech)
             .field("initial_prompt", &self.initial_prompt)
             .field("hf_repo", &self.hf_repo)
             .field("formats", &self.formats)
@@ -559,10 +574,7 @@ fn transcription_options_from_state(state: &SheetState) -> TranscriptionOptions 
         initial_prompt: state.initial_prompt.clone(),
         temperature: DEFAULT_TEMPERATURE.to_vec(),
         llm: llm_options(state),
-        // `SheetState` has no `extract_speech` field yet — the options-sheet
-        // checkbox is still a decoy local (a later M8 task binds it to a
-        // real field and threads it through here).
-        extract_speech: false,
+        extract_speech: state.extract_speech,
     }
 }
 
@@ -1014,12 +1026,16 @@ pub(crate) fn render_llm_model_prompt_fields(
 /// (F-044/J-9, design spec §8.2) — precomputed by `app.rs` every frame from
 /// `Services.settings`/the system locale (`crate::i18n::lumii_locale_requested`),
 /// same "app.rs computes, this module only renders" split as
-/// `custom_model_available`.
+/// `custom_model_available`. `demucs_available` (F-027, design spec §3)
+/// gates the "Extract speech" checkbox the same way — `app.rs`'s
+/// `Services.capabilities.demucs`, probed once at startup from the very
+/// `DemucsIsolator` wired into `RunnerDeps::isolator`.
 pub fn ui(
     ctx: &egui::Context,
     sheet: &mut Option<OptionsSheet>,
     custom_model_available: bool,
     include_lumii: bool,
+    demucs_available: bool,
     secrets: &Arc<dyn SecretStore>,
 ) -> Option<SheetOutcome> {
     let OptionsSheet {
@@ -1075,12 +1091,18 @@ pub fn ui(
         render_language_combo(ui, "humm-options-language", &mut state.language);
         ui.checkbox(&mut state.word_timestamps, tr("options-word-timestamps"));
 
-        let mut extract_speech = false;
-        ui.add_enabled(
-            false,
-            egui::Checkbox::new(&mut extract_speech, tr("options-extract-speech")),
-        )
-        .on_disabled_hover_text(tr("options-extract-speech-tooltip"));
+        // F-027: disabled — with an actionable install-hint tooltip — only
+        // when demucs itself is genuinely absent (Capabilities pattern,
+        // design spec §3/§8); otherwise a live checkbox bound straight to
+        // `state.extract_speech`, same shape as `word_timestamps` above.
+        let extract_speech_response = ui.add_enabled(
+            demucs_available,
+            egui::Checkbox::new(&mut state.extract_speech, tr("options-extract-speech")),
+        );
+        if !demucs_available {
+            extract_speech_response
+                .on_disabled_hover_text(tr("options-extract-speech-missing-tooltip"));
+        }
 
         render_export_checkboxes(ui, &mut state.formats);
 
@@ -1171,6 +1193,7 @@ mod tests {
             task: TaskKind::Transcribe,
             language: None,
             word_timestamps: false,
+            extract_speech: false,
             initial_prompt: String::new(),
             hf_repo: String::new(),
             formats: BTreeSet::new(),
@@ -1197,6 +1220,7 @@ mod tests {
         assert_eq!(state.task, TaskKind::Transcribe);
         assert_eq!(state.language, None);
         assert!(!state.word_timestamps);
+        assert!(!state.extract_speech);
         assert_eq!(state.initial_prompt, "");
         assert_eq!(state.hf_repo, "");
         assert!(state.formats.is_empty());
@@ -1266,6 +1290,7 @@ mod tests {
         state.task = TaskKind::Translate;
         state.language = Language::parse("fr");
         state.word_timestamps = true;
+        state.extract_speech = true;
         state.initial_prompt = "proper nouns: Buzz, humm".to_string();
         state.hf_repo = "openai/whisper-tiny".to_string();
         state.formats = [OutputFormat::Srt, OutputFormat::Vtt].into_iter().collect();
@@ -1398,6 +1423,18 @@ mod tests {
 
         let specs = build_specs(&request, &state);
         assert_eq!(specs[0].1.options.language, None);
+    }
+
+    #[test]
+    fn build_specs_threads_extract_speech_onto_transcription_options() {
+        let request = ImportRequest::Files(vec![PathBuf::from("/a.wav")]);
+
+        let mut state = base_state();
+        state.extract_speech = false;
+        assert!(!build_specs(&request, &state)[0].1.options.extract_speech);
+
+        state.extract_speech = true;
+        assert!(build_specs(&request, &state)[0].1.options.extract_speech);
     }
 
     #[test]

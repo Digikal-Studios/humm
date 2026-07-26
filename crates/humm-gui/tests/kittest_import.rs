@@ -149,7 +149,7 @@ fn wait_for_task_count(store: &SqliteStore, expected: usize) -> Vec<humm_store::
 // -- Options sheet: file-count summary ---------------------------------------
 
 #[test]
-fn open_options_sheet_shows_the_file_count_and_extract_speech_is_disabled() {
+fn open_options_sheet_shows_the_file_count() {
     let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
     let (mut harness, _dir) = harness_with(store, Capabilities::default());
     harness.run();
@@ -163,11 +163,86 @@ fn open_options_sheet_shows_the_file_count_and_extract_speech_is_disabled() {
     harness.run();
 
     harness.get_by_label_contains("2 files");
+}
 
-    let extract_speech = harness.get_by_label("Extract speech");
+// -- Task 6 (F-027): Extract-speech checkbox + demucs capability gating -----
+
+/// With `demucs` present (`Capabilities.demucs = true`), the checkbox
+/// renders enabled, and toggling it both persists the sticky
+/// `file_transcriber.extract_speech` setting (reopen-round-trip, the same
+/// pattern `run_with_srt_checked_enqueues_full_options_closes_the_sheet_and_stays_sticky_on_reopen`
+/// uses for SRT) and lands in the enqueued/persisted `TranscriptionOptions`.
+#[test]
+fn extract_speech_checkbox_enabled_when_demucs_present() {
+    let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
+    let store_for_assert = Arc::clone(&store);
+    let capabilities = Capabilities {
+        demucs: true,
+        ..Capabilities::default()
+    };
+    let (mut harness, _dir) = harness_with(store, capabilities);
+    harness.run();
+
+    harness
+        .state_mut()
+        .open_options_sheet_for_test(ImportRequest::Files(vec![PathBuf::from("/no/such/a.wav")]));
+    harness.run();
+
+    let checkbox = harness.get_by_label("Extract speech");
     assert!(
-        extract_speech.accesskit_node().is_disabled(),
-        "Extract speech must be disabled this milestone"
+        !checkbox.accesskit_node().is_disabled(),
+        "Extract speech must be enabled when demucs is present"
+    );
+    checkbox.click();
+    harness.run();
+
+    harness.get_by_label("Run").click();
+    harness.run();
+
+    let rows = wait_for_task_count(&store_for_assert, 1);
+    let spec = store_for_assert
+        .load_task_spec(&rows[0].id)
+        .expect("load_task_spec")
+        .expect("a Run-enqueued task always has a persisted options_json");
+    assert!(
+        spec.options.extract_speech,
+        "the checked Extract-speech option must land in the enqueued TranscriptionOptions"
+    );
+
+    // Reopen with a fresh request: the checkbox must still be checked
+    // (sticky `file_transcriber.extract_speech`, written back on the
+    // previous Run).
+    harness
+        .state_mut()
+        .open_options_sheet_for_test(ImportRequest::Files(vec![PathBuf::from("/no/such/b.wav")]));
+    harness.run();
+    let checkbox = harness.get_by_label("Extract speech");
+    assert_eq!(
+        checkbox.accesskit_node().toggled(),
+        Some(egui::accesskit::Toggled::True),
+        "Extract speech must still be checked on reopen (sticky prefs)"
+    );
+}
+
+/// With `demucs` absent (the `Capabilities::default()` fixture), the
+/// checkbox renders disabled with an actionable missing-binary tooltip
+/// (`options-extract-speech-missing-tooltip`) — replaces the old
+/// always-disabled assertion this milestone retires.
+#[test]
+fn extract_speech_checkbox_disabled_with_tooltip_when_demucs_absent() {
+    let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
+    let (mut harness, _dir) = harness_with(store, Capabilities::default());
+    harness.run();
+
+    harness
+        .state_mut()
+        .open_options_sheet_for_test(ImportRequest::Files(vec![PathBuf::from("/no/such/a.wav")]));
+    harness.run();
+
+    let checkbox = harness.get_by_label("Extract speech");
+    assert!(
+        checkbox.accesskit_node().is_disabled(),
+        "Extract speech must be disabled while demucs is absent"
     );
 }
 
