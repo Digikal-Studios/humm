@@ -355,7 +355,7 @@ pub fn ui(
         let before = persisted_projection(&state.sheet);
 
         render_backend_combo(ui, "humm-prefs-fw-backend", &mut state.sheet.backend);
-        if size_combo_visible(&state.sheet) {
+        if size_combo_visible(state.sheet.backend) {
             render_model_combo(
                 ui,
                 "humm-prefs-fw-model-size",
@@ -364,7 +364,7 @@ pub fn ui(
                 state.include_lumii,
             );
         }
-        if api_key_row_visible(&state.sheet) {
+        if api_key_row_visible(state.sheet.backend) {
             render_api_key_row(
                 ui,
                 &mut state.sheet.api_key,

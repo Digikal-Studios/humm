@@ -30,8 +30,9 @@ use egui_kittest::{Harness, HarnessBuilder};
 use humm_audio::MockCapture;
 use humm_core::boundary::{AudioCapture, AudioDevice, CaptureHandle, MeterSnapshot};
 use humm_core::cancel::CancelToken;
-use humm_core::domain::{Backend, ModelSpec, Status, TranscriptionId};
+use humm_core::domain::{Backend, ModelSpec, Status, TaskKind, TranscriptionId};
 use humm_core::error::{AudioError, CoreError, EngineError};
+use humm_core::language::Language;
 use humm_core::models::download::DownloadProgress;
 use humm_core::queue::{ArtifactEnsurer, EngineFactory};
 use humm_core::secrets::{MemorySecretStore, SecretKey, SecretStore};
@@ -255,6 +256,11 @@ fn window_renders_the_record_button_and_microphone_label() {
 fn api_backend_selection_hides_size_combo_and_shows_api_key_row() {
     let mut harness = build_harness(fixture());
     harness.step();
+
+    // The backend combo itself always renders, regardless of which backend
+    // is currently selected (unlike the size combo/Api Key row below, which
+    // are conditional).
+    harness.get_by_label("Backend:");
 
     // Whisper is the default backend: the size combo shows, the Api Key row
     // doesn't.
@@ -830,6 +836,11 @@ impl AudioCapture for SharedMockCapture {
 
 const BATCH_SAMPLES: usize = 80_000;
 
+/// The `(task, language)` provenance log [`ScriptedEngine`] records each
+/// `transcribe_live` call into (review finding: closes the API-arm e2e
+/// test's provenance gap).
+type OptsLog = Arc<Mutex<Vec<(TaskKind, Option<Language>)>>>;
+
 struct ScriptedEngineFactory {
     capture: Arc<Mutex<MockCapture>>,
     calls: Arc<AtomicUsize>,
@@ -844,6 +855,7 @@ impl LiveEngineFactory for ScriptedEngineFactory {
         Ok(Box::new(ScriptedEngine {
             capture: Arc::clone(&self.capture),
             calls: Arc::clone(&self.calls),
+            opts_log: Arc::new(Mutex::new(Vec::new())),
         }))
     }
 }
@@ -856,16 +868,28 @@ impl LiveEngineFactory for ScriptedEngineFactory {
 struct ScriptedEngine {
     capture: Arc<Mutex<MockCapture>>,
     calls: Arc<AtomicUsize>,
+    /// Records `(task, language)` for every `transcribe_live` call — closes
+    /// the review-flagged provenance gap for the API-arm e2e test, which
+    /// asserts against this log that the session actually threaded
+    /// `LiveOptions.task`/`.language` through to the scripted engine (a
+    /// literal `TaskKind::Transcribe` default would otherwise pass the test
+    /// silently). Unused (but still populated) by the Whisper-arm e2e test,
+    /// which has no equivalent assertion.
+    opts_log: OptsLog,
 }
 
 impl LiveEngineSession for ScriptedEngine {
     fn transcribe_live(
         &mut self,
         _samples: &[f32],
-        _opts: &LiveOptions,
+        opts: &LiveOptions,
         _prompt: &str,
         _cancel: &CancelToken,
     ) -> Result<String, EngineError> {
+        self.opts_log
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((opts.task, opts.language));
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         if n == 0 {
             self.capture
@@ -1266,6 +1290,9 @@ fn scripted_end_to_end_record_two_utterances_then_stop() {
 struct ScriptedApiEngineFactory {
     capture: Arc<Mutex<MockCapture>>,
     calls: Arc<AtomicUsize>,
+    /// Shared with the returned [`ScriptedEngine`] so the test can assert
+    /// what `task`/`language` actually reached it.
+    opts_log: OptsLog,
 }
 
 impl LiveEngineFactory for ScriptedApiEngineFactory {
@@ -1281,6 +1308,7 @@ impl LiveEngineFactory for ScriptedApiEngineFactory {
         Box::new(ScriptedEngine {
             capture: Arc::clone(&self.capture),
             calls: Arc::clone(&self.calls),
+            opts_log: Arc::clone(&self.opts_log),
         })
     }
 }
@@ -1320,6 +1348,14 @@ fn api_backend_scripted_end_to_end_record_two_utterances_then_stop() {
     // `RecordingVm::open` prefills `RecordingOptions` from exactly this
     // sticky field (`RecordingOptions::from_settings`).
     settings.recording.backend = Some("openai_api".to_string());
+    // Deliberately non-default task/language (review finding: a hardcoded
+    // `TaskKind::Transcribe`/`None` in the session-wiring code would pass
+    // silently against the defaults `TaskKind::Transcribe`/`None` already
+    // are -- selecting `Translate`/`fr` here means the `opts_log` assertion
+    // below only passes if `LiveOptions.task`/`.language` genuinely carried
+    // this session's real selections through to the scripted engine).
+    settings.recording.task = Some("translate".to_string());
+    settings.recording.language = Some("fr".to_string());
 
     let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
     // The window's own Api Key row seeds from this same store
@@ -1349,6 +1385,7 @@ fn api_backend_scripted_end_to_end_record_two_utterances_then_stop() {
 
     let mock_capture = Arc::new(Mutex::new(MockCapture::new(vec![0.5; 2 * BATCH_SAMPLES])));
     let engine_calls = Arc::new(AtomicUsize::new(0));
+    let opts_log: OptsLog = Arc::new(Mutex::new(Vec::new()));
 
     let scripted_deps = RecordingDeps {
         capture: Mutex::new(Box::new(SharedMockCapture(Arc::clone(&mock_capture)))),
@@ -1357,6 +1394,7 @@ fn api_backend_scripted_end_to_end_record_two_utterances_then_stop() {
         engine_factory: Arc::new(ScriptedApiEngineFactory {
             capture: Arc::clone(&mock_capture),
             calls: Arc::clone(&engine_calls),
+            opts_log: Arc::clone(&opts_log),
         }),
         upload_factory: Arc::new(NeverCalledUploadFactory),
         dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
@@ -1445,6 +1483,20 @@ fn api_backend_scripted_end_to_end_record_two_utterances_then_stop() {
         2,
         "load_api's scripted engine ran exactly twice, never load/ensure_model"
     );
+
+    // Provenance (review finding): the session's real task/language
+    // selections -- `Translate`/`fr`, deliberately not the defaults --
+    // must have reached the scripted engine via `LiveOptions`, not just
+    // whatever `transcribe_chunk` itself defaults to.
+    let logged = opts_log.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    assert_eq!(
+        logged,
+        vec![
+            (TaskKind::Translate, Language::parse("fr")),
+            (TaskKind::Translate, Language::parse("fr")),
+        ],
+        "both scripted-engine calls must carry the session's real task/language"
+    );
 }
 
 #[test]
@@ -1484,6 +1536,7 @@ fn api_backend_missing_key_shows_an_inline_error_and_never_starts_a_session() {
         engine_factory: Arc::new(ScriptedApiEngineFactory {
             capture: Arc::new(Mutex::new(MockCapture::new(Vec::new()))),
             calls: Arc::new(AtomicUsize::new(0)),
+            opts_log: Arc::new(Mutex::new(Vec::new())),
         }),
         upload_factory: Arc::new(NeverCalledUploadFactory),
         dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
@@ -1519,14 +1572,165 @@ fn api_backend_missing_key_shows_an_inline_error_and_never_starts_a_session() {
         RecordingStatus::Stopped,
         "the optimistic Stopped->Recording flip must be reverted, not left stranded"
     );
-    assert!(
-        vm.error_dialog.is_some(),
-        "a missing key must show an inline error"
+    assert_eq!(
+        vm.error_dialog.as_deref(),
+        Some(humm_gui::i18n::tr("viewer-translate-key-required-body").as_str()),
+        "the missing-key dialog must be the reused viewer-translate-key-required-body string, \
+         not a fresh ad-hoc message"
     );
     drop(vm);
 
     // No store row at all: no session thread was ever spawned to insert one.
     assert!(TasksVm::load(&store).sorted_rows().is_empty());
+}
+
+#[test]
+fn missing_key_precheck_does_not_tear_down_a_still_running_translator_from_a_prior_session() {
+    // Review fix (task 18): the F-061b missing-key precheck must run
+    // *before* `start_live_session` tears down the previous session's
+    // still-running live-translation worker (spec §7.4: a translator
+    // outlives its own session's Stop). Session 1 (Whisper backend,
+    // translation enabled) leaves a translator attached to the VM; session
+    // 2 selects the API backend with no key configured, so its Record click
+    // must abort inline *without* touching that translator.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("humm.sqlite3");
+    let store = Arc::new(SqliteStore::open(&db_path).expect("open store"));
+    let model_path = dir.path().join("fake-model.bin");
+    std::fs::write(&model_path, b"never opened by the scripted engine").expect("write");
+
+    let mut settings = Settings::default();
+    settings.recording.enable_llm_translation = true;
+    settings.recording.llm_model = Some("gpt-4o-mini".to_string());
+    settings.recording.llm_prompt = Some("Translate.".to_string());
+
+    // Session 1 runs on the Whisper backend and needs a key only for the
+    // translation spawn path (`services.secrets`) -- session 2's own
+    // precheck reads `RecordingDeps.secrets` instead (left empty below),
+    // which is exactly what makes it fail.
+    let translate_secrets = MemorySecretStore::new();
+    translate_secrets
+        .set(SecretKey::OpenAiApiKey, "sk-test")
+        .expect("seed key");
+
+    let services = services::init_with(TestDeps {
+        store: Arc::clone(&store),
+        media_dir: dir.path().join("media"),
+        model_root: dir.path().join("models"),
+        settings,
+        settings_path: dir.path().join("settings.toml"),
+        engines: Box::new(NeverCalledEngineFactory),
+        fetcher: None,
+        capabilities: Capabilities::default(),
+        artifacts: None,
+        secrets: Arc::new(translate_secrets) as Arc<dyn SecretStore>,
+        translate: Arc::new(ScriptedTranslateSpawner::new(Arc::new(|text: &str| {
+            format!("X:{text}")
+        }))),
+        llm: None,
+        validate: services::default_test_validate(),
+    });
+
+    let mock_capture = Arc::new(Mutex::new(MockCapture::new(vec![0.5; 2 * BATCH_SAMPLES])));
+    let engine_calls = Arc::new(AtomicUsize::new(0));
+
+    // `RecordingDeps.secrets` starts with no OpenAI key at all -- session
+    // 2's own precheck (which reads this store, not `services.secrets`)
+    // must fail against it.
+    let scripted_deps = RecordingDeps {
+        capture: Mutex::new(Box::new(SharedMockCapture(Arc::clone(&mock_capture)))),
+        store: Arc::clone(&store) as Arc<dyn LiveStore>,
+        model_ensurer: Arc::new(InstantEnsurer { model_path }),
+        engine_factory: Arc::new(ScriptedEngineFactory {
+            capture: Arc::clone(&mock_capture),
+            calls: Arc::clone(&engine_calls),
+        }),
+        upload_factory: Arc::new(NeverCalledUploadFactory),
+        dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
+        secrets: Arc::new(MemorySecretStore::new()),
+    };
+
+    let mut harness = HarnessBuilder::default()
+        .with_size(egui::Vec2::new(1000.0, 600.0))
+        .build_eframe(move |_cc| {
+            let mut app = HummApp::new_for_test(services);
+            app.set_recording_deps_for_test(scripted_deps);
+            app
+        });
+    harness.step();
+
+    harness.state_mut().open_recording_window_for_test();
+    harness.step();
+    let vm_arc = harness
+        .state()
+        .recording_vm_for_test()
+        .expect("window is open");
+    let deps_arc = harness.state().recording_deps_for_test();
+
+    // Session 1: Record -> both utterances -> Stop, translation on.
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    harness.step();
+    wait_for(&mut harness, "the second utterance to land on the panel", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            vm_arc
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .panel_text
+                .contains("utterance two")
+        }
+    });
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    wait_for(&mut harness, "session 1 to stop", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            vm_arc.lock().unwrap_or_else(|p| p.into_inner()).status == RecordingStatus::Stopped
+        }
+    });
+    assert!(
+        vm_arc
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .has_live_translator_for_test(),
+        "session 1's translator must still be attached after Stop (spec §7.4 lifecycle)"
+    );
+
+    // Session 2: switch to the API backend (no key in `RecordingDeps.secrets`)
+    // and click Record -- the precheck must abort inline, and must not have
+    // touched session 1's translator on the way.
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .options
+        .backend = Backend::OpenAiApi;
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    harness.step();
+    harness.step(); // settle: `harvest_recording_intent` runs the precheck this frame.
+
+    let vm = vm_arc.lock().unwrap_or_else(|p| p.into_inner());
+    assert_eq!(
+        vm.status,
+        RecordingStatus::Stopped,
+        "the aborted second click must revert to Stopped"
+    );
+    assert!(
+        vm.error_dialog.is_some(),
+        "a missing key must show an inline error"
+    );
+    assert!(
+        vm.has_live_translator_for_test(),
+        "the still-running translator from session 1 must survive an aborted Record click -- \
+         the precheck must run before the translator teardown, not after"
+    );
 }
 
 // -- Task 11 review finding 2: session-thread panic recovery -----------------

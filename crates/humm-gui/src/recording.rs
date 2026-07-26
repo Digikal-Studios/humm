@@ -911,6 +911,17 @@ impl RecordingVm {
         self.options.write_to(settings);
     }
 
+    /// Test-only: whether a live-translation worker (F-063) is currently
+    /// attached — [`Self::live_translator`] is `pub(crate)`, invisible to
+    /// kittest's own separate crate, so this is the seam that lets a kittest
+    /// case prove it (review fix, task 18): the F-061b missing-key precheck
+    /// in `app.rs::start_live_session` must run *before* a Record click
+    /// tears the previous session's still-running translator down, so an
+    /// aborted click leaves this `true` if it was `true` going in.
+    pub fn has_live_translator_for_test(&self) -> bool {
+        self.live_translator.is_some()
+    }
+
     /// Stops and joins any running meter-only capture (idempotent — a no-op
     /// when none is running). Always run before starting a new one, and on
     /// window close/Record click.

@@ -71,26 +71,38 @@
 //!   segments' text with `" "` reproduces both of Buzz's branches: the
 //!   join is exercised for the `segments` case, and is a no-op (one element)
 //!   for the `text`-only case. No narrower bespoke parser was needed.
-//! - **Error handling: the loop survives a failed chunk, it does not
-//!   die.** `:355-359` catches every exception from the API call and turns
-//!   it into `{"text": f"Error: {e}"}` (surfaced as if it were transcribed
-//!   text) when still running, or `{"text": ""}` when a Stop landed
-//!   mid-request — the outer `while self.is_running` loop (`:108-151`) is
-//!   never broken by a failed chunk; only `result is None` (which
-//!   `_transcribe_via_api` never returns) would end it. humm's
-//!   `run_session` (`live/session.rs`) instead treats a genuine
+//! - **Error handling: humm's session ends on a chunk failure; Buzz's
+//!   survives it by corrupting the transcript instead (fail-loud ruling,
+//!   ledger #L17).** `:355-359` catches every exception from the API call
+//!   and turns it into `{"text": f"Error: {e}"}` — surfaced as if it were
+//!   transcribed text, and then fed straight back in as the *next* chunk's
+//!   rolling prompt (`:142` unconditionally rebinds `initial_prompt` to
+//!   whatever text just came back, fake string included) — when still
+//!   running, or `{"text": ""}` when a Stop landed mid-request. The outer
+//!   `while self.is_running` loop (`:108-151`) is never broken by a failed
+//!   chunk; only `result is None` (which `_transcribe_via_api` never
+//!   returns) would end it, so Buzz's session **keeps recording
+//!   indefinitely** after an API failure, degrading into a stream of fake
+//!   `"Error: ..."` segments built on an increasingly poisoned prompt.
+//!   humm's `run_session` (`live/session.rs`) instead treats a genuine
 //!   [`EngineError`] as loop-ending (`Err(err) => { sink(Error); break; }`)
-//!   and only [`EngineError::Canceled`] as the silent, loop-ending-without-
-//!   an-error-event case Buzz's `is_running`-gated branch mirrors. That
-//!   loop-continues-vs-loop-ends difference is `run_session`'s existing,
-//!   already-verified contract (F-061's local-engine row), not something
-//!   this module changes; [`Self::transcribe_chunk`] only needs to return
-//!   the right [`EngineError`] variant for each failure so that contract
-//!   fires correctly — a cancel maps to [`EngineError::Canceled`] (silent
-//!   stop, matching Buzz's `is_running == False` arm), everything else maps
-//!   to [`EngineError::Api`] (a genuine error, matching Buzz's `is_running
-//!   == True` arm, modulo humm surfacing it as a real error event instead of
-//!   Buzz's fake-transcript-text `"Error: ..."` string).
+//!   — the **session itself ends**, not merely its presentation of the
+//!   failure — and only [`EngineError::Canceled`] is the silent,
+//!   loop-continues-without-an-error-event case Buzz's `is_running`-gated
+//!   branch mirrors. This loop-continues-vs-loop-ends divergence is a
+//!   deliberate fail-loud ruling, not an accident of `run_session`'s
+//!   pre-existing contract: Buzz's survival is actively harmful (a
+//!   corrupted rolling prompt feeding every subsequent chunk), and humm
+//!   already persists each accepted segment before a session can end
+//!   (Q-10), so ending loud loses no completed work — a
+//!   tolerate-N-consecutive-failures refinement is a candidate for M8, not
+//!   this task. [`Self::transcribe_chunk`] only needs to return the right
+//!   [`EngineError`] variant for each failure so `run_session`'s existing,
+//!   already-verified contract (F-061's local-engine row) fires correctly —
+//!   a cancel maps to [`EngineError::Canceled`] (silent stop, matching
+//!   Buzz's `is_running == False` arm), everything else maps to
+//!   [`EngineError::Api`], which ends the session (Buzz's `is_running ==
+//!   True` arm would have kept going with corrupted output instead).
 
 use std::time::Duration;
 

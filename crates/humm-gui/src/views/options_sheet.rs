@@ -298,16 +298,30 @@ fn llm_options(state: &SheetState) -> Option<LlmTranslationOptions> {
 /// whisper.cpp only — the API backend has no size to pick. A pure function
 /// (rather than inlining the check at the one render call site) so it's
 /// unit-testable without an `egui::Context`.
-pub(crate) fn size_combo_visible(state: &SheetState) -> bool {
-    state.backend == Backend::Whisper
+///
+/// Takes `Backend` directly (not `&SheetState`) — the single definition
+/// [`crate::views::recording::recording_ui`]'s own backend-gated rows reuse
+/// too (task 18 review: house convention is one definition per visibility
+/// rule, not the same gate re-derived at each call site), matching an
+/// exhaustive `match` over the domain enum (CLAUDE.md's "exhaustive match on
+/// domain enums" convention) rather than a bare `==` comparison.
+pub(crate) fn size_combo_visible(backend: Backend) -> bool {
+    match backend {
+        Backend::Whisper => true,
+        Backend::OpenAiApi => false,
+    }
 }
 
 /// Whether the Api Key row renders — the mirror image of
 /// [`size_combo_visible`] (Buzz `transcription_options_group_box.py:242-244`:
 /// `setRowVisible(self.openai_access_token_edit, model_type ==
-/// ModelType.OPEN_AI_WHISPER_API)`).
-pub(crate) fn api_key_row_visible(state: &SheetState) -> bool {
-    state.backend == Backend::OpenAiApi
+/// ModelType.OPEN_AI_WHISPER_API)`). Same `Backend`-direct signature and
+/// exhaustive-match shape as `size_combo_visible`, for the same reason.
+pub(crate) fn api_key_row_visible(backend: Backend) -> bool {
+    match backend {
+        Backend::Whisper => false,
+        Backend::OpenAiApi => true,
+    }
 }
 
 /// Whether the Advanced section's Hugging Face repo field renders: local
@@ -1013,7 +1027,7 @@ pub fn ui(
         ui.separator();
 
         render_backend_combo(ui, "humm-options-backend", &mut state.backend);
-        if size_combo_visible(state) {
+        if size_combo_visible(state.backend) {
             render_model_combo(
                 ui,
                 "humm-options-model-size",
@@ -1022,7 +1036,7 @@ pub fn ui(
                 include_lumii,
             );
         }
-        if api_key_row_visible(state) {
+        if api_key_row_visible(state.backend) {
             render_api_key_row(
                 ui,
                 &mut state.api_key,
@@ -1490,18 +1504,18 @@ mod tests {
     #[test]
     fn whisper_backend_shows_the_size_combo_and_hf_repo_hides_the_api_key_row() {
         let state = base_state(); // backend: Backend::Whisper
-        assert!(size_combo_visible(&state));
+        assert!(size_combo_visible(state.backend));
         assert!(hf_repo_row_visible(&state));
-        assert!(!api_key_row_visible(&state));
+        assert!(!api_key_row_visible(state.backend));
     }
 
     #[test]
     fn api_backend_hides_the_size_combo_and_hf_repo_shows_the_api_key_row() {
         let mut state = base_state();
         state.backend = Backend::OpenAiApi;
-        assert!(!size_combo_visible(&state));
+        assert!(!size_combo_visible(state.backend));
         assert!(!hf_repo_row_visible(&state));
-        assert!(api_key_row_visible(&state));
+        assert!(api_key_row_visible(state.backend));
     }
 
     /// HUMM_SURFACE §5 queue-path gap: `build_specs` must read

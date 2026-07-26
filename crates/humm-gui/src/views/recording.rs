@@ -41,8 +41,9 @@ use crate::recording::{
 };
 use crate::views::audio_meter::audio_meter;
 use crate::views::options_sheet::{
-    render_api_key_row, render_backend_combo, render_language_combo, render_model_combo,
-    render_task_combo, sheet_modal_title_and_body, title_case,
+    api_key_row_visible, render_api_key_row, render_backend_combo, render_language_combo,
+    render_model_combo, render_task_combo, sheet_modal_title_and_body, size_combo_visible,
+    title_case,
 };
 use crate::views::presentation;
 use crate::views::recording_advanced;
@@ -197,7 +198,11 @@ pub fn recording_ui(
         // language) — Buzz's model-*type* combo is likewise this group's
         // first row (`transcription_options_group_box.py:107-126`).
         render_backend_combo(ui, "humm-recording-backend", &mut vm.options.backend);
-        if vm.options.backend == Backend::Whisper {
+        // Both gates are the single-definition predicates
+        // `views::options_sheet` also uses for the file-options sheet's own
+        // identical rows (task 18 review: one visibility rule, not the same
+        // `Backend` comparison re-derived at each call site).
+        if size_combo_visible(vm.options.backend) {
             render_model_combo(
                 ui,
                 "humm-recording-model-size",
@@ -210,7 +215,7 @@ pub fn recording_ui(
                     .on_hover_text(tr("recording-model-load-note"));
             }
         }
-        if vm.options.backend == Backend::OpenAiApi {
+        if api_key_row_visible(vm.options.backend) {
             render_api_key_row(
                 ui,
                 &mut vm.options.api_key,

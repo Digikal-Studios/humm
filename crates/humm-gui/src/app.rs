@@ -21,7 +21,9 @@ use humm_core::live::{
     ExportSink, RecordingMode, SessionConfig, TranslationApplier, effective_upload_url,
 };
 use humm_core::models::download::DownloadProgress;
-use humm_core::openai::{ENV_BASE, ENV_KEY, TranslatorConfig, resolve_endpoint};
+use humm_core::openai::{
+    ENV_BASE, ENV_KEY, OpenAiEngineConfig, TranslatorConfig, resolve_endpoint,
+};
 use humm_core::queue::{ArtifactEnsurer, QueueHandle, TaskEvent, TaskEventKind};
 use humm_core::settings::{FileTranscriberSettings, GuiSettings, Settings, ViewerGeometry};
 use humm_media::{FfmpegDecoder, FfmpegVideoStreamer, FfprobeProber};
@@ -2720,23 +2722,16 @@ impl HummApp {
     /// genuinely do come from `recording_settings` below, since `settings.recording`
     /// already holds their current value the instant they change.
     fn start_live_session(&mut self, vm_arc: &Arc<Mutex<RecordingVm>>, ctx: &egui::Context) {
-        let (device_id, options, meter, old_translator) = {
-            let mut vm = vm_arc
+        let (device_id, options, meter) = {
+            let vm = vm_arc
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             (
                 vm.selected_device.clone(),
                 vm.options.clone(),
                 Arc::clone(&vm.meter),
-                // A new Record click tears down the previous session's
-                // translator first (fresh worker + applier per session,
-                // spec §7.4 lifecycle).
-                vm.live_translator.take(),
             )
         };
-        if let Some(old) = old_translator {
-            old.stop();
-        }
 
         // F-061b: the API backend needs a resolvable key *before* the
         // session is ever allowed to start -- a deliberate, documented
@@ -2747,11 +2742,15 @@ impl HummApp {
         // full source read). Resolved fresh here (keyring + `settings.openai`,
         // via the shared `resolve_openai_config`), matching the "read fresh
         // at record-start" contract `Self::force_cpu_setting`/
-        // `GuiEngineFactory::create_openai` already use. A missing/empty key
-        // aborts the click inline: the optimistic Stopped->Recording UI flip
-        // `RecordingVm::on_record_clicked` already made is reverted via the
-        // same `flush_finish_stopping` every other early-Stop path uses, and
-        // no session thread is ever spawned.
+        // `GuiEngineFactory::create_openai` already use. Deliberately runs
+        // **before** the previous session's translator is torn down below
+        // (review fix): an aborted click must be side-effect-free, leaving
+        // any still-running translator from an earlier session untouched. A
+        // missing/empty key aborts the click inline: the optimistic
+        // Stopped->Recording UI flip `RecordingVm::on_record_clicked`
+        // already made is reverted via the same `flush_finish_stopping`
+        // every other early-Stop path uses, and no session thread is ever
+        // spawned.
         let api_config = if options.backend == Backend::OpenAiApi {
             match resolve_openai_config(
                 &self.services.settings,
@@ -2772,6 +2771,19 @@ impl HummApp {
         } else {
             None
         };
+
+        // A new Record click tears down the previous session's translator
+        // (fresh worker + applier per session, spec §7.4 lifecycle) -- only
+        // reached once the precheck above has passed.
+        let old_translator = {
+            let mut vm = vm_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            vm.live_translator.take()
+        };
+        if let Some(old) = old_translator {
+            old.stop();
+        }
 
         let recording_settings = {
             let settings = self
@@ -3671,6 +3683,40 @@ impl LiveEngineFactory for UnwiredLiveEngineFactory {
         _model_path: &Path,
         _use_gpu: bool,
     ) -> Result<Box<dyn LiveEngineSession>, EngineError> {
+        Err(EngineError::ModelLoad {
+            path: PathBuf::from("(recording session not wired for this test)"),
+            detail: "call HummApp::set_recording_deps_for_test to script a live session"
+                .to_string(),
+        })
+    }
+
+    /// Overrides [`LiveEngineFactory::load_api`]'s default `unreachable!`
+    /// panic (review fix, task 18) with the same actionable-error contract
+    /// `load` above already gives: rather than a hard panic, a test that
+    /// somehow reaches the API backend without scripting
+    /// `HummApp::set_recording_deps_for_test` gets a clean session error
+    /// (`SessionMessage::Error` + `Stopped`) carrying the identical message.
+    /// `load_api` itself cannot fail (no `Result`), so the failure is
+    /// deferred one step, onto the returned stand-in session's first
+    /// `transcribe_live` call.
+    fn load_api(&self, _cfg: OpenAiEngineConfig) -> Box<dyn LiveEngineSession> {
+        Box::new(UnwiredApiEngineSession)
+    }
+}
+
+/// [`UnwiredLiveEngineFactory::load_api`]'s stand-in session — see that
+/// method's own doc for why this exists instead of inheriting the trait's
+/// default panic.
+struct UnwiredApiEngineSession;
+
+impl LiveEngineSession for UnwiredApiEngineSession {
+    fn transcribe_live(
+        &mut self,
+        _samples: &[f32],
+        _opts: &LiveOptions,
+        _prompt: &str,
+        _cancel: &CancelToken,
+    ) -> Result<String, EngineError> {
         Err(EngineError::ModelLoad {
             path: PathBuf::from("(recording session not wired for this test)"),
             detail: "call HummApp::set_recording_deps_for_test to script a live session"
