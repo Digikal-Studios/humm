@@ -96,8 +96,17 @@ completion too, `main_window.py:435-443`). `post_processed` (F-110/F-111/
 F-113/F-115/F-116, additive) always **follows** a `completed` event (never a
 `skipped` one) and is emitted once, only when at least one post-processing
 hook is enabled; `errors` lists one message per hook failure (a hook failure
-never fails the task). Neither event has a producer yet in this milestone —
-they're reserved vocabulary the post-processing features to come will emit.
+never fails the task). **Both events now have real producers** (M7 Tasks 4–7
+landed the features these were reserved for; this paragraph previously said
+they did not): `Runner::run_job` returns `Terminal::Skipped(segments)` when
+F-115's pre-hook finds the input already transcribed, and
+`run_on_complete_chain` emits the single `PostProcessed` event after the
+resize/summary/docx chain. Both are reachable from the CLI as well as the GUI
+— `humm-cli`'s `CliPostprocSource` snapshots `settings.postproc` and hands it
+to the queue, so a `settings.toml` with a hook enabled produces these events
+from `humm add` (there is deliberately no CLI *flag* for post-processing;
+settings are the only switch). Post-hooks are off by default, so a default
+configuration emits neither.
 
 LLM translation (F-031) adds **no new `--json` event** in M6 — the schema
 above is unchanged: `humm add` has no LLM-translation flag (`humm-cli`'s
@@ -191,6 +200,7 @@ upload, F-064).
 | GUI exclusivity lock (`humm-gui` only) | `~/Library/Application Support/humm/gui.lock` | `HUMM_DATA_DIR` (§7) |
 | Presentation-window CSS override (`humm-gui` only, F-065, M5 Task 12) | `~/Library/Application Support/humm/presentation_style.css` (optional — absent by default) | `HUMM_CONFIG_DIR` |
 | OpenAI API key (F-041/F-031, ADR-012) | OS keyring/credential store (macOS Keychain / Windows Credential Manager / *nix Secret Service), service `"humm"`, entry `"OpenAI API key"` — never `settings.toml`, the DB, or logs (`crates/humm-store/src/secrets.rs`'s `KeyringSecretStore`). Deliberately its own service string, distinct from Buzz's `"Buzz"`: a fresh humm setup never reads a key Buzz already stored. | Not overridable by env for real use; `-m openaiapi`'s hermetic cli-int tests use `HUMM_DISABLE_KEYRING` (§5) instead of touching this store at all. |
+| AI Summary API key (F-111, M7, ADR-012) | Same keyring, same service `"humm"`, **separate entry `"AI Summary API key"`** — the summarization hook's endpoint is independently configurable from the transcription one, so it gets its own credential rather than sharing. Buzz stored its equivalent under a plugin-scoped name (`plugin:ai_summary:api_key`); humm addresses it through the same `SecretKey::entry_name` scheme as every other key (ledger #L9). Never `settings.toml`, the DB, or logs. | Same as above: no env override for real use. |
 
 The presentation-window CSS override is a **subset-parser mechanism deviation**
 from Buzz (spec §2.6, `views/presentation.rs::parse_presentation_css`): Buzz's
@@ -352,6 +362,50 @@ reaches folder-watch tasks without needing its own per-watch setting. This
 keeps that field correctly on the *template* half of the watch-identity/
 job-template split (`humm_gui::folder_watch`'s own module doc): a Preferences
 → General edit resolves `ReconcileAction::UpdateTemplate`, never `Restart`.
+
+### 6.6 Remaining M7 settings groups (`[ui]`, `[shortcuts]`, `[postproc]`, `recording.backend`)
+
+The other tables M7 added. All are written through on commit by the
+Preferences window — there is no OK/Cancel step anywhere (ledger #L8).
+
+**`[ui]`** (F-008/F-100, Preferences → General):
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `locale` | `Option<String>` | `None` | Buzz locale code (e.g. `"de_DE"`) to force the UI into. `None` follows the system locale. Negotiated through Buzz's own fallback chain — exact code → language prefix → `en_US` — so an unshipped code degrades to English rather than failing. Applies **live**: changing it re-renders every open window on the next frame, with no restart hint (ledger #L10). |
+| `font_size` | `Option<u32>` | `None` | App-wide text-style size in points. `None` uses egui's built-in default. **Clamped to 8–32 by `Settings::load`**, so a hand-edited out-of-range value is corrected on read rather than honored. |
+
+**`[shortcuts]`** (F-005, Preferences → Shortcuts): a flat
+`HashMap<String, String>` of **overrides only** — an action bound to its
+default is absent from the file entirely, and clearing a row deletes its
+entry. Keys are Buzz's action names (`OPEN_IMPORT_WINDOW`, `CLEAR_HISTORY`, …);
+values are Buzz's wire notation, which uses `Ctrl` for the command modifier on
+every platform (`"Ctrl+Shift+K"` renders as `⌘⇧K` on macOS). Conflicting
+bindings are **allowed and persisted** — the editor warns on both colliding
+rows and does not reject the assignment.
+
+**`[recording]`** gains one key beyond §6.2's table:
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `backend` | `Option<String>` | `None` (⇒ local Whisper) | Which engine live recording uses — `"whisper"` or `"openai_api"` (F-061b). Saved on window close, not on change (Buzz's own model-type combo has no immediate-save handler either). With `"openai_api"`, Record refuses to start at all unless an OpenAI key resolves from the keyring, failing inline with an actionable message before any session thread spawns (ledger #L18 ✚ — Buzz has no such precheck and surfaces a bad key as fake transcript text). |
+
+**`[postproc]`** (F-110's four natives, Preferences → Post-processing).
+**Every hook is disabled by default**, matching Buzz, and a disabled hook
+costs a boolean check. Sub-tables, in the fixed execution order they run in
+(ledger #L2 — skip is the only *pre*-hook; the rest run after export):
+
+| Sub-table | Feature | Keys |
+|-----|-----|-----|
+| `skip_already_transcribed` | F-115 | `enabled` (false), `check_result_files` (**true**), `check_database` (false) |
+| `transcript_resizer` | F-116 | `enabled` (false), `merge_by_gap`, `merge_gap_seconds`, `split_by_punctuation`, `punctuation`, `split_by_max_length`, `max_length` |
+| `ai_summary` | F-111 | `enabled` (false), `api_url`, `model`, `prompt`, `save_to_notes`, `save_to_file`, `output_folder` — **the key is not here**, it is the keyring entry in §6's table |
+| `export_docx` | F-113 | `enabled` (false), `output_folder`, `include_timestamps` |
+
+A hook failure is logged and reported in the `post_processed` event's `errors`
+array (§3); it **never** fails the transcription. Both binaries read this same
+table — the CLI has no post-processing flags, so `settings.toml` is the only
+switch (§3).
 
 ## 7. First-run migration
 
