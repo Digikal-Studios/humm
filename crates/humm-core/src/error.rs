@@ -52,6 +52,16 @@ pub enum MediaError {
         /// The file that was probed.
         path: PathBuf,
     },
+    /// The demucs speech-isolation subprocess failed to produce a vocals
+    /// stem (F-027, ADR-023).
+    #[error("demucs speech isolation failed: {detail}")]
+    IsolationFailed {
+        /// Diagnostic detail — stderr excerpt/exit status, plus an
+        /// actionable note that demucs may need to download its model on
+        /// first run (Buzz's own task-error text,
+        /// `file_transcriber_queue_worker.py:198`).
+        detail: String,
+    },
     /// Underlying I/O error.
     #[error(transparent)]
     Io(

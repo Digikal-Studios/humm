@@ -22,7 +22,7 @@ files or URLs.
 | `-l`, `--language` | `<code>` | `""` (auto-detect) | ISO language code, or empty to auto-detect. |
 | `-p`, `--prompt` | `<text>` | `""` | Initial prompt passed to the model. |
 | `-w`, `--word-timestamps` | flag | off | Emit word-level timestamps. |
-| `-e`, `--extract-speech` | flag | off | Not yet available (exit 1). |
+| `-e`, `--extract-speech` | flag | off | Isolate speech from background noise/music via a `demucs` subprocess before transcribing (F-027, ADR-023). Fails fast (exit 1) with an actionable install hint if `demucs` isn't found on `PATH`/`HUMM_DEMUCS`: `"demucs not found — install it (e.g. pipx install demucs) or omit --extract-speech"`. The isolated `<stem>_speech.mp3` is used as the decode input only — exports, the DB row, and the viewer all keep the original file name — and is deleted once the task reaches any terminal state (completed/failed/canceled). |
 | `--openai-token` | `<token>` | — | The OpenAI access token, used only with `-m openaiapi` (see above for the full resolution order). Accepted-and-ignored with any other `-m` value (Buzz parity). |
 | `--srt` | flag | off | Write an SRT export. |
 | `--vtt` | flag | off | Write a VTT export. |
@@ -113,17 +113,15 @@ configuration emits neither.
 plain progress fraction (`TaskEventKind::PhaseChanged`): today the only value
 `phase` ever carries is `"isolating_speech"` (demucs speech isolation running
 before transcription), `snake_case` of the corresponding `TaskPhase` variant —
-the field is extensible to future phases without a schema change. It has no
-producer yet as of this commit: `TaskEventKind::PhaseChanged` exists in
-`humm-core::queue` and is wired into `--json`/human-mode rendering, but the
-demucs pre-pass that actually emits it (`run_job`'s before-transcription seam,
-gated on `TranscriptionOptions::extract_speech`) lands in a later M8 task —
-the same "vocabulary now, producer later" shape `skipped`/`post_processed` had
-in M6 before M7 wired their hooks (see the paragraph above). Once wired it
-will appear anywhere between `started` and the terminal event, never terminal
-itself; human mode renders it as a progress-style line (`<input>  isolating
-speech`), so `--quiet` suppresses it exactly like `download_progress`/
-`progress`.
+the field is extensible to future phases without a schema change. **Has a
+real producer as of Task 5**: `Runner::run_job`'s before-transcription seam
+emits it right before calling the wired `SpeechIsolator` (`DemucsIsolator`,
+`humm-media`), gated on the task's own `TranscriptionOptions::extract_speech`
+— reachable from the CLI via `-e`/`--extract-speech` (§1) once `demucs` is
+found on `PATH`/`HUMM_DEMUCS` (§5). It appears anywhere between `started` and
+the terminal event, never terminal itself; human mode renders it as a
+progress-style line (`<input>  isolating speech`), so `--quiet` suppresses it
+exactly like `download_progress`/`progress`.
 
 LLM translation (F-031) adds **no new `--json` event** in M6 — the schema
 above is unchanged: `humm add` has no LLM-translation flag (`humm-cli`'s
@@ -175,6 +173,7 @@ progress and warning lines only (`post_processed`'s warnings included;
 | `HUMM_PARAGRAPH_SPLIT_TIME` | Millisecond gap between segments that starts a new paragraph (default `2000`), resolved everywhere through the one shared helper, `text_view::paragraph_split_from_env()`. `humm-cli`'s `run.rs` and the GUI's queue path (`options_sheet::build_specs`, the spec a Run click enqueues) both call it once at spec-build time, into `OutputSpec.paragraph_split`; the **viewer's** Text-mode display and its own TXT export (F-084) call it fresh on every use instead, since those redraw/re-export live rather than building a spec up front. One helper, four call sites — an override can never make a queue-enqueued task's auto-written TXT, the on-screen Text-mode view, and a later manual TXT export of the same transcript disagree (Buzz `write_output` reads `BUZZ_PARAGRAPH_SPLIT_TIME` fresh too). Translation mode never paragraph-splits (Buzz quirk). |
 | `HUMM_DOWNLOAD_COOKIEFILE` | Cookie file passed to yt-dlp for authenticated URL downloads. Takes precedence over `settings.downloads.cookie_file`. |
 | `HUMM_FFMPEG` / `HUMM_FFPROBE` / `HUMM_YTDLP` | Override the ffmpeg / ffprobe / yt-dlp binary path (else looked up on `PATH`). |
+| `HUMM_DEMUCS` | Override the `demucs` binary path (else looked up on `PATH`) — the F-027 speech-isolation subprocess (ADR-023), gated on the CLI's `-e`/`--extract-speech` flag. |
 | `HUMM_BUZZ_SQLITE` | Override the one-time Buzz-import source database. Used only if the path exists — point it at a nonexistent path to disable the import (M2 addition; used by hermetic tests). |
 | `HUMM_BUZZ_TESTDATA`, `HUMM_WHISPER_TEST_MODEL` | Test-only: locate Buzz fixtures / a real tiny model for `#[ignore]` tests. |
 

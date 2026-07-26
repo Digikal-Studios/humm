@@ -5,6 +5,7 @@
 
 mod capabilities;
 mod decode;
+mod demucs;
 mod encode;
 mod fetch;
 mod probe;
@@ -12,6 +13,7 @@ mod video;
 
 pub use capabilities::{MediaCapabilities, probe_binaries};
 pub use decode::FfmpegDecoder;
+pub use demucs::DemucsIsolator;
 pub use fetch::YtDlpFetcher;
 pub use probe::FfprobeProber;
 pub use video::FfmpegVideoStreamer;

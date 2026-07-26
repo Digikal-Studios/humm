@@ -45,7 +45,8 @@ use std::time::Instant;
 use serde::Serialize;
 
 use humm_core::boundary::{
-    AudioDecoder, AudioEncoder, MediaFetcher, MediaProber, TaskStore, TranscriptionEngine,
+    AudioDecoder, AudioEncoder, MediaFetcher, MediaProber, SpeechIsolator, TaskStore,
+    TranscriptionEngine,
 };
 use humm_core::cancel::CancelToken;
 use humm_core::domain::{
@@ -70,7 +71,7 @@ use humm_core::queue::{
 };
 use humm_core::secrets::{SecretKey, SecretStore};
 use humm_core::settings::{OpenAiSettings, PostprocSettings, Settings};
-use humm_media::{FfmpegDecoder, FfprobeProber, YtDlpFetcher, probe_binaries};
+use humm_media::{DemucsIsolator, FfmpegDecoder, FfprobeProber, YtDlpFetcher, probe_binaries};
 use humm_store::{KeyringSecretStore, SqliteStore};
 use humm_whisper::WhisperEngine;
 
@@ -87,7 +88,16 @@ pub fn run_add(args: AddArgs) -> ExitCode {
         eprintln!("note: --hide-gui has no effect; humm is headless (ADR-007)");
     }
 
-    if let Some(exit_code) = validate_add_args(&args) {
+    // Only probed when actually needed (`-e` was passed) — cheap (a `PATH`
+    // scan, no subprocess spawn, `DemucsIsolator::available`'s doc), but no
+    // reason to touch the filesystem at all for the common case where the
+    // flag isn't set (the value is never consulted in that case either).
+    let demucs_available = if args.extract_speech {
+        DemucsIsolator::new().available()
+    } else {
+        false
+    };
+    if let Some(exit_code) = validate_add_args(&args, demucs_available) {
         return exit_code;
     }
 
@@ -103,14 +113,20 @@ pub fn run_add(args: AddArgs) -> ExitCode {
 /// `task-10-brief.md` specifies — all before any store/model work. Returns
 /// `Some(exit_code)` (a usage error, with the `--help` hint) to abort, `None`
 /// once every check passes.
-fn validate_add_args(args: &AddArgs) -> Option<ExitCode> {
+///
+/// `demucs_available` is the caller's already-probed answer to "is `demucs`
+/// installed" (`DemucsIsolator::available`) — threaded in rather than probed
+/// here so this function stays a pure, easily unit-tested decision (Task 5,
+/// F-027/F-002): `-e` fails fast with an actionable install hint when it's
+/// `false`, exactly like Buzz's own binary-missing checks elsewhere.
+fn validate_add_args(args: &AddArgs, demucs_available: bool) -> Option<ExitCode> {
     if args.files.is_empty() {
         return Some(usage_fail("No input files"));
     }
 
-    if args.extract_speech {
+    if args.extract_speech && !demucs_available {
         return Some(usage_fail(
-            "speech extraction is not yet available in humm — it arrives in a later release",
+            "demucs not found — install it (e.g. pipx install demucs) or omit --extract-speech",
         ));
     }
 
@@ -242,11 +258,10 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         // No CLI flag yet enables LLM translation (F-031 wiring is a later
         // M6 task).
         llm: None,
-        // `validate_add_args` above still usage-fails whenever this is
-        // `true` (Task 5 flips that to a real demucs-presence check and
-        // wires the isolator), so this is always `false` here today — but
-        // threading the real field through means that flip needs no
-        // further change at this call site.
+        // `validate_add_args` above already fails fast with an actionable
+        // install hint when this is `true` and demucs isn't found (Task 5,
+        // F-027/F-002) — reaching here means either it's `false`, or it's
+        // `true` and the isolator wired into `RunnerDeps` below is real.
         extract_speech: args.extract_speech,
     };
     let output = OutputSpec {
@@ -296,11 +311,14 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         }) as Arc<dyn PostprocConfigSource>),
         // M8 pre-transcription seam: wired in Tasks 5-8. Task 5 wires the
         // CLI's `-e` flag to a real `isolator` (design spec §9's F-002 "`-e`
-        // goes live" row); `reducer`/`lang_detector` stay `None` on the CLI
-        // even after that (design spec §8: the F-112/F-114 pre-hooks are
-        // GUI-configured-only, the `postproc: None` CLI stance extended to
-        // the pre-chain).
-        isolator: None,
+        // goes live" row) — always constructed (not gated on
+        // `args.extract_speech`), since `queue::Runner::run_job` only ever
+        // calls `isolate` when the *task's own* `options.extract_speech` is
+        // set (`RunnerDeps::isolator`'s doc); `reducer`/`lang_detector` stay
+        // `None` on the CLI even after that (design spec §8: the F-112/F-114
+        // pre-hooks are GUI-configured-only, the `postproc: None` CLI stance
+        // extended to the pre-chain).
+        isolator: Some(Arc::new(DemucsIsolator::new()) as Arc<dyn SpeechIsolator>),
         reducer: None,
         lang_detector: None,
     };
@@ -1501,15 +1519,32 @@ mod tests {
     #[test]
     fn validate_add_args_rejects_empty_files() {
         let args = base_add_args();
-        assert!(validate_add_args(&args).is_some());
+        assert!(validate_add_args(&args, false).is_some());
     }
 
     #[test]
-    fn validate_add_args_rejects_extract_speech() {
+    fn validate_add_args_rejects_extract_speech_when_demucs_unavailable() {
         let mut args = base_add_args();
         args.files = vec!["dummy.mp3".to_string()];
         args.extract_speech = true;
-        assert!(validate_add_args(&args).is_some());
+        let exit_code = validate_add_args(&args, false);
+        assert!(exit_code.is_some());
+    }
+
+    #[test]
+    fn validate_add_args_accepts_extract_speech_when_demucs_available() {
+        let mut args = base_add_args();
+        args.files = vec!["dummy.mp3".to_string()];
+        args.extract_speech = true;
+        assert!(validate_add_args(&args, true).is_none());
+    }
+
+    #[test]
+    fn validate_add_args_ignores_demucs_availability_when_extract_speech_unset() {
+        let mut args = base_add_args();
+        args.files = vec!["dummy.mp3".to_string()];
+        args.extract_speech = false;
+        assert!(validate_add_args(&args, false).is_none());
     }
 
     // `resolve_openai_token`'s no-flag branches fall through to a real
@@ -1567,7 +1602,7 @@ mod tests {
         let mut args = base_add_args();
         args.files = vec!["dummy.mp3".to_string()];
         args.model_type = ModelTypeArg::OpenAiApi;
-        assert!(validate_add_args(&args).is_none());
+        assert!(validate_add_args(&args, false).is_none());
     }
 
     #[test]
@@ -1576,7 +1611,7 @@ mod tests {
         args.files = vec!["dummy.mp3".to_string()];
         args.model_type = ModelTypeArg::HuggingFace;
         args.hfid = None;
-        assert!(validate_add_args(&args).is_some());
+        assert!(validate_add_args(&args, false).is_some());
     }
 
     #[test]
@@ -1587,7 +1622,7 @@ mod tests {
         args.files = vec!["dummy.mp3".to_string()];
         args.model_type = ModelTypeArg::HuggingFace;
         args.hfid = Some("openai/whisper-tiny".to_string());
-        assert!(validate_add_args(&args).is_none());
+        assert!(validate_add_args(&args, false).is_none());
     }
 
     #[test]
@@ -1596,7 +1631,7 @@ mod tests {
         args.files = vec!["dummy.mp3".to_string()];
         args.model_type = ModelTypeArg::Whisper;
         args.hfid = Some("some/repo".to_string());
-        assert!(validate_add_args(&args).is_none());
+        assert!(validate_add_args(&args, false).is_none());
     }
 
     #[test]
@@ -1605,7 +1640,7 @@ mod tests {
         args.files = vec!["dummy.mp3".to_string()];
         args.model_type = ModelTypeArg::Whisper;
         args.openai_token = Some("token".to_string());
-        assert!(validate_add_args(&args).is_none());
+        assert!(validate_add_args(&args, false).is_none());
     }
 
     #[test]
@@ -1618,7 +1653,7 @@ mod tests {
             let mut args = base_add_args();
             args.files = vec!["dummy.mp3".to_string()];
             args.model_type = model_type;
-            assert!(validate_add_args(&args).is_none());
+            assert!(validate_add_args(&args, false).is_none());
         }
     }
 

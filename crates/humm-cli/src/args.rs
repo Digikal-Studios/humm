@@ -9,10 +9,11 @@
 //! (ADR-007, `docs/design/UX_SPEC.md` §5).
 //!
 //! `run.rs::run_add` validates the semantics clap's grammar can't express
-//! (hfid-required-for-huggingface, the still-not-yet-available `-e` —
-//! `buzz/cli.py:146-147`, `docs/analysis/EXTERNAL_SURFACE.md` §2/§8) and, for
+//! (hfid-required-for-huggingface, `buzz/cli.py:146-147`) and, for
 //! `-m openaiapi`, resolves the OpenAI access token before any model/VAD work
-//! (F-002/F-041, M6 Task 11).
+//! (F-002/F-041, M6 Task 11). `-e` is live (F-027, ADR-023, M8 Task 5): it
+//! fails fast with an actionable install hint when `demucs` isn't found on
+//! `PATH`/`HUMM_DEMUCS`, else wires a real `DemucsIsolator` into the queue.
 //!
 //! Default model size is `small`, not Buzz's `tiny`
 //! (`docs/design/UX_SPEC.md` §6, an approved deviation).

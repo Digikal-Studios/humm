@@ -168,23 +168,113 @@ fn log_file_written() {
     assert!(!contents.trim().is_empty(), "expected non-empty log file");
 }
 
-// 10. `-e/--extract-speech` -> exit 1, exact not-yet-available message.
+// 10. `-e/--extract-speech` is live now (Task 5, F-027/F-002): with `PATH`
+// scrubbed of any `demucs` (and `HUMM_DEMUCS` unset), validation fails fast
+// with an actionable install hint naming demucs — replaces the retired
+// "not yet available" pin.
 #[test]
-fn extract_speech_not_yet_available() {
+fn e_flag_without_demucs_fails_actionably() {
     let log_dir = tempfile::tempdir().unwrap();
     let input_dir = tempfile::tempdir().unwrap();
     let input = dummy_input(input_dir.path(), "dummy.mp3");
+    // A fresh empty directory as `PATH`: guaranteed to contain no `demucs`
+    // binary regardless of what's actually installed on the host running
+    // this test suite.
+    let empty_path_dir = tempfile::tempdir().unwrap();
 
     humm_cmd()
         .env("HUMM_LOG_DIR", log_dir.path())
+        .env("PATH", empty_path_dir.path())
+        .env_remove("HUMM_DEMUCS")
         .arg("add")
         .arg("-e")
         .arg(&input)
         .assert()
         .code(1)
-        .stderr(predicate::str::contains(
-            "speech extraction is not yet available in humm — it arrives in a later release",
-        ));
+        .stderr(
+            predicate::str::contains("demucs not found")
+                .and(predicate::str::contains("pipx install demucs")),
+        );
+}
+
+/// Writes a fake `demucs` executable into `dir` that emulates the
+/// spike-confirmed contract layout (`validation/m8-spikes/README.md`,
+/// "Spike C"): it reads the `-o <scratch>` argument and copies whatever the
+/// real trailing input-file argument is to `<scratch>/htdemucs/vocals.mp3`
+/// — a genuinely decodable copy of the real input (not fixture bytes),
+/// since this stub's output is fed straight into the real `ffmpeg` decode
+/// step by the CLI's own pipeline, exactly like a real `vocals.mp3` would
+/// be.
+#[cfg(unix)]
+fn write_stub_demucs(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("demucs");
+    fs::write(
+        &path,
+        "#!/bin/sh\n\
+         outdir=\"\"\n\
+         input=\"\"\n\
+         while [ $# -gt 0 ]; do\n\
+         case \"$1\" in\n\
+         -o) outdir=\"$2\"; shift 2 ;;\n\
+         *) input=\"$1\"; shift ;;\n\
+         esac\n\
+         done\n\
+         mkdir -p \"$outdir/htdemucs\"\n\
+         cp \"$input\" \"$outdir/htdemucs/vocals.mp3\"\n",
+    )
+    .expect("write stub demucs script");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod stub demucs");
+}
+
+// 10b. `-e/--extract-speech` with a stub `demucs` discovered via `PATH`
+// (prepended ahead of the real system `PATH` so the real `ffmpeg` the
+// pipeline needs afterward is still found): the task actually runs through
+// the isolator and completes, and the `_speech.mp3` derivative — created
+// beside the (copied, so nothing is written next to the shared Buzz
+// testdata fixture) input — is cleaned up afterward (`TempAudioGuard`'s
+// all-terminal-paths cleanup, design spec §3 item 4).
+#[test]
+#[cfg(unix)]
+fn e_flag_accepted_with_stub_demucs() {
+    let env = Env::new();
+    let out = tempfile::tempdir().unwrap();
+    let input_dir = tempfile::tempdir().unwrap();
+    let wav = input_dir.path().join("clip.wav");
+    fs::copy(testdata_dir().join("whisper-latvian.wav"), &wav).expect("copy fixture");
+
+    let demucs_dir = tempfile::tempdir().unwrap();
+    write_stub_demucs(demucs_dir.path());
+    let path_var = format!(
+        "{}:{}",
+        demucs_dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    env.cmd()
+        .env("PATH", path_var)
+        .arg("add")
+        .arg(&wav)
+        .arg("--txt")
+        .arg("-s")
+        .arg("tiny")
+        .arg("-e")
+        .arg("-d")
+        .arg(out.path())
+        .assert()
+        .code(0);
+
+    let store = env.store();
+    let tasks = store.list_tasks().expect("list");
+    assert_eq!(tasks.len(), 1, "expected exactly one task row: {tasks:?}");
+    assert_eq!(tasks[0].status, Status::Completed);
+
+    let speech_path = input_dir.path().join("clip_speech.mp3");
+    assert!(
+        !speech_path.exists(),
+        "expected the isolated _speech.mp3 to be cleaned up after the run: {}",
+        speech_path.display()
+    );
 }
 
 // 11 moved to the wired tier below (`openaiapi_without_token_or_keyring_fails_actionably`

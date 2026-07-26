@@ -17,12 +17,14 @@ use std::time::{Duration, Instant};
 
 use humm_core::boundary::{
     AudioDecoder, AudioEncoder, FetchProgress, MediaFetcher, MediaProber, Pcm, SAMPLE_RATE,
-    VideoStreamer,
+    SpeechIsolator, VideoStreamer,
 };
 use humm_core::cancel::CancelToken;
 use humm_core::domain::Millis;
 use humm_core::error::MediaError;
-use humm_media::{FfmpegDecoder, FfmpegVideoStreamer, FfprobeProber, YtDlpFetcher, probe_binaries};
+use humm_media::{
+    DemucsIsolator, FfmpegDecoder, FfmpegVideoStreamer, FfprobeProber, YtDlpFetcher, probe_binaries,
+};
 
 /// Root of Buzz's test fixtures, honoring `HUMM_BUZZ_TESTDATA` (Global
 /// Constraint 4).
@@ -910,5 +912,97 @@ fn yt_dlp_capability_probe_reports_version_when_present() {
     assert!(
         caps.yt_dlp.is_some(),
         "expected yt-dlp version to be detected via `yt-dlp --version`"
+    );
+}
+
+// -- DemucsIsolator (F-027, ADR-023) -----------------------------------------
+//
+// Gated on `HUMM_DEMUCS_CONTRACT=1` in *addition* to `#[ignore]`: unlike
+// ffmpeg/yt-dlp (assumed present in any dev environment able to build this
+// workspace), a real `demucs` install is a heavy, ML-specific optional
+// dependency (PyTorch, a first-run ~80MB model download) that most machines
+// running a plain `cargo test -p humm-media -- --ignored` won't have — this
+// extra gate keeps that default `--ignored` run from failing here.
+//
+// Provisioning (`validation/m8-spikes/README.md`, "Spike C"): bare
+// `uvx demucs` fails on the M8 spike's reference machine because demucs
+// 4.1.0 pulls in a `sphn` (Rust/PyO3) dependency needing a Rust target that
+// machine's `rustup` doesn't have — pin the classic pre-`sphn` release
+// instead, exactly as the spike did:
+//
+// ```text
+// uvx --from demucs==4.0.1 --with "numpy<2" demucs \
+//     --two-stems=vocals -n htdemucs --mp3 -o <scratch> \
+//     --filename "{stem}.{ext}" <input>
+// ```
+//
+// Point `HUMM_DEMUCS` at a tiny wrapper script that `exec`s that pinned
+// `uvx` invocation (or an equivalent `pipx install demucs==4.0.1`/
+// `pip install "demucs==4.0.1" "numpy<2"` install with plain `demucs` on
+// `PATH`, in which case `HUMM_DEMUCS` can be left unset), then:
+//
+// ```text
+// CARGO_HOME="$(git rev-parse --show-toplevel)/.cargo-home" \
+//     HUMM_DEMUCS_CONTRACT=1 HUMM_DEMUCS=/path/to/demucs-wrapper.sh \
+//     cargo test -p humm-media -- --ignored real_demucs
+// ```
+//
+// Budget ~60s wall for the one-time cold-cache model download (Spike C); a
+// warm-cache run took ~7s for the 8.517s `whisper-french.mp3` fixture.
+#[test]
+#[ignore = "requires a real demucs install (set HUMM_DEMUCS_CONTRACT=1); see doc comment for provisioning"]
+fn real_demucs_isolates_vocals_from_whisper_french() {
+    if std::env::var("HUMM_DEMUCS_CONTRACT").as_deref() != Ok("1") {
+        panic!(
+            "HUMM_DEMUCS_CONTRACT is not set to 1 — provision a real demucs \
+             install first (see this test's doc comment) and point HUMM_DEMUCS \
+             at it if it isn't a plain `demucs` on PATH"
+        );
+    }
+
+    // Copied into a scratch dir so the isolated `_speech.mp3` derivative
+    // never lands beside the shared Buzz testdata fixtures.
+    let input_dir = tempfile::tempdir().expect("tempdir");
+    let input = input_dir.path().join("whisper-french.mp3");
+    std::fs::copy(testdata().join("whisper-french.mp3"), &input).expect("copy fixture");
+
+    let prober = FfprobeProber::new();
+    let input_duration = prober
+        .probe(&input)
+        .expect("probe input")
+        .duration
+        .expect("input has a known duration");
+
+    let isolator = DemucsIsolator::new();
+    assert!(
+        isolator.available(),
+        "HUMM_DEMUCS_CONTRACT=1 but demucs isn't available — check HUMM_DEMUCS/PATH"
+    );
+
+    let cancel = CancelToken::new();
+    let start = Instant::now();
+    let result = isolator
+        .isolate(&input, &cancel)
+        .expect("isolate should succeed with a real demucs install");
+    println!("demucs isolation took {:?}", start.elapsed());
+
+    assert_eq!(result, input_dir.path().join("whisper-french_speech.mp3"));
+    assert!(result.is_file(), "expected {} to exist", result.display());
+
+    // "Decodable audio of ~equal duration": probing (not just a raw
+    // ffmpeg decode) proves the output is a genuine, readable audio
+    // container, and its duration should match the input within a couple
+    // of seconds (Spike C observed 8.568s output vs. 8.517s input — normal
+    // MP3 encoder padding, not a truncation/corruption).
+    let output_duration = prober
+        .probe(&result)
+        .expect("probe isolated output")
+        .duration
+        .expect("output has a known duration");
+    let diff_ms = (output_duration.0 - input_duration.0).abs();
+    assert!(
+        diff_ms < 2000,
+        "expected isolated output duration ({output_duration:?}) within 2s of \
+         input duration ({input_duration:?})"
     );
 }
