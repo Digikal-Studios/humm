@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 
-use humm_core::boundary::{AudioDecoder, Pcm, PlaybackPcm};
+use humm_core::boundary::{AudioDecoder, Pcm, PlaybackPcm, SAMPLE_RATE};
 use humm_core::cancel::CancelToken;
 use humm_core::error::MediaError;
 
@@ -43,6 +43,34 @@ impl FfmpegDecoder {
     pub(crate) fn binary(&self) -> &Path {
         &self.binary
     }
+
+    /// Decodes `path` to mono `f32` PCM at an arbitrary `sample_rate` (Hz),
+    /// checking `cancel` cooperatively. Generalizes [`AudioDecoder::decode`]
+    /// (a thin wrapper calling this with [`SAMPLE_RATE`]) — added for
+    /// `humm-dfn`'s DeepFilterNet3 pass (F-112, M8 design spec §4), which
+    /// needs 48 kHz mono (queried from the model itself, not hardcoded
+    /// here — this method takes whatever rate the caller asks for).
+    pub fn decode_mono_at(
+        &self,
+        path: &Path,
+        sample_rate: u32,
+        cancel: &CancelToken,
+    ) -> Result<Pcm, MediaError> {
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("-nostdin")
+            .args(["-threads", "0"])
+            .arg("-i")
+            .arg(path)
+            .args(["-f", "f32le"])
+            .args(["-ac", "1"])
+            .args(["-acodec", "pcm_f32le"])
+            .args(["-ar", &sample_rate.to_string()])
+            .args(["-loglevel", "error"])
+            .arg("-");
+
+        let raw = run_ffmpeg_pcm(cmd, &self.binary, cancel)?;
+        Ok(Pcm::new(bytes_to_f32(&raw)))
+    }
 }
 
 impl Default for FfmpegDecoder {
@@ -54,20 +82,7 @@ impl Default for FfmpegDecoder {
 impl AudioDecoder for FfmpegDecoder {
     fn decode(&self, path: &Path, cancel: &CancelToken) -> Result<Pcm, MediaError> {
         // `whisper_audio.py:39-50`, f32le per ADR-003.
-        let mut cmd = Command::new(&self.binary);
-        cmd.arg("-nostdin")
-            .args(["-threads", "0"])
-            .arg("-i")
-            .arg(path)
-            .args(["-f", "f32le"])
-            .args(["-ac", "1"])
-            .args(["-acodec", "pcm_f32le"])
-            .args(["-ar", "16000"])
-            .args(["-loglevel", "error"])
-            .arg("-");
-
-        let raw = run_ffmpeg_pcm(cmd, &self.binary, cancel)?;
-        Ok(Pcm::new(bytes_to_f32(&raw)))
+        self.decode_mono_at(path, SAMPLE_RATE, cancel)
     }
 
     fn decode_playback(
@@ -241,5 +256,43 @@ mod tests {
             .decode_playback(Path::new("/irrelevant"), &cancel)
             .expect_err("should be canceled");
         assert!(matches!(err, MediaError::Canceled));
+    }
+
+    // -- decode_mono_at (M8 generalization, F-112) --------------------------
+
+    #[test]
+    fn decode_mono_at_pre_canceled_token_short_circuits_before_spawning() {
+        let decoder = FfmpegDecoder::with_binary("/nonexistent/ffmpeg-binary-for-test");
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let err = decoder
+            .decode_mono_at(Path::new("/irrelevant"), 48_000, &cancel)
+            .expect_err("should be canceled");
+        assert!(matches!(err, MediaError::Canceled));
+    }
+
+    #[test]
+    fn decode_mono_at_missing_binary_is_actionable() {
+        let decoder = FfmpegDecoder::with_binary("/nonexistent/ffmpeg-binary-for-test");
+        let cancel = CancelToken::new();
+        let err = decoder
+            .decode_mono_at(Path::new("/irrelevant"), 48_000, &cancel)
+            .expect_err("missing binary should fail");
+        assert!(matches!(err, MediaError::BinaryMissing { .. }));
+    }
+
+    #[test]
+    fn decode_delegates_to_decode_mono_at_16k() {
+        // `decode` (the `AudioDecoder` trait method) is now a thin wrapper
+        // over `decode_mono_at(path, SAMPLE_RATE, cancel)` — pin the
+        // delegation via the shared pre-canceled fast path (both must
+        // short-circuit identically, since they're the same code path).
+        let decoder = FfmpegDecoder::with_binary("/nonexistent/ffmpeg-binary-for-test");
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let via_decode = decoder.decode(Path::new("/irrelevant"), &cancel);
+        let via_mono_at = decoder.decode_mono_at(Path::new("/irrelevant"), 16_000, &cancel);
+        assert!(matches!(via_decode, Err(MediaError::Canceled)));
+        assert!(matches!(via_mono_at, Err(MediaError::Canceled)));
     }
 }

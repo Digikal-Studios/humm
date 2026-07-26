@@ -197,6 +197,35 @@ fn decode_synthesized_sine_wav() {
 
 #[test]
 #[ignore = "requires ffmpeg + Buzz testdata"]
+fn decode_mono_at_48k_matches_requested_rate_and_duration() {
+    // `decode_mono_at` generalizes `decode` beyond the fixed 16 kHz
+    // `AudioDecoder::decode` uses — `humm-dfn` (F-112) calls it at 48 kHz,
+    // DeepFilterNet3's own expected rate. Source is a 22.05 kHz mono sine,
+    // deliberately not 48 kHz, so a pass just means ffmpeg actually
+    // resampled rather than passing the source through unchanged.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("sine.wav");
+    write_sine_wav(&path, 440.0, 1.0, 22_050, 0.5);
+
+    let decoder = FfmpegDecoder::new();
+    let cancel = CancelToken::new();
+    let pcm = decoder
+        .decode_mono_at(&path, 48_000, &cancel)
+        .expect("decode_mono_at should succeed");
+
+    assert!(
+        (47_500..=48_500).contains(&pcm.len()),
+        "expected ~48000 samples at 48kHz for 1s of audio, got {}",
+        pcm.len()
+    );
+    assert!(
+        pcm.samples().iter().all(|s| s.is_finite()),
+        "decoded samples must all be finite"
+    );
+}
+
+#[test]
+#[ignore = "requires ffmpeg + Buzz testdata"]
 fn probe_mp3() {
     let path = testdata().join("whisper-french.mp3");
     let prober = FfprobeProber::new();

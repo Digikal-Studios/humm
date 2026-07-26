@@ -51,32 +51,43 @@
 //! `i16` range's negative extreme (`-32768`) is simply never emitted. This
 //! matches Buzz's own scaling factor exactly (it also multiplies by
 //! `32767`, not `32768`), so it is not a humm-only quirk.
+//!
+//! **Generalized for M8 (`humm-dfn`, F-112):** the writer was originally
+//! hardcoded to [`SAMPLE_RATE`] (16 kHz, this module's only caller at the
+//! time). [`write_wav_mono_i16`] takes the sample rate as a parameter
+//! instead — DeepFilterNet3 writes its denoised output at 48 kHz (queried
+//! from the model, `humm-dfn`'s own concern, not hardcoded here).
+//! [`write_wav_16k_mono_i16`] is now a thin wrapper calling it with
+//! [`SAMPLE_RATE`], so every existing caller/test is unaffected.
 
 use std::io::Write;
 
 use crate::boundary::SAMPLE_RATE;
 
-/// WAV channel count this writer always uses — humm's live-recording
-/// pipeline already decodes/resamples to mono before it reaches here (spec
-/// §10), so this is a fixed constant, not a parameter.
+/// WAV channel count this writer always uses — every caller decodes/
+/// resamples to mono before it reaches here, so this is a fixed constant,
+/// not a parameter.
 const NUM_CHANNELS: u16 = 1;
 /// WAV bit depth this writer always uses (16-bit signed PCM).
 const BITS_PER_SAMPLE: u16 = 16;
 /// Bytes per sample frame: `NUM_CHANNELS * BITS_PER_SAMPLE / 8`.
 const BLOCK_ALIGN: u16 = NUM_CHANNELS * (BITS_PER_SAMPLE / 8);
-/// Bytes per second of audio: `SAMPLE_RATE * BLOCK_ALIGN`.
-const BYTE_RATE: u32 = SAMPLE_RATE * (BLOCK_ALIGN as u32);
 
-/// Writes `pcm` (16 kHz mono `f32` samples, expected in `[-1.0, 1.0]` —
-/// clamped if not, see the [module doc](self)) as a canonical 44-byte-header
-/// RIFF/WAVE file to `w`: PCM format 1, 1 channel, 16000 Hz, 16-bit signed
-/// little-endian samples, `data` chunk immediately following the header with
-/// no extension chunks.
+/// Writes `pcm` (mono `f32` samples at `sample_rate` Hz, expected in
+/// `[-1.0, 1.0]` — clamped if not, see the [module doc](self)) as a
+/// canonical 44-byte-header RIFF/WAVE file to `w`: PCM format 1, 1 channel,
+/// `sample_rate` Hz, 16-bit signed little-endian samples, `data` chunk
+/// immediately following the header with no extension chunks.
 ///
 /// # Errors
 ///
 /// Propagates any [`std::io::Error`] from writing to `w`.
-pub fn write_wav_16k_mono_i16(pcm: &[f32], w: &mut impl Write) -> std::io::Result<()> {
+pub fn write_wav_mono_i16(
+    pcm: &[f32],
+    sample_rate: u32,
+    w: &mut impl Write,
+) -> std::io::Result<()> {
+    let byte_rate = sample_rate * u32::from(BLOCK_ALIGN);
     let data_len = pcm.len() as u32 * u32::from(BLOCK_ALIGN);
     let chunk_size = 36 + data_len;
 
@@ -88,8 +99,8 @@ pub fn write_wav_16k_mono_i16(pcm: &[f32], w: &mut impl Write) -> std::io::Resul
     w.write_all(&16u32.to_le_bytes())?; // Subchunk1Size = 16 (PCM)
     w.write_all(&1u16.to_le_bytes())?; // AudioFormat = 1 (PCM)
     w.write_all(&NUM_CHANNELS.to_le_bytes())?;
-    w.write_all(&SAMPLE_RATE.to_le_bytes())?;
-    w.write_all(&BYTE_RATE.to_le_bytes())?;
+    w.write_all(&sample_rate.to_le_bytes())?;
+    w.write_all(&byte_rate.to_le_bytes())?;
     w.write_all(&BLOCK_ALIGN.to_le_bytes())?;
     w.write_all(&BITS_PER_SAMPLE.to_le_bytes())?;
 
@@ -103,6 +114,18 @@ pub fn write_wav_16k_mono_i16(pcm: &[f32], w: &mut impl Write) -> std::io::Resul
     }
 
     Ok(())
+}
+
+/// Writes `pcm` (16 kHz mono `f32` samples) as a canonical WAV file to `w` —
+/// a thin wrapper over [`write_wav_mono_i16`] at [`SAMPLE_RATE`], kept for
+/// the live-recording upload path (`crate::openai::live`) that predates the
+/// M8 generalization above.
+///
+/// # Errors
+///
+/// Propagates any [`std::io::Error`] from writing to `w`.
+pub fn write_wav_16k_mono_i16(pcm: &[f32], w: &mut impl Write) -> std::io::Result<()> {
+    write_wav_mono_i16(pcm, SAMPLE_RATE, w)
 }
 
 #[cfg(test)]
@@ -188,5 +211,51 @@ mod tests {
         assert_eq!(&out[8..12], b"WAVE");
         assert_eq!(&out[36..40], b"data");
         assert_eq!(u32::from_le_bytes([out[40], out[41], out[42], out[43]]), 0);
+    }
+
+    // -- write_wav_mono_i16 (M8 generalization, F-112) --------------------
+
+    #[test]
+    fn write_wav_mono_i16_at_48k_stamps_the_given_sample_rate_and_byte_rate() {
+        // `humm-dfn` writes its DeepFilterNet3 output at 48 kHz — a
+        // different rate than the 16 kHz `write_wav_16k_mono_i16` wrapper
+        // always uses, so this pins the header fields the generalized
+        // function computes from its `sample_rate` parameter.
+        let pcm = [0.0f32, 1.0, -1.0, 0.5];
+        let mut out = Vec::new();
+        write_wav_mono_i16(&pcm, 48_000, &mut out).expect("write");
+
+        assert_eq!(out.len(), 52);
+        assert_eq!(&out[0..4], b"RIFF");
+        assert_eq!(&out[8..12], b"WAVE");
+        assert_eq!(
+            u32::from_le_bytes([out[24], out[25], out[26], out[27]]),
+            48_000,
+            "SampleRate field"
+        );
+        assert_eq!(
+            u32::from_le_bytes([out[28], out[29], out[30], out[31]]),
+            48_000 * 2,
+            "ByteRate field = sample_rate * block_align(2)"
+        );
+        assert_eq!(u16::from_le_bytes([out[32], out[33]]), 2, "BlockAlign");
+        assert_eq!(u16::from_le_bytes([out[34], out[35]]), 16, "BitsPerSample");
+
+        let data = &out[44..];
+        assert_eq!(i16::from_le_bytes([data[0], data[1]]), 0);
+        assert_eq!(i16::from_le_bytes([data[2], data[3]]), 32767);
+        assert_eq!(i16::from_le_bytes([data[4], data[5]]), -32767);
+        assert_eq!(i16::from_le_bytes([data[6], data[7]]), 16383);
+    }
+
+    #[test]
+    fn write_wav_16k_mono_i16_matches_write_wav_mono_i16_at_sample_rate() {
+        let pcm = [0.1f32, -0.2, 0.3, -0.4];
+        let mut via_wrapper = Vec::new();
+        write_wav_16k_mono_i16(&pcm, &mut via_wrapper).expect("write");
+        let mut via_general = Vec::new();
+        write_wav_mono_i16(&pcm, SAMPLE_RATE, &mut via_general).expect("write");
+
+        assert_eq!(via_wrapper, via_general);
     }
 }

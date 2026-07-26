@@ -6,6 +6,7 @@ members = [
     "crates/humm-whisper",
     "crates/humm-audio",
     "crates/humm-store",
+    "crates/humm-dfn",
     "crates/humm-cli",
     "crates/humm-gui",
 ]
@@ -62,6 +63,21 @@ egui_kittest = { version = "0.35", features = ["eframe"] }
 notify = "8"
 ab_glyph = "0.2"
 nix = { version = "0.31", default-features = false, features = ["signal"] }
+# F-112 (M8): pure-Rust DeepFilterNet3 noise reduction. Git-pinned per
+# `validation/m8-spikes/README.md` Spike A / ADR-011 addendum — the
+# crates.io release is stale (DeepFilterNet1-era 0.2.5); this rev is tag
+# `v0.5.6`. `default-features = false` + `["tract", "default-model"]`: pure
+# tract (ONNX-in-Rust) inference, no `ort`, embeds the DeepFilterNet3 model
+# via `include_bytes!` — no model download at runtime.
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "978576aa8400552a4ce9730838c635aa30db5e61", default-features = false, features = [
+    "tract",
+    "default-model",
+] }
+# Pinned to match `deep_filter`'s own `^0.15` requirement on `ndarray`
+# (`libDF/Cargo.toml`) — `humm-dfn` builds the `ArrayView2`/`ArrayViewMut2`
+# frames `DfTract::process` takes directly, so this must resolve to the same
+# `ndarray` `deep_filter` itself uses.
+ndarray = "0.15"
 
 [profile.release]
 lto = "thin"

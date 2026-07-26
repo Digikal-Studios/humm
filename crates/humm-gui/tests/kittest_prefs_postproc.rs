@@ -1,9 +1,10 @@
 //! kittest coverage for Task 16 (F-110/F-111/F-113/F-115/F-116 config home,
-//! design spec §8.5): the Post-processing preferences tab -- one
-//! enable-checkbox-plus-representative-field persistence test per section
-//! (Skip Already Transcribed, Automatic Transcript Resizer, AI Summary,
-//! Export to DOCX), the AI Summary key row's keyring-not-settings proof, and
-//! the Browse-button dialog seam for the two folder fields.
+//! design spec §8.5) plus M8 Task 7's addition (F-112): the Post-processing
+//! preferences tab -- one enable-checkbox-plus-representative-field
+//! persistence test per section (Skip Already Transcribed, Noise Reduction /
+//! DeepFilterNet, Automatic Transcript Resizer, AI Summary, Export to DOCX),
+//! the AI Summary key row's keyring-not-settings proof, and the Browse-button
+//! dialog seam for the two folder fields.
 //!
 //! Per `views/preferences.rs`'s own module doc, the Preferences window is a
 //! real OS viewport `egui_kittest`'s single-`Harness` accessibility tree
@@ -150,6 +151,28 @@ fn skip_section_enable_and_check_database_persist() {
     let reloaded = Settings::load(&settings_path).expect("settings file was written");
     assert!(reloaded.postproc.skip_already_transcribed.enabled);
     assert!(reloaded.postproc.skip_already_transcribed.check_database);
+}
+
+// -- Noise Reduction / DeepFilterNet (F-112, M8) -----------------------------
+
+#[test]
+fn noise_reduction_section_renders_and_toggles() {
+    let mut harness = postproc_harness(Settings::default(), Arc::new(NullDialogs));
+    harness.run();
+
+    harness
+        .get_by_label("Enable DeepFilterNet Noise Reduction")
+        .click();
+    harness.run();
+    harness
+        .get_by_label("Keep denoised file after transcription")
+        .click();
+    harness.run();
+
+    let settings_path = harness.state().settings_path.clone();
+    let reloaded = Settings::load(&settings_path).expect("settings file was written");
+    assert!(reloaded.postproc.noise_reduction.enabled);
+    assert!(reloaded.postproc.noise_reduction.keep_denoised_file);
 }
 
 // -- Automatic Transcript Resizer (F-116) ------------------------------------

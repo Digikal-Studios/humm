@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::NaiveDateTime;
 
-use humm_core::boundary::{AudioEncoder, MediaFetcher, SpeechIsolator, TaskStore};
+use humm_core::boundary::{AudioEncoder, MediaFetcher, NoiseReducer, SpeechIsolator, TaskStore};
 use humm_core::env::{threads_from_env, use_gpu_from_env};
 use humm_core::error::StoreError;
 use humm_core::openai::LlmEndpointSource;
@@ -42,6 +42,7 @@ use humm_core::settings::{Settings, SettingsError};
 use humm_core::telemetry::{Event, NoopTelemetry, PostHogTelemetry, Telemetry, telemetry_enabled};
 use humm_core::update::{self, UpdateInfo};
 use humm_core::viewer::text_view::paragraph_split_from_env;
+use humm_dfn::DfNoiseReducer;
 use humm_media::{
     DemucsIsolator, FfmpegDecoder, FfprobeProber, MediaCapabilities, YtDlpFetcher, probe_binaries,
 };
@@ -307,6 +308,12 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
     capabilities.demucs = isolator.available();
 
     let decoder = Arc::new(FfmpegDecoder::new());
+    // The reducer wired into `RunnerDeps` below (F-112) reuses this same
+    // `FfmpegDecoder` instance for its own `decode_mono_at` call — cloned
+    // (cheap, `Arc`) before `decoder` moves into the `RunnerDeps` literal
+    // (where it coerces to `Arc<dyn AudioDecoder>`), same "share, don't
+    // duplicate the adapter" pattern as `isolator` above.
+    let reducer = Arc::new(DfNoiseReducer::new(Arc::clone(&decoder)));
     let prober = Arc::new(FfprobeProber::new());
     let fetcher = {
         let guard = settings
@@ -383,11 +390,19 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
         // (`queue::Runner::run_job`'s gate), so this is wired unconditionally
         // rather than behind `if capabilities.demucs` (an absent binary still
         // degrades per-task, via `SpeechIsolator::isolate`'s own error path,
-        // not by leaving the seam `None`). `reducer`/`lang_detector` land in
-        // later M8 tasks; `None` for now keeps that seam inert exactly like
-        // every field here did before it existed.
+        // not by leaving the seam `None`). `lang_detector` lands in a later
+        // M8 task; `None` for now keeps that seam inert exactly like every
+        // field here did before it existed.
         isolator: Some(isolator as Arc<dyn SpeechIsolator>),
-        reducer: None,
+        // F-112: wired unconditionally too, same reasoning as `isolator`
+        // above — but for a different reason underneath. `deep_filter`'s
+        // `default-model` feature embeds the DeepFilterNet3 weights at
+        // compile time (no download, no "binary missing" absence path), so
+        // there is no availability probe to gate on in the first place;
+        // enabling/disabling the hook is entirely `PostprocConfig::
+        // noise_reduction.enabled`'s job (`queue::Runner::run_job`'s own
+        // gate), not this wiring site's.
+        reducer: Some(reducer as Arc<dyn NoiseReducer>),
         lang_detector: None,
     };
     let queue = spawn_task_runner(deps);

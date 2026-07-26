@@ -53,7 +53,7 @@ impl MediaProber for FfprobeProber {
                 map_spawn_error(
                     "ffprobe",
                     "HUMM_FFPROBE",
-                    "install it (e.g. `brew install ffprobe`)",
+                    "install it (e.g. `brew install ffmpeg` — ffprobe ships inside it)",
                     &self.binary,
                     err,
                 )

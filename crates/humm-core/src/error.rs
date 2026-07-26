@@ -62,6 +62,16 @@ pub enum MediaError {
         /// `file_transcriber_queue_worker.py:198`).
         detail: String,
     },
+    /// The `humm-dfn` DeepFilterNet3 noise-reduction pass failed to build
+    /// or run its model (F-112). Never surfaces as a task failure on its
+    /// own — the queue's noise-reduction step logs this and degrades to
+    /// the prior audio (Buzz parity, `plugin.py:58-60`).
+    #[error("DeepFilterNet noise reduction failed: {detail}")]
+    ReductionFailed {
+        /// Diagnostic detail from the underlying `deep_filter`/`tract`
+        /// error (model load or per-frame inference failure).
+        detail: String,
+    },
     /// Underlying I/O error.
     #[error(transparent)]
     Io(

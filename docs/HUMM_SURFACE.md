@@ -411,23 +411,30 @@ rows and does not reject the assignment.
 **`[postproc]`** (F-110's four natives, Preferences → Post-processing).
 **Every hook is disabled by default**, matching Buzz, and a disabled hook
 costs a boolean check. Sub-tables, in the fixed execution order they run in
-(ledger #L2 — skip is the only *pre*-hook; the rest run after export):
+(ledger #L2 — `skip_already_transcribed` and `noise_reduction` are the two
+*pre*-hooks, checked before transcription in that order — `noise_reduction`
+chained after F-027 speech isolation and before F-114 language detection in
+the M8 pre-transcription chain, design spec §3/§5; the rest run after
+export):
 
 | Sub-table | Feature | Keys |
 |-----|-----|-----|
 | `skip_already_transcribed` | F-115 | `enabled` (false), `check_result_files` (**true**), `check_database` (false) |
+| `noise_reduction` (M8) | F-112 | `enabled` (false), `keep_denoised_file` (false) — whether the DeepFilterNet-denoised `<input_stem>_DeepFilterNet3.wav` is kept next to the input rather than cleaned up |
 | `transcript_resizer` | F-116 | `enabled` (false), `merge_by_gap`, `merge_gap_seconds`, `split_by_punctuation`, `punctuation`, `split_by_max_length`, `max_length` |
 | `ai_summary` | F-111 | `enabled` (false), `api_url`, `model`, `prompt`, `save_to_notes`, `save_to_file`, `output_folder` — **the key is not here**, it is the keyring entry in §6's table |
 | `export_docx` | F-113 | `enabled` (false), `output_folder`, `include_timestamps` |
-| `noise_reduction` (M8) | F-112 | `enabled` (false), `keep_denoised_file` (false) — whether the DeepFilterNet-denoised `<input_stem>_DeepFilterNet3.wav` is kept next to the input rather than cleaned up |
 | `language_detection` (M8) | F-114 | `enabled` (false), `download_tiny_if_missing` (**true**) — whether the `tiny` model is fetched automatically when no already-downloaded model is available to detect with |
 
 A hook failure is logged and reported in the `post_processed` event's `errors`
 array (§3); it **never** fails the transcription. Both binaries read this same
 table — the CLI has no post-processing flags, so `settings.toml` is the only
-switch (§3). `noise_reduction`/`language_detection` are vocabulary as of this
-commit — a later M8 task wires their before-transcription hooks into
-`run_job`.
+switch (§3). `noise_reduction`'s before-transcription hook is fully wired as
+of M8 Task 7 (`humm-dfn`'s `DfNoiseReducer`, wired into `RunnerDeps.reducer`
+in the GUI's `services::init` — the CLI has no post-processing flags to wire
+it from, same as every other `[postproc]` hook) — see F-112's `PARITY_MATRIX.md`
+row for the full detail. `language_detection` remains vocabulary only —
+a later M8 task wires its before-transcription hook into `run_job`.
 
 ## 7. First-run migration
 

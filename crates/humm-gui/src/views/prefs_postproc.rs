@@ -1,7 +1,10 @@
 //! Preferences → Post-processing tab (ADR-010, design spec §8.5): the config
-//! home for the four native post-processing hooks (F-110's resolution) —
-//! **Skip Already Transcribed** (F-115, the only pre-hook), then, in the
-//! fixed execution order design spec §2.1 establishes, **Automatic
+//! home for the native post-processing hooks (F-110's resolution) — two
+//! **pre**-transcription hooks, **Skip Already Transcribed** (F-115) and
+//! **Noise Reduction (DeepFilterNet)** (F-112, M8), rendered first (in that
+//! order — `check_skip` runs before the M8 isolation/reduction/detection
+//! chain in `queue::Runner::run_job`), then, in the fixed execution order
+//! design spec §2.1 establishes for the **on_complete** hooks, **Automatic
 //! Transcript Resizer** (F-116) → **AI Summary** (F-111) → **Export to
 //! DOCX** (F-113). Each section is an `egui::CollapsingHeader` with an
 //! enable checkbox first, then its fields (gated by that section's own
@@ -14,6 +17,7 @@
 //! *does* carry over, byte-faithful, is each field's Buzz label/description
 //! (the source of every `en` ftl string below):
 //! - `buzz/plugins/skip_already_transcribed/plugin.py:28-47`
+//! - `buzz/plugins/deep_filter_net/plugin.py:32-39`
 //! - `buzz/plugins/transcript_resizer/plugin.py:51-88`
 //! - `buzz/plugins/ai_summary/plugin.py:47-93`
 //! - `buzz/plugins/export_docx/plugin.py:74-88`
@@ -159,6 +163,13 @@ pub struct PostprocTabState {
     /// `check_database` checkbox (Buzz "Check in transcription database").
     pub check_database: bool,
 
+    // -- Noise Reduction / DeepFilterNet (F-112, M8) --
+    /// "Enable DeepFilterNet Noise Reduction" checkbox.
+    pub noise_reduction_enabled: bool,
+    /// `keep_denoised_file` checkbox (Buzz "Keep denoised file after
+    /// transcription", `plugin.py:35`, label ported verbatim).
+    pub keep_denoised_file: bool,
+
     // -- Automatic Transcript Resizer (F-116) --
     /// "Enable Automatic Transcript Resizer" checkbox.
     pub resizer_enabled: bool,
@@ -232,6 +243,9 @@ impl PostprocTabState {
             check_result_files: settings.skip_already_transcribed.check_result_files,
             check_database: settings.skip_already_transcribed.check_database,
 
+            noise_reduction_enabled: settings.noise_reduction.enabled,
+            keep_denoised_file: settings.noise_reduction.keep_denoised_file,
+
             resizer_enabled: settings.transcript_resizer.enabled,
             merge_by_gap: settings.transcript_resizer.merge_by_gap,
             merge_gap_seconds_buffer: settings.transcript_resizer.merge_gap_seconds.clone(),
@@ -265,6 +279,8 @@ impl std::fmt::Debug for PostprocTabState {
             .field("skip_enabled", &self.skip_enabled)
             .field("check_result_files", &self.check_result_files)
             .field("check_database", &self.check_database)
+            .field("noise_reduction_enabled", &self.noise_reduction_enabled)
+            .field("keep_denoised_file", &self.keep_denoised_file)
             .field("resizer_enabled", &self.resizer_enabled)
             .field("merge_by_gap", &self.merge_by_gap)
             .field("merge_gap_seconds_buffer", &self.merge_gap_seconds_buffer)
@@ -329,6 +345,33 @@ pub fn commit_check_database(
     let value = state.check_database;
     persist_postproc(settings, settings_path, |p| {
         p.skip_already_transcribed.check_database = value
+    });
+}
+
+// -- Noise Reduction / DeepFilterNet --
+
+/// Commits the "Enable DeepFilterNet Noise Reduction" checkbox.
+pub fn commit_noise_reduction_enabled(
+    state: &PostprocTabState,
+    settings: &Mutex<Settings>,
+    settings_path: &Path,
+) {
+    let value = state.noise_reduction_enabled;
+    persist_postproc(settings, settings_path, |p| {
+        p.noise_reduction.enabled = value
+    });
+}
+
+/// Commits the "Keep denoised file after transcription" checkbox (Buzz
+/// `config_fields` label verbatim, `plugin.py:35`).
+pub fn commit_keep_denoised_file(
+    state: &PostprocTabState,
+    settings: &Mutex<Settings>,
+    settings_path: &Path,
+) {
+    let value = state.keep_denoised_file;
+    persist_postproc(settings, settings_path, |p| {
+        p.noise_reduction.keep_denoised_file = value
     });
 }
 
@@ -561,12 +604,14 @@ pub fn commit_docx_include_timestamps(
 
 // -- Render -------------------------------------------------------------------
 
-/// Renders the Post-processing tab: a header caption, then the four sections
-/// as `CollapsingHeader`s in execution order (module doc) — Skip Already
-/// Transcribed first (the pre-hook), then Automatic Transcript Resizer → AI
-/// Summary → Export to DOCX (design spec §2.1). Every section defaults open
-/// (no ADR-010 enable/ordering list to hide behind — the whole point of this
-/// tab is being the four features' visible config home).
+/// Renders the Post-processing tab: a header caption, then the five sections
+/// as `CollapsingHeader`s in execution order (module doc) — the two
+/// pre-transcription hooks first, Skip Already Transcribed then Noise
+/// Reduction (DeepFilterNet), then the on_complete hooks: Automatic
+/// Transcript Resizer → AI Summary → Export to DOCX (design spec §2.1).
+/// Every section defaults open (no ADR-010 enable/ordering list to hide
+/// behind — the whole point of this tab is being the features' visible
+/// config home).
 pub fn ui(
     ui: &mut egui::Ui,
     state: &mut PostprocTabState,
@@ -578,8 +623,8 @@ pub fn ui(
     ui.label(tr("prefs-postproc-header"));
     ui.separator();
 
-    // 1. Skip Already Transcribed (F-115) -- the only pre-hook, checked
-    // first (design spec §2.1).
+    // 1. Skip Already Transcribed (F-115) -- the first pre-hook, checked
+    // before the M8 isolation/reduction/detection chain (design spec §2.1).
     egui::CollapsingHeader::new(tr("prefs-postproc-skip-title"))
         .id_salt("humm-prefs-postproc-skip")
         .default_open(true)
@@ -617,7 +662,34 @@ pub fn ui(
             });
         });
 
-    // 2. Automatic Transcript Resizer (F-116).
+    // 2. Noise Reduction / DeepFilterNet (F-112, M8) -- the second (and
+    // last) pre-hook, run after isolation and before language detection in
+    // the M8 chain (design spec §4).
+    egui::CollapsingHeader::new(tr("prefs-postproc-dfn-title"))
+        .id_salt("humm-prefs-postproc-dfn")
+        .default_open(true)
+        .show(ui, |ui| {
+            let mut enabled = state.noise_reduction_enabled;
+            if ui
+                .checkbox(&mut enabled, tr("prefs-postproc-dfn-enable"))
+                .changed()
+            {
+                state.noise_reduction_enabled = enabled;
+                commit_noise_reduction_enabled(state, settings, settings_path);
+            }
+            ui.add_enabled_ui(state.noise_reduction_enabled, |ui| {
+                let mut keep_denoised_file = state.keep_denoised_file;
+                if ui
+                    .checkbox(&mut keep_denoised_file, tr("prefs-postproc-dfn-keep-file"))
+                    .changed()
+                {
+                    state.keep_denoised_file = keep_denoised_file;
+                    commit_keep_denoised_file(state, settings, settings_path);
+                }
+            });
+        });
+
+    // 3. Automatic Transcript Resizer (F-116).
     egui::CollapsingHeader::new(tr("prefs-postproc-resizer-title"))
         .id_salt("humm-prefs-postproc-resizer")
         .default_open(true)
@@ -687,7 +759,7 @@ pub fn ui(
             });
         });
 
-    // 3. AI Summary (F-111).
+    // 4. AI Summary (F-111).
     egui::CollapsingHeader::new(tr("prefs-postproc-summary-title"))
         .id_salt("humm-prefs-postproc-summary")
         .default_open(true)
@@ -782,7 +854,7 @@ pub fn ui(
             });
         });
 
-    // 4. Export to DOCX (F-113).
+    // 5. Export to DOCX (F-113).
     egui::CollapsingHeader::new(tr("prefs-postproc-docx-title"))
         .id_salt("humm-prefs-postproc-docx")
         .default_open(true)
@@ -879,6 +951,8 @@ mod tests {
         let mut settings = PostprocSettings::default();
         settings.skip_already_transcribed.enabled = true;
         settings.skip_already_transcribed.check_database = true;
+        settings.noise_reduction.enabled = true;
+        settings.noise_reduction.keep_denoised_file = true;
         settings.transcript_resizer.enabled = true;
         settings.transcript_resizer.max_length = "80".to_string();
         settings.ai_summary.enabled = true;
@@ -892,6 +966,8 @@ mod tests {
 
         assert!(state.skip_enabled);
         assert!(state.check_database);
+        assert!(state.noise_reduction_enabled);
+        assert!(state.keep_denoised_file);
         assert!(state.resizer_enabled);
         assert_eq!(state.max_length_buffer, "80");
         assert!(state.summary_enabled);
@@ -914,6 +990,11 @@ mod tests {
         assert!(!state.skip_enabled);
         assert!(state.check_result_files, "Buzz default: on");
         assert!(!state.check_database);
+        assert!(
+            !state.noise_reduction_enabled,
+            "Buzz plugins default-disabled"
+        );
+        assert!(!state.keep_denoised_file);
         assert!(!state.resizer_enabled);
         assert!(!state.summary_enabled);
         assert_eq!(state.summary_api_url_buffer, "");
@@ -979,6 +1060,23 @@ mod tests {
         let guard = settings.lock().unwrap();
         assert!(guard.postproc.skip_already_transcribed.enabled);
         assert!(guard.postproc.skip_already_transcribed.check_database);
+    }
+
+    #[test]
+    fn commit_noise_reduction_enabled_and_keep_denoised_file_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.toml");
+        let settings = Mutex::new(Settings::default());
+
+        let mut state = fresh_state();
+        state.noise_reduction_enabled = true;
+        commit_noise_reduction_enabled(&state, &settings, &settings_path);
+        state.keep_denoised_file = true;
+        commit_keep_denoised_file(&state, &settings, &settings_path);
+
+        let guard = settings.lock().unwrap();
+        assert!(guard.postproc.noise_reduction.enabled);
+        assert!(guard.postproc.noise_reduction.keep_denoised_file);
     }
 
     #[test]

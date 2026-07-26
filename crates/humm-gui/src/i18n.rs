@@ -364,6 +364,10 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "prefs-postproc-skip-check-files-desc",
         "prefs-postproc-skip-check-db",
         "prefs-postproc-skip-check-db-desc",
+        // Noise Reduction / DeepFilterNet (F-112, M8 Task 7).
+        "prefs-postproc-dfn-title",
+        "prefs-postproc-dfn-enable",
+        "prefs-postproc-dfn-keep-file",
         "prefs-postproc-resizer-title",
         "prefs-postproc-resizer-enable",
         "prefs-postproc-resizer-merge-by-gap",
