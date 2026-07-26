@@ -51,7 +51,7 @@ pub struct Settings {
     /// (F-041, F-031, design spec §9).
     pub openai: OpenAiSettings,
     /// User-overridden keyboard shortcuts (F-005), keyed by
-    /// [`ShortcutAction::settings_key`]'s `SCREAMING_SNAKE` action name
+    /// `ShortcutAction::settings_key`'s `SCREAMING_SNAKE` action name
     /// (`humm-gui`'s `shortcuts.rs`; Buzz `settings/shortcut.py`). An action
     /// absent from this map keeps its built-in default sequence. Empty by
     /// default (no overrides).
@@ -311,7 +311,10 @@ pub struct FolderWatchSettings {
     /// Per-auto-task file-transcription options applied to every watched
     /// file (Buzz's `file_transcription_options` sub-group; type reuse —
     /// its [`FileTranscriberSettings::last_import_folder`] is simply unused
-    /// in this context).
+    /// in this context, and its `default_export_template` is a decoy here
+    /// too: the watcher's job template carries the GLOBAL
+    /// `file_transcriber.default_export_template` instead, so a value
+    /// hand-edited into this nested copy is silently ignored).
     pub options: FileTranscriberSettings,
 }
 

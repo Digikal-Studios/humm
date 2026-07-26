@@ -4,3 +4,4 @@
 .claude/.cc-writes/
 /.cargo-home
 /.superpowers/
+__pycache__/
