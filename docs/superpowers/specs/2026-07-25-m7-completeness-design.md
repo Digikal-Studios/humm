@@ -654,11 +654,18 @@ backends).
 - **Session wiring**: `EngineFn` stays the seam. The API arm's closure holds an
   `OpenAiEngine`-derived chunk transcriber: PCM chunk → in-memory WAV (16 kHz
   mono f32 → 16-bit PCM WAV bytes — a tiny writer in core; no ffmpeg per chunk,
-  deviation ledger #L13: Buzz writes a temp WAV file via soundfile, humm builds
-  the same container in memory — same bytes-on-the-wire shape, no disk churn) →
-  multipart `/audio/transcriptions` with the rolling prompt as `prompt`, under
-  `cancelable` + the engine's timeout. Language/task map exactly as the file
-  engine's (F-041 request builder reused).
+  deviation ledger #L13: Buzz writes a temp WAV file via the stdlib `wave`
+  module — **not** `soundfile`, corrected on Task 17's source re-read
+  (`recording_transcriber.py:6,309-316`) — humm builds the same container in
+  memory — same bytes-on-the-wire shape, no disk churn) → multipart
+  `/audio/transcriptions` with the caller-supplied prompt as `prompt` (ledger
+  #L16 — Buzz's own live-API arm never actually threads its rolling prompt,
+  an apparent defect this port does not carry), under `cancelable` + a
+  60 s timeout scaled to a chunk's size (`LiveApiTranscriber::REQUEST_TIMEOUT`,
+  not the file engine's 600 s). Language maps exactly as the file engine's;
+  task does not — `transcribe_chunk` always posts to `/audio/transcriptions`
+  with no task parameter, a scope gap against Buzz's task-conditional
+  endpoint selection (ledger #L15).
 - **Realtime-fit warning**: the measured-speed map is keyed by model size — API
   sessions record under a backend-qualified key (e.g. `openai_api`) so a slow
   network doesn't poison the local sizes' numbers (✚ detail, ledger #L14).
@@ -740,8 +747,10 @@ backends).
 | L10 | UI language applies live — no restart, no "Restart required!" hint | every string resolves per frame through `tr()`; Buzz's restart was a gettext-at-import limitation |
 | L11 | Live-export block + live-mode combo omitted from General | Buzz's own in-app note announces the move humm's M5 already made; two writers for one setting is a bug farm |
 | L12 | "Reduce GPU RAM" (int8) omitted | consumers are the unported HF/Faster-Whisper backends (ADR-008); dead surface otherwise |
-| L13 | Live-API chunks built as in-memory WAV, not temp files | same wire bytes; no disk churn; Buzz's temp file was a soundfile-API artifact |
+| L13 | Live-API chunks built as in-memory WAV, not temp files | same wire bytes; no disk churn; Buzz's temp file was a **`wave`**-module artifact (Task 17 re-read corrected this row's own text: `recording_transcriber.py:6,309-316` imports and uses the stdlib `wave` module, not `soundfile` — no `soundfile` import exists in that file) |
 | L14 | API live sessions record measured speed under a backend-qualified key | network speed must not poison local model-size numbers the realtime-fit warning reads |
+| L15 | `LiveApiTranscriber::transcribe_chunk` (`openai/live.rs`) always posts to `/audio/transcriptions`, with no task parameter — a live session with `TaskKind::Translate` selected against the API backend transcribes instead of translating | Task 17's binding contract fixed this exact signature; Buzz's own live-API arm *does* conditionally post to `/audio/translations` when `task == Task.TRANSLATE` (`recording_transcriber.py:330-343`), and humm-gui's recording options already carry a settable `TaskKind` (`recording.rs:175,1022`), so this is a real, reachable scope gap, not theoretical — recorded for Task 18/a follow-up to close, not silently dropped |
+| L16 | `LiveApiTranscriber::transcribe_chunk` sends whatever rolling `prompt` its caller supplies (via `run_session`'s uniform per-backend prompt threading), rather than Buzz's literal live-API behavior | Buzz's `_transcribe_via_api(self, samples, initial_prompt)` (`recording_transcriber.py:306`) accepts the rolling prompt as a parameter but never reads it — `:323` sends the static `self.transcription_options.initial_prompt` instead, unconditionally, for every chunk of the session. The same parameter-vs-static mixup recurs in `_transcribe_faster_whisper` (`:278`); only `_transcribe_whisper` (`:261`) actually threads the rolling value. Read as an oversight, not a deliberate choice — house precedent (`openai::parse`'s `offset_ms` fix for the whisper.cpp branch) is to fix accidental upstream corruption rather than port it byte-faithfully |
 
 ---
 

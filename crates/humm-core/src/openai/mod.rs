@@ -3,9 +3,10 @@
 //! ([`validate`]), the pure response-parsing half of the transcription engine
 //! ([`parse`], including its whisper.cpp-server word-merge port), and the
 //! engine itself ([`engine`], the OpenAI-compatible API file-transcription
-//! backend — F-041, design spec §3), and the LLM translator ([`translate`],
-//! F-031/F-063/F-085, design spec §4.1-§4.3 — batch protocol, worker
-//! thread, and endpoint resolution).
+//! backend — F-041, design spec §3), the live-recording per-chunk API
+//! transcriber ([`live`], F-061 closure, design spec §10), and the LLM
+//! translator ([`translate`], F-031/F-063/F-085, design spec §4.1-§4.3 —
+//! batch protocol, worker thread, and endpoint resolution).
 //!
 //! The API key travels as an in-memory `String` inside these types only:
 //! constructor argument -> `Authorization` header. It is never
@@ -15,12 +16,14 @@
 pub(crate) mod chat;
 pub mod client;
 pub mod engine;
+pub mod live;
 pub mod parse;
 pub mod translate;
 pub mod validate;
 
 pub use client::{ApiFailure, DEFAULT_BASE_URL, OpenAiAuth, cancelable, effective_base};
 pub use engine::{MAX_CHUNK_SIZE, OpenAiEngine, OpenAiEngineConfig, chunk_plan};
+pub use live::LiveApiTranscriber;
 pub use parse::{parse_response, response_format_for};
 pub use translate::{
     BATCH_SIZE, ENV_BASE, ENV_KEY, LlmEndpoint, LlmEndpointSource, TranslatorConfig,

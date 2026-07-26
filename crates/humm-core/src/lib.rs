@@ -28,3 +28,4 @@ pub mod settings;
 pub mod telemetry;
 pub mod update;
 pub mod viewer;
+pub mod wav;

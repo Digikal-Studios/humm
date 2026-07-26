@@ -352,7 +352,13 @@ fn offset_ms_for_sample(start_sample: usize) -> i64 {
 /// a cancel becomes [`EngineError::Canceled`]; every other failure becomes
 /// [`EngineError::Api`], whose actionable detail already names the host and
 /// (for HTTP responses) the status and a body excerpt, and never the key.
-fn map_api_failure(failure: ApiFailure) -> EngineError {
+///
+/// `pub(crate)` — reused verbatim by [`super::live::LiveApiTranscriber`],
+/// which maps its own request/parse failures through the identical rule
+/// (design spec §10's reuse-discipline note). Purely a visibility change
+/// from this module's original private helper; behavior is untouched, so
+/// this module's own tests stay green.
+pub(crate) fn map_api_failure(failure: ApiFailure) -> EngineError {
     match failure {
         ApiFailure::Canceled => EngineError::Canceled,
         ApiFailure::Http { detail } | ApiFailure::Shape { detail } => EngineError::Api { detail },
@@ -377,7 +383,10 @@ fn map_encode_error(error: MediaError) -> EngineError {
 /// messages — falls back to `url` verbatim if it doesn't parse. Never
 /// includes the request's `Authorization` header, so it can never leak the
 /// key (design spec §2).
-fn host_of(url: &str) -> String {
+///
+/// `pub(crate)` — shared with [`super::live::LiveApiTranscriber`], the only
+/// other caller building actionable request-failure messages the same way.
+pub(crate) fn host_of(url: &str) -> String {
     url::Url::parse(url)
         .ok()
         .and_then(|parsed| {
@@ -391,7 +400,9 @@ fn host_of(url: &str) -> String {
 
 /// A short, char-boundary-safe excerpt of a response body for an error
 /// message: the first ~300 characters, with an ellipsis when truncated.
-fn body_excerpt(body: &str) -> String {
+///
+/// `pub(crate)` — shared with [`super::live::LiveApiTranscriber`].
+pub(crate) fn body_excerpt(body: &str) -> String {
     const MAX: usize = 300;
     if body.len() <= MAX {
         return body.to_string();
