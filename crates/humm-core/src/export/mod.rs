@@ -420,10 +420,16 @@ mod tests {
         // is unconditional on the suffix alone, not on provenance — a
         // user's own file that just happens to be named `*_speech.*` gets
         // the same single strip as a demucs-produced isolation output.
-        // Confirms it strips only once too: `my_song_speech` -> `my_song`,
-        // not something stripped twice.
+        //
+        // The input deliberately has *two* trailing `_speech` occurrences
+        // (`interview_speech_speech`) so a single-strip implementation and a
+        // loop-until-no-more-suffix implementation disagree on the result —
+        // a single `my_song_speech` -> `my_song` case can't tell them apart
+        // (review Minor 7). `output_file_path` strips exactly once
+        // (`strip_suffix`, not a `while` loop), so only the trailing
+        // occurrence goes: `interview_speech_speech` -> `interview_speech`.
         let path = output_file_path(
-            Path::new("/tmp/my_song_speech.mp3"),
+            Path::new("/tmp/interview_speech_speech.mp3"),
             TaskKind::Transcribe,
             None,
             ModelSize::Small,
@@ -432,7 +438,7 @@ mod tests {
             Some("{{ input_file_name }}"),
             fixed_now(),
         );
-        assert_eq!(path, Path::new("/tmp/my_song.txt"));
+        assert_eq!(path, Path::new("/tmp/interview_speech.txt"));
     }
 
     #[test]

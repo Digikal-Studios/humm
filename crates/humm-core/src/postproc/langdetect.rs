@@ -75,13 +75,32 @@ pub fn should_detect(language: Option<Language>) -> bool {
 /// exist ([`registry::local_model_path`]'s rule — the same resume-safe check
 /// every other model consumer uses). `Custom` and `Lumii` are never
 /// considered (see [`CANDIDATE_SIZES`]).
+///
+/// Ties (e.g. `Small`/`SmallEn`, or `Large`/`LargeV2`/`LargeV3`, all sharing
+/// a rank) keep the **first**-declared [`CANDIDATE_SIZES`] entry — Buzz's
+/// own `_resolve_model_path` uses a strict `rank > best_size` comparison
+/// (`plugin.py:145-147`), so an equal-ranked later size never overwrites an
+/// earlier winner. This matters concretely: `Small` ties `SmallEn`, but
+/// `SmallEn` is English-only and would make detection unable to ever return
+/// anything else. A plain `Iterator::max_by_key` would pick the *last* tied
+/// element instead (review fix, Important 1) — hence the explicit
+/// strict-greater-than fold below rather than `max_by_key`.
 pub fn select_model(model_root: &Path) -> Option<PathBuf> {
-    CANDIDATE_SIZES
-        .iter()
-        .copied()
-        .filter_map(|size| registry::local_model_path(model_root, size).map(|path| (size, path)))
-        .max_by_key(|(size, _)| size_rank(*size))
-        .map(|(_, path)| path)
+    let mut best: Option<(u64, PathBuf)> = None;
+    for size in CANDIDATE_SIZES.iter().copied() {
+        let Some(path) = registry::local_model_path(model_root, size) else {
+            continue;
+        };
+        let rank = size_rank(size);
+        let is_new_best = match &best {
+            Some((best_rank, _)) => rank > *best_rank,
+            None => true,
+        };
+        if is_new_best {
+            best = Some((rank, path));
+        }
+    }
+    best.map(|(_, path)| path)
 }
 
 #[cfg(test)]
@@ -135,6 +154,39 @@ mod tests {
         assert_eq!(
             select_model(dir.path()),
             registry::local_model_path(dir.path(), ModelSize::Small)
+        );
+    }
+
+    /// Review fix (Important 1): `Small` and `SmallEn` share a rank (both
+    /// 460 in [`size_rank`]); Buzz's strict `>` comparison keeps the first
+    /// declared (`Small`), not the last. A naive `Iterator::max_by_key`
+    /// would have picked `SmallEn` instead — an English-only model that
+    /// could never let detection return anything but English.
+    #[test]
+    fn select_model_tie_prefers_first_declared_size_over_later_equal_rank() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        touch_model(dir.path(), ModelSize::Small);
+        touch_model(dir.path(), ModelSize::SmallEn);
+
+        assert_eq!(
+            select_model(dir.path()),
+            registry::local_model_path(dir.path(), ModelSize::Small),
+            "Small and SmallEn tie in rank; the first-declared size (Small) \
+             must win, not the English-only SmallEn"
+        );
+    }
+
+    /// Same tie-break rule, in the `Large` family (`Large`/`LargeV2`/
+    /// `LargeV3` all rank 2870): `Large` is declared first and must win.
+    #[test]
+    fn select_model_large_family_tie_prefers_large_over_large_v3() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        touch_model(dir.path(), ModelSize::LargeV3);
+        touch_model(dir.path(), ModelSize::Large);
+
+        assert_eq!(
+            select_model(dir.path()),
+            registry::local_model_path(dir.path(), ModelSize::Large)
         );
     }
 

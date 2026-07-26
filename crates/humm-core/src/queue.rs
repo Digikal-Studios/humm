@@ -665,22 +665,42 @@ enum Terminal {
 ///   when [`RunnerDeps::postproc`] is `None` (every pre-M7 caller, and any
 ///   test double that doesn't need hooks) — the chain then never runs, as
 ///   if this field didn't exist.
+/// - `detected_language`: F-114's detected language, if the pre-transcription
+///   chain's detection step resolved one (M8, review fix). Buzz's own plugin
+///   mutates `task.transcription_options.language` in place, so its
+///   `on_complete`-equivalent hooks (notably F-116's transcript resizer,
+///   whose regroup step chooses a CJK vs. Latin word-join separator by
+///   language, `plugins/enhanced_language_detection/plugin.py:99-101`) see
+///   the detected language too — `run_task` folds this in as
+///   `detected_language.or(spec.options.language)` when calling
+///   `run_on_complete_chain`, so the chain observes the same effective
+///   language [`run_file_job`] transcribed with.
 struct PostCompleteContext {
     input_path: PathBuf,
     postproc: Option<PostprocConfig>,
+    detected_language: Option<Language>,
 }
 
 /// Drop-based cleanup of the M8 pre-transcription chain's temp derivative
 /// files (design spec §3/§4): the isolated `_speech` file and the denoised
-/// `_DeepFilterNet3` file, if either step ran. Constructed once per
-/// [`Runner::run_job`] call and held for that call's whole duration, so it
-/// cleans up on **every** exit path — `Completed`, `Failed`, `Canceled`, and
-/// a panic unwinding through `run_job` (which is itself already
-/// `catch_unwind`-contained one level up, in `Runner::run_task` — the
-/// unwind still passes through this guard's stack frame on its way out,
-/// running `Drop` normally). This is humm's improvement over Buzz, which
-/// deletes its `_speech.mp3` only in its `on_task_completed` handler and
-/// leaks it on failure/cancel (deviations ledger #3); F-112's
+/// `_DeepFilterNet3` file, if either step ran and actually produced one (a
+/// step whose output path is identical to its input — see the
+/// `!= audio_input`/`!= prior_audio` checks at each call site — is never
+/// recorded here at all, so a misbehaving/no-op adapter can never cause this
+/// guard to delete the user's own source). Constructed once per
+/// [`Runner::run_job`] call and held for that call's whole duration, so every
+/// *successfully-produced* file it does know about is cleaned up on **every**
+/// exit path — `Completed`, `Failed`, `Canceled`, and a panic unwinding
+/// through `run_job` (which is itself already `catch_unwind`-contained one
+/// level up, in `Runner::run_task` — the unwind still passes through this
+/// guard's stack frame on its way out, running `Drop` normally). A step that
+/// fails after writing a *partial* output before returning `Err` (e.g. a
+/// killed subprocess that had already started writing its target file) is
+/// not covered here — that partial file was never returned to this guard to
+/// record, so removing it is the adapter's own obligation (a later task's
+/// `DemucsIsolator`, not this seam). This is humm's improvement over Buzz,
+/// which deletes its `_speech.mp3` only in its `on_task_completed` handler
+/// and leaks it on failure/cancel (deviations ledger #3); F-112's
 /// `_DeepFilterNet3` file gets the same all-terminals treatment (ledger,
 /// same rule).
 ///
@@ -1197,13 +1217,19 @@ impl Runner {
                     // `on_complete` hook chain (F-116/F-111/F-113, design
                     // spec §2.1) — a no-op when no config source was
                     // configured at all (`ctx.postproc: None`, checked
-                    // inside `run_on_complete_chain` itself).
+                    // inside `run_on_complete_chain` itself). The effective
+                    // language is F-114's detected language when the
+                    // pre-transcription chain resolved one, else the task's
+                    // own choice — `PostCompleteContext::detected_language`'s
+                    // doc comment explains why the chain must see this and
+                    // not just `spec.options.language` (review fix).
+                    let chain_language = ctx.detected_language.or(spec.options.language);
                     self.run_on_complete_chain(
                         id,
                         &ctx,
                         &outcome.segments,
                         spec.options.word_timestamps,
-                        spec.options.language.map(Language::code),
+                        chain_language.map(Language::code),
                         &token,
                     );
                 }
@@ -1364,7 +1390,14 @@ impl Runner {
             });
             match isolator.isolate(&audio_input, token) {
                 Ok(isolated) => {
-                    guard.isolated = Some(isolated.clone());
+                    // Only queue `isolated` for cleanup when it's actually a
+                    // *new* file distinct from what was passed in — a
+                    // misbehaving (or fallback/no-op) isolator that echoes
+                    // its input path back must never cause `TempAudioGuard`
+                    // to delete the user's own source (review fix).
+                    if isolated != audio_input {
+                        guard.isolated = Some(isolated.clone());
+                    }
                     audio_input = isolated;
                 }
                 Err(err) => {
@@ -1422,7 +1455,11 @@ impl Runner {
                 reducer.reduce(&prior_audio, token)
             })) {
                 Ok(Ok(denoised)) => {
-                    guard.denoised = Some(denoised.clone());
+                    // Same identity check as the isolation step above: never
+                    // queue the reducer's own input path for cleanup.
+                    if denoised != prior_audio {
+                        guard.denoised = Some(denoised.clone());
+                    }
                     audio_input = denoised;
                 }
                 Ok(Err(err)) => {
@@ -1587,6 +1624,7 @@ impl Runner {
                 Box::new(PostCompleteContext {
                     input_path: job.input,
                     postproc: postproc_cfg,
+                    detected_language,
                 }),
             ),
             Err(err) => classify(err),
@@ -5826,6 +5864,90 @@ mod tests {
         }
     }
 
+    /// Review fix (Important 3): an isolator that echoes its input path back
+    /// unchanged — exactly `ScriptedIsolator`'s own no-script fallback arm,
+    /// and a plausible shape for a real no-op/misconfigured adapter — must
+    /// never have that path recorded for `TempAudioGuard` cleanup, or the
+    /// guard would delete the user's own source file on task completion.
+    #[test]
+    fn temp_guard_does_not_delete_isolator_echoed_input() {
+        let isolator = Arc::new(ScriptedIsolator {
+            scripts: Arc::new(Mutex::new(VecDeque::new())), // no script -> echoes input
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            isolator: Some(isolator),
+            ..Cfg::default()
+        });
+
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let input = h.input_file("clip.mp3");
+        let mut spec = path_task(input.clone());
+        spec.options.extract_speech = true;
+        q.enqueue(a, spec, Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+        assert!(
+            input.exists(),
+            "the isolator echoed the input path back unchanged — it must \
+             never be deleted as though it were a genuine derivative"
+        );
+    }
+
+    /// Review fix (Important 3): same identity check, for the reducer.
+    #[test]
+    fn temp_guard_does_not_delete_reducer_echoed_input() {
+        let reducer = Arc::new(ScriptedReducer {
+            scripts: Arc::new(Mutex::new(VecDeque::new())), // no script -> echoes input
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let cfg = postproc_cfg_with_m8(
+            NoiseReductionSettings {
+                enabled: true,
+                keep_denoised_file: false,
+            },
+            LangDetectSettings::default(),
+        );
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            reducer: Some(reducer),
+            postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+            ..Cfg::default()
+        });
+
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let input = h.input_file("clip.mp3");
+        q.enqueue(a, path_task(input.clone()), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+        assert!(
+            input.exists(),
+            "the reducer echoed its input path back unchanged — it must \
+             never be deleted as though it were a genuine derivative"
+        );
+    }
+
     #[test]
     fn reducer_failure_proceeds_on_prior_audio() {
         let reducer = Arc::new(ScriptedReducer {
@@ -6199,22 +6321,123 @@ mod tests {
         );
     }
 
+    /// Review fix (Important 2): the detected language must reach the
+    /// `on_complete` hook chain too, not just the engine/export name —
+    /// Buzz's own plugin mutates the shared `task.transcription_options`, so
+    /// downstream hooks (F-116's transcript resizer, whose `regroup` step
+    /// picks a CJK-vs-Latin word-join separator by language) see it. The
+    /// task's own `options.language` stays unset (`word_timestamped_task`'s
+    /// default); the detector resolves `ja` — a non-space language
+    /// (`regroup::words::NON_SPACE_LANGUAGES`). Two un-punctuated,
+    /// close-in-time segments ("hello"/"world") land in one `regroup`
+    /// sentence group; the resizer's `replace_task_segments` write is
+    /// observed directly, joined with `""` (a no-op separator, since the
+    /// non-space language already glues them without one).
+    #[test]
+    fn detected_language_reaches_on_complete_chain_regroup() {
+        let detector = Arc::new(ScriptedDetector {
+            scripts: Arc::new(Mutex::new(VecDeque::from([DetectScript::Ok(
+                Language::parse("ja"),
+            )]))),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let cfg = PostprocConfig {
+            skip: SkipSettings::default(),
+            summary: AiSummarySettings::default(),
+            summary_api_key: None,
+            docx: ExportDocxSettings::default(),
+            resize: AutoResizeSettings {
+                enabled: true,
+                ..AutoResizeSettings::default()
+            },
+            paragraph_split: Millis(2000),
+            noise_reduction: NoiseReductionSettings::default(),
+            language_detection: LangDetectSettings {
+                enabled: true,
+                download_tiny_if_missing: true,
+            },
+        };
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            lang_detector: Some(detector),
+            postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+            initial_segments: vec![
+                Segment {
+                    start: Millis(0),
+                    end: Millis(400),
+                    text: "hello".to_string(),
+                    translation: String::new(),
+                },
+                Segment {
+                    start: Millis(450),
+                    end: Millis(800),
+                    text: "world".to_string(),
+                    translation: String::new(),
+                },
+            ],
+            ..Cfg::default()
+        });
+        h.seed_model(ModelSize::Small);
+
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        q.enqueue(
+            a,
+            word_timestamped_task(h.input_file("clip.mp3")),
+            Source::FileImport,
+        );
+        q.finish().expect("finish");
+        let _events = drain(&rx);
+
+        assert_eq!(h.language_seen(), vec![Language::parse("ja")]);
+
+        let replaced = h
+            .store_calls()
+            .into_iter()
+            .find_map(|c| match c {
+                StoreCall::ReplaceSegments(id, segs) if id == a => Some(segs),
+                _ => None,
+            })
+            .expect("resize hook should have replaced segments");
+        let joined: String = replaced.iter().map(|s| s.text.clone()).collect();
+        assert!(
+            joined.contains("helloworld"),
+            "the on_complete chain must see the *detected* ja, not the \
+             task's unset language, so regroup's word separator is \"\" \
+             (non-space language) rather than \" \": {joined:?}"
+        );
+        assert!(
+            !joined.contains("hello world"),
+            "a space-joined result means the chain fell back to the task's \
+             own (unset) language instead of the detected ja: {joined:?}"
+        );
+    }
+
     #[test]
     fn detector_absent_model_downloads_tiny_when_enabled() {
         let model_calls = Arc::new(Mutex::new(Vec::new()));
+        let tiny_path = PathBuf::from("/fake/tiny-model.bin");
         let ensurer = Arc::new(FakeEnsurer {
             model_scripts: Arc::new(Mutex::new(VecDeque::from([EnsureModelScript::Ok {
-                progress: vec![],
-                path: PathBuf::from("/fake/tiny-model.bin"),
+                progress: vec![DownloadProgress {
+                    file: "ggml-tiny.bin".to_string(),
+                    downloaded: 40,
+                    total: Some(100),
+                }],
+                path: tiny_path.clone(),
             }]))),
             vad_scripts: Arc::new(Mutex::new(VecDeque::new())),
             model_calls: Arc::clone(&model_calls),
             vad_calls: Arc::new(Mutex::new(0)),
             model_gate: None,
         });
+        let detector_calls = Arc::new(Mutex::new(Vec::new()));
         let detector = Arc::new(ScriptedDetector {
             scripts: Arc::new(Mutex::new(VecDeque::from([DetectScript::Ok(None)]))),
-            calls: Arc::new(Mutex::new(Vec::new())),
+            calls: Arc::clone(&detector_calls),
         });
         let cfg = postproc_cfg_with_m8(
             NoiseReductionSettings::default(),
@@ -6242,12 +6465,95 @@ mod tests {
         let a = TranscriptionId::new();
         q.enqueue(a, path_task(h.input_file("clip.mp3")), Source::FileImport);
         q.finish().expect("finish");
-        let _events = drain(&rx);
+        let events = drain(&rx);
 
         let recorded = model_calls.lock().expect("model calls").clone();
         assert!(
             recorded.iter().any(|m| m.size == ModelSize::Tiny),
             "expected a Tiny model ensure call: {recorded:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.kind, TaskEventKind::ModelDownloadProgress { .. })),
+            "the tiny-model download's progress must surface as \
+             ModelDownloadProgress, same as the task's own model ensure: \
+             {events:?}"
+        );
+        assert_eq!(
+            *detector_calls.lock().expect("detector calls"),
+            vec![tiny_path],
+            "the detector must run against exactly the path the ensurer \
+             resolved for the downloaded tiny model"
+        );
+    }
+
+    /// The gate test symmetric with the above: no model downloaded, but
+    /// `download_tiny_if_missing` is off — detection must skip entirely
+    /// rather than falling back to a download, with zero `ensure_model`
+    /// calls and zero detector calls.
+    #[test]
+    fn detector_absent_model_and_tiny_download_disabled_skips_with_zero_ensure_calls() {
+        let model_calls = Arc::new(Mutex::new(Vec::new()));
+        let ensurer = Arc::new(FakeEnsurer {
+            model_scripts: Arc::new(Mutex::new(VecDeque::new())),
+            vad_scripts: Arc::new(Mutex::new(VecDeque::new())),
+            model_calls: Arc::clone(&model_calls),
+            vad_calls: Arc::new(Mutex::new(0)),
+            model_gate: None,
+        });
+        let detector_calls = Arc::new(Mutex::new(Vec::new()));
+        let detector = Arc::new(ScriptedDetector {
+            scripts: Arc::new(Mutex::new(VecDeque::from([DetectScript::Ok(None)]))),
+            calls: Arc::clone(&detector_calls),
+        });
+        let cfg = postproc_cfg_with_m8(
+            NoiseReductionSettings::default(),
+            LangDetectSettings {
+                enabled: true,
+                download_tiny_if_missing: false,
+            },
+        );
+        let (q, h) = build_with_ensurer(
+            Cfg {
+                scripts: vec![EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![seg("hi")],
+                }],
+                lang_detector: Some(detector),
+                postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+                ..Cfg::default()
+            },
+            ensurer,
+        );
+        // No model seeded under `h.model_root()`.
+
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        q.enqueue(a, path_task(h.input_file("clip.mp3")), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        // `build_with_ensurer` wires the same `ensurer` for the task's own
+        // (unrelated) model resolution too — `path_task`'s default Whisper
+        // backend always ensures its own `Small` model regardless of
+        // language detection, so `model_calls` isn't expected to be empty.
+        // What must never appear is a `Tiny` call: that's specifically
+        // detection's own fallback, which must not fire here.
+        let recorded = model_calls.lock().expect("model calls").clone();
+        assert!(
+            !recorded.iter().any(|m| m.size == ModelSize::Tiny),
+            "no Tiny-model ensure call should happen when the tiny fallback \
+             is disabled: {recorded:?}"
+        );
+        assert!(
+            detector_calls.lock().expect("detector calls").is_empty(),
+            "detection must be skipped entirely, not attempted with no model"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
         );
     }
 
