@@ -868,6 +868,13 @@ pub fn run_live_session(
         return;
     }
     if cancel.is_canceled() {
+        // Between begin and the end_live_session() call after run_session()
+        // below -- call it here too so every early return once the session
+        // has begun tears the bracket down symmetrically (a no-op for
+        // WhisperEngine today, since the slot begin_live_session just
+        // cleared is still empty, but future-proofs the trait seam for a
+        // backend whose begin/end pair does hold something).
+        engine.end_live_session();
         sink(SessionMessage::Stopped { measurement: None });
         return;
     }
@@ -923,6 +930,10 @@ pub fn run_live_session(
         ) {
             Ok(handle) => handle,
             Err(err) => {
+                // Same bracket-symmetry note as the cancellation check above
+                // -- this is still between begin_live_session() and
+                // run_session(), so end_live_session() belongs here too.
+                engine.end_live_session();
                 sink(SessionMessage::Error(err.to_string()));
                 sink(SessionMessage::Stopped { measurement: None });
                 return;
@@ -1385,6 +1396,12 @@ mod tests {
 
     #[test]
     fn recording_error_dialog_text_matches_buzz_byte_exact() {
+        // This test never calls `set_locale` itself, but it does assert on
+        // translated text (`recording_error_dialog_text` reads through
+        // `crate::i18n::tr`), so it can still observe another concurrently
+        // running test's locale switch mid-flight without this guard --
+        // `lock_locale_for_test`'s own doc comment now says so explicitly.
+        let _guard = crate::i18n::lock_locale_for_test();
         assert_eq!(
             recording_error_dialog_text("no input device"),
             "An error occurred while starting a new recording:no input device. Please check \

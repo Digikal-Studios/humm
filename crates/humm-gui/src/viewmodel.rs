@@ -780,6 +780,12 @@ mod tests {
 
     #[test]
     fn load_builds_model_and_task_text_from_persisted_spec() {
+        // This test never calls `set_locale` itself, but it does assert on
+        // translated text (`task_text`/`model_text` are built via `tr`), so
+        // it can still observe another concurrently running test's locale
+        // switch mid-flight without this guard -- `lock_locale_for_test`'s
+        // own doc comment now says so explicitly.
+        let _guard = crate::i18n::lock_locale_for_test();
         let store = SqliteStore::open_in_memory().expect("open");
         let id = TranscriptionId::new();
         let mut spec = sample_spec(Input::Path(PathBuf::from("/tmp/clip.wav")));

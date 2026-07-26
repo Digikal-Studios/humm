@@ -46,8 +46,24 @@
 //! against a stale state leaking across sessions) and
 //! [`WhisperEngine::end_live_session`] drops it as best-effort cleanup. The
 //! one call is still per-chunk: the rolling prompt continues to be passed
-//! explicitly via `prompt`, and the abort/segment wiring is still installed
-//! on `params` per call, unchanged.
+//! explicitly via `prompt`, and the abort callback wiring is still installed
+//! on `params` per call, unchanged (live mode has no segment/progress
+//! callbacks to begin with — see "Live mode" above).
+//!
+//! **Parity bonus, not just a perf fix.** Per-session state reuse also
+//! matches Buzz's own live-recording behavior more closely than the
+//! per-chunk-fresh-state approach this replaces did: Buzz's `whisper-server`
+//! subprocess (`recording_transcriber.py:450-554`) called whisper.cpp's
+//! context-level `whisper_full`, which allocates and owns **one** internal
+//! state for the server process's entire lifetime — every chunk the server
+//! ever transcribes runs on that same state, not a fresh one. whisper.cpp's
+//! own reference realtime example, `examples/stream/stream.cpp`, does the
+//! same: one `whisper_state` reused across the whole streaming session. So
+//! this ticket doesn't just recover the CoreML-reload cost ADR-021 traced —
+//! it also brings humm's in-process live path back in line with the
+//! state-lifetime shape both Buzz's server and upstream's own streaming
+//! reference use, which the per-chunk-fresh-state interim design (accepted
+//! deliberately in ADR-021, for architectural simplicity) had diverged from.
 //!
 //! **Text/prompt/KV state never leaks between calls, reused state or not.**
 //! whisper.cpp's `whisper_full_with_state` unconditionally clears
@@ -68,10 +84,10 @@
 //! consume a different point in that rng sequence than the same chunk would
 //! on its own **freshly created** state (which always restarts at
 //! `mt19937(0)`). Confirmed empirically against the real tiny model
-//! (`tests/contract.rs`'s `first_chunk_output_is_identical_whether_the_state_is_reused_or_fresh`
-//! — always matches, since a state's first call always starts from the same
-//! rng position either way — versus the same file's module-doc note on why a
-//! *later* chunk does not, and
+//! (`tests/contract.rs`'s `first_chunk_output_is_reproducible_across_engine_instances`,
+//! pinned against a captured golden transcript — always matches, since a
+//! state's first call always starts from the same rng position either way —
+//! versus the same file's doc comment on why a *later* chunk does not, and
 //! `live_session_chunk_sequence_is_deterministic_when_repeated`, which
 //! verifies the property that **is** true instead: a reused-state chunk
 //! sequence reproduces identically run to run). This is whisper.cpp's own
@@ -154,18 +170,11 @@ pub struct LiveOptions {
 #[derive(Debug)]
 struct LiveStateSlot<T> {
     value: Option<T>,
-    /// Bumped every time [`Self::get_or_create`] actually constructs a new
-    /// `T` (a cache miss) — the hermetic seam the state-lifecycle unit test
-    /// observes in place of a real whisper state creation.
-    generation: u64,
 }
 
 impl<T> LiveStateSlot<T> {
     fn new() -> Self {
-        LiveStateSlot {
-            value: None,
-            generation: 0,
-        }
+        LiveStateSlot { value: None }
     }
 
     /// Drops any cached value, guaranteeing the next [`Self::get_or_create`]
@@ -182,7 +191,6 @@ impl<T> LiveStateSlot<T> {
     fn get_or_create<E>(&mut self, create: impl FnOnce() -> Result<T, E>) -> Result<&mut T, E> {
         if self.value.is_none() {
             self.value = Some(create()?);
-            self.generation += 1;
         }
         Ok(self.value.as_mut().expect("just set above"))
     }
@@ -974,7 +982,7 @@ mod tests {
     //     `transcribe_live` delegate to, hermetically, against a plain `i32`
     //     instead of a `WhisperState`. The `#[ignore]` real-model tests in
     //     `tests/contract.rs` cover the whisper-backed end of this contract
-    //     (`first_chunk_output_is_identical_whether_the_state_is_reused_or_fresh`,
+    //     (`first_chunk_output_is_reproducible_across_engine_instances`,
     //     `live_session_chunk_sequence_is_deterministic_when_repeated`,
     //     `second_session_after_begin_produces_same_output_as_first`).
 
@@ -992,7 +1000,6 @@ mod tests {
             .unwrap();
         assert_eq!(first, 99);
         assert_eq!(creations, 1, "first call must construct");
-        assert_eq!(slot.generation, 1);
 
         // Second call: cache hit -- reuses the same value, `create` is not
         // invoked again (mirrors consecutive `transcribe_live` calls within
@@ -1005,7 +1012,6 @@ mod tests {
             .unwrap();
         assert_eq!(second, 99, "cached value must be reused, not replaced");
         assert_eq!(creations, 1, "second call must not construct again");
-        assert_eq!(slot.generation, 1);
 
         // `clear()` (what `begin_live_session`/`end_live_session` call)
         // forces the next call to construct fresh -- mirrors a new session
@@ -1019,7 +1025,6 @@ mod tests {
             .unwrap();
         assert_eq!(third, 101, "post-clear call must construct a fresh value");
         assert_eq!(creations, 2, "clear() must force reconstruction");
-        assert_eq!(slot.generation, 2, "generation bumps only on construction");
     }
 
     #[test]
@@ -1028,10 +1033,6 @@ mod tests {
 
         let err = slot.get_or_create(|| Err::<i32, _>("boom")).unwrap_err();
         assert_eq!(err, "boom");
-        assert_eq!(
-            slot.generation, 0,
-            "a failed create must not count as a miss"
-        );
 
         // A later successful call still constructs (the slot was never
         // populated by the failed attempt).
@@ -1043,8 +1044,11 @@ mod tests {
             })
             .unwrap();
         assert_eq!(ok, 7);
-        assert_eq!(creations, 1);
-        assert_eq!(slot.generation, 1);
+        assert_eq!(
+            creations, 1,
+            "a failed create must not have populated the slot -- this call \
+             must still construct"
+        );
     }
 
     // --- Live params mapping (F-061, ADR-008) ---

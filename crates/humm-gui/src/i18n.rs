@@ -708,10 +708,13 @@ pub fn lumii_locale_requested(settings: &Settings, system_locale: Option<&str>) 
 }
 
 /// Serializes every test — in this module or any integration test — that
-/// calls [`set_locale`], against every other one: the harness runs `#[test]`
-/// functions concurrently by default, and [`set_locale`] mutates process-wide
-/// global state ([`GENERATION`]/[`ACTIVE_LOCALE_INDEX`]) two tests could
-/// otherwise race on. **Not** `#[cfg(test)]`-gated — a Cargo integration test
+/// calls [`set_locale`] **or** asserts on translated text, against every
+/// other one: the harness runs `#[test]` functions concurrently by default,
+/// and [`set_locale`] mutates process-wide global state
+/// ([`GENERATION`]/[`ACTIVE_LOCALE_INDEX`]) two tests could otherwise race
+/// on — including a test that only *reads* a translation and never calls
+/// `set_locale` itself, since it can still observe another test's in-flight
+/// locale switch. **Not** `#[cfg(test)]`-gated — a Cargo integration test
 /// (anything under `humm-gui/tests/*.rs`, e.g. `kittest_prefs.rs`'s language-
 /// combo test) is compiled as its own separate crate linking against the
 /// compiled library, so it can never reach a `#[cfg(test)]`-gated item of
@@ -740,9 +743,12 @@ impl Drop for LocaleTestGuard {
 
 /// Acquires [`LOCALE_TEST_LOCK`] for the calling test's whole body. Every
 /// test — in this module or any integration test — that calls [`set_locale`]
-/// must hold one of these, bound to a `let _guard = ...` for its full
-/// duration (a `let _ = ...` would drop the guard, and its reset-to-`en_US`
-/// effect, immediately).
+/// **or** asserts on translated text (anything reached through [`tr`], even
+/// indirectly — a test can observe another concurrently running test's
+/// in-flight `set_locale` call just by reading a translation, without ever
+/// switching locale itself) must hold one of these, bound to a `let _guard =
+/// ...` for its full duration (a `let _ = ...` would drop the guard, and its
+/// reset-to-`en_US` effect, immediately).
 pub fn lock_locale_for_test() -> LocaleTestGuard {
     let guard = LOCALE_TEST_LOCK
         .lock()

@@ -433,18 +433,29 @@ fn live_transcribes_successive_chunks_then_cancels_promptly() {
 }
 
 /// Contract 7 (ADR-021 carried perf ticket, F-061): a live session's first
-/// chunk — the one that lazily creates the cached `WhisperState` — must
-/// produce byte-identical text whether that state comes from the reuse cache
-/// (this task's change) or from a dedicated fresh engine (the pre-this-task
-/// behavior). This is the one call where whisper.cpp's own state design
-/// guarantees equivalence: `whisper_init_state` seeds `decoders[0].rng` to
-/// `mt19937(0)` once, so a state's *first* `full()` call always starts from
-/// the same rng position either way, on top of `whisper_full_with_state`
-/// unconditionally clearing `result_all` and (with `no_context = true`,
-/// whisper.cpp's own default this crate never overrides)
-/// `prompt_past0`/`prompt_past1`/`kv_self` at the top of every call. See
-/// `crates/humm-whisper/src/engine.rs`'s module doc ("Live session state
-/// reuse") for the full argument.
+/// chunk — the one that lazily creates the cached `WhisperState` — produces
+/// the same transcript every time, pinned against a golden literal captured
+/// from a real run (`GOLDEN_CHUNK_A_TEXT`, captured sandbox-lifted; see that
+/// const's doc for how to recapture it if the fixture/model/params ever
+/// change).
+///
+/// **This is a reproducibility/regression test, not a reused-vs-fresh
+/// equivalence test.** An earlier version of this test ran the same input
+/// through `engine().transcribe_live(...)` twice and asserted the two
+/// results were equal to each other -- but both calls are the identical
+/// code path (a fresh engine's first, and only, `transcribe_live` call), so
+/// that assertion was a tautology: it could never have caught a real
+/// regression in the reuse-cache machinery, only a change in whisper.cpp's
+/// own decode determinism. Pinning the golden text instead gives a genuine
+/// regression guard: whisper.cpp's own state design does guarantee this
+/// output is stable in the first place (`whisper_init_state` seeds
+/// `decoders[0].rng` to `mt19937(0)` once per state, so a state's *first*
+/// `full()` call always starts from the same rng position, and
+/// `whisper_full_with_state` unconditionally clears `result_all` and, with
+/// `no_context = true` -- whisper.cpp's own default this crate never
+/// overrides -- `prompt_past0`/`prompt_past1`/`kv_self` at the top of every
+/// call) -- see `crates/humm-whisper/src/engine.rs`'s module doc ("Live
+/// session state reuse") for the full argument.
 ///
 /// **Multi-chunk caveat, found empirically while first writing this test and
 /// recorded honestly (not the property this test asserts):** whisper.cpp's
@@ -466,29 +477,38 @@ fn live_transcribes_successive_chunks_then_cancels_promptly() {
 /// property that *is* verified for multi-chunk sessions: reused-state output
 /// is reproducible run to run, not identical to an independently-fresh
 /// baseline.
+///
+/// Captured against `ggml-tiny.bin` + its compiled CoreML encoder,
+/// `french_live_options()` (language `fr`, `TaskKind::Transcribe`, the
+/// standard fallback temperature schedule), the first 3 s of
+/// `whisper-french.mp3`, empty rolling prompt. Recapture with:
+/// `HUMM_WHISPER_TEST_MODEL="$HOME/Library/Application Support/humm/models/ggml-tiny.bin" \
+/// cargo test -p humm-whisper --test contract -- --ignored --nocapture \
+/// first_chunk_output_is_reproducible_across_engine_instances` (sandbox-lifted --
+/// see this file's module doc) and copy the printed transcript in verbatim if
+/// the fixture, model, or `LiveOptions` ever change deliberately.
+const GOLDEN_CHUNK_A_TEXT: &str = "Bien venu d'en passer elle, un podcast.";
+
 #[test]
 #[ignore = "requires ffmpeg + a real whisper tiny model (downloaded/cached on first run)"]
-fn first_chunk_output_is_identical_whether_the_state_is_reused_or_fresh() {
+fn first_chunk_output_is_reproducible_across_engine_instances() {
     let pcm = decode("whisper-french.mp3");
     let samples = pcm.samples();
     let chunk_len = (SAMPLE_RATE as usize) * 3;
     let chunk_a = &samples[..chunk_len.min(samples.len())];
     let opts = french_live_options();
 
-    // "Reused" here just means "goes through the cache slot" -- this is its
-    // first call, so the slot's `get_or_create` constructs a state exactly
-    // as `engine()` below does for its own first (and only) call.
-    let reused_a = engine()
+    let run_a = engine()
         .transcribe_live(chunk_a, &opts, "", &CancelToken::new())
-        .expect("reuse-cache first chunk");
-    let fresh_a = engine()
-        .transcribe_live(chunk_a, &opts, "", &CancelToken::new())
-        .expect("dedicated-fresh-engine first chunk");
+        .expect("first-chunk transcription");
+
+    eprintln!("captured chunk A text: {run_a:?}");
 
     assert_eq!(
-        reused_a, fresh_a,
-        "a session's first chunk (the state's first use either way) must be \
-         state-reuse-neutral"
+        run_a, GOLDEN_CHUNK_A_TEXT,
+        "a session's first chunk must reproduce the pinned golden transcript \
+         -- if this legitimately changed (fixture/model/params update), \
+         recapture GOLDEN_CHUNK_A_TEXT per this test's doc comment"
     );
 }
 
@@ -538,11 +558,26 @@ fn live_session_chunk_sequence_is_deterministic_when_repeated() {
 }
 
 /// Contract 8 (ADR-021 carried perf ticket, F-061): `begin_live_session`'s
-/// hard guarantee against cross-session leakage. The same engine instance
-/// runs the same chunk in two separate sessions (bracketed by
-/// `begin_live_session`/`end_live_session`); the second session's output must
-/// match the first's exactly -- no residual state from session one leaking
-/// into session two's cached `WhisperState`.
+/// own hard guarantee against cross-session leakage -- isolated from
+/// `end_live_session`'s.
+///
+/// **Deliberately no `end_live_session()` call after the first session.**
+/// An earlier version of this test called `end_live_session()` at the end of
+/// session one, before session two's `begin_live_session()`. Since both
+/// methods clear the identical cache slot (`WhisperEngine::begin_live_session`/
+/// `end_live_session`'s doc comments), that meant the test could not
+/// distinguish which one was actually responsible for session two starting
+/// fresh -- deleting the `begin_live_session()` call entirely (a real
+/// regression) would still have passed, because `end_live_session()` alone
+/// already cleared the state. Leaving session one's state uncleared here
+/// means the *only* clearing operation between the two `transcribe_live`
+/// calls is session two's `begin_live_session()` -- so this test is now
+/// actually sensitive to that call: without it, the second call would run on
+/// a state whose `decoders[0].rng` already advanced through session one's
+/// entire decode (the same mechanism the sibling `first_chunk_...`/
+/// `live_session_chunk_sequence_...` tests' doc comments describe for a
+/// reused state's second chunk), producing different text than the pinned
+/// first-session golden path -- a real, catchable failure, not a tautology.
 #[test]
 #[ignore = "requires ffmpeg + a real whisper tiny model (downloaded/cached on first run)"]
 fn second_session_after_begin_produces_same_output_as_first() {
@@ -558,7 +593,7 @@ fn second_session_after_begin_produces_same_output_as_first() {
     let first_session_text = engine
         .transcribe_live(chunk, &opts, "", &CancelToken::new())
         .expect("first session chunk");
-    engine.end_live_session();
+    // No `end_live_session()` here -- see the doc comment above for why.
 
     engine.begin_live_session().expect("begin second session");
     let second_session_text = engine
@@ -569,6 +604,7 @@ fn second_session_after_begin_produces_same_output_as_first() {
     assert_eq!(
         first_session_text, second_session_text,
         "identical input in a fresh session must reproduce identical output \
-         -- no cross-session leakage from the cached live state"
+         -- begin_live_session's own clear, not end_live_session's, must be \
+         what keeps session one's state from leaking into session two"
     );
 }
