@@ -294,11 +294,12 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         postproc: Some(Arc::new(CliPostprocSource {
             postproc: settings.postproc.clone(),
         }) as Arc<dyn PostprocConfigSource>),
-        // M8 pre-transcription seam: wired in Tasks 5-8. The CLI's `-e`
-        // isolator wiring (Task 5) will follow the F-002-live pattern;
-        // `reducer`/`lang_detector` stay `None` on the CLI even after that
-        // (design spec §8: the F-112/F-114 pre-hooks are GUI-configured-only,
-        // the `postproc: None` CLI stance extended to the pre-chain).
+        // M8 pre-transcription seam: wired in Tasks 5-8. Task 5 wires the
+        // CLI's `-e` flag to a real `isolator` (design spec §9's F-002 "`-e`
+        // goes live" row); `reducer`/`lang_detector` stay `None` on the CLI
+        // even after that (design spec §8: the F-112/F-114 pre-hooks are
+        // GUI-configured-only, the `postproc: None` CLI stance extended to
+        // the pre-chain).
         isolator: None,
         reducer: None,
         lang_detector: None,
