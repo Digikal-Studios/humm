@@ -161,6 +161,29 @@ impl SheetState {
     /// set (the combo wouldn't even list `Custom` in that case — see
     /// [`selectable_model_sizes`] — so a stale `Custom` prefill must not
     /// silently stick around as an unselectable value).
+    ///
+    /// **`Lumii` is deliberately *not* reset the same way, and the asymmetry
+    /// is intentional** (M7 Task 13 review note). Both sizes are conditionally
+    /// listed by [`selectable_model_sizes`] — `Custom` on
+    /// `custom_model_available`, `Lumii` on `include_lumii`
+    /// ([`crate::i18n::lumii_locale_requested`], Buzz's own `lv_LV` gate) — so
+    /// a persisted selection of either can outlive the condition that listed
+    /// it. What differs is what the stale value *resolves to*:
+    ///
+    /// - A stale `Custom` is **unresolvable**: its entire definition is the
+    ///   now-cleared `settings.models.custom_model_url`, so keeping it would
+    ///   hand the engine factory a size with nothing behind it.
+    /// - A stale `Lumii` is **fully resolvable**: `registry::ggml_url` and
+    ///   `ModelDownloader::resolve_model` carry a `Lumii` arm unconditionally
+    ///   (F-042), independent of locale. The gate is purely about *offering*
+    ///   the model to users whose UI locale suggests they want it — Buzz's own
+    ///   framing — not about whether it works. Resetting it would silently
+    ///   downgrade a Latvian user's deliberate choice the moment they switched
+    ///   the UI to English, which Buzz does not do either.
+    ///
+    /// So the rule is "reset what cannot resolve, keep what can": a `Lumii`
+    /// prefill under a non-`lv` locale stays selected and simply isn't
+    /// re-selectable from the combo until the locale gate opens again.
     pub fn from_settings(prefill: &FileTranscriberSettings, custom_model_available: bool) -> Self {
         let mut model_size = prefill
             .model_size
@@ -574,7 +597,6 @@ fn transcription_options_from_state(state: &SheetState) -> TranscriptionOptions 
 /// degrades the same way any other missing-model case does (the engine
 /// factory fails to resolve it and the task fails actionably), rather than
 /// being silently downgraded to "Small" behind the user's back.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn spec_from_transcriber_settings(
     settings: &FileTranscriberSettings,
     custom_model_available: bool,

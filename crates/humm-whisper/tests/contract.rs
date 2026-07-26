@@ -20,7 +20,17 @@
 //! - The VAD test additionally fetches the Silero model over the network.
 //!
 //! Text quality is *not* asserted (the tiny model is weak); these tests pin
-//! structure and timing behaviour.
+//! structure and timing behaviour. **One exception, and it is not a quality
+//! assertion either:** Contract 7
+//! ([`first_chunk_output_is_reproducible_across_engine_instances`]) and
+//! Contract 7b ([`live_session_chunk_sequence_is_deterministic_when_repeated`])
+//! compare exact transcript strings — the first against a captured golden
+//! literal ([`GOLDEN_CHUNK_A_TEXT`]), the second against a second run of
+//! itself. Both are pinning *bit-stability* of whatever weak text tiny
+//! produces (the ADR-021 state-reuse regression guard), never claiming the
+//! text is good; the golden literal is deliberately treated as an opaque
+//! captured artifact, recaptured rather than corrected whenever its capture
+//! configuration changes.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -432,12 +442,44 @@ fn live_transcribes_successive_chunks_then_cancels_promptly() {
     );
 }
 
+/// The pinned first-chunk transcript [Contract
+/// 7](first_chunk_output_is_reproducible_across_engine_instances) asserts
+/// against — a **captured artifact**, not a specification: whatever the real
+/// model actually produced, copied in verbatim.
+///
+/// Captured against `ggml-tiny.bin` + its compiled CoreML encoder,
+/// `french_live_options()` (language `fr`, `TaskKind::Transcribe`, the
+/// standard fallback temperature schedule), the first 3 s of
+/// `whisper-french.mp3`, empty rolling prompt, on Apple Silicon with the
+/// Metal + CoreML backends active.
+///
+/// **Recapture whenever any input to that capture changes deliberately** —
+/// the fixture (`whisper-french.mp3` or the 3 s slice), the model file, the
+/// `LiveOptions` (`french_live_options`), the vendored whisper.cpp/whisper-rs
+/// version, **or the backend/hardware** the tests run on (a different GPU
+/// backend, a CPU-only build, or a non-Apple-Silicon machine can legitimately
+/// decode to different text — this constant pins *reproducibility on one
+/// configuration*, and is not portable across configurations). Recapture with:
+/// `HUMM_WHISPER_TEST_MODEL="$HOME/Library/Application Support/humm/models/ggml-tiny.bin" \
+/// cargo test -p humm-whisper --test contract -- --ignored --nocapture \
+/// first_chunk_output_is_reproducible_across_engine_instances` (sandbox-lifted --
+/// see this file's module doc) and copy the printed transcript in verbatim.
+const GOLDEN_CHUNK_A_TEXT: &str = "Bien venu d'en passer elle, un podcast.";
+
 /// Contract 7 (ADR-021 carried perf ticket, F-061): a live session's first
 /// chunk — the one that lazily creates the cached `WhisperState` — produces
 /// the same transcript every time, pinned against a golden literal captured
-/// from a real run (`GOLDEN_CHUNK_A_TEXT`, captured sandbox-lifted; see that
-/// const's doc for how to recapture it if the fixture/model/params ever
-/// change).
+/// from a real run ([`GOLDEN_CHUNK_A_TEXT`]; see that const's doc for the
+/// exact capture configuration and when to recapture).
+///
+/// This is one of the two tests that **exempt themselves from this file's
+/// module-doc "text quality is not asserted" rule** (the other is Contract 7b
+/// below): the assertion here is not about quality at all — tiny's output is
+/// as weak as ever, and the golden literal is visibly garbled French — but
+/// about *bit-stability* of that weak output across engine instances. Pinning
+/// the exact string is the only way to catch a regression in the state-reuse
+/// machinery, so the text is asserted as an opaque captured artifact, never
+/// as a correctness claim about the transcript.
 ///
 /// **This is a reproducibility/regression test, not a reused-vs-fresh
 /// equivalence test.** An earlier version of this test ran the same input
@@ -477,18 +519,6 @@ fn live_transcribes_successive_chunks_then_cancels_promptly() {
 /// property that *is* verified for multi-chunk sessions: reused-state output
 /// is reproducible run to run, not identical to an independently-fresh
 /// baseline.
-///
-/// Captured against `ggml-tiny.bin` + its compiled CoreML encoder,
-/// `french_live_options()` (language `fr`, `TaskKind::Transcribe`, the
-/// standard fallback temperature schedule), the first 3 s of
-/// `whisper-french.mp3`, empty rolling prompt. Recapture with:
-/// `HUMM_WHISPER_TEST_MODEL="$HOME/Library/Application Support/humm/models/ggml-tiny.bin" \
-/// cargo test -p humm-whisper --test contract -- --ignored --nocapture \
-/// first_chunk_output_is_reproducible_across_engine_instances` (sandbox-lifted --
-/// see this file's module doc) and copy the printed transcript in verbatim if
-/// the fixture, model, or `LiveOptions` ever change deliberately.
-const GOLDEN_CHUNK_A_TEXT: &str = "Bien venu d'en passer elle, un podcast.";
-
 #[test]
 #[ignore = "requires ffmpeg + a real whisper tiny model (downloaded/cached on first run)"]
 fn first_chunk_output_is_reproducible_across_engine_instances() {

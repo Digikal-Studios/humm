@@ -443,58 +443,14 @@ fn base_url_and_model_fields_persist_to_settings() {
 
 // -- General tab: the M7 Task 11 rows (F-100 complete) -----------------------
 
-/// The UI-language combo lists exactly [`i18n::AVAILABLE_LOCALES`] (the
-/// F-008b starter set: `en_US`/`de_DE`/`es_ES`/`zh_CN`) and selecting an entry persists
-/// `ui.locale` (live apply -- design spec ledger #L10). Driving a `ComboBox`
-/// selection by simulated click has no kittest precedent in this workspace
-/// (`kittest_import.rs`/`kittest_recording.rs` both document the same gap
-/// and mutate backing state directly instead) -- this test follows suit,
-/// asserting the rendered combo's closed-state label matches the negotiated
-/// locale's display name, then driving the "selection" via the commit seam
-/// directly, exactly like `base_url_and_model_fields_persist_to_settings`
-/// above does for its own text fields.
-///
-/// Wrapped in [`i18n::lock_locale_for_test`]: [`prefs_general::commit_locale`]
-/// calls [`i18n::set_locale`], which mutates process-wide global state other
-/// tests (in this file and `i18n.rs`) also touch.
-#[test]
-fn language_combo_lists_available_locales_and_persists() {
-    let _locale_guard = i18n::lock_locale_for_test();
-    assert_eq!(
-        i18n::AVAILABLE_LOCALES.len(),
-        4,
-        "the F-008b starter set embeds en_US/de_DE/es_ES/zh_CN -- update this \
-         count as each of Buzz's remaining 11 locales is ported"
-    );
-
-    let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
-    let mut harness = general_harness(secrets, services::default_test_validate());
-    harness.run();
-
-    // The combo's closed-state control shows the negotiated locale's display
-    // name as its accessible *value* (accesskit's `ComboBox` role reports its
-    // current selection there, not as a `label`) -- proves it renders
-    // through `i18n::display_name`, not a hardcoded string.
-    harness.get(
-        By::new()
-            .role(Role::ComboBox)
-            .value(&i18n::display_name("en_US")),
-    );
-
-    {
-        let fixture = harness.state_mut();
-        fixture.state.general.locale_code = "en_US".to_string();
-        prefs_general::commit_locale(
-            &fixture.state.general.locale_code,
-            &fixture.settings,
-            &fixture.settings_path,
-        );
-    }
-
-    let settings_path = harness.state().settings_path.clone();
-    let reloaded = Settings::load(&settings_path).expect("settings file was written");
-    assert_eq!(reloaded.ui.locale.as_deref(), Some("en_US"));
-}
+// The UI-language combo's own test, `language_combo_lists_available_locales_
+// and_persists`, deliberately does **not** live here: it is the only test in
+// this crate's integration suite that *writes* the process-wide active locale
+// (`prefs_general::commit_locale` → `i18n::set_locale`), while many tests in
+// this binary read translated text. It was moved to its own integration binary,
+// `tests/kittest_locale.rs`, so separate processes — not per-test lock
+// discipline — keep the writer away from every reader; see that file's module
+// doc for the full rationale.
 
 /// The font-size row: a `DragValue` has no kittest-driving precedent in this
 /// workspace either (confirmed: zero uses across `crates/humm-gui/tests/`),

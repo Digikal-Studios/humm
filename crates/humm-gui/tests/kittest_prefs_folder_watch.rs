@@ -11,7 +11,7 @@
 //!
 //! `ComboBox` selections (the embedded model-size combo) have no
 //! click-driving precedent anywhere in this workspace --
-//! `kittest_prefs.rs`'s own `language_combo_lists_available_locales_and_persists`
+//! `kittest_locale.rs`'s `language_combo_lists_available_locales_and_persists`
 //! documents the same gap (`kittest_import.rs`/`kittest_recording.rs` too) --
 //! so this file follows the same established convention: assert what the
 //! combo renders, then drive persistence via the exposed commit seam

@@ -285,7 +285,7 @@ models-delete-confirm-title = 删除模型
 models-delete-confirm-body = 您确定要删除所选模型吗？
 models-download-error-title = 错误
 models-download-failed = 下载失败
-models-speed-badge = 实时速度 { $ratio }×
+models-speed-badge = { $ratio }× 实时速度
 models-speed-badge-tip = 根据本机实时录音会话测得的实时速度
 
 ## Preferences Shortcuts tab (views/prefs_shortcuts.rs, F-005 editor + ✚
