@@ -32,6 +32,7 @@ use humm_whisper::LiveOptions;
 use crate::engine_factory::{DownloaderEnsurer, resolve_openai_config};
 use crate::events::{self, SharedEventQueue};
 use crate::folder_watch::{FolderWatchService, FolderWatchSnapshot, ReconcileAction};
+use crate::fonts;
 use crate::i18n::{self, tr};
 use crate::import::{FileDialogs, ImportRequest, RfdFileDialogs, scan_folder};
 use crate::live_fixture::FixtureCapture;
@@ -330,6 +331,16 @@ impl HummApp {
         services: Services,
         argv_import: Vec<PathBuf>,
     ) -> Self {
+        // CJK fallback font (F-008 gate, design spec §7.1): installed first,
+        // before any locale/font-size setup below reads or writes
+        // `cc.egui_ctx`'s style — without this, the zh_CN/zh_TW/ja_JP
+        // catalogs (and Buzz's own `。？！` default punctuation under any
+        // locale) render as tofu (`□`), since egui's compiled-in default
+        // fonts carry no Han/Kana glyphs. See `fonts.rs`'s module doc for
+        // the bundled font, its source, and the documented SC-glyph-shape
+        // divergence for TC/JP text.
+        fonts::install(&cc.egui_ctx);
+
         // Locale negotiation (F-008a, design spec §9.1): resolved exactly
         // once here, after `services::init` has already loaded
         // `settings.toml` but before this constructor returns an app for

@@ -150,7 +150,13 @@ pub fn ui(
     current_shortcuts: &ShortcutMap,
     dialogs: &dyn FileDialogs,
 ) {
-    ui.horizontal(|ui| {
+    // `horizontal_wrapped`, not `horizontal` (F-101 ride-along, design spec
+    // §7.1/M7 finding): at `ui.font_size = 24` the six tabs' rendered widths
+    // sum past the window's 650pt min width (`app.rs::HummApp::
+    // show_preferences_viewport`), so a plain `horizontal` row clips the
+    // last tab(s) off the visible strip with no way to reach them. Wrapping
+    // lets the strip spill onto a second line instead of clipping.
+    ui.horizontal_wrapped(|ui| {
         ui.selectable_value(&mut state.tab, PrefsTab::General, tr("prefs-tab-general"));
         ui.selectable_value(&mut state.tab, PrefsTab::Models, tr("prefs-tab-models"));
         ui.selectable_value(

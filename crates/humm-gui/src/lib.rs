@@ -12,6 +12,7 @@ pub mod app;
 pub mod engine_factory;
 pub mod events;
 pub mod folder_watch;
+pub mod fonts;
 pub mod format;
 pub mod i18n;
 pub mod import;

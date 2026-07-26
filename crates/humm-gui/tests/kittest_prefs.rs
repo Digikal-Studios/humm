@@ -959,6 +959,114 @@ fn all_six_tabs_are_selectable_and_render() {
     }
 }
 
+// -- Tab strip: all six tabs stay clickable at font_size 24 (F-008 ride-along) --
+
+/// The tab-strip regression fixture: identical shape to [`SixTabFixture`]
+/// above, just reused at the Preferences window's *real* min width (650pt,
+/// `app.rs::HummApp::show_preferences_viewport`) rather than that test's
+/// more generous 700pt -- the M7-noted overflow (`views::preferences`'s own
+/// module doc, design spec §7.1) only reproduces at this width.
+struct TabStripFixture {
+    state: PreferencesState,
+    model_root: PathBuf,
+    settings: Arc<Mutex<Settings>>,
+    settings_path: PathBuf,
+    secrets: Arc<dyn SecretStore>,
+    validate: ValidateFn,
+    shortcuts_generation: Arc<AtomicUsize>,
+    current_shortcuts: ShortcutMap,
+    _model_root_dir: tempfile::TempDir,
+    _settings_dir: tempfile::TempDir,
+}
+
+/// F-008's ride-along fix (design spec §7.1, M7 finding): at `ui.font_size =
+/// 24` the six-tab strip's rendered width exceeds the Preferences window's
+/// 650pt min width. A plain `horizontal` row lets the overflowing tab(s)
+/// clip outside the visible/clickable area; this drives every tab-strip
+/// entry by label at that exact width/size combination and asserts each
+/// click actually flips `PreferencesState::tab` -- proving all six stay
+/// reachable, not just rendered somewhere.
+#[test]
+fn all_six_tabs_clickable_at_font_size_24() {
+    let model_root_dir = tempfile::tempdir().expect("model root tempdir");
+    let settings_dir = tempfile::tempdir().expect("settings tempdir");
+    let settings_path = settings_dir.path().join("settings.toml");
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+    let model_root = model_root_dir.path().to_path_buf();
+
+    let fixture = TabStripFixture {
+        state: PreferencesState {
+            tab: PrefsTab::General,
+            general: GeneralTabState::new(secrets.as_ref(), &Settings::default()),
+            models: ModelsTabState::new(&model_root, None, false),
+            shortcuts: ShortcutsTabState::default(),
+            folder_watch: FolderWatchTabState::new(
+                &humm_core::settings::FolderWatchSettings::default(),
+                secrets.as_ref(),
+                false,
+                false,
+            ),
+            postproc: PostprocTabState::new(
+                &humm_core::settings::PostprocSettings::default(),
+                secrets.as_ref(),
+            ),
+        },
+        model_root,
+        settings: Arc::new(Mutex::new(Settings::default())),
+        settings_path,
+        secrets,
+        validate: services::default_test_validate(),
+        shortcuts_generation: Arc::new(AtomicUsize::new(0)),
+        current_shortcuts: ShortcutMap::from_settings(&HashMap::new()),
+        _model_root_dir: model_root_dir,
+        _settings_dir: settings_dir,
+    };
+
+    let mut harness = HarnessBuilder::default()
+        .with_size(egui::Vec2::new(650.0, 500.0))
+        .build_ui_state(
+            |ui, fixture: &mut TabStripFixture| {
+                preferences::ui(
+                    ui,
+                    &mut fixture.state,
+                    &fixture.model_root,
+                    &fixture.settings,
+                    &fixture.settings_path,
+                    &fixture.secrets,
+                    &fixture.validate,
+                    &fixture.shortcuts_generation,
+                    &fixture.current_shortcuts,
+                    &NullDialogs,
+                );
+            },
+            fixture,
+        );
+    // `ui.font_size = 24`, applied to this harness's own `Context` -- the
+    // same call `HummApp::new`/the General tab's own commit seam makes in
+    // production (`prefs_general::apply_font_size`).
+    prefs_general::apply_font_size(&harness.ctx, Some(24));
+    harness.run();
+
+    let tabs: &[(&str, PrefsTab)] = &[
+        ("General", PrefsTab::General),
+        ("Models", PrefsTab::Models),
+        ("Shortcuts", PrefsTab::Shortcuts),
+        ("Folder Watch", PrefsTab::FolderWatch),
+        ("Post-processing", PrefsTab::PostProcessing),
+        ("Privacy", PrefsTab::Privacy),
+    ];
+
+    for (label, expected_tab) in tabs {
+        harness.get_by_label(label).click();
+        harness.run();
+        assert_eq!(
+            harness.state().state.tab,
+            *expected_tab,
+            "clicking the {label:?} tab-strip entry must select it, even at font_size 24"
+        );
+    }
+}
+
 // -- Toolbar update chip: appears once an Available notice lands -------------
 
 #[test]
