@@ -380,7 +380,14 @@ mod tests {
         // Locale-independent by construction: compares against `tr` calling
         // the same key, rather than a hardcoded English string, since this
         // (unlike every other branch in this file) is a translated humm
-        // addition, not a byte-exact Buzz string.
+        // addition, not a byte-exact Buzz string. This test never calls
+        // `set_locale` itself, but `status_text`'s `Phase::Isolating` arm
+        // and the right-hand `tr` call below are two separate reads of
+        // process-wide locale state, so it still needs
+        // `lock_locale_for_test`'s guard against a concurrently running
+        // test's in-flight locale switch landing between them (its own doc
+        // comment says so explicitly).
+        let _guard = crate::i18n::lock_locale_for_test();
         let mut row = base_row(Status::InProgress);
         row.phase = Phase::Isolating;
         assert_eq!(

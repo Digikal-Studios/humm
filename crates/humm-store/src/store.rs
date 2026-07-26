@@ -1228,9 +1228,12 @@ impl SqliteStore {
                 options.model.size.as_str(),
                 options.model.hf_repo,
                 options.word_timestamps,
-                // No `TranscriptionOptions` field carries this (see
-                // `create_task`'s identical comment) — always false.
-                false,
+                // F-027: the real option (live recording has no isolator
+                // seam wired to it — Buzz has no demucs pre-pass for live
+                // recording either — so this is always `false` in practice
+                // today, but it's derived from `options` rather than
+                // hardcoded, the same fix `create_task` got).
+                options.extract_speech,
                 name,
                 options_json,
                 Source::LiveRecording.as_str(),
@@ -3064,6 +3067,24 @@ mod tests {
         assert_eq!(task_row.name.as_deref(), Some(name));
         assert_eq!(task_row.file, None);
         assert_eq!(task_row.url, None);
+    }
+
+    #[test]
+    fn insert_live_session_writes_extract_speech_column() {
+        // F-027, mirrors `insert_writes_extract_speech_column` for
+        // `create_task`: `insert_live_session` is the twin INSERT site for
+        // the same column and must derive it from `options` too, not a
+        // hardcoded literal.
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut options = sample_live_options();
+        options.extract_speech = true;
+
+        let id = store
+            .insert_live_session("Live recording 23-Jul-2026 10-00-00", &options)
+            .expect("insert live session");
+
+        let row = fetch_full_row(&store, &id);
+        assert!(row.extract_speech);
     }
 
     #[test]
