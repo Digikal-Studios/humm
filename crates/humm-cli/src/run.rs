@@ -279,6 +279,7 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         }),
         tuning,
         media_dir: paths::media_dir(),
+        model_root,
         // The CLI resolves the model synchronously before enqueueing (Buzz
         // parity, `cli.py:219-221`) — no ArtifactEnsurer is ever configured.
         artifacts: None,
@@ -293,6 +294,14 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         postproc: Some(Arc::new(CliPostprocSource {
             postproc: settings.postproc.clone(),
         }) as Arc<dyn PostprocConfigSource>),
+        // M8 pre-transcription seam: wired in Tasks 5-8. The CLI's `-e`
+        // isolator wiring (Task 5) will follow the F-002-live pattern;
+        // `reducer`/`lang_detector` stay `None` on the CLI even after that
+        // (design spec §8: the F-112/F-114 pre-hooks are GUI-configured-only,
+        // the `postproc: None` CLI stance extended to the pre-chain).
+        isolator: None,
+        reducer: None,
+        lang_detector: None,
     };
 
     let handle = spawn_task_runner(deps);

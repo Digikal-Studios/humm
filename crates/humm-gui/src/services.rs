@@ -331,6 +331,7 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
             threads: threads_from_env(std::env::var("HUMM_WHISPER_N_THREADS").ok().as_deref()),
         },
         media_dir: paths::media_dir(),
+        model_root: model_root.clone(),
         // The GUI never resolves a model before enqueueing — this is what
         // makes that safe: the runner ensures the model/VAD as the task's
         // own first phase (module doc, `queue.rs`).
@@ -350,6 +351,13 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
             settings: Arc::clone(&settings),
             secrets: Arc::clone(&secrets),
         }) as Arc<dyn PostprocConfigSource>),
+        // M8 pre-transcription seam: wired in Tasks 5-8 (isolator, reducer,
+        // language detector adapters land there). `None` for now means the
+        // seam never runs, exactly like every field here did before it
+        // existed.
+        isolator: None,
+        reducer: None,
+        lang_detector: None,
     };
     let queue = spawn_task_runner(deps);
     let events = queue.subscribe();
@@ -620,6 +628,7 @@ pub fn init_with(deps: TestDeps) -> Services {
         engines: deps.engines,
         tuning: EngineTuning::default(),
         media_dir: deps.media_dir,
+        model_root: deps.model_root.clone(),
         artifacts: deps.artifacts,
         llm: deps.llm,
         // No existing kittest exercises the check_skip seam or any other
@@ -627,6 +636,13 @@ pub fn init_with(deps: TestDeps) -> Services {
         // the engine exactly as before this field existed (see
         // `queue::RunnerDeps::postproc`'s doc comment).
         postproc: None,
+        // M8 pre-transcription seam: no existing kittest exercises it yet
+        // (Tasks 5-8 add the adapters + their own scripted-double kittests).
+        // `None` keeps every task running exactly as before these fields
+        // existed.
+        isolator: None,
+        reducer: None,
+        lang_detector: None,
     };
     let queue = spawn_task_runner(runner_deps);
     let events = queue.subscribe();

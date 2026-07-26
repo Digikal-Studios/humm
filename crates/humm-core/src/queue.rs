@@ -54,6 +54,16 @@
 //!   `Started` → [`DownloadProgress`* for a URL task's media fetch] →
 //!   [`ModelDownloadProgress`* while an artifact download is in flight] →
 //!   `Progress`/`SegmentAdded`* → terminal.
+//! - **M8 pre-transcription chain (F-027/F-112/F-114, design spec §3/§5).**
+//!   `Runner::run_job` gains a fixed-order isolation → noise-reduction →
+//!   language-detection block between `check_skip` and artifact-ensure
+//!   ([`RunnerDeps::isolator`]/[`RunnerDeps::reducer`]/[`RunnerDeps::lang_detector`],
+//!   each `None` = that hook never runs). Detection decodes the file itself
+//!   (to feed [`crate::boundary::LanguageDetector::detect`]), so the file
+//!   decodes twice whenever detection actually runs — once there, once again
+//!   inside [`run_file_job`] moments later. Buzz pays this same cost the same
+//!   way (a separate `whisper-cli --detect-language` process ahead of the
+//!   main transcription process).
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -62,11 +72,13 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::boundary::{
-    AudioDecoder, FetchProgress, MediaFetcher, MediaProber, SegmentSink, TaskStore,
-    TranscriptionEngine,
+    AudioDecoder, FetchProgress, LanguageDetector, MediaFetcher, MediaProber, NoiseReducer,
+    SegmentSink, SpeechIsolator, TaskStore, TranscriptionEngine,
 };
 use crate::cancel::CancelToken;
-use crate::domain::{Backend, Input, ModelSpec, Segment, Source, TaskSpec, TranscriptionId};
+use crate::domain::{
+    Backend, Input, ModelSize, ModelSpec, Segment, Source, TaskSpec, TranscriptionId,
+};
 use crate::error::{CoreError, EngineError, MediaError, ModelError, StoreError};
 use crate::language::Language;
 use crate::models::download::DownloadProgress;
@@ -298,6 +310,12 @@ pub struct RunnerDeps {
     pub tuning: EngineTuning,
     /// Directory under which URL downloads land (`media_dir/<task-id>/`).
     pub media_dir: PathBuf,
+    /// Root directory downloaded whisper models live under (`paths::model_root()`
+    /// in both binaries) — needed independently of any per-task
+    /// [`crate::domain::ModelSpec`] so [`postproc::langdetect::select_model`]
+    /// (M8, F-114) can scan for the largest already-downloaded model. Read
+    /// only when [`Self::lang_detector`] is configured and enabled.
+    pub model_root: PathBuf,
     /// Ensures model/VAD artifacts before a task's engine runs, enabling
     /// non-modal downloads for GUI callers (`docs/design/UX_SPEC.md` §J-1).
     /// `None` (the CLI) means models are already resolved before
@@ -322,6 +340,21 @@ pub struct RunnerDeps {
     /// test double that doesn't need hooks — means the seam never runs and
     /// every task transcribes exactly as it did before this field existed.
     pub postproc: Option<Arc<dyn PostprocConfigSource>>,
+    /// Isolates speech from background noise/music before transcription
+    /// (F-027, design spec §3), gated on [`crate::domain::TranscriptionOptions::extract_speech`].
+    /// `None` (every pre-M8 caller, and Tasks 1-4's own binaries) means the
+    /// hook never runs — `run_job` behaves byte-for-byte as it did before
+    /// this field existed, the `postproc: None` precedent.
+    pub isolator: Option<Arc<dyn SpeechIsolator>>,
+    /// Reduces background noise before transcription (F-112, design spec
+    /// §4), gated on `PostprocConfig::noise_reduction.enabled`. `None`
+    /// disables the hook entirely, same precedent as [`Self::isolator`].
+    pub reducer: Option<Arc<dyn NoiseReducer>>,
+    /// Detects the spoken language before transcription (F-114, design spec
+    /// §5), gated on `PostprocConfig::language_detection.enabled` and
+    /// [`postproc::langdetect::should_detect`]. `None` disables the hook
+    /// entirely, same precedent as [`Self::isolator`].
+    pub lang_detector: Option<Arc<dyn LanguageDetector>>,
 }
 
 /// Shared registry of live subscriber senders.
@@ -637,6 +670,56 @@ struct PostCompleteContext {
     postproc: Option<PostprocConfig>,
 }
 
+/// Drop-based cleanup of the M8 pre-transcription chain's temp derivative
+/// files (design spec §3/§4): the isolated `_speech` file and the denoised
+/// `_DeepFilterNet3` file, if either step ran. Constructed once per
+/// [`Runner::run_job`] call and held for that call's whole duration, so it
+/// cleans up on **every** exit path — `Completed`, `Failed`, `Canceled`, and
+/// a panic unwinding through `run_job` (which is itself already
+/// `catch_unwind`-contained one level up, in `Runner::run_task` — the
+/// unwind still passes through this guard's stack frame on its way out,
+/// running `Drop` normally). This is humm's improvement over Buzz, which
+/// deletes its `_speech.mp3` only in its `on_task_completed` handler and
+/// leaks it on failure/cancel (deviations ledger #3); F-112's
+/// `_DeepFilterNet3` file gets the same all-terminals treatment (ledger,
+/// same rule).
+///
+/// `denoised` is exempted from cleanup when `keep_denoised_file` is set
+/// (`PostprocConfig::noise_reduction.keep_denoised_file`) — the user asked
+/// to keep it as an artifact next to the input. `isolated` has no such
+/// setting: Buzz's own `_speech.mp3` is never a keepable artifact either.
+struct TempAudioGuard {
+    isolated: Option<PathBuf>,
+    denoised: Option<PathBuf>,
+    keep_denoised: bool,
+}
+
+impl Drop for TempAudioGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.isolated.take() {
+            remove_temp_audio_file(&path);
+        }
+        if self.keep_denoised {
+            return;
+        }
+        if let Some(path) = self.denoised.take() {
+            remove_temp_audio_file(&path);
+        }
+    }
+}
+
+/// Removes a temp derivative file, logging (not panicking) on any failure
+/// other than "already gone" — cleanup running twice, or a file that was
+/// never actually created because the step it belongs to never ran, must
+/// never be an error.
+fn remove_temp_audio_file(path: &Path) {
+    if let Err(err) = std::fs::remove_file(path)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("failed to remove temp audio file {}: {err}", path.display());
+    }
+}
+
 /// `true` if `error` represents cancellation rather than a genuine failure.
 ///
 /// `CoreError::Model(ModelError::Canceled)` is included alongside the bare
@@ -742,6 +825,35 @@ impl ModelDownloadThrottle {
     }
 }
 
+/// Builds a throttled [`TaskEventKind::ModelDownloadProgress`]-emitting
+/// closure for one artifact-download phase, sharing
+/// [`ModelDownloadThrottle`]'s discipline — factored out so both
+/// [`Runner::ensure_artifacts`] (the task's own model/VAD) and
+/// [`Runner::ensure_tiny_lang_detect_model`] (F-114's tiny-model fallback,
+/// M8) emit progress identically without duplicating the throttle wiring.
+fn model_download_progress_fn(
+    subscribers: SubscriberList,
+    id: TranscriptionId,
+) -> impl FnMut(DownloadProgress) {
+    let mut throttle = ModelDownloadThrottle::default();
+    move |update: DownloadProgress| {
+        if !throttle.should_emit(&update) {
+            return;
+        }
+        emit(
+            &subscribers,
+            TaskEvent {
+                task_id: id,
+                kind: TaskEventKind::ModelDownloadProgress {
+                    file: update.file,
+                    downloaded: update.downloaded,
+                    total: update.total,
+                },
+            },
+        );
+    }
+}
+
 /// The [`SegmentSink`] the runner hands to the pipeline: it forwards segment
 /// and progress updates as [`TaskEvent`]s and writes progress to the store,
 /// throttled to whole-percent changes.
@@ -813,6 +925,9 @@ struct Runner {
     tuning: EngineTuning,
     /// Root directory for URL downloads.
     media_dir: PathBuf,
+    /// Root directory for downloaded whisper models — see
+    /// [`RunnerDeps::model_root`].
+    model_root: PathBuf,
     /// Ensures model/VAD artifacts per job when configured (GUI). `None`
     /// (CLI) skips artifact-ensure entirely — see [`RunnerDeps::artifacts`].
     artifacts: Option<Arc<dyn ArtifactEnsurer>>,
@@ -823,6 +938,15 @@ struct Runner {
     /// Supplies a fresh post-processing config snapshot per task. `None`
     /// disables the `check_skip` seam entirely — see [`RunnerDeps::postproc`].
     postproc: Option<Arc<dyn PostprocConfigSource>>,
+    /// Isolates speech before transcription (F-027) — see
+    /// [`RunnerDeps::isolator`].
+    isolator: Option<Arc<dyn SpeechIsolator>>,
+    /// Reduces noise before transcription (F-112) — see
+    /// [`RunnerDeps::reducer`].
+    reducer: Option<Arc<dyn NoiseReducer>>,
+    /// Detects the spoken language before transcription (F-114) — see
+    /// [`RunnerDeps::lang_detector`].
+    lang_detector: Option<Arc<dyn LanguageDetector>>,
     /// Tasks accepted but not yet run (FIFO).
     pending: VecDeque<PendingTask>,
     /// Ids canceled but not yet dequeued (Buzz's canceled-set). *Consumed*: a
@@ -1198,6 +1322,188 @@ impl Runner {
             return Terminal::Skipped(segments);
         }
 
+        // M8 pre-transcription chain (design spec §3/§5): isolation → noise
+        // reduction → language detection, in that fixed order (ledger #5),
+        // placed between `check_skip` (above) and artifact-ensure (below) —
+        // deliberately *after* Buzz's own ordering, which extracts speech
+        // before `check_skip` and thereby breaks skip+extract together
+        // (ledger #2). `audio_input` tracks the current decode target as
+        // each successful step swaps it; `job.input` is never touched — it
+        // stays the export-naming/DB-row/viewer identity throughout (Buzz
+        // parity: the DB insert already happened before extraction,
+        // `plugins/manager.py:107-119`'s path-swap is in-memory only).
+        // `guard` cleans up every temp derivative file on every exit path
+        // from this function, including a panic (`TempAudioGuard`'s doc
+        // comment).
+        let mut audio_input = job.input.clone();
+        let mut detected_language: Option<Language> = None;
+        let mut guard = TempAudioGuard {
+            isolated: None,
+            denoised: None,
+            keep_denoised: postproc_cfg
+                .as_ref()
+                .map(|cfg| cfg.noise_reduction.keep_denoised_file)
+                .unwrap_or(false),
+        };
+
+        // (1) F-027 speech isolation — gated on the task's own option
+        // (`extract_speech` is a per-task choice, not a Preferences hook, so
+        // it is deliberately *not* gated on `postproc_cfg`) and an isolator
+        // actually being wired (`self.isolator`, `None` until Task 5). Not
+        // `catch_unwind`-contained beyond `run_task`'s existing outer
+        // containment: a genuine isolation panic fails the task (Buzz
+        // parity) — unlike reduction/detection below, which degrade instead.
+        if job.options.extract_speech
+            && let Some(isolator) = self.isolator.clone()
+        {
+            self.emit(TaskEvent {
+                task_id: id,
+                kind: TaskEventKind::PhaseChanged {
+                    phase: TaskPhase::IsolatingSpeech,
+                },
+            });
+            match isolator.isolate(&audio_input, token) {
+                Ok(isolated) => {
+                    guard.isolated = Some(isolated.clone());
+                    audio_input = isolated;
+                }
+                Err(err) => {
+                    // Buzz's `IndexError -> "no_audio"` arm (`:80-83`): a
+                    // silent video (or any other input with no audio stream)
+                    // degrades to the original file instead of failing.
+                    let no_audio = matches!(
+                        self.prober.probe(&job.input),
+                        Ok(info) if !info.has_audio
+                    );
+                    if no_audio {
+                        log::warn!(
+                            "speech isolation skipped, {} has no audio stream: {err}",
+                            job.input.display()
+                        );
+                    } else {
+                        return Terminal::Failed(format!(
+                            "speech isolation failed: {err} — check that demucs is \
+                             installed and on PATH, and your internet connection \
+                             (demucs may need to download a model on first run)"
+                        ));
+                    }
+                }
+            }
+        }
+
+        if token.is_canceled() {
+            return Terminal::Canceled;
+        }
+
+        // (2) F-112 noise reduction — gated on Preferences
+        // (`cfg.noise_reduction.enabled`) and a reducer being wired; chained
+        // onto whatever `audio_input` is by now (the isolated file if step
+        // 1 ran and succeeded, else the original). `catch_unwind`-contained:
+        // a reducer failure *or panic* degrades to the prior audio rather
+        // than failing the task (Buzz returns `None` on exception,
+        // `plugin.py:58-60`).
+        if let Some(cfg) = postproc_cfg.as_ref()
+            && cfg.noise_reduction.enabled
+            && let Some(reducer) = self.reducer.clone()
+        {
+            let prior_audio = audio_input.clone();
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                reducer.reduce(&prior_audio, token)
+            })) {
+                Ok(Ok(denoised)) => {
+                    guard.denoised = Some(denoised.clone());
+                    audio_input = denoised;
+                }
+                Ok(Err(err)) => {
+                    log::warn!("noise reduction failed, proceeding with the prior audio: {err}");
+                }
+                Err(payload) => {
+                    let msg = panic_message(&*payload);
+                    log::error!("noise reduction hook panicked for task {id}: {msg}");
+                }
+            }
+        }
+
+        if token.is_canceled() {
+            return Terminal::Canceled;
+        }
+
+        // (3) F-114 enhanced language detection — gated on Preferences
+        // (`cfg.language_detection.enabled`), a detector being wired, and
+        // Buzz's own selection rule (`postproc::langdetect::should_detect`:
+        // unset or explicitly English, the en-quirk). `catch_unwind`-
+        // contained: a detector failure *or panic* degrades to auto rather
+        // than failing the task.
+        //
+        // Detection needs decoded audio, which this seam decodes itself
+        // (below) via `self.decoder` — the *same* `audio_input` `run_file_job`
+        // will decode again moments later once this whole pre-transcription
+        // chain returns control to it. This file therefore decodes twice
+        // whenever detection actually runs. Buzz pays the same cost the same
+        // way: its `enhanced_language_detection` plugin spawns a separate
+        // `whisper-cli --detect-language` process (`whisper_cpp.py:403+`)
+        // ahead of the main transcription process, so ported faithfully
+        // rather than optimized away.
+        if let Some(cfg) = postproc_cfg.as_ref()
+            && cfg.language_detection.enabled
+            && let Some(detector) = self.lang_detector.clone()
+            && postproc::langdetect::should_detect(job.options.language)
+        {
+            let model_path = match postproc::langdetect::select_model(&self.model_root) {
+                Some(path) => Some(path),
+                None if cfg.language_detection.download_tiny_if_missing => {
+                    match self.artifacts.clone() {
+                        Some(ensurer) => {
+                            self.ensure_tiny_lang_detect_model(id, ensurer.as_ref(), token)
+                        }
+                        None => None,
+                    }
+                }
+                None => None,
+            };
+
+            match model_path {
+                None => {
+                    log::warn!("language detection skipped: no whisper.cpp model available");
+                }
+                Some(model_path) => {
+                    let decoder = &*self.decoder;
+                    let detect_audio = audio_input.clone();
+                    let outcome: std::thread::Result<Result<Option<Language>, String>> =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let pcm = decoder
+                                .decode(&detect_audio, token)
+                                .map_err(|err| err.to_string())?;
+                            detector
+                                .detect(&pcm, &model_path, token)
+                                .map_err(|err| err.to_string())
+                        }));
+                    match outcome {
+                        Ok(Ok(Some(lang))) => {
+                            if let Err(err) = self.store.update_language(&id, lang.code()) {
+                                self.store_write_failed(id, "update_language", &err);
+                            }
+                            detected_language = Some(lang);
+                        }
+                        Ok(Ok(None)) => {
+                            log::info!("language detection did not return a language");
+                        }
+                        Ok(Err(msg)) => {
+                            log::warn!("language detection failed, proceeding on auto: {msg}");
+                        }
+                        Err(payload) => {
+                            let msg = panic_message(&*payload);
+                            log::error!("language detection hook panicked for task {id}: {msg}");
+                        }
+                    }
+                }
+            }
+        }
+
+        if token.is_canceled() {
+            return Terminal::Canceled;
+        }
+
         // When an ArtifactEnsurer is configured (GUI), ensure the model/VAD
         // artifacts as this job's own phase and use a job-local tuning with
         // the freshly-resolved VAD path; otherwise (CLI) behavior is
@@ -1246,6 +1552,8 @@ impl Runner {
 
         let result = run_file_job(
             &job,
+            &audio_input,
+            detected_language,
             tuning,
             &*self.decoder,
             &*self.prober,
@@ -1425,24 +1733,7 @@ impl Runner {
         model: &ModelSpec,
         token: &CancelToken,
     ) -> Result<(PathBuf, EngineTuning), Terminal> {
-        let subscribers = Arc::clone(&self.subscribers);
-        let mut throttle = ModelDownloadThrottle::default();
-        let mut on_progress = move |update: DownloadProgress| {
-            if !throttle.should_emit(&update) {
-                return;
-            }
-            emit(
-                &subscribers,
-                TaskEvent {
-                    task_id: id,
-                    kind: TaskEventKind::ModelDownloadProgress {
-                        file: update.file,
-                        downloaded: update.downloaded,
-                        total: update.total,
-                    },
-                },
-            );
-        };
+        let mut on_progress = model_download_progress_fn(Arc::clone(&self.subscribers), id);
 
         let resolved = ensurer
             .ensure_model(model, &mut on_progress, token)
@@ -1452,6 +1743,43 @@ impl Runner {
         tuning.vad_model = ensurer.ensure_vad(&mut on_progress, token);
 
         Ok((resolved, tuning))
+    }
+
+    /// F-114's tiny-model download fallback (design spec §5, Buzz
+    /// `plugin.py:153-169`): called only when
+    /// [`postproc::langdetect::select_model`] found nothing already
+    /// downloaded and `download_tiny_if_missing` is set. Reuses
+    /// [`Self::artifacts`]'s [`ArtifactEnsurer::ensure_model`] with a `Tiny`
+    /// [`ModelSpec`] so the download goes through the exact same
+    /// resume/sentinel/progress machinery as the task's own model —
+    /// emitting the same [`TaskEventKind::ModelDownloadProgress`] events.
+    ///
+    /// Never fails the task: a download failure is logged and detection is
+    /// simply skipped (`None`), matching Buzz's own `except Exception` arm
+    /// there (`:164-167`) — language detection is a nice-to-have, not a
+    /// requirement.
+    fn ensure_tiny_lang_detect_model(
+        &self,
+        id: TranscriptionId,
+        ensurer: &dyn ArtifactEnsurer,
+        token: &CancelToken,
+    ) -> Option<PathBuf> {
+        let mut on_progress = model_download_progress_fn(Arc::clone(&self.subscribers), id);
+        let tiny_spec = ModelSpec {
+            backend: Backend::Whisper,
+            size: ModelSize::Tiny,
+            hf_repo: None,
+        };
+        match ensurer.ensure_model(&tiny_spec, &mut on_progress, token) {
+            Ok(path) => Some(path),
+            Err(err) => {
+                log::warn!(
+                    "language detection: failed to download the tiny model, skipping \
+                     detection for this task: {err}"
+                );
+                None
+            }
+        }
     }
 
     /// Downloads a URL input into `media_dir/<id>/`, emitting `DownloadProgress`
@@ -1531,9 +1859,13 @@ pub fn spawn_task_runner(deps: RunnerDeps) -> QueueHandle {
         engines: deps.engines,
         tuning: deps.tuning,
         media_dir: deps.media_dir,
+        model_root: deps.model_root,
         artifacts: deps.artifacts,
         llm: deps.llm,
         postproc: deps.postproc,
+        isolator: deps.isolator,
+        reducer: deps.reducer,
+        lang_detector: deps.lang_detector,
         pending: VecDeque::new(),
         canceled: HashSet::new(),
         finishing: false,
@@ -1555,7 +1887,8 @@ mod tests {
     use super::*;
     use crate::boundary::{EngineCaps, EngineOptions, MediaInfo, Pcm, PlaybackPcm};
     use crate::domain::{
-        Backend, LlmTranslationOptions, Millis, ModelSize, OutputSpec, TranscriptionOptions,
+        Backend, LlmTranslationOptions, Millis, ModelSize, OutputFormat, OutputSpec,
+        TranscriptionOptions,
     };
     use crate::error::{ModelError, StoreError};
     use crate::models::test_server::{Canned, TestServer};
@@ -1640,6 +1973,8 @@ mod tests {
         ReplaceSegments(TranscriptionId, Vec<Segment>),
         /// `set_task_notes` — the ai_summary hook's `save_to_notes` write.
         SetNotes(TranscriptionId, String),
+        /// `update_language` — F-114's detected-language write (M8).
+        UpdateLanguage(TranscriptionId, String),
     }
 
     struct FakeStore {
@@ -1720,13 +2055,8 @@ mod tests {
             Ok(())
         }
 
-        fn update_language(
-            &self,
-            _id: &TranscriptionId,
-            _language: &str,
-        ) -> Result<(), StoreError> {
-            // No queue-level test exercises this yet — F-114's
-            // before-transcription seam lands in a later M8 task.
+        fn update_language(&self, id: &TranscriptionId, language: &str) -> Result<(), StoreError> {
+            self.record(StoreCall::UpdateLanguage(*id, language.to_string()));
             Ok(())
         }
 
@@ -1825,13 +2155,27 @@ mod tests {
         }
     }
 
-    struct FakeProber;
+    /// Reports `has_audio: false` for exactly the first
+    /// `no_audio_for_first_n_calls` calls, then `true` for every call after
+    /// — `0` (the default) means every call reports `has_audio: true`,
+    /// every pre-M8 test's implicit assumption. The M8 isolation
+    /// no-audio-degrade test uses `1`: the isolation-failure handler's own
+    /// probe (call 1) sees `false` and degrades gracefully, while
+    /// `run_file_job`'s later probe of the (unmodified) original file
+    /// (call 2+) sees `true` and transcribes normally — modeling demucs's
+    /// own stricter/different audio-stream check (Buzz's `IndexError`)
+    /// tripping on a file ffprobe still considers to have a usable stream.
+    struct FakeProber {
+        no_audio_for_first_n_calls: usize,
+        calls: AtomicUsize,
+    }
 
     impl MediaProber for FakeProber {
         fn probe(&self, _path: &Path) -> Result<MediaInfo, MediaError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(MediaInfo {
                 duration: Some(Millis(1000)),
-                has_audio: true,
+                has_audio: n >= self.no_audio_for_first_n_calls,
                 has_video: false,
                 video: None,
             })
@@ -1867,6 +2211,10 @@ mod tests {
         /// test prove a per-job `EngineTuning` override (from
         /// `ArtifactEnsurer::ensure_vad`) actually reached the pipeline.
         vad_seen: Arc<Mutex<Vec<Option<PathBuf>>>>,
+        /// `options.language` as seen by this call, in call order — lets a
+        /// test prove F-114's detected language actually reached
+        /// `EngineOptions` (M8).
+        language_seen: Arc<Mutex<Vec<Option<Language>>>>,
     }
 
     impl TranscriptionEngine for FakeEngine {
@@ -1883,6 +2231,10 @@ mod tests {
                 .lock()
                 .expect("vad seen lock")
                 .push(options.vad_model.clone());
+            self.language_seen
+                .lock()
+                .expect("language seen lock")
+                .push(options.language);
             let script = self.scripts.lock().expect("scripts lock").pop_front();
             let result = match script {
                 Some(EngineScript::Emit { progress, segments }) => {
@@ -1942,6 +2294,7 @@ mod tests {
         /// configured — CLI parity).
         resolved_calls: Arc<Mutex<Vec<Option<PathBuf>>>>,
         vad_seen: Arc<Mutex<Vec<Option<PathBuf>>>>,
+        language_seen: Arc<Mutex<Vec<Option<Language>>>>,
     }
 
     impl EngineFactory for FakeFactory {
@@ -1963,6 +2316,7 @@ mod tests {
                 in_flight: Arc::clone(&self.in_flight),
                 max_in_flight: Arc::clone(&self.max_in_flight),
                 vad_seen: Arc::clone(&self.vad_seen),
+                language_seen: Arc::clone(&self.language_seen),
             }))
         }
     }
@@ -2080,6 +2434,115 @@ mod tests {
         }
     }
 
+    // -- Scripted M8 pre-transcription doubles: one script entry per call,
+    //    the same house pattern as `EngineScript`/`FakeFetcher` above. -------
+
+    enum IsolateScript {
+        Ok(PathBuf),
+        Err(MediaError),
+    }
+
+    /// Scripted [`SpeechIsolator`]: records every `isolate` call's input
+    /// path and plays back one scripted result per call, in call order.
+    struct ScriptedIsolator {
+        scripts: Arc<Mutex<VecDeque<IsolateScript>>>,
+        calls: Arc<Mutex<Vec<PathBuf>>>,
+    }
+
+    impl SpeechIsolator for ScriptedIsolator {
+        fn isolate(&self, input: &Path, _cancel: &CancelToken) -> Result<PathBuf, MediaError> {
+            self.calls
+                .lock()
+                .expect("isolator calls lock")
+                .push(input.to_path_buf());
+            match self
+                .scripts
+                .lock()
+                .expect("isolator scripts lock")
+                .pop_front()
+            {
+                Some(IsolateScript::Ok(path)) => Ok(path),
+                Some(IsolateScript::Err(err)) => Err(err),
+                None => Ok(input.to_path_buf()),
+            }
+        }
+
+        fn available(&self) -> bool {
+            true
+        }
+    }
+
+    enum ReduceScript {
+        Ok(PathBuf),
+        Err(MediaError),
+        Panic,
+    }
+
+    /// Scripted [`NoiseReducer`]: records every `reduce` call's input path
+    /// and plays back one scripted result per call, in call order.
+    struct ScriptedReducer {
+        scripts: Arc<Mutex<VecDeque<ReduceScript>>>,
+        calls: Arc<Mutex<Vec<PathBuf>>>,
+    }
+
+    impl NoiseReducer for ScriptedReducer {
+        fn reduce(&self, input: &Path, _cancel: &CancelToken) -> Result<PathBuf, MediaError> {
+            self.calls
+                .lock()
+                .expect("reducer calls lock")
+                .push(input.to_path_buf());
+            match self
+                .scripts
+                .lock()
+                .expect("reducer scripts lock")
+                .pop_front()
+            {
+                Some(ReduceScript::Ok(path)) => Ok(path),
+                Some(ReduceScript::Err(err)) => Err(err),
+                Some(ReduceScript::Panic) => panic!("reducer exploded"),
+                None => Ok(input.to_path_buf()),
+            }
+        }
+    }
+
+    enum DetectScript {
+        Ok(Option<Language>),
+        Err(EngineError),
+        Panic,
+    }
+
+    /// Scripted [`LanguageDetector`]: records every `detect` call's model
+    /// path and plays back one scripted result per call, in call order.
+    struct ScriptedDetector {
+        scripts: Arc<Mutex<VecDeque<DetectScript>>>,
+        calls: Arc<Mutex<Vec<PathBuf>>>,
+    }
+
+    impl LanguageDetector for ScriptedDetector {
+        fn detect(
+            &self,
+            _audio: &Pcm,
+            model: &Path,
+            _cancel: &CancelToken,
+        ) -> Result<Option<Language>, EngineError> {
+            self.calls
+                .lock()
+                .expect("detector calls lock")
+                .push(model.to_path_buf());
+            match self
+                .scripts
+                .lock()
+                .expect("detector scripts lock")
+                .pop_front()
+            {
+                Some(DetectScript::Ok(lang)) => Ok(lang),
+                Some(DetectScript::Err(err)) => Err(err),
+                Some(DetectScript::Panic) => panic!("detector exploded"),
+                None => Ok(None),
+            }
+        }
+    }
+
     // -- Harness -------------------------------------------------------------
 
     struct Harness {
@@ -2090,6 +2553,8 @@ mod tests {
         max_in_flight: Arc<AtomicUsize>,
         resolved_calls: Arc<Mutex<Vec<Option<PathBuf>>>>,
         vad_seen: Arc<Mutex<Vec<Option<PathBuf>>>>,
+        language_seen: Arc<Mutex<Vec<Option<Language>>>>,
+        model_root: PathBuf,
         tmp: TempDir,
     }
 
@@ -2106,10 +2571,32 @@ mod tests {
             self.vad_seen.lock().expect("vad seen").clone()
         }
 
+        fn language_seen(&self) -> Vec<Option<Language>> {
+            self.language_seen.lock().expect("language seen").clone()
+        }
+
         fn input_file(&self, name: &str) -> PathBuf {
             let path = self.tmp.path().join(name);
             std::fs::write(&path, b"fake media").expect("write input");
             path
+        }
+
+        /// Plants a fake-but-complete downloaded model (file + sentinel) for
+        /// `size` under [`Self::model_root`] — the shape
+        /// `postproc::langdetect::select_model` looks for.
+        fn seed_model(&self, size: crate::domain::ModelSize) {
+            let root = &self.model_root;
+            std::fs::create_dir_all(root).expect("create model root");
+            let name = crate::models::registry::ggml_file_name(size);
+            std::fs::write(root.join(&name), b"fake model bytes").expect("write model");
+            std::fs::write(
+                root.join(format!(
+                    "{name}{}",
+                    crate::models::registry::SENTINEL_SUFFIX
+                )),
+                b"",
+            )
+            .expect("write sentinel");
         }
     }
 
@@ -2138,6 +2625,15 @@ mod tests {
         replace_gate: Option<Gate>,
         // See `FakeStore::panic_in_replace_task_segments`'s doc comment.
         panic_in_replace_task_segments: bool,
+        // M8 pre-transcription seam (`RunnerDeps::isolator`/`reducer`/
+        // `lang_detector`) — `None` (the default) means the seam never runs,
+        // exactly like every other pre-M8 caller.
+        isolator: Option<Arc<dyn SpeechIsolator>>,
+        reducer: Option<Arc<dyn NoiseReducer>>,
+        lang_detector: Option<Arc<dyn LanguageDetector>>,
+        // See `FakeProber::no_audio_for_first_n_calls`'s doc comment — the
+        // isolation no-audio-degrade test's setup (M8).
+        prober_no_audio_for_first_n_calls: usize,
     }
 
     fn build(cfg: Cfg) -> (QueueHandle, Harness) {
@@ -2149,6 +2645,8 @@ mod tests {
         let max_in_flight = Arc::new(AtomicUsize::new(0));
         let resolved_calls = Arc::new(Mutex::new(Vec::new()));
         let vad_seen = Arc::new(Mutex::new(Vec::new()));
+        let language_seen = Arc::new(Mutex::new(Vec::new()));
+        let model_root = tmp.path().join("models");
 
         let store = FakeStore {
             calls: Arc::clone(&store_calls),
@@ -2172,6 +2670,7 @@ mod tests {
             created: Arc::clone(&created),
             resolved_calls: Arc::clone(&resolved_calls),
             vad_seen: Arc::clone(&vad_seen),
+            language_seen: Arc::clone(&language_seen),
         };
         let fetcher: Option<Arc<dyn MediaFetcher>> = if cfg.no_fetcher {
             None
@@ -2186,14 +2685,21 @@ mod tests {
         let deps = RunnerDeps {
             store: Arc::new(store),
             decoder: Arc::new(decoder),
-            prober: Arc::new(FakeProber),
+            prober: Arc::new(FakeProber {
+                no_audio_for_first_n_calls: cfg.prober_no_audio_for_first_n_calls,
+                calls: AtomicUsize::new(0),
+            }),
             fetcher,
             engines: Box::new(factory),
             tuning: EngineTuning::default(),
             media_dir: tmp.path().join("media"),
+            model_root: model_root.clone(),
             artifacts: cfg.ensurer,
             llm: cfg.llm,
             postproc: cfg.postproc,
+            isolator: cfg.isolator,
+            reducer: cfg.reducer,
+            lang_detector: cfg.lang_detector,
         };
 
         let handle = spawn_task_runner(deps);
@@ -2207,6 +2713,8 @@ mod tests {
                 max_in_flight,
                 resolved_calls,
                 vad_seen,
+                language_seen,
+                model_root,
                 tmp,
             },
         )
@@ -2265,6 +2773,26 @@ mod tests {
             paragraph_split: Millis(2000),
             noise_reduction: NoiseReductionSettings::default(),
             language_detection: LangDetectSettings::default(),
+        }
+    }
+
+    /// A [`PostprocConfig`] with every hook at its Buzz-parity default except
+    /// [`PostprocConfig::noise_reduction`]/[`PostprocConfig::language_detection`]
+    /// — the M8 pre-transcription seam tests' own counterpart to
+    /// [`postproc_cfg_with_skip`]/[`postproc_cfg_with_hooks`].
+    fn postproc_cfg_with_m8(
+        noise_reduction: NoiseReductionSettings,
+        language_detection: LangDetectSettings,
+    ) -> PostprocConfig {
+        PostprocConfig {
+            skip: SkipSettings::default(),
+            summary: AiSummarySettings::default(),
+            summary_api_key: None,
+            docx: ExportDocxSettings::default(),
+            resize: AutoResizeSettings::default(),
+            paragraph_split: Millis(2000),
+            noise_reduction,
+            language_detection,
         }
     }
 
@@ -4985,5 +5513,726 @@ mod tests {
             Some("boom".to_string())
         );
         assert_eq!(hook_error_after_cancel_check(None, &cancel), None);
+    }
+
+    // ======================================================================
+    // M8: pre-transcription seam (F-027/F-112/F-114, design spec §3/§5)
+    // ======================================================================
+
+    #[test]
+    fn extract_speech_swaps_decode_input_and_emits_phase() {
+        let isolator_scripts = Arc::new(Mutex::new(VecDeque::new()));
+        let isolator_calls = Arc::new(Mutex::new(Vec::new()));
+        let isolator = Arc::new(ScriptedIsolator {
+            scripts: Arc::clone(&isolator_scripts),
+            calls: Arc::clone(&isolator_calls),
+        });
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            isolator: Some(isolator),
+            ..Cfg::default()
+        });
+
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let input = h.input_file("a.mp3");
+        let isolated = input.with_file_name("a_speech.mp3");
+        // The isolated file must actually exist: `run_file_job`'s
+        // input-exists check (M8, `audio_input` not `job.input`) is real
+        // production behavior, not something this test should route around.
+        std::fs::write(&isolated, b"fake isolated audio").expect("write isolated file");
+        isolator_scripts
+            .lock()
+            .expect("isolator scripts")
+            .push_back(IsolateScript::Ok(isolated.clone()));
+
+        let mut spec = path_task(input.clone());
+        spec.options.extract_speech = true;
+        q.enqueue(a, spec, Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        assert!(
+            events.iter().any(|e| e.task_id == a
+                && matches!(
+                    e.kind,
+                    TaskEventKind::PhaseChanged {
+                        phase: TaskPhase::IsolatingSpeech
+                    }
+                )),
+            "expected an IsolatingSpeech phase event: {events:?}"
+        );
+        assert_eq!(*isolator_calls.lock().expect("isolator calls"), vec![input]);
+        assert_eq!(
+            h.decoded.lock().expect("decoded").clone(),
+            vec![isolated],
+            "the decoder must see the isolated path, not the original input"
+        );
+        assert!(
+            h.store_calls()
+                .iter()
+                .any(|c| matches!(c, StoreCall::Completed(x, _) if *x == a))
+        );
+    }
+
+    #[test]
+    fn isolation_failure_no_audio_proceeds_on_original() {
+        let isolator = Arc::new(ScriptedIsolator {
+            scripts: Arc::new(Mutex::new(VecDeque::from([IsolateScript::Err(
+                MediaError::DecodeFailed {
+                    detail: "no audio stream".into(),
+                },
+            )]))),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            isolator: Some(isolator),
+            // Call 1 (the isolation-failure handler's own probe) sees
+            // `has_audio: false` and degrades gracefully; call 2+
+            // (`run_file_job`'s later probe of the unmodified original)
+            // sees `true` and transcribes it normally — see
+            // `FakeProber::no_audio_for_first_n_calls`'s doc comment.
+            prober_no_audio_for_first_n_calls: 1,
+            ..Cfg::default()
+        });
+
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let input = h.input_file("silent.mp4");
+        let mut spec = path_task(input.clone());
+        spec.options.extract_speech = true;
+        q.enqueue(a, spec, Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        // Degrades to the original file instead of failing (Buzz's
+        // `IndexError -> "no_audio"` arm).
+        assert_eq!(h.decoded.lock().expect("decoded").clone(), vec![input]);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Failed { .. }))
+        );
+    }
+
+    #[test]
+    fn isolation_failure_with_audio_fails_task_actionably() {
+        let isolator = Arc::new(ScriptedIsolator {
+            scripts: Arc::new(Mutex::new(VecDeque::from([IsolateScript::Err(
+                MediaError::DecodeFailed {
+                    detail: "demucs exited with status 1".into(),
+                },
+            )]))),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            isolator: Some(isolator),
+            ..Cfg::default()
+        });
+
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let input = h.input_file("clip.mp3");
+        let mut spec = path_task(input);
+        spec.options.extract_speech = true;
+        q.enqueue(a, spec, Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        let msg = events
+            .iter()
+            .find_map(|e| match &e.kind {
+                TaskEventKind::Failed { message } if e.task_id == a => Some(message.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected a Failed event: {events:?}"));
+        let lower = msg.to_lowercase();
+        assert!(
+            lower.contains("demucs"),
+            "message should name demucs: {msg}"
+        );
+        assert!(
+            lower.contains("download") || lower.contains("model"),
+            "message should mention the possible first-run model download: {msg}"
+        );
+        // Never reaches the decoder/engine.
+        assert!(h.decoded.lock().expect("decoded").is_empty());
+    }
+
+    #[test]
+    fn isolation_output_deleted_on_completed_and_on_failed() {
+        // -- Completed path --
+        {
+            let isolator_scripts = Arc::new(Mutex::new(VecDeque::new()));
+            let isolator = Arc::new(ScriptedIsolator {
+                scripts: Arc::clone(&isolator_scripts),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            });
+            let (q, h) = build(Cfg {
+                scripts: vec![EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![seg("hi")],
+                }],
+                isolator: Some(isolator),
+                ..Cfg::default()
+            });
+            let rx = q.subscribe();
+            let a = TranscriptionId::new();
+            let input = h.input_file("a.mp3");
+            let isolated = input.with_file_name("a_speech.mp3");
+            std::fs::write(&isolated, b"fake isolated audio").expect("write isolated file");
+            isolator_scripts
+                .lock()
+                .expect("isolator scripts")
+                .push_back(IsolateScript::Ok(isolated.clone()));
+
+            let mut spec = path_task(input);
+            spec.options.extract_speech = true;
+            q.enqueue(a, spec, Source::FileImport);
+            q.finish().expect("finish");
+            let events = drain(&rx);
+
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
+            );
+            assert!(
+                !isolated.exists(),
+                "isolated file must be cleaned up after Completed"
+            );
+        }
+
+        // -- Failed path (engine fails after isolation succeeds) --
+        {
+            let isolator_scripts = Arc::new(Mutex::new(VecDeque::new()));
+            let isolator = Arc::new(ScriptedIsolator {
+                scripts: Arc::clone(&isolator_scripts),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            });
+            let (q, h) = build(Cfg {
+                scripts: vec![EngineScript::Fail],
+                isolator: Some(isolator),
+                ..Cfg::default()
+            });
+            let rx = q.subscribe();
+            let a = TranscriptionId::new();
+            let input = h.input_file("b.mp3");
+            let isolated = input.with_file_name("b_speech.mp3");
+            std::fs::write(&isolated, b"fake isolated audio").expect("write isolated file");
+            isolator_scripts
+                .lock()
+                .expect("isolator scripts")
+                .push_back(IsolateScript::Ok(isolated.clone()));
+
+            let mut spec = path_task(input);
+            spec.options.extract_speech = true;
+            q.enqueue(a, spec, Source::FileImport);
+            q.finish().expect("finish");
+            let events = drain(&rx);
+
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Failed { .. }))
+            );
+            assert!(
+                !isolated.exists(),
+                "isolated file must be cleaned up after Failed"
+            );
+        }
+    }
+
+    #[test]
+    fn reducer_failure_proceeds_on_prior_audio() {
+        let reducer = Arc::new(ScriptedReducer {
+            scripts: Arc::new(Mutex::new(VecDeque::from([ReduceScript::Err(
+                MediaError::DecodeFailed {
+                    detail: "boom".into(),
+                },
+            )]))),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let cfg = postproc_cfg_with_m8(
+            NoiseReductionSettings {
+                enabled: true,
+                keep_denoised_file: false,
+            },
+            LangDetectSettings::default(),
+        );
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            reducer: Some(reducer),
+            postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+            ..Cfg::default()
+        });
+
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let input = h.input_file("clip.mp3");
+        q.enqueue(a, path_task(input.clone()), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+        assert_eq!(h.decoded.lock().expect("decoded").clone(), vec![input]);
+    }
+
+    #[test]
+    fn reducer_panic_is_contained() {
+        let reducer = Arc::new(ScriptedReducer {
+            scripts: Arc::new(Mutex::new(VecDeque::from([ReduceScript::Panic]))),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let cfg = postproc_cfg_with_m8(
+            NoiseReductionSettings {
+                enabled: true,
+                keep_denoised_file: false,
+            },
+            LangDetectSettings::default(),
+        );
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            reducer: Some(reducer),
+            postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+            ..Cfg::default()
+        });
+
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let input = h.input_file("clip.mp3");
+        q.enqueue(a, path_task(input.clone()), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        // The panic must not crash the runner thread nor fail the task.
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+        assert_eq!(h.decoded.lock().expect("decoded").clone(), vec![input]);
+    }
+
+    #[test]
+    fn denoised_output_deleted_on_completed_by_default() {
+        let reducer_scripts = Arc::new(Mutex::new(VecDeque::new()));
+        let reducer = Arc::new(ScriptedReducer {
+            scripts: Arc::clone(&reducer_scripts),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let cfg = postproc_cfg_with_m8(
+            NoiseReductionSettings {
+                enabled: true,
+                keep_denoised_file: false,
+            },
+            LangDetectSettings::default(),
+        );
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            reducer: Some(reducer),
+            postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+            ..Cfg::default()
+        });
+
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let input = h.input_file("clip.mp3");
+        let denoised = input.with_file_name("clip_DeepFilterNet3.wav");
+        std::fs::write(&denoised, b"fake denoised audio").expect("write denoised file");
+        reducer_scripts
+            .lock()
+            .expect("reducer scripts")
+            .push_back(ReduceScript::Ok(denoised.clone()));
+
+        q.enqueue(a, path_task(input), Source::FileImport);
+        q.finish().expect("finish");
+        let _events = drain(&rx);
+
+        assert!(
+            !denoised.exists(),
+            "denoised file must be cleaned up by default"
+        );
+    }
+
+    #[test]
+    fn denoised_output_kept_when_keep_denoised_file_set() {
+        let reducer_scripts = Arc::new(Mutex::new(VecDeque::new()));
+        let reducer = Arc::new(ScriptedReducer {
+            scripts: Arc::clone(&reducer_scripts),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let cfg = postproc_cfg_with_m8(
+            NoiseReductionSettings {
+                enabled: true,
+                keep_denoised_file: true,
+            },
+            LangDetectSettings::default(),
+        );
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            reducer: Some(reducer),
+            postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+            ..Cfg::default()
+        });
+
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let input = h.input_file("clip.mp3");
+        let denoised = input.with_file_name("clip_DeepFilterNet3.wav");
+        std::fs::write(&denoised, b"fake denoised audio").expect("write denoised file");
+        reducer_scripts
+            .lock()
+            .expect("reducer scripts")
+            .push_back(ReduceScript::Ok(denoised.clone()));
+
+        q.enqueue(a, path_task(input), Source::FileImport);
+        q.finish().expect("finish");
+        let _events = drain(&rx);
+
+        assert!(
+            denoised.exists(),
+            "denoised file must be kept when keep_denoised_file is set"
+        );
+    }
+
+    #[test]
+    fn detector_runs_only_when_language_none_or_english() {
+        fn call_count(language: Option<Language>, enabled: bool) -> usize {
+            let detector_calls = Arc::new(Mutex::new(Vec::new()));
+            let detector = Arc::new(ScriptedDetector {
+                scripts: Arc::new(Mutex::new(VecDeque::from([DetectScript::Ok(None)]))),
+                calls: Arc::clone(&detector_calls),
+            });
+            let cfg = postproc_cfg_with_m8(
+                NoiseReductionSettings::default(),
+                LangDetectSettings {
+                    enabled,
+                    download_tiny_if_missing: false,
+                },
+            );
+            let (q, h) = build(Cfg {
+                scripts: vec![EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![seg("hi")],
+                }],
+                lang_detector: Some(detector),
+                postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+                ..Cfg::default()
+            });
+            h.seed_model(ModelSize::Small);
+
+            let rx = q.subscribe();
+            let a = TranscriptionId::new();
+            let input = h.input_file("clip.mp3");
+            let mut spec = path_task(input);
+            spec.options.language = language;
+            q.enqueue(a, spec, Source::FileImport);
+            q.finish().expect("finish");
+            let _events = drain(&rx);
+
+            detector_calls.lock().expect("detector calls").len()
+        }
+
+        assert_eq!(
+            call_count(None, true),
+            1,
+            "unset language must run detection"
+        );
+        assert_eq!(
+            call_count(Language::parse("en"), true),
+            1,
+            "explicit English must still run detection (Buzz's en-quirk)"
+        );
+        assert_eq!(
+            call_count(Language::parse("fr"), true),
+            0,
+            "an explicit non-English language must skip detection"
+        );
+        assert_eq!(
+            call_count(None, false),
+            0,
+            "a disabled hook must skip detection even with language unset"
+        );
+    }
+
+    #[test]
+    fn detector_failure_proceeds_on_auto() {
+        let detector = Arc::new(ScriptedDetector {
+            scripts: Arc::new(Mutex::new(VecDeque::from([DetectScript::Err(
+                EngineError::Inference {
+                    detail: "boom".into(),
+                },
+            )]))),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let cfg = postproc_cfg_with_m8(
+            NoiseReductionSettings::default(),
+            LangDetectSettings {
+                enabled: true,
+                download_tiny_if_missing: false,
+            },
+        );
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            lang_detector: Some(detector),
+            postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+            ..Cfg::default()
+        });
+        h.seed_model(ModelSize::Small);
+
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        q.enqueue(a, path_task(h.input_file("clip.mp3")), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        // Detection failure never fails the task, and no language is
+        // written to the store — the job proceeds on auto.
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+        assert!(
+            !h.store_calls()
+                .iter()
+                .any(|c| matches!(c, StoreCall::UpdateLanguage(..)))
+        );
+        assert_eq!(h.language_seen(), vec![None]);
+    }
+
+    #[test]
+    fn detector_panic_is_contained() {
+        let detector = Arc::new(ScriptedDetector {
+            scripts: Arc::new(Mutex::new(VecDeque::from([DetectScript::Panic]))),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let cfg = postproc_cfg_with_m8(
+            NoiseReductionSettings::default(),
+            LangDetectSettings {
+                enabled: true,
+                download_tiny_if_missing: false,
+            },
+        );
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            lang_detector: Some(detector),
+            postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+            ..Cfg::default()
+        });
+        h.seed_model(ModelSize::Small);
+
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        q.enqueue(a, path_task(h.input_file("clip.mp3")), Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        // The panic must not crash the runner thread nor fail the task.
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+        assert_eq!(h.language_seen(), vec![None]);
+    }
+
+    #[test]
+    fn detected_language_reaches_engine_export_name_and_store() {
+        let detector = Arc::new(ScriptedDetector {
+            scripts: Arc::new(Mutex::new(VecDeque::from([DetectScript::Ok(
+                Language::parse("fr"),
+            )]))),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let cfg = postproc_cfg_with_m8(
+            NoiseReductionSettings::default(),
+            LangDetectSettings {
+                enabled: true,
+                download_tiny_if_missing: true,
+            },
+        );
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("bonjour")],
+            }],
+            lang_detector: Some(detector),
+            postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+            ..Cfg::default()
+        });
+        h.seed_model(ModelSize::Small);
+
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let input = h.input_file("clip.mp3");
+        let spec = TaskSpec {
+            input: Input::Path(input),
+            options: TranscriptionOptions::default(),
+            output: OutputSpec {
+                formats: [OutputFormat::Txt].into_iter().collect(),
+                directory: Some(h.tmp.path().to_path_buf()),
+                file_name_template: Some("{{ input_file_name }}-{{ language }}".to_string()),
+                paragraph_split: Millis(2000),
+                source_disposition: None,
+            },
+        };
+        q.enqueue(a, spec, Source::FileImport);
+        q.finish().expect("finish");
+        let _events = drain(&rx);
+
+        assert_eq!(h.language_seen(), vec![Language::parse("fr")]);
+        assert!(
+            h.store_calls()
+                .contains(&StoreCall::UpdateLanguage(a, "fr".to_string()))
+        );
+        let expected = h.tmp.path().join("clip-fr.txt");
+        assert!(
+            expected.exists(),
+            "expected export named with the detected language at {expected:?}"
+        );
+    }
+
+    #[test]
+    fn detector_absent_model_downloads_tiny_when_enabled() {
+        let model_calls = Arc::new(Mutex::new(Vec::new()));
+        let ensurer = Arc::new(FakeEnsurer {
+            model_scripts: Arc::new(Mutex::new(VecDeque::from([EnsureModelScript::Ok {
+                progress: vec![],
+                path: PathBuf::from("/fake/tiny-model.bin"),
+            }]))),
+            vad_scripts: Arc::new(Mutex::new(VecDeque::new())),
+            model_calls: Arc::clone(&model_calls),
+            vad_calls: Arc::new(Mutex::new(0)),
+            model_gate: None,
+        });
+        let detector = Arc::new(ScriptedDetector {
+            scripts: Arc::new(Mutex::new(VecDeque::from([DetectScript::Ok(None)]))),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let cfg = postproc_cfg_with_m8(
+            NoiseReductionSettings::default(),
+            LangDetectSettings {
+                enabled: true,
+                download_tiny_if_missing: true,
+            },
+        );
+        let (q, h) = build_with_ensurer(
+            Cfg {
+                scripts: vec![EngineScript::Emit {
+                    progress: vec![],
+                    segments: vec![seg("hi")],
+                }],
+                lang_detector: Some(detector),
+                postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+                ..Cfg::default()
+            },
+            ensurer,
+        );
+        // No model seeded under `h.model_root()`: `select_model` finds
+        // nothing, forcing the tiny-download fallback.
+
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        q.enqueue(a, path_task(h.input_file("clip.mp3")), Source::FileImport);
+        q.finish().expect("finish");
+        let _events = drain(&rx);
+
+        let recorded = model_calls.lock().expect("model calls").clone();
+        assert!(
+            recorded.iter().any(|m| m.size == ModelSize::Tiny),
+            "expected a Tiny model ensure call: {recorded:?}"
+        );
+    }
+
+    #[test]
+    fn hooks_never_run_when_deps_none() {
+        let cfg = postproc_cfg_with_m8(
+            NoiseReductionSettings {
+                enabled: true,
+                keep_denoised_file: false,
+            },
+            LangDetectSettings {
+                enabled: true,
+                download_tiny_if_missing: true,
+            },
+        );
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            postproc: Some(Arc::new(FixedPostprocSource(cfg))),
+            // `isolator`/`reducer`/`lang_detector` all stay `None`
+            // (`Cfg::default()`) even though every hook's own Preferences
+            // flag is "on" — the seam must never run without a wired
+            // collaborator (the `postproc: None` precedent, extended).
+            ..Cfg::default()
+        });
+
+        let rx = q.subscribe();
+        let a = TranscriptionId::new();
+        let input = h.input_file("clip.mp3");
+        let mut spec = path_task(input.clone());
+        spec.options.extract_speech = true;
+        q.enqueue(a, spec, Source::FileImport);
+        q.finish().expect("finish");
+        let events = drain(&rx);
+
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.kind, TaskEventKind::PhaseChanged { .. }))
+        );
+        assert_eq!(h.decoded.lock().expect("decoded").clone(), vec![input]);
+        assert!(
+            !h.store_calls()
+                .iter()
+                .any(|c| matches!(c, StoreCall::UpdateLanguage(..)))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
     }
 }

@@ -400,6 +400,42 @@ mod tests {
     }
 
     #[test]
+    fn output_file_path_strips_speech_suffix() {
+        let path = output_file_path(
+            Path::new("/tmp/interview_speech.mp3"),
+            TaskKind::Transcribe,
+            None,
+            ModelSize::Small,
+            OutputFormat::Txt,
+            None,
+            Some("{{ input_file_name }}"),
+            fixed_now(),
+        );
+        assert_eq!(path, Path::new("/tmp/interview.txt"));
+    }
+
+    #[test]
+    fn output_file_path_strips_speech_suffix_for_a_user_file_literally_named_x_speech() {
+        // Byte-parity edge case (Buzz `transcriber.py:238-240`): the strip
+        // is unconditional on the suffix alone, not on provenance — a
+        // user's own file that just happens to be named `*_speech.*` gets
+        // the same single strip as a demucs-produced isolation output.
+        // Confirms it strips only once too: `my_song_speech` -> `my_song`,
+        // not something stripped twice.
+        let path = output_file_path(
+            Path::new("/tmp/my_song_speech.mp3"),
+            TaskKind::Transcribe,
+            None,
+            ModelSize::Small,
+            OutputFormat::Txt,
+            None,
+            Some("{{ input_file_name }}"),
+            fixed_now(),
+        );
+        assert_eq!(path, Path::new("/tmp/my_song.txt"));
+    }
+
+    #[test]
     fn output_file_path_model_type_token_renders_whisper_cpp() {
         let path = output_file_path(
             Path::new("/tmp/interview.mp3"),

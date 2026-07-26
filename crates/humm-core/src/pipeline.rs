@@ -14,6 +14,7 @@ use crate::cancel::CancelToken;
 use crate::domain::{JobSpec, Segment, SourceDisposition};
 use crate::error::{CoreError, ExportError, MediaError};
 use crate::export::{TextKey, output_file_path, write_format};
+use crate::language::Language;
 use crate::openai::{LlmEndpointSource, TranslatorConfig, TranslatorHandle};
 
 /// The result of a successful [`run_file_job`]: the (trimmed) segments
@@ -113,6 +114,28 @@ impl SegmentSink for TeeSink<'_> {
 /// missing (`create_dir_all`) instead of failing, since Buzz's `write_output`
 /// simply fails when `-d` names a nonexistent directory.
 ///
+/// # `audio_input` vs `job.input` (M8, design spec §3/§5)
+///
+/// `audio_input` is the file actually decoded and transcribed — the caller's
+/// current point in the isolation → noise-reduction → detection chain
+/// (`crate::queue::Runner::run_job`), or simply `&job.input` when none of
+/// those hooks ran. `job.input` itself is never touched here: it is the
+/// export-naming/DB-row/viewer *identity*, unchanged by any pre-transcription
+/// swap (Buzz parity — the DB insert happens before extraction; only the
+/// in-memory decode target swaps, `plugins/manager.py:107-119`). Concretely:
+/// - the input-exists check and the media probe run against `audio_input`
+///   (that's the file about to be decoded — a missing/no-audio *derived*
+///   file is exactly as fatal as a missing/no-audio original one);
+/// - `decoder.decode` reads `audio_input`;
+/// - `output_file_path` and [`apply_source_disposition`] both use `job.input`
+///   (export names and folder-watch disposition must never see a temp
+///   isolated/denoised path).
+///
+/// `language_override` is F-114's detected language, if any;
+/// `language_override.or(job.options.language)` is the *effective* language
+/// fed to [`EngineOptions`] and threaded into every `output_file_path` call's
+/// `{{ language }}` token.
+///
 /// # LLM translation (F-031, design spec §6)
 ///
 /// When `job.options.llm` is `Some` **and** `llm` resolves an endpoint (a key
@@ -133,6 +156,8 @@ impl SegmentSink for TeeSink<'_> {
 #[allow(clippy::too_many_arguments)]
 pub fn run_file_job(
     job: &JobSpec,
+    audio_input: &Path,
+    language_override: Option<Language>,
     tuning: &EngineTuning,
     decoder: &dyn AudioDecoder,
     prober: &dyn MediaProber,
@@ -141,16 +166,19 @@ pub fn run_file_job(
     cancel: &CancelToken,
     llm: Option<&dyn LlmEndpointSource>,
 ) -> Result<JobOutcome, CoreError> {
-    if !job.input.exists() {
+    // `audio_input`, not `job.input`: the decode target may be an isolated/
+    // denoised derivative (M8 pre-transcription chain) — see this fn's doc
+    // comment.
+    if !audio_input.exists() {
         return Err(CoreError::InputMissing {
-            path: job.input.clone(),
+            path: audio_input.to_path_buf(),
         });
     }
 
-    match prober.probe(&job.input) {
+    match prober.probe(audio_input) {
         Ok(info) if !info.has_audio => {
             return Err(MediaError::NoAudioStream {
-                path: job.input.clone(),
+                path: audio_input.to_path_buf(),
             }
             .into());
         }
@@ -161,7 +189,7 @@ pub fn run_file_job(
             // decode). Log and continue.
             log::warn!(
                 "probe failed for {}: {err} — continuing, decode is authoritative",
-                job.input.display()
+                audio_input.display()
             );
         }
     }
@@ -170,13 +198,19 @@ pub fn run_file_job(
         return Err(CoreError::Canceled);
     }
 
-    let pcm = decoder.decode(&job.input, cancel)?;
+    // Decode target: `audio_input`, per this fn's doc comment.
+    let pcm = decoder.decode(audio_input, cancel)?;
     if pcm.is_empty() {
         return Err(CoreError::NoAudioDecoded);
     }
 
+    // Effective language: F-114's detected language (if any) wins over the
+    // task's own choice — feeds the engine and every export name's
+    // `{{ language }}` token below.
+    let language = language_override.or(job.options.language);
+
     let engine_options = EngineOptions {
-        language: job.options.language,
+        language,
         task: job.options.task,
         initial_prompt: job.options.initial_prompt.clone(),
         word_timestamps: job.options.word_timestamps,
@@ -304,10 +338,14 @@ pub fn run_file_job(
             return Err(CoreError::Canceled);
         }
 
+        // `job.input`, not `audio_input`: export names/DB identity must
+        // never see an isolated/denoised temp path (this fn's doc comment).
+        // `language` (not `job.options.language`) so a detected language
+        // reaches the `{{ language }}` token too.
         let path = output_file_path(
             &job.input,
             job.options.task,
-            job.options.language,
+            language,
             job.options.model.size,
             *format,
             job.output.directory.as_deref(),
@@ -350,6 +388,8 @@ pub fn run_file_job(
     // Every failure here is logged and swallowed, never propagated: the
     // transcription itself already succeeded (ADR-018 spirit).
     if let Some(disposition) = job.output.source_disposition {
+        // `job.input` (the folder-watch source the user pointed at), never
+        // `audio_input` (a temp isolated/denoised derivative).
         apply_source_disposition(disposition, &job.input, job.output.directory.as_deref());
     }
 
@@ -675,6 +715,8 @@ mod tests {
 
         let outcome = run_file_job(
             &job,
+            &job.input,
+            None,
             &EngineTuning::default(),
             &decoder,
             &prober,
@@ -721,6 +763,8 @@ mod tests {
 
         let outcome = run_file_job(
             &job,
+            &job.input,
+            None,
             &EngineTuning::default(),
             &decoder,
             &prober,
@@ -760,6 +804,8 @@ mod tests {
 
         let result = run_file_job(
             &job,
+            &job.input,
+            None,
             &EngineTuning::default(),
             &decoder,
             &prober,
@@ -798,6 +844,8 @@ mod tests {
 
         let result = run_file_job(
             &job,
+            &job.input,
+            None,
             &EngineTuning::default(),
             &decoder,
             &prober,
@@ -833,6 +881,8 @@ mod tests {
 
         let result = run_file_job(
             &job,
+            &job.input,
+            None,
             &EngineTuning::default(),
             &decoder,
             &prober,
@@ -878,6 +928,8 @@ mod tests {
 
         let result = run_file_job(
             &job,
+            &job.input,
+            None,
             &EngineTuning::default(),
             &decoder,
             &no_audio_prober,
@@ -905,6 +957,8 @@ mod tests {
 
         let result2 = run_file_job(
             &job,
+            &job.input,
+            None,
             &EngineTuning::default(),
             &decoder2,
             &erroring_prober,
@@ -935,6 +989,8 @@ mod tests {
 
         let outcome = run_file_job(
             &job,
+            &job.input,
+            None,
             &EngineTuning::default(),
             &decoder,
             &prober,
@@ -947,6 +1003,107 @@ mod tests {
 
         assert_eq!(observer.segments, outcome.segments);
         assert_eq!(observer.progress, vec![0.5, 1.0]);
+    }
+
+    // -- M8: `audio_input` vs `job.input` (design spec §3/§5) --------------
+
+    #[test]
+    fn run_file_job_decodes_audio_input_not_job_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `job.input` deliberately does NOT exist on disk here — proving the
+        // input-exists check, the probe, and the decode all operate on
+        // `audio_input`, never on `job.input` (which stays the export-naming/
+        // identity path only).
+        let input = tmp.path().join("input.mp3");
+        let audio_input = tmp.path().join("input_speech.mp3");
+        touch(&audio_input);
+
+        let formats: BTreeSet<OutputFormat> = [OutputFormat::Txt].into_iter().collect();
+        let job = job_with(
+            input,
+            formats,
+            Some(tmp.path().to_path_buf()),
+            Some("{{ input_file_name }}".to_string()),
+        );
+
+        let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let prober = prober_with_audio();
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let mut observer = NullSink;
+        let cancel = CancelToken::new();
+
+        let outcome = run_file_job(
+            &job,
+            &audio_input,
+            None,
+            &EngineTuning::default(),
+            &decoder,
+            &prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            decoder.call_count(),
+            1,
+            "decode must succeed against audio_input, which exists — job.input does not"
+        );
+        // Export naming stays on `job.input`'s stem ("input"), not
+        // `audio_input`'s ("input_speech"), even though `job.input` was
+        // never touched on disk.
+        let txt_path = tmp.path().join("input.txt");
+        assert_eq!(outcome.written, vec![txt_path.clone()]);
+        assert!(txt_path.exists());
+    }
+
+    #[test]
+    fn run_file_job_uses_language_override_over_job_options_language() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("input.mp3");
+        touch(&input);
+
+        let formats: BTreeSet<OutputFormat> = [OutputFormat::Txt].into_iter().collect();
+        let mut job = job_with(
+            input.clone(),
+            formats,
+            Some(tmp.path().to_path_buf()),
+            Some("{{ language }}".to_string()),
+        );
+        job.options.language = crate::language::Language::parse("de");
+
+        let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+        let prober = prober_with_audio();
+        let mut engine = FakeEngine {
+            behavior: EngineBehavior::EmitFixtureSegments,
+        };
+        let mut observer = NullSink;
+        let cancel = CancelToken::new();
+
+        let outcome = run_file_job(
+            &job,
+            &input,
+            crate::language::Language::parse("fr"),
+            &EngineTuning::default(),
+            &decoder,
+            &prober,
+            &mut engine,
+            &mut observer,
+            &cancel,
+            None,
+        )
+        .unwrap();
+
+        // The override ("fr") wins over the job's own option ("de") in the
+        // export name.
+        let fr_path = tmp.path().join("fr.txt");
+        assert_eq!(outcome.written, vec![fr_path]);
+        assert!(tmp.path().join("fr.txt").exists());
+        assert!(!tmp.path().join("de.txt").exists());
     }
 
     // -- Extra coverage beyond the brief's 7 cases ------------------------
@@ -969,6 +1126,8 @@ mod tests {
 
         let result = run_file_job(
             &job,
+            &job.input,
+            None,
             &EngineTuning::default(),
             &decoder,
             &prober,
@@ -1001,6 +1160,8 @@ mod tests {
 
         let outcome = run_file_job(
             &job,
+            &job.input,
+            None,
             &EngineTuning::default(),
             &decoder,
             &prober,
@@ -1053,6 +1214,8 @@ mod tests {
 
         let result = run_file_job(
             &job,
+            &job.input,
+            None,
             &EngineTuning::default(),
             &decoder,
             &prober,
@@ -1098,6 +1261,8 @@ mod tests {
 
         let result = run_file_job(
             &job,
+            &job.input,
+            None,
             &EngineTuning::default(),
             &decoder,
             &prober,
@@ -1135,6 +1300,8 @@ mod tests {
 
         let outcome = run_file_job(
             &job,
+            &job.input,
+            None,
             &EngineTuning::default(),
             &decoder,
             &prober,
@@ -1177,6 +1344,8 @@ mod tests {
 
         let outcome = run_file_job(
             &job,
+            &job.input,
+            None,
             &EngineTuning::default(),
             &decoder,
             &prober,
@@ -1233,6 +1402,8 @@ mod tests {
 
         let result = run_file_job(
             &job,
+            &job.input,
+            None,
             &EngineTuning::default(),
             &decoder,
             &prober,
@@ -1283,6 +1454,8 @@ mod tests {
 
         let outcome = run_file_job(
             &job,
+            &job.input,
+            None,
             &EngineTuning::default(),
             &decoder,
             &prober,
@@ -1326,6 +1499,8 @@ mod tests {
 
         let outcome = run_file_job(
             &job,
+            &job.input,
+            None,
             &EngineTuning::default(),
             &decoder,
             &prober,

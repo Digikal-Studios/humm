@@ -7,6 +7,7 @@
 
 pub mod auto_resize;
 pub mod docx;
+pub mod langdetect;
 pub mod skip;
 pub mod summary;
 
