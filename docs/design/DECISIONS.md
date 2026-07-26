@@ -97,6 +97,40 @@ Decision recorded from `../OPEN_QUESTIONS.md` Q-1 (approved 2026-07-20): PostHog
 - **Speaker identification (F-087):** `Diarizer` trait now; M8 impl via `ort` (segmentation+embedding ONNX models + clustering in Rust). Different models than Buzz's NeMo stack — outcome-level parity (speakers detected, named, merged), verified by diff on speaker-count/boundary sanity, not identical labels.
 - **Noise reduction (F-112):** DeepFilterNet's reference implementation is itself Rust (`df` crates) — native integration expected cheap; validate at M8.
 
+### Addendum (M8 entry, 2026-07-26) — the mandated re-evaluation, with evidence
+
+**`ort` status:** still pre-release — `2.0.0-rc.12` (2026-03-05), `max_stable_version: null`, all 1.x yanked; 14.0M downloads, actively maintained (crates.io API, checked 2026-07-26). Usable only with an exact `=2.0.0-rc.12` pin confined to one adapter crate; anything that can avoid ort should.
+
+**F-027 verdict — the ONNX arm fails viability before any benchmark; the subprocess arm is adopted (ADR-023).** Evidence: (1) no canonical hosted htdemucs ONNX artifact exists — the first working full export (StemSplit `demucs-onnx`, 2026-05) requires local torch at export time, and earlier attempts (sevagh/demucs.onnx, Mixxx GSoC 2025) document the export blockers (complex64 STFT, `aten::_native_multi_head_attention`); (2) every working export moves STFT/iSTFT outside the graph, so a Rust integration would reimplement demucs's STFT + overlap-add + shift + normalization numerics — a large, quality-risky port; (3) upstream `facebookresearch/demucs` was archived 2025-01-01 (low-maintenance fork `adefossez/demucs`) — the model is frozen and no upstream ONNX publication is coming; (4) ort is still rc. The decision rule "if quality/perf validate" therefore collapses at the viability step — the sketched fallback (optional `demucs` subprocess, graceful absence) is the decision, and it is also the closest shape to Buzz's own mechanism (Buzz runs demucs as Python in a killable child process, `file_transcriber_queue_worker.py:276-350`).
+
+**F-087 verdict — the ort arm stands, realized via an existing Rust crate behind humm's `Diarizer` trait (ADR-024).** The exact decided pipeline (segmentation ONNX + embedding ONNX + clustering in Rust) exists as maintained crates: `speakrs` 0.5 (Apache-2.0; pyannote community-1-style pipeline — segmentation, powerset decode, overlap-add, binarization, embeddings, VBx clustering; ort or native CoreML; models on HF `avencera/speakrs-models` with an offline-dir override) and `pyannote-rs` 0.3.x (MIT; segmentation-3.0 + wespeaker-voxceleb-resnet34-LM + cosine clustering). An M8 validation spike picks speakrs (primary) vs pyannote-rs (fallback) on build health, 2-speaker-fixture sanity, and perf; in-house reimplementation only if both fail.
+
+**F-112 verdict — native `df` confirmed, but via git-pin, not crates.io.** The crates.io `deep_filter` release is stale (0.2.5, 2022-07 — DeepFilterNet1-era); the repo (Rikorose/DeepFilterNet, MIT/Apache-2.0) is current: tag v0.5.6 (2024-08-31), `libDF` (`deep_filter` 0.5.x) with a `tract` feature (tract-onnx ^0.21.4, pure-Rust inference — no ort) and a `default-model` feature embedding DeepFilterNet3. Decision: git-pin `deep_filter` at the v0.5.6 rev, features `["tract", "default-model"]`; fallback if the pinned build fails validation: vendor libDF's tract path. Pure Rust — no new non-Rust boundary; the embedded model bytes ride the pinned crate.
+
+Design realization: `docs/superpowers/specs/2026-07-26-m8-heavy-ml-closing-design.md`.
+
+## ADR-023 — F-027 speech isolation via optional `demucs` subprocess
+
+**Context:** ADR-011's M8 re-evaluation (addendum above) rejected the ort+htdemucs-ONNX arm on viability evidence. Buzz's own mechanism is demucs (PyTorch, vendored fork) run in a killable child process with the vocals stem saved as `<stem>_speech.mp3`.
+
+**Options:** (a) ort + htdemucs ONNX (rejected — addendum evidence); (b) demucs.cpp/demucs.onnx C++ binaries as subprocess (exotic, unpackaged, would make humm ship/build C++ inference infrastructure for one optional feature); (c) **optional `demucs` CLI subprocess** — user-installed (pip/pipx/uvx), graceful absence.
+
+**Decision:** (c). `DemucsIsolator` in `humm-media` (the subprocess adapter crate) behind core's `SpeechIsolator` trait. Contract: `demucs --two-stems=vocals -n htdemucs --mp3 -o <scratch> --filename "{stem}.{ext}" <input>` (stable, long-established flags; no `-d` — demucs's cuda-else-cpu default is Buzz's own device rule); output renamed to `<input_stem>_speech.mp3` beside the input (Buzz naming); discovery `HUMM_DEMUCS` env then `PATH`; cancellation = SIGTERM → 5 s → SIGKILL (Buzz's terminate→kill); absence = options-sheet checkbox disabled with actionable tooltip, CLI `-e` fails fast with an install hint. Progress is indeterminate — demucs emits only human-oriented tqdm on stderr and Standing Policy rule 3 forbids parsing it (deviation from Buzz's in-process callback fraction, spec ledger #1).
+
+**Standing Policy compliance:** trait boundary (`SpeechIsolator`), adapter isolation (humm-media), stable CLI surface, graceful absence, contract tests (`#[ignore]`, real binary) that alone re-validate a demucs upgrade.
+
+**Validation plan:** contract tests — vocals file produced + named correctly, kill-on-cancel ack, no-audio degrade (silent video proceeds on the original, Buzz's `no_audio` arm), absence degrade; acceptance outcome-diff on fixture media. Results recorded here when run.
+
+## ADR-024 — F-087 diarization via ort-backed pipeline crate + model artifacts
+
+**Context:** ADR-011 decided ort segmentation+embeddings+clustering with outcome-level parity (Q-3). The M8 addendum found the decided pipeline already exists as maintained Rust crates; reimplementing it in-house would be ~1-2 kLOC of numerics with real correctness risk and no parity gain.
+
+**Decision:** new adapter crate `humm-diarize` implementing core's `Diarizer` trait via **speakrs** (primary candidate; fallback `pyannote-rs`; exact-pinned either way — the M8 validation spike picks on build health, 2-speaker-fixture sanity (≥2 speakers, boundaries ±2 s of known splice points), and perf). `ort` pinned exactly (`=2.0.0-rc.12` at adoption) and confined to this crate. Model artifacts (segmentation + embedding ONNX) are non-Rust artifacts fetched through the F-043 `ensure_artifact` pattern (resume, SHA where published, `.humm_complete` sentinel, per-path lock) into `model_root()/diarization/` from the selected crate's pinned HF URLs; the crate consumes the local dir (offline override). Graceful absence: the Speaker-ID window offers the download with determinate progress + cancel; no network + no models → actionable message, never a crash (the `ensure_vad` degrade philosophy). Buzz's NeMo MSDD + ctc-forced-aligner + deepmultilingualpunctuation stack is not ported (ADR-011 outcome-level parity).
+
+**Standing Policy compliance:** trait boundary (`Diarizer`), adapter isolation (humm-diarize is the only crate naming ort/speakrs), version pinning via Cargo (exact pins; ort's runtime binaries are version-locked to the pinned crate), contract tests against the real models that alone re-validate an upgrade, graceful absence. Build note: ort fetches its prebuilt runtime at build time from the crate-pinned source — recorded as a build-environment fact (one sandbox-lifted fetch, like the cargo-home seeding recipe).
+
+**Validation plan:** spike results (crate choice + evidence) recorded here; contract test on the synthesized 2-speaker fixture; acceptance outcome-diff per ADR-011 (count/boundary sanity, not label equality).
+
 ## ADR-012 — Settings: TOML file (deviation from QSettings)
 **Decision:** serde-typed TOML at the platform config dir; atomic writes; no QSettings migration (approved Q-6); secrets in OS keyring via `keyring` (4.x) behind `SecretStore`.
 **Rationale:** QSettings is a Qt-ism (registry/plist/ini per-OS); a typed struct with in-code defaults is the Rust shape, diffable and user-editable. All Buzz setting *semantics* (keys catalogued in `EXTERNAL_SURFACE.md` §3.6) map onto the struct.
