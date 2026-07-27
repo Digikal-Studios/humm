@@ -21,11 +21,13 @@
 //! (Task 4) — this module is only the real detection call itself.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use humm_core::boundary::{LanguageDetector, Pcm};
 use humm_core::cancel::CancelToken;
 use humm_core::error::EngineError;
 use humm_core::language::Language;
+use humm_core::settings::Settings;
 
 use whisper_rs::{WhisperContext, WhisperContextParameters};
 
@@ -52,6 +54,38 @@ pub(crate) fn map_lang_id(id: i32) -> Option<Language> {
     Language::parse(code)
 }
 
+/// Resolves whether the *next* [`WhisperLangDetector::detect`] call should
+/// use GPU acceleration, combining the same two inputs
+/// `humm-gui::engine_factory::GuiEngineFactory::create_whisper` combines for
+/// the main transcription engine: `use_gpu_env` (`HUMM_FORCE_CPU`, already
+/// resolved once at process startup — env vars don't change mid-process, so
+/// caching this half is safe, same as `GuiEngineFactory::use_gpu`) ANDed with
+/// a **fresh** read of `settings.models.force_cpu` (the Preferences → General
+/// → Disable GPU checkbox) taken right here, at call time — never cached —
+/// so a checkbox flip is honored by the very next `detect()` call with no
+/// restart, exactly like `create_whisper`'s own live read. The lock is held
+/// only long enough to copy the one `bool` field, then dropped before any
+/// context-creation work starts (Standing Policy: never hold a lock across
+/// blocking work).
+///
+/// Extracted as its own free function, rather than inlined in `detect`, so
+/// the "settings changed between two calls" property is unit-testable
+/// without a real whisper model — [`WhisperContext`] can't be constructed in
+/// a unit test (`tests/contract.rs`'s module doc explains why: it needs a
+/// real ggml file), so `detect`'s own cancel/missing-model guards are the
+/// only parts of it hermetically testable directly; this resolution logic
+/// is pulled out so it doesn't have to ride along with those guards to be
+/// covered.
+fn resolve_use_gpu(use_gpu_env: bool, settings: &Mutex<Settings>) -> bool {
+    let force_cpu_setting = {
+        let guard = settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.models.force_cpu
+    };
+    use_gpu_env && !force_cpu_setting
+}
+
 /// Detects the spoken language of already-decoded audio via whisper.cpp's
 /// standalone language-detection routine (F-114).
 ///
@@ -61,32 +95,27 @@ pub(crate) fn map_lang_id(id: i32) -> Option<Language> {
 /// from the `model` path the caller resolved (`postproc::langdetect::
 /// select_model`/the tiny-download fallback, both in `Runner::run_job`) —
 /// this type never caches a context between calls (module doc).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct WhisperLangDetector {
-    /// `true` forces CPU-only inference (no Metal/CoreML) for every context
-    /// this detector creates. The GUI's `services::init` computes this from
-    /// the same two inputs `GuiEngineFactory::create_whisper` combines for
-    /// the main transcription engine (`HUMM_FORCE_CPU` + `settings.models.
-    /// force_cpu`) — but, unlike `create_whisper`, which re-reads the setting
-    /// fresh on every engine construction so a Preferences checkbox flip is
-    /// honored by the very next task with no restart, this detector is
-    /// constructed exactly once at startup (this struct's own `new` takes a
-    /// plain `bool`, not a live settings handle), so a force-CPU toggle only
-    /// takes effect for language detection after a restart. Documented
-    /// divergence, not a bug: `WhisperLangDetector::new(force_cpu: bool)`'s
-    /// signature is a snapshot by design.
-    force_cpu: bool,
+    /// The env-derived half of GPU-acceleration resolution — fixed for the
+    /// process lifetime, see [`resolve_use_gpu`]'s doc.
+    use_gpu_env: bool,
+    /// Shared live settings — `models.force_cpu` is read fresh (never
+    /// cached) on every [`Self::detect`] call via [`resolve_use_gpu`].
+    settings: Arc<Mutex<Settings>>,
 }
 
 impl WhisperLangDetector {
-    /// Builds a detector that loads every context with GPU acceleration
-    /// disabled when `force_cpu` is `true`, enabled otherwise (Metal/CoreML on
-    /// Apple Silicon, plain CPU elsewhere — same acceleration rule
-    /// [`crate::engine::WhisperEngine::load`] applies to its own `use_gpu`
-    /// flag, just inverted here to match Buzz's `--no-gpu` framing,
-    /// `whisper_cpp.py:464-466`).
-    pub fn new(force_cpu: bool) -> Self {
-        WhisperLangDetector { force_cpu }
+    /// Builds a detector that resolves GPU acceleration per call via
+    /// [`resolve_use_gpu`] — `use_gpu_env` is the env-only half
+    /// (`HUMM_FORCE_CPU`, resolved once by the caller), `settings` is the
+    /// shared live handle `models.force_cpu` is read fresh from every time
+    /// (never snapshotted at construction).
+    pub fn new(use_gpu_env: bool, settings: Arc<Mutex<Settings>>) -> Self {
+        WhisperLangDetector {
+            use_gpu_env,
+            settings,
+        }
     }
 }
 
@@ -102,11 +131,15 @@ impl LanguageDetector for WhisperLangDetector {
     /// file (`whisper_cpp.py:403-470`), so no windowing/offset choice is made
     /// here either. An empty `audio` short-circuits to `Ok(None)`
     /// (`pcm_to_mel`/whisper.cpp's own routine has nothing to detect from —
-    /// same empty-input convention `WhisperEngine::transcribe` uses).
+    /// same empty-input convention `WhisperEngine::transcribe` uses). A
+    /// missing `model` file is checked explicitly before ever touching
+    /// whisper-rs, mirroring [`crate::engine::WhisperEngine::load`]'s own
+    /// pre-check and actionable message verbatim, rather than surfacing
+    /// whisper-rs's generic "Failed to create a new whisper context." text.
     ///
     /// # Errors
     /// [`EngineError::Canceled`] if `cancel` fires before or between steps;
-    /// [`EngineError::ModelLoad`] if `model` can't be loaded;
+    /// [`EngineError::ModelLoad`] if `model` is missing or can't be loaded;
     /// [`EngineError::Inference`] if state creation, `pcm_to_mel`, or
     /// `lang_detect` itself fails. Every error here is caught and logged by
     /// the caller (`Runner::run_job`'s `catch_unwind`-contained pre-hook,
@@ -126,9 +159,16 @@ impl LanguageDetector for WhisperLangDetector {
         if audio.is_empty() {
             return Ok(None);
         }
+        if !model.is_file() {
+            return Err(EngineError::ModelLoad {
+                path: model.to_path_buf(),
+                detail: "model file missing — download it first or set HUMM_MODEL_ROOT".to_string(),
+            });
+        }
 
+        let use_gpu = resolve_use_gpu(self.use_gpu_env, &self.settings);
         let mut params = WhisperContextParameters::default();
-        params.use_gpu(!self.force_cpu);
+        params.use_gpu(use_gpu);
 
         let context =
             WhisperContext::new_with_params(model, params).map_err(|e| EngineError::ModelLoad {
@@ -204,19 +244,64 @@ mod tests {
         assert_eq!(map_lang_id(out_of_range), None);
     }
 
-    // -- WhisperLangDetector::new ---------------------------------------------
+    // -- resolve_use_gpu: the live-read seam (review Important 2) -------------
+
+    fn settings_with_force_cpu(force_cpu: bool) -> Mutex<Settings> {
+        let mut settings = Settings::default();
+        settings.models.force_cpu = force_cpu;
+        Mutex::new(settings)
+    }
 
     #[test]
-    fn new_stores_the_force_cpu_flag() {
-        assert!(WhisperLangDetector::new(true).force_cpu);
-        assert!(!WhisperLangDetector::new(false).force_cpu);
+    fn resolve_use_gpu_env_false_forces_cpu_regardless_of_setting() {
+        assert!(!resolve_use_gpu(false, &settings_with_force_cpu(false)));
+        assert!(!resolve_use_gpu(false, &settings_with_force_cpu(true)));
+    }
+
+    #[test]
+    fn resolve_use_gpu_setting_forces_cpu_when_env_allows_gpu() {
+        assert!(!resolve_use_gpu(true, &settings_with_force_cpu(true)));
+    }
+
+    #[test]
+    fn resolve_use_gpu_true_when_neither_forces_cpu() {
+        assert!(resolve_use_gpu(true, &settings_with_force_cpu(false)));
+    }
+
+    /// The exact property review Important 2 asked for: a settings change
+    /// made *between* two calls is honored by the second call without
+    /// reconstructing anything — proof this is a live read, not a value
+    /// captured once at some earlier point.
+    #[test]
+    fn resolve_use_gpu_reads_fresh_each_call_reflecting_a_live_settings_change() {
+        let settings = settings_with_force_cpu(false);
+
+        assert!(
+            resolve_use_gpu(true, &settings),
+            "GPU allowed before the toggle"
+        );
+
+        settings.lock().unwrap().models.force_cpu = true;
+
+        assert!(
+            !resolve_use_gpu(true, &settings),
+            "the very next call must see the live toggle with no reconstruction"
+        );
+    }
+
+    // -- WhisperLangDetector::new ---------------------------------------------
+
+    fn detector_with(use_gpu_env: bool, force_cpu_setting: bool) -> WhisperLangDetector {
+        let mut settings = Settings::default();
+        settings.models.force_cpu = force_cpu_setting;
+        WhisperLangDetector::new(use_gpu_env, Arc::new(Mutex::new(settings)))
     }
 
     // -- detect: empty-audio short-circuit (no model needed) -----------------
 
     #[test]
     fn detect_empty_audio_is_none_without_touching_the_model() {
-        let detector = WhisperLangDetector::new(true);
+        let detector = detector_with(true, false);
         let audio = Pcm::new(Vec::new());
         // A nonexistent model path proves this never gets past the
         // empty-audio guard to attempt loading it.
@@ -230,7 +315,7 @@ mod tests {
 
     #[test]
     fn detect_pre_canceled_token_errors_before_touching_the_model() {
-        let detector = WhisperLangDetector::new(true);
+        let detector = detector_with(true, false);
         let audio = Pcm::new(vec![0.0_f32; 16_000]);
         let cancel = CancelToken::new();
         cancel.cancel();
@@ -239,9 +324,12 @@ mod tests {
         assert!(matches!(result, Err(EngineError::Canceled)));
     }
 
+    /// Review Important 1: the missing-model message must be the same
+    /// actionable text `WhisperEngine::load` gives, not whisper-rs's generic
+    /// context-creation failure string.
     #[test]
     fn detect_missing_model_is_model_load_error() {
-        let detector = WhisperLangDetector::new(true);
+        let detector = detector_with(true, false);
         let audio = Pcm::new(vec![0.0_f32; 16_000]);
         let err = detector
             .detect(
@@ -250,6 +338,15 @@ mod tests {
                 &CancelToken::new(),
             )
             .expect_err("missing model must error");
-        assert!(matches!(err, EngineError::ModelLoad { .. }));
+        match err {
+            EngineError::ModelLoad { path, detail } => {
+                assert_eq!(path, Path::new("/no/such/ggml-model.bin"));
+                assert!(
+                    detail.contains("model file missing"),
+                    "expected the actionable pre-check message, got: {detail}"
+                );
+            }
+            other => panic!("expected ModelLoad, got {other:?}"),
+        }
     }
 }

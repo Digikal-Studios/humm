@@ -327,21 +327,6 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
     let model_root = paths::model_root();
 
     let use_gpu = use_gpu_from_env(std::env::var("HUMM_FORCE_CPU").ok().as_deref());
-    // The F-114 language detector (wired into `RunnerDeps` below) combines
-    // the same two `force_cpu` inputs `GuiEngineFactory::create_whisper`
-    // combines for the main transcription engine — `HUMM_FORCE_CPU` (already
-    // folded into `use_gpu` above) and `settings.models.force_cpu` — just
-    // read once here at startup rather than fresh per call, since
-    // `WhisperLangDetector` is constructed once, not per task (unlike
-    // `create_whisper`, which re-reads the setting on every engine build so a
-    // checkbox flip is honored without a restart). `HUMM_FORCE_CPU` still
-    // wins whenever it forces CPU.
-    let lang_detect_force_cpu = !use_gpu
-        || settings
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .models
-            .force_cpu;
     let ensurer = DownloaderEnsurer {
         root: model_root.clone(),
         // Shared, not snapshotted: `DownloaderEnsurer` reads
@@ -427,8 +412,15 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
         // probe either (whisper-rs is always linked in; the model it runs
         // against is resolved per-job by `postproc::langdetect::select_model`
         // / the tiny-download fallback, both already inside `run_job`).
+        // `settings` is shared, not snapshotted: `WhisperLangDetector` reads
+        // `models.force_cpu` fresh on every `detect()` call (review fix —
+        // mirrors `DownloaderEnsurer`'s own live-settings-read contract just
+        // above, and `GuiEngineFactory::create_whisper`'s), so a Preferences
+        // "Disable GPU" toggle is honored by the very next detection with no
+        // restart, same as it already is for the main transcription engine.
         lang_detector: Some(
-            Arc::new(WhisperLangDetector::new(lang_detect_force_cpu)) as Arc<dyn LanguageDetector>
+            Arc::new(WhisperLangDetector::new(use_gpu, Arc::clone(&settings)))
+                as Arc<dyn LanguageDetector>,
         ),
     };
     let queue = spawn_task_runner(deps);

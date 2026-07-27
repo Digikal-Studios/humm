@@ -33,8 +33,8 @@
 //! configuration changes.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use humm_core::boundary::{
@@ -46,6 +46,7 @@ use humm_core::domain::{Millis, ModelSize, Segment, TaskKind};
 use humm_core::error::EngineError;
 use humm_core::language::Language;
 use humm_core::models::download::ModelDownloader;
+use humm_core::settings::Settings;
 use humm_media::FfmpegDecoder;
 use humm_whisper::{LiveOptions, WhisperEngine, WhisperLangDetector};
 
@@ -80,6 +81,17 @@ fn decode(file: &str) -> Pcm {
     decoder
         .decode(&path, &CancelToken::new())
         .unwrap_or_else(|e| panic!("failed to decode {}: {e}", path.display()))
+}
+
+/// A [`WhisperLangDetector`] that forces CPU-only inference for every
+/// `detect()` call (`use_gpu_env = false` — via `resolve_use_gpu`'s
+/// `use_gpu_env && !force_cpu_setting` combination, `false` on the left
+/// forces CPU regardless of `settings.models.force_cpu`) — the sandboxed-CPU
+/// contract `detects_french_fixture`/`detect_pre_canceled_errors_promptly_
+/// against_the_real_model` below pin (see `detects_french_fixture`'s doc
+/// comment for the empirical finding this establishes).
+fn cpu_only_lang_detector() -> WhisperLangDetector {
+    WhisperLangDetector::new(false, Arc::new(Mutex::new(Settings::default())))
 }
 
 fn engine() -> WhisperEngine {
@@ -648,9 +660,9 @@ fn second_session_after_begin_produces_same_output_as_first() {
 /// `engine()` (`WhisperEngine::load(.., true)` — GPU **on**), which needs the
 /// sandbox lifted (Metal context creation segfaults under this coding
 /// harness's sandboxed shell — the standing precedent from M2 onward,
-/// `docs/benchmarks/M2.md`/`M3.md`/`M4.md`/`M5.md`). This test instead builds
-/// `WhisperLangDetector::new(true)` (`force_cpu`, i.e. `use_gpu(false)`
-/// throughout) and was run **both** ways to check the premise empirically
+/// `docs/benchmarks/M2.md`/`M3.md`/`M4.md`/`M5.md`). This test instead uses
+/// [`cpu_only_lang_detector`] (`use_gpu(false)` throughout) and was run
+/// **both** ways to check the premise empirically
 /// rather than assume it: sandboxed, `cargo test -p humm-whisper --test
 /// contract -- --ignored detects_french_fixture` passed (twice, non-flaky)
 /// with no crash and the correct `fr` result; the unsandboxed run produced
@@ -679,7 +691,7 @@ fn second_session_after_begin_produces_same_output_as_first() {
             runs sandboxed with force_cpu(true), see this test's doc comment"]
 fn detects_french_fixture() {
     let pcm = decode("whisper-french.mp3");
-    let detector = WhisperLangDetector::new(true);
+    let detector = cpu_only_lang_detector();
 
     let detected = detector
         .detect(&pcm, &ensure_tiny_model(), &CancelToken::new())
@@ -703,7 +715,7 @@ fn detects_french_fixture() {
             runs sandboxed with force_cpu(true), see detects_french_fixture's doc comment"]
 fn detect_pre_canceled_errors_promptly_against_the_real_model() {
     let pcm = decode("whisper-french.mp3");
-    let detector = WhisperLangDetector::new(true);
+    let detector = cpu_only_lang_detector();
     let cancel = CancelToken::new();
     cancel.cancel();
 
