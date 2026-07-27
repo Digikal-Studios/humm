@@ -551,6 +551,14 @@ recipe; ort build-time binary fetch needs one lifted build (recorded).
 10. F-027/F-087 are outcome-level parity by decided strategy (ADR-011):
     demucs subprocess instead of vendored-fork Python API; ort/community-1
     diarization instead of NeMo MSDD + forced alignment + punctuation.
+11. F-087's cancel granularity is coarser than this section's own sketch
+    ("checked between stages and inside the windowed diarization loop"):
+    `speakrs::OwnedDiarizationPipeline::run` is a single monolithic call with
+    no intermediate hook, so `humm-diarize`'s `OrtDiarizer` can only check
+    `cancel` before and after that call, not inside it — a cancel arriving
+    mid-run resolves at the call boundary (~9-10s worst case on the
+    two-speaker fixture, ADR-024's Task 9 addendum), not sub-second like the
+    rest of the codebase's cancellation points.
 
 ## 12. Risks
 

@@ -28,6 +28,23 @@ use crate::domain::Millis;
 /// by order of first appearance across a whole run (Buzz's label shape,
 /// `speaker_identification_widget.py:743-773`) is the transcript-mapping
 /// layer's job, not this type's.
+///
+/// **Two properties later mapping code must not assume away:**
+/// - **Ordering is a contract [`Diarizer::diarize`] guarantees, not an
+///   incidental property of any one implementation.** `humm-diarize`'s
+///   `OrtDiarizer` re-sorts by `start` defensively before returning, rather
+///   than trusting `speakrs`'s own internal ordering to hold across every
+///   inference path (sequential vs. concurrent) — see its module doc.
+///   Callers may rely on the chronological-order guarantee; they must not
+///   assume any particular *implementation* achieves it for free.
+/// - **Turns from *different* speakers can overlap in time.** A diarizer
+///   scans each speaker's activity independently (`speakrs`'s pipeline
+///   binarizes one frame-activation column per speaker), so two speakers'
+///   turns can genuinely overlap (simultaneous/cross-talk speech) — the
+///   turn list is not a clean non-overlapping partition of the timeline.
+///   Task 10's overlap-to-transcript-segment mapping must handle overlapping
+///   candidate turns explicitly (e.g. "maximal overlap wins"), not assume
+///   at most one turn is ever active at a given instant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpeakerTurn {
     /// Turn start time.
@@ -101,7 +118,10 @@ pub enum DiarizeError {
 pub trait Diarizer: Send + Sync {
     /// Diarizes `audio`, emitting [`DiarizeProgress`] updates to `progress`
     /// and checking `cancel` cooperatively. Returns the detected speaker
-    /// turns in chronological order.
+    /// turns sorted by `start` (a contract implementations must actively
+    /// uphold, not merely inherit — see [`SpeakerTurn`]'s doc); turns from
+    /// different speakers may still overlap in time (also [`SpeakerTurn`]'s
+    /// doc) — sorted is not the same claim as non-overlapping.
     fn diarize(
         &self,
         audio: &Pcm,

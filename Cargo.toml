@@ -92,8 +92,14 @@ ndarray = "0.15"
 # prerequisite: `brew install openblas libomp`). `coreml` is additive — CPU
 # mode still works with it enabled; ort's own prebuilt runtime binary fetch
 # at build time (`cdn.pyke.io`) needs a sandbox-lifted first build/fetch.
+# Task 9 review: the spike's own recorded feature set (`online` included)
+# was never a deliberate choice — `online` gates `hf-hub`/`ModelManager`'s
+# HuggingFace-download path, which `humm-diarize` never calls (it only uses
+# `from_dir`, ungated). Dropping `online` removed 20 dependencies
+# (`hf-hub`, `cookie`/`cookie_store`, `hyper-tls`, `tokio-native-tls`, etc.)
+# and confirmed no `native-tls` feature ever reaches the workspace's shared
+# `reqwest` (still purely `rustls`-based) — see ADR-024's Task 9 addendum.
 speakrs = { version = "=0.5.0", default-features = false, features = [
-    "online",
     "openblas-system",
     "coreml",
 ] }

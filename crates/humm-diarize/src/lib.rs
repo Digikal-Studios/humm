@@ -14,11 +14,21 @@
 //! =2.0.0-rc.12` pin (an upstream `ort::Error<SessionBuilder>`
 //! `Send + Sync` regression between rc.10 and rc.12 breaks its `eyre`-based
 //! error conversion). `Cargo.toml` pins `speakrs = "=0.5.0"` exactly, with
-//! `default-features = false, features = ["online", "openblas-system",
-//! "coreml"]` (the crate's *default* features pull `ndarray-linalg`'s
-//! from-source `openblas-static`, which fails to link on this machine's
-//! Homebrew toolchain — `openblas-system` links Homebrew's prebuilt OpenBLAS
-//! instead; macOS build prerequisite: `brew install openblas libomp`).
+//! `default-features = false, features = ["openblas-system", "coreml"]`
+//! (the crate's *default* features pull `ndarray-linalg`'s from-source
+//! `openblas-static`, which fails to link on this machine's Homebrew
+//! toolchain — `openblas-system` links Homebrew's prebuilt OpenBLAS instead;
+//! macOS build prerequisite: `brew install openblas libomp`). **`online`
+//! deliberately dropped (task-9 review):** the spike's originally-recorded
+//! feature set included `online`, but that was never a deliberate choice —
+//! `online` gates only `speakrs::models::ModelManager`/`from_pretrained`'s
+//! HuggingFace-download path, which this crate never calls (`OrtDiarizer`
+//! uses `from_dir` exclusively, ungated by any feature). Dropping it removed
+//! 20 transitive dependencies from `Cargo.lock` (`hf-hub`,
+//! `cookie`/`cookie_store`, `hyper-tls`, `tokio-native-tls`, etc.) and was
+//! verified to leave the workspace's shared `reqwest` purely `rustls`-based
+//! (`cargo tree -e features --workspace` shows no `reqwest feature
+//! "native-tls"` anywhere) — confirmed empirically, not assumed.
 //!
 //! **Resolved `ort` version, confirmed by the compiler (not just the spike's
 //! notes) while implementing this task:** `cargo fetch`/`cargo build`
@@ -113,6 +123,15 @@ impl OrtDiarizer {
     /// [`DiarizeError::ModelsMissing`] naming the missing file name(s) and
     /// pointing at [`humm_core::models::download::ModelDownloader::ensure_diarization_models`]
     /// as the fix.
+    ///
+    /// This check only ever runs here, once, at construction — per the
+    /// [module docs](self), the actual model load happens fresh inside every
+    /// [`Diarizer::diarize`] call, not here. So a file that exists at
+    /// construction time but is deleted before a later `diarize()` call
+    /// (e.g. a user manually clearing the model cache mid-session) is *not*
+    /// re-caught as `ModelsMissing`: `from_dir`/ONNX Runtime's own load
+    /// failure surfaces as [`DiarizeError::Failed`] instead, with whatever
+    /// message the underlying library gives for a missing file.
     pub fn new(models: DiarizationModelPaths) -> Result<Self, DiarizeError> {
         let missing: Vec<&str> = models
             .files()
@@ -174,7 +193,24 @@ impl Diarizer for OrtDiarizer {
             return Err(DiarizeError::Canceled);
         }
 
-        result.segments.iter().map(to_speaker_turn).collect()
+        let mut turns = result
+            .segments
+            .iter()
+            .map(to_speaker_turn)
+            .collect::<Result<Vec<_>, _>>()?;
+        // `Diarizer::diarize`'s contract is sorted-by-start output. `speakrs`'s
+        // own `to_segments` already sorts its raw output, and empirically
+        // `DiarizationResult.segments` comes back sorted too (see the
+        // contract test) — but that is an observed property of today's
+        // `speakrs` internals (its own docs make no ordering guarantee on
+        // `DiarizationResult.segments` specifically), not a documented API
+        // promise this crate can rely on across a future `speakrs` upgrade
+        // or an inference-path change (e.g. the concurrent CoreML path).
+        // Sorting here defensively costs nothing on already-sorted input and
+        // makes the trait's guarantee actually held by this adapter, not
+        // merely inherited by accident.
+        turns.sort_by_key(|t| t.start.0);
+        Ok(turns)
     }
 }
 
