@@ -12,7 +12,8 @@ Contents:
 
 | Path | What it is |
 |---|---|
-| `shots/01..43-*.png` | Windowed screenshots referenced by number (`[NN]`) from `docs/gui-manual/M8.md`; the filenames say what each one shows. |
+| `shots/01..50-*.png` | Windowed screenshots referenced by number (`[NN]`) from `docs/gui-manual/M8.md`; the filenames say what each one shows. `44..47` are Task 17's fix-verification shots; `48..50` are Task 19b's F-021 drag-drop evidence (§13.1). |
+| `differential/` | Task 19b: real Buzz-vs-humm `add` artifacts (F-028, F-040) — see `differential/README.md`. |
 | `logs/humm-media-contract-ignored.log` | The full `cargo test -p humm-media --test contract -- --ignored` run (real ffmpeg + real yt-dlp + real demucs). |
 | `logs/outcome-measurements.txt` | ffmpeg `astats` numbers behind §1 and §2 below. |
 | `logs/cli-extract-speech-without-demucs.log` | CLI `-e` graceful-absence message. |
