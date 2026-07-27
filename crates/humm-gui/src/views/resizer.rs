@@ -775,6 +775,12 @@ mod tests {
         use egui_kittest::Harness;
         use egui_kittest::kittest::Queryable;
 
+        // This test never calls `set_locale` itself, but it builds `vm.error`
+        // through `crate::i18n::tr` and then queries the banner by its
+        // English wording, so it can still observe another concurrently
+        // running test's locale switch mid-flight without this guard --
+        // `lock_locale_for_test`'s own doc comment now says so explicitly.
+        let _guard = crate::i18n::lock_locale_for_test();
         let mut vm = vm_for_algo(true, true, true);
         vm.error = Some(format!(
             "{} {}",

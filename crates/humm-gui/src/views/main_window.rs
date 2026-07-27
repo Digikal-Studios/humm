@@ -725,6 +725,13 @@ mod tests {
 
     #[test]
     fn banner_shows_base_message_on_first_event() {
+        // This test never calls `set_locale` itself, but it does assert on
+        // translated text (`message()` reads through `crate::i18n::tr`, and
+        // the expected value re-evaluates `tr` independently), so it can
+        // still observe another concurrently running test's locale switch
+        // mid-flight without this guard -- `lock_locale_for_test`'s own doc
+        // comment now says so explicitly.
+        let _guard = crate::i18n::lock_locale_for_test();
         let mut banner = StoreHealthBanner::default();
         banner.on_store_write_failed();
         assert!(banner.visible());
@@ -733,6 +740,9 @@ mod tests {
 
     #[test]
     fn banner_appends_counter_on_subsequent_events() {
+        // Same read-only locale hazard as
+        // `banner_shows_base_message_on_first_event`.
+        let _guard = crate::i18n::lock_locale_for_test();
         let mut banner = StoreHealthBanner::default();
         banner.on_store_write_failed();
         banner.on_store_write_failed();
@@ -753,6 +763,9 @@ mod tests {
 
     #[test]
     fn dismissed_banner_reappears_fresh_on_next_event() {
+        // Same read-only locale hazard as
+        // `banner_shows_base_message_on_first_event`.
+        let _guard = crate::i18n::lock_locale_for_test();
         let mut banner = StoreHealthBanner::default();
         banner.on_store_write_failed();
         banner.on_store_write_failed();
@@ -769,6 +782,9 @@ mod tests {
 
     #[test]
     fn pill_label_watching_has_no_paused_suffix() {
+        // Same read-only locale hazard as
+        // `banner_shows_base_message_on_first_event`.
+        let _guard = crate::i18n::lock_locale_for_test();
         let state = FolderWatchPillState {
             folder_name: "my-clips".to_string(),
             paused: false,
@@ -781,6 +797,9 @@ mod tests {
 
     #[test]
     fn pill_label_paused_appends_the_paused_suffix() {
+        // Same read-only locale hazard as
+        // `banner_shows_base_message_on_first_event`.
+        let _guard = crate::i18n::lock_locale_for_test();
         let state = FolderWatchPillState {
             folder_name: "my-clips".to_string(),
             paused: true,
