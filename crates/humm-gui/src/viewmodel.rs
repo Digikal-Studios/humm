@@ -651,7 +651,15 @@ fn row_vm_from_task_row(store: &SqliteStore, row: TaskRow) -> RowVm {
 /// File Name / URL column text: `name` else the file's basename else `url`
 /// else empty — matching Python's `record.name or basename(file) or url or
 /// ""` (an empty `name`/`url` string counts as absent, same as `None`).
-fn display_name_for(row: &TaskRow) -> String {
+///
+/// `pub(crate)`: also the Speaker-ID window's title fallback
+/// (`speaker_id::SpeakerIdVm::open`) for a row with no file — e.g. the
+/// `MissingAudio` gate itself, where an empty OS window title would
+/// otherwise be a real, reachable UX gap (unlike the viewer's own
+/// `file_basename`-only title, whose empty-string case is dead code in
+/// practice — the viewer only ever opens for a `Completed`/`Skipped` row,
+/// which always has a file).
+pub(crate) fn display_name_for(row: &TaskRow) -> String {
     if let Some(name) = row.name.as_deref().filter(|s| !s.is_empty()) {
         return name.to_string();
     }

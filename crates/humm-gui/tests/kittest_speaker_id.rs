@@ -297,9 +297,9 @@ fn identify_runs_to_ready_with_speaker_rows() {
     let turns = vec![turn(0, 1000, 5), turn(1000, 2000, 9)];
     let (mut fixture, _dir) = fixture_with(true, &segments, ScriptedDiarizeService::ready(turns));
 
-    fixture
-        .vm
-        .start_identify(&fixture.deps, &egui::Context::default());
+    let ctx = egui::Context::default();
+    let source = fixture.vm.source;
+    fixture.vm.start_identify(&fixture.deps, &ctx);
     assert!(
         matches!(fixture.vm.stage, SpeakerIdStage::Running { .. }),
         "Running is installed synchronously on click, before the worker produces anything"
@@ -321,6 +321,20 @@ fn identify_runs_to_ready_with_speaker_rows() {
         }
         other => panic!("expected Ready, got {other:?}"),
     }
+
+    // The full start_identify -> worker thread -> set_stage chain must have
+    // requested a repaint of *this window's own* deferred viewport (the
+    // same `("speakers", id)` hash `app.rs::show_speaker_viewports` builds
+    // its `ViewportId` from) at least once along the way — not just the
+    // root viewport a bare `request_repaint()` would hit from a background
+    // thread. Complements `speaker_id::tests::set_stage_requests_repaint_
+    // of_the_given_viewport_not_root`'s narrower, `set_stage`-only check
+    // with an end-to-end one through the real worker thread.
+    let viewport_id = egui::ViewportId::from_hash_of(("speakers", source));
+    assert!(
+        ctx.has_requested_repaint_for(&viewport_id),
+        "the Identify run must have requested a repaint of the speaker-id window's own viewport"
+    );
 
     let mut harness = build_harness(fixture);
     harness.run();
@@ -383,6 +397,39 @@ fn cancel_mid_run_resets_to_idle() {
         fixture.vm.can_identify(),
         "Identify is clickable again after a cancel"
     );
+}
+
+// -- dropping_the_window_cancels_the_in_flight_identify_run ----------------
+
+/// Closing the window (dropping the vm) cancels an in-flight Identify run —
+/// Buzz `closeEvent` does the same (`:806-817`, stops the identification
+/// thread and the media player). Without `impl Drop for SpeakerIdVm`, a
+/// closed window would leave the worker thread (blocked here on the
+/// scripted service's channel, standing in for a real ~10s `OrtDiarizer`
+/// run) running to completion for nothing — and a close-then-reopen would
+/// leave two concurrent pipelines running against the same transcript.
+#[test]
+fn dropping_the_window_cancels_the_in_flight_identify_run() {
+    let (_tx, rx) = mpsc::channel::<()>();
+    let scripted = ScriptedDiarizeService::blocking(rx, vec![turn(0, 1000, 0)]);
+    let (fixture, _dir) = fixture_with(true, &[seg(0, 1000, "hello")], scripted);
+    let Fixture { mut vm, deps } = fixture;
+
+    vm.start_identify(&deps, &egui::Context::default());
+    assert!(matches!(vm.stage, SpeakerIdStage::Running { .. }));
+
+    let run_cancel = vm.run_cancel_token_for_test().expect("a run is in flight");
+    assert!(!run_cancel.is_canceled());
+
+    drop(vm); // the window closing
+
+    assert!(
+        run_cancel.is_canceled(),
+        "closing the window must cancel the in-flight Identify run (Buzz closeEvent :806-817)"
+    );
+    // `_tx` drops at the end of this function, unblocking the scripted
+    // worker's `recv()` so the orphaned thread finishes promptly rather
+    // than lingering for the rest of the test process's life.
 }
 
 // -- error_shows_message_and_resets -----------------------------------------

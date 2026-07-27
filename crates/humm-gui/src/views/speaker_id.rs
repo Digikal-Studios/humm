@@ -150,7 +150,7 @@ fn show_step2(ui: &mut egui::Ui, vm: &mut SpeakerIdVm, deps: &SpeakerIdDeps, ctx
             ui.colored_label(ui.visuals().warn_fg_color, message);
         }
 
-        if let Some(message) = vm.save_error_for_test() {
+        if let Some(message) = vm.save_error() {
             ui.colored_label(ui.visuals().warn_fg_color, message);
         }
 

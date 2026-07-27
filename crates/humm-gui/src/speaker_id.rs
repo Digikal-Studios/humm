@@ -68,6 +68,16 @@
 //! need to be told apart from. A cancelled run's outcome, whatever it is,
 //! is always discarded back to [`SpeakerIdStage::Idle`].
 //!
+//! **Deliberate divergence:** Buzz shows a distinct terminal `"Cancelled"`
+//! label (`:623`) between the "Cancelling..." ack and resetting its
+//! buttons; this module skips that middle step and resolves straight to
+//! `Idle` — which `views::speaker_id::ui` renders with the same
+//! `"speaker-id-ready-label"` text ("Ready to identify speakers") an
+//! untouched window shows. A simplification, not an oversight: nothing in
+//! the brief or UX_SPEC asks for a third transient label, and collapsing
+//! "Cancelled" and "Ready to identify speakers" into one state removes a
+//! stage a test would otherwise have to race against.
+//!
 //! # Play-sample (Buzz `:707-725`, deviations ledger #7)
 //!
 //! The window owns its own `humm_audio::Player`, built lazily on the
@@ -126,6 +136,7 @@ use humm_store::SqliteStore;
 use rand::Rng;
 
 use crate::i18n::tr;
+use crate::viewmodel::display_name_for;
 
 /// A sample preview never plays more than this much of a segment (deviations
 /// ledger #7): Buzz arms its stop-timer with the segment's *absolute end
@@ -439,7 +450,8 @@ pub struct SpeakerIdVm {
     /// Receiver for the background sample-decode thread; `Some` only while
     /// `sample_player` is `Loading`.
     sample_rx: Option<Receiver<Result<humm_core::boundary::PlaybackPcm, String>>>,
-    /// Cancels the sample decode if the window closes mid-decode.
+    /// Cancels the sample decode if the window closes mid-decode — tripped
+    /// by `impl Drop for SpeakerIdVm`, below.
     sample_decode_cancel: CancelToken,
     /// A `(seek position, stop position)` a Play-sample click queued before
     /// the player finished building — applied the instant it does (by
@@ -462,15 +474,19 @@ pub struct SpeakerIdVm {
 }
 
 impl SpeakerIdVm {
-    /// Opens a Speaker-ID view-model for `source`: derives the window title,
-    /// and seeds [`SpeakerIdStage::Idle`] or [`SpeakerIdStage::MissingAudio`]
-    /// from whether the source's file actually exists on disk (Buzz
-    /// `:514-518`, `os.path.isfile`). Never fails outright on a missing
-    /// file — only a genuine store-read error propagates (mirrors
-    /// `ResizerVm::open`'s contract).
+    /// Opens a Speaker-ID view-model for `source`: derives the window title
+    /// (the task table's own `name`-else-file-basename-else-`url` fallback,
+    /// [`crate::viewmodel::display_name_for`] — never a blank OS window
+    /// title, including in the `MissingAudio` case, where there is no file
+    /// to fall back to at all), and seeds [`SpeakerIdStage::Idle`] or
+    /// [`SpeakerIdStage::MissingAudio`] from whether the source's file
+    /// actually exists on disk (Buzz `:514-518`, `os.path.isfile`). Never
+    /// fails outright on a missing file — only a genuine store-read error
+    /// propagates (mirrors `ResizerVm::open`'s contract).
     pub fn open(source: TranscriptionId, deps: &SpeakerIdDeps) -> Result<Self, StoreError> {
-        let file = deps.store.get_task(&source)?.and_then(|task| task.file);
-        let title = file.as_deref().map(file_basename).unwrap_or_default();
+        let task = deps.store.get_task(&source)?;
+        let file = task.as_ref().and_then(|task| task.file.clone());
+        let title = task.as_ref().map(display_name_for).unwrap_or_default();
         let stage = match &file {
             Some(path) if path.is_file() => SpeakerIdStage::Idle,
             _ => SpeakerIdStage::MissingAudio,
@@ -495,10 +511,20 @@ impl SpeakerIdVm {
         })
     }
 
-    /// The recorded Save-failure banner text, for a test to assert on across
-    /// the crate boundary.
-    pub fn save_error_for_test(&self) -> Option<&str> {
+    /// The current Save-failure banner text, if any — `views::speaker_id::ui`
+    /// renders this alongside the still-`Ready` Step 2 form (see the
+    /// `save_error` field's own doc comment for why it's kept separate from
+    /// `stage` rather than folded into it).
+    pub fn save_error(&self) -> Option<&str> {
         self.save_error.as_deref()
+    }
+
+    /// The recorded Save-failure banner text, for a test to assert on across
+    /// the crate boundary — a thin alias of [`Self::save_error`] kept
+    /// distinct so production rendering never calls a `_for_test`-suffixed
+    /// method.
+    pub fn save_error_for_test(&self) -> Option<&str> {
+        self.save_error()
     }
 
     /// Whether a cancel has been requested for the in-flight run (see this
@@ -554,6 +580,12 @@ impl SpeakerIdVm {
         let diarize = Arc::clone(&deps.diarize);
         let store = Arc::clone(&deps.store);
         let ctx_for_thread = ctx.clone();
+        // The exact same `("speakers", id)` hash tuple `app.rs::show_speaker_
+        // viewports`/`repaint_other_open_viewports` build this window's
+        // `ViewportId` from — see `set_stage`'s doc for why a background
+        // thread must target this id specifically, never a bare
+        // `request_repaint()`.
+        let viewport_id = egui::ViewportId::from_hash_of(("speakers", source));
 
         std::thread::spawn(move || {
             let outcome = run_identify(
@@ -564,12 +596,14 @@ impl SpeakerIdVm {
                 store.as_ref(),
                 &status,
                 &cancel,
+                &ctx_for_thread,
+                viewport_id,
             );
             status
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .finished = Some(outcome);
-            ctx_for_thread.request_repaint();
+            ctx_for_thread.request_repaint_of(viewport_id);
         });
     }
 
@@ -665,6 +699,12 @@ impl SpeakerIdVm {
         let decoder = Arc::clone(&deps.decoder);
         let cancel = self.sample_decode_cancel.clone();
         let ctx = ctx.clone();
+        // Same reasoning as `start_identify`'s own worker (see `set_stage`'s
+        // doc): a bare `request_repaint()` from this background thread would
+        // target the root viewport, not this deferred window, and the
+        // Loading -> Ready transition would sit unnoticed until unrelated
+        // input repainted it.
+        let viewport_id = egui::ViewportId::from_hash_of(("speakers", self.source));
         let (tx, rx) = mpsc::channel();
         self.sample_rx = Some(rx);
 
@@ -673,7 +713,7 @@ impl SpeakerIdVm {
                 .decode_playback(&path, &cancel)
                 .map_err(|err| err.to_string());
             let _ = tx.send(pcm);
-            ctx.request_repaint();
+            ctx.request_repaint_of(viewport_id);
         });
     }
 
@@ -754,12 +794,44 @@ impl SpeakerIdVm {
             _ => None,
         }
     }
+
+    /// The in-flight run's cancel token, cloned — for a test to retain
+    /// across a `drop`/window-close and check `is_canceled()` on afterward
+    /// (the vm itself is gone by then, but a [`CancelToken`] clone shares
+    /// the same underlying flag as the original). `None` while nothing is
+    /// running.
+    pub fn run_cancel_token_for_test(&self) -> Option<CancelToken> {
+        self.run.as_ref().map(|handle| handle.cancel.clone())
+    }
+}
+
+impl Drop for SpeakerIdVm {
+    fn drop(&mut self) {
+        // Closing the window must not leave either background thread
+        // running for nothing (Buzz `closeEvent`, `speaker_identification_
+        // widget.py:806-817`, stops the identify thread — `_cleanup_thread`
+        // — and the media player on close). Every close path (the user's
+        // OS close click, a Save success, or the originating viewer
+        // closing and taking this window with it, `app.rs::close_viewer`)
+        // ends the same way: the last `Arc<Mutex<SpeakerIdVm>>` clone drops
+        // and this runs — the same "cleanup lives in `Drop`, not in every
+        // close call site" shape `ViewerVm::drop` already uses for its own
+        // background decode.
+        if let Some(handle) = &self.run {
+            handle.cancel.cancel();
+        }
+        self.sample_decode_cancel.cancel();
+    }
 }
 
 /// The background Identify run's full pipeline (decode → ensure models →
 /// diarize → map to segments) — a free function (not a `SpeakerIdVm` method)
 /// since it runs entirely off the UI thread with no `&self` to borrow;
-/// `status`/`cancel` are its only channel back to the vm.
+/// `status`/`cancel` are its only channel back to the vm. `ctx`/`viewport_id`
+/// are threaded through purely so every [`set_stage`] call can request a
+/// repaint of *this window specifically* — see [`set_stage`]'s own doc for
+/// why a plain `ctx.request_repaint()` would not do that.
+#[allow(clippy::too_many_arguments)]
 fn run_identify(
     path: &Path,
     source: TranscriptionId,
@@ -768,11 +840,13 @@ fn run_identify(
     store: &SqliteStore,
     status: &Mutex<RunStatus>,
     cancel: &CancelToken,
+    ctx: &egui::Context,
+    viewport_id: egui::ViewportId,
 ) -> Result<ReadyState, String> {
     if cancel.is_canceled() {
         return Err("canceled".to_string());
     }
-    set_stage(status, tr("speaker-id-decoding"), None);
+    set_stage(status, tr("speaker-id-decoding"), None, ctx, viewport_id);
     let pcm = decoder
         .decode(path, cancel)
         .map_err(|err| err.to_string())?;
@@ -780,23 +854,37 @@ fn run_identify(
     if cancel.is_canceled() {
         return Err("canceled".to_string());
     }
-    set_stage(status, tr("speaker-id-downloading-models"), Some(0.0));
+    set_stage(
+        status,
+        tr("speaker-id-downloading-models"),
+        Some(0.0),
+        ctx,
+        viewport_id,
+    );
     diarize.ensure_models(
-        &mut |fraction| set_stage(status, tr("speaker-id-downloading-models"), Some(fraction)),
+        &mut |fraction| {
+            set_stage(
+                status,
+                tr("speaker-id-downloading-models"),
+                Some(fraction),
+                ctx,
+                viewport_id,
+            );
+        },
         cancel,
     )?;
 
     if cancel.is_canceled() {
         return Err("canceled".to_string());
     }
-    set_stage(status, tr("speaker-id-identifying"), None);
+    set_stage(status, tr("speaker-id-identifying"), None, ctx, viewport_id);
     let turns = diarize.diarize(
         &pcm,
         &mut |_progress| {
             // Every `DiarizeStage` collapses to the same neutral label — see
             // this module's doc for why surfacing per-stage names would be
             // dishonest for a single monolithic `speakrs` call.
-            set_stage(status, tr("speaker-id-identifying"), None);
+            set_stage(status, tr("speaker-id-identifying"), None, ctx, viewport_id);
         },
         cancel,
     )?;
@@ -820,13 +908,36 @@ fn run_identify(
 }
 
 /// Writes `label`/`fraction` into the shared run status (silently tolerating
-/// a poisoned lock, the workspace `lock_recover` convention).
-fn set_stage(status: &Mutex<RunStatus>, label: String, fraction: Option<f32>) {
-    let mut guard = status
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard.label = label;
-    guard.fraction = fraction;
+/// a poisoned lock, the workspace `lock_recover` convention), then requests
+/// a repaint of `viewport_id` specifically.
+///
+/// The Speaker-ID window is a *deferred* egui viewport
+/// (`app.rs::show_speaker_viewports`), not the root one. A bare
+/// `ctx.request_repaint()` called from a background thread resolves to
+/// `egui::Context::viewport_id()`'s default — the root viewport — because
+/// there is no "current viewport" outside of an actual frame; `show_
+/// viewport_deferred` itself never self-schedules a repaint either. Without
+/// targeting `viewport_id` explicitly via [`egui::Context::request_repaint_of`],
+/// this window's progress bar/label would freeze (most visibly during the
+/// determinate download stage, whose fraction updates rapidly) until some
+/// unrelated input happened to repaint it — confirmed by reading `egui`
+/// 0.35's own `Context::request_repaint`/`request_repaint_of` source, not
+/// assumed.
+fn set_stage(
+    status: &Mutex<RunStatus>,
+    label: String,
+    fraction: Option<f32>,
+    ctx: &egui::Context,
+    viewport_id: egui::ViewportId,
+) {
+    {
+        let mut guard = status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.label = label;
+        guard.fraction = fraction;
+    }
+    ctx.request_repaint_of(viewport_id);
 }
 
 /// Reads `source`'s current segments from the store as plain [`Segment`]s —
@@ -881,9 +992,9 @@ pub fn pick_sample(
 /// `views::resizer::save_segments`'s create-new arm uses. Returns the new
 /// transcript's id; `app.rs`'s harvest sends
 /// `AppEvent::TranscriptionsUpdated { close_source: false, .. }` and closes
-/// this window on success, or records the error on
-/// [`SpeakerIdVm::save_error_for_test`] (leaving `stage` — and the user's
-/// edited names/merge choice — untouched) on failure.
+/// this window on success, or records the error on [`SpeakerIdVm::save_error`]
+/// (leaving `stage` — and the user's edited names/merge choice — untouched)
+/// on failure.
 pub fn save(
     store: &SqliteStore,
     source: TranscriptionId,
@@ -893,17 +1004,6 @@ pub fn save(
     let new_id = store.copy_transcription(source)?;
     store.mark_replaced_completed(new_id, &labeled)?;
     Ok(new_id)
-}
-
-/// The window title for a media file path: its basename (Buzz
-/// `paths.file_path_as_title` = `os.path.basename`) — duplicated (not
-/// shared) from `crate::viewer`/`views::resizer`'s own private copies,
-/// matching their existing convention rather than introducing a new shared
-/// utility module for a four-line function.
-fn file_basename(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1129,6 +1229,91 @@ mod tests {
             vm.can_identify(),
             "re-running Identify from Ready is allowed (Buzz parity)"
         );
+    }
+
+    #[test]
+    fn dropping_the_vm_cancels_the_in_flight_run_and_sample_decode() {
+        let status = Arc::new(Mutex::new(RunStatus {
+            label: "decoding".to_string(),
+            fraction: None,
+            finished: None,
+        }));
+        let run_cancel = CancelToken::new();
+        let mut vm = test_vm();
+        vm.run = Some(RunHandle {
+            status,
+            cancel: run_cancel.clone(),
+        });
+        let sample_cancel = vm.sample_decode_cancel.clone();
+
+        assert!(!run_cancel.is_canceled());
+        assert!(!sample_cancel.is_canceled());
+
+        drop(vm);
+
+        assert!(
+            run_cancel.is_canceled(),
+            "closing the window must cancel an in-flight Identify run \
+             (Buzz closeEvent :806-817)"
+        );
+        assert!(
+            sample_cancel.is_canceled(),
+            "closing the window must also cancel an in-flight sample-preview decode"
+        );
+    }
+
+    #[test]
+    fn dropping_a_vm_with_no_in_flight_run_does_not_panic() {
+        // No `run`, `sample_decode_cancel` never touched by a Play-sample
+        // click — the common case (a window closed before ever clicking
+        // Identify or Play sample) must drop cleanly.
+        let vm = test_vm();
+        drop(vm);
+    }
+
+    #[test]
+    fn set_stage_requests_repaint_of_the_given_viewport_specifically() {
+        let status = Arc::new(Mutex::new(RunStatus {
+            label: String::new(),
+            fraction: None,
+            finished: None,
+        }));
+        let ctx = egui::Context::default();
+        let this_window = egui::ViewportId::from_hash_of(("speakers", TranscriptionId::new()));
+        let a_different_window =
+            egui::ViewportId::from_hash_of(("speakers", TranscriptionId::new()));
+
+        // Note: `egui::ViewportId::ROOT` is *not* a useful "untouched"
+        // witness here — `egui::Context::default()` seeds it with an
+        // implicit outstanding repaint of its own (every fresh context
+        // wants its very first frame to paint), so it already reports
+        // `has_requested_repaint_for == true` before `set_stage` ever runs.
+        // A second, unrelated non-root id (never touched by this call) is
+        // the clean negative case instead.
+        assert!(!ctx.has_requested_repaint_for(&this_window));
+        assert!(!ctx.has_requested_repaint_for(&a_different_window));
+
+        set_stage(
+            &status,
+            "identifying".to_string(),
+            Some(0.5),
+            &ctx,
+            this_window,
+        );
+
+        assert!(
+            ctx.has_requested_repaint_for(&this_window),
+            "set_stage must request a repaint of the window's own deferred \
+             viewport, not rely on a bare request_repaint() (which resolves \
+             to root from a background thread — see set_stage's own doc)"
+        );
+        assert!(
+            !ctx.has_requested_repaint_for(&a_different_window),
+            "must target only the given viewport, not a blanket repaint"
+        );
+        let guard = status.lock().unwrap();
+        assert_eq!(guard.label, "identifying");
+        assert_eq!(guard.fraction, Some(0.5));
     }
 
     /// A minimal `SpeakerIdVm` for state-transition tests that never touch
