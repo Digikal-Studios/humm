@@ -1007,6 +1007,59 @@ impl LiveEngineSession for FailThenSucceedEngine {
     }
 }
 
+struct AlwaysFailEngineFactory {
+    capture: Arc<Mutex<MockCapture>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl LiveEngineFactory for AlwaysFailEngineFactory {
+    fn load(
+        &self,
+        _model_path: &Path,
+        _use_gpu: bool,
+    ) -> Result<Box<dyn LiveEngineSession>, EngineError> {
+        Ok(Box::new(AlwaysFailEngine {
+            capture: Arc::clone(&self.capture),
+            calls: Arc::clone(&self.calls),
+        }))
+    }
+}
+
+/// Review-fix coverage: fails every chunk, unconditionally — the
+/// `chunk_skipped_warning_clears_under_the_terminal_error_state` kittest's
+/// own engine, reaching `run_session`'s 3rd-consecutive-failure terminal
+/// `Error` (spec §7.4). Unlike `FailThenSucceedEngine`, it *does* pump each
+/// next batch itself (on calls 1 and 2, i.e. before the 2nd and 3rd calls) —
+/// this test only asserts the *end* state after the terminal error, not an
+/// intermediate transient one, so the same race the other engine's doc
+/// comment describes cannot bite here: there is no window in which an
+/// intermediate state needs to be observed before it's overwritten.
+struct AlwaysFailEngine {
+    capture: Arc<Mutex<MockCapture>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl LiveEngineSession for AlwaysFailEngine {
+    fn transcribe_live(
+        &mut self,
+        _samples: &[f32],
+        _opts: &LiveOptions,
+        _prompt: &str,
+        _cancel: &CancelToken,
+    ) -> Result<String, EngineError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n < 2 {
+            self.capture
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .pump(BATCH_SAMPLES);
+        }
+        Err(EngineError::Inference {
+            detail: format!("boom{n}"),
+        })
+    }
+}
+
 /// Resolves instantly to a scripted path — never a real ggml file, and
 /// never opened for real (`ScriptedEngine` ignores it entirely).
 struct InstantEnsurer {
@@ -1476,6 +1529,204 @@ fn chunk_skipped_shows_transient_warning() {
             .chunk_skipped_warning
             .is_none(),
         "no lingering warning once the session has stopped"
+    );
+}
+
+/// Review fix: the sibling case `chunk_skipped_shows_transient_warning`
+/// doesn't cover — a session that fails once (the warning shows) and is
+/// then **stopped directly, with no intervening successful chunk** to
+/// clear it via `SessionMessage::ChunkSkippedCleared`. Isolates
+/// `RecordingVm::finish_stopping`'s own clear (`recording.rs`): before the
+/// fix, nothing on this path ever cleared `chunk_skipped_warning`, so it
+/// would still read `Some("boom")` on the stopped view.
+#[test]
+fn chunk_skipped_warning_clears_on_stop_without_a_following_success() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("humm.sqlite3");
+    let store = Arc::new(SqliteStore::open(&db_path).expect("open store"));
+    let model_path = dir.path().join("fake-model.bin");
+    std::fs::write(&model_path, b"never opened by the scripted engine").expect("write");
+
+    let services = services::init_with(TestDeps {
+        store: Arc::clone(&store),
+        media_dir: dir.path().join("media"),
+        model_root: dir.path().join("models"),
+        settings: Settings::default(),
+        settings_path: dir.path().join("settings.toml"),
+        engines: Box::new(NeverCalledEngineFactory),
+        fetcher: None,
+        capabilities: Capabilities::default(),
+        artifacts: None,
+        secrets: services::default_test_secrets(),
+        translate: services::default_test_translate(),
+        llm: None,
+        validate: services::default_test_validate(),
+    });
+
+    // Only the first batch is ever pumped in this test (`SharedMockCapture`'s
+    // own `start()`) — a second is never fed, so `FailThenSucceedEngine`'s
+    // second call (and therefore any success) is never reached.
+    let mock_capture = Arc::new(Mutex::new(MockCapture::new(vec![0.5; 2 * BATCH_SAMPLES])));
+    let engine_calls = Arc::new(AtomicUsize::new(0));
+
+    let scripted_deps = RecordingDeps {
+        capture: Mutex::new(Box::new(SharedMockCapture(Arc::clone(&mock_capture)))),
+        store: Arc::clone(&store) as Arc<dyn LiveStore>,
+        model_ensurer: Arc::new(InstantEnsurer { model_path }),
+        engine_factory: Arc::new(FailThenSucceedEngineFactory {
+            calls: Arc::clone(&engine_calls),
+        }),
+        upload_factory: Arc::new(NeverCalledUploadFactory),
+        dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
+        secrets: Arc::new(MemorySecretStore::new()),
+    };
+
+    let mut harness = HarnessBuilder::default()
+        .with_size(egui::Vec2::new(1000.0, 600.0))
+        .build_eframe(move |_cc| {
+            let mut app = HummApp::new_for_test(services);
+            app.set_recording_deps_for_test(scripted_deps);
+            app
+        });
+    harness.step();
+
+    harness.state_mut().open_recording_window_for_test();
+    harness.step();
+    let vm_arc = harness
+        .state()
+        .recording_vm_for_test()
+        .expect("window is open");
+    let deps_arc = harness.state().recording_deps_for_test();
+
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    harness.step();
+
+    wait_for(&mut harness, "the chunk-skipped warning to appear", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            vm_arc
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .chunk_skipped_warning
+                .is_some()
+        }
+    });
+
+    // Stop directly — no batch2 pump, no intervening success.
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    wait_for(&mut harness, "the session to stop", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            vm_arc.lock().unwrap_or_else(|p| p.into_inner()).status == RecordingStatus::Stopped
+        }
+    });
+
+    assert!(
+        vm_arc
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .chunk_skipped_warning
+            .is_none(),
+        "finish_stopping must clear a still-showing chunk-skipped warning \
+         even with no intervening successful chunk"
+    );
+}
+
+/// Review fix: the 3rd-consecutive-chunk-failure path (spec §7.4) must not
+/// leave the tolerated-failure warning showing underneath its own terminal
+/// error — isolates `SessionMessage::Error`'s own clear (`app.rs`).
+#[test]
+fn chunk_skipped_warning_clears_under_the_terminal_error_state() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("humm.sqlite3");
+    let store = Arc::new(SqliteStore::open(&db_path).expect("open store"));
+    let model_path = dir.path().join("fake-model.bin");
+    std::fs::write(&model_path, b"never opened by the scripted engine").expect("write");
+
+    let services = services::init_with(TestDeps {
+        store: Arc::clone(&store),
+        media_dir: dir.path().join("media"),
+        model_root: dir.path().join("models"),
+        settings: Settings::default(),
+        settings_path: dir.path().join("settings.toml"),
+        engines: Box::new(NeverCalledEngineFactory),
+        fetcher: None,
+        capabilities: Capabilities::default(),
+        artifacts: None,
+        secrets: services::default_test_secrets(),
+        translate: services::default_test_translate(),
+        llm: None,
+        validate: services::default_test_validate(),
+    });
+
+    // 3 batches' worth: `AlwaysFailEngine` pumps the 2nd and 3rd itself
+    // (see its own doc comment for why that's race-free here).
+    let mock_capture = Arc::new(Mutex::new(MockCapture::new(vec![0.5; 3 * BATCH_SAMPLES])));
+    let engine_calls = Arc::new(AtomicUsize::new(0));
+
+    let scripted_deps = RecordingDeps {
+        capture: Mutex::new(Box::new(SharedMockCapture(Arc::clone(&mock_capture)))),
+        store: Arc::clone(&store) as Arc<dyn LiveStore>,
+        model_ensurer: Arc::new(InstantEnsurer { model_path }),
+        engine_factory: Arc::new(AlwaysFailEngineFactory {
+            capture: Arc::clone(&mock_capture),
+            calls: Arc::clone(&engine_calls),
+        }),
+        upload_factory: Arc::new(NeverCalledUploadFactory),
+        dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
+        secrets: Arc::new(MemorySecretStore::new()),
+    };
+
+    let mut harness = HarnessBuilder::default()
+        .with_size(egui::Vec2::new(1000.0, 600.0))
+        .build_eframe(move |_cc| {
+            let mut app = HummApp::new_for_test(services);
+            app.set_recording_deps_for_test(scripted_deps);
+            app
+        });
+    harness.step();
+
+    harness.state_mut().open_recording_window_for_test();
+    harness.step();
+    let vm_arc = harness
+        .state()
+        .recording_vm_for_test()
+        .expect("window is open");
+    let deps_arc = harness.state().recording_deps_for_test();
+
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    harness.step();
+
+    // The 3rd consecutive failure ends the session with a terminal error
+    // dialog (session.rs's own tolerate-3 contract).
+    wait_for(&mut harness, "the terminal error to appear", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            vm_arc
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .error_dialog
+                .is_some()
+        }
+    });
+
+    assert!(
+        vm_arc
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .chunk_skipped_warning
+            .is_none(),
+        "the terminal error must not leave a stale chunk-skipped warning \
+         showing underneath its own error dialog"
     );
 }
 

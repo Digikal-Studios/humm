@@ -3415,6 +3415,10 @@ impl HummApp {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 vm.error_dialog = Some(live_session::recording_error_dialog_text(&cause));
+                // Review fix: the terminal 3rd-consecutive-chunk-failure
+                // error (spec §7.4) must not leave the tolerated-failure
+                // warning showing underneath its own error dialog.
+                vm.chunk_skipped_warning = None;
             }
             SessionMessage::Stopped { measurement } => {
                 self.finish_live_session(vm_arc, measurement);

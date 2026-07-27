@@ -172,6 +172,31 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
             .any(|window| window == needle)
 }
 
+/// Finds `marker` (e.g. `b"name=\"language\""`) in `haystack`, then returns
+/// the bytes of *that specific multipart part's own value* — from just
+/// after the following blank line (`\r\n\r\n`, the end of that part's own
+/// headers) up to its terminating `\r\n`. Review fix (Minor): a plain
+/// whole-body [`contains`] check for a short value like `b"fr"` could pass
+/// by coincidence if those bytes ever appeared elsewhere in the body (the
+/// boundary string, a header, another field); scoping to the named part's
+/// own value is a strictly stronger assertion.
+fn value_after<'a>(haystack: &'a [u8], marker: &[u8]) -> Option<&'a [u8]> {
+    let marker_at = haystack
+        .windows(marker.len())
+        .position(|window| window == marker)?;
+    let after_marker = &haystack[marker_at + marker.len()..];
+    let blank_line = b"\r\n\r\n";
+    let value_at = after_marker
+        .windows(blank_line.len())
+        .position(|window| window == blank_line)?;
+    let value_start = &after_marker[value_at + blank_line.len()..];
+    let value_end = value_start
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .unwrap_or(value_start.len());
+    Some(&value_start[..value_end])
+}
+
 #[test]
 fn session_threads_task_and_language_to_the_right_endpoint_and_form_field() {
     let server = MockServer::start(2);
@@ -216,13 +241,13 @@ fn session_threads_task_and_language_to_the_right_endpoint_and_form_field() {
         requests[0].path, "/audio/transcriptions",
         "Transcribe must hit the transcriptions endpoint"
     );
-    assert!(
-        contains(&requests[0].body, b"name=\"language\""),
-        "a forced language on Transcribe must carry a language form field"
-    );
-    assert!(
-        contains(&requests[0].body, b"fr"),
-        "the language field's value must be the French code"
+    let language_value = value_after(&requests[0].body, b"name=\"language\"")
+        .expect("a forced language on Transcribe must carry a language form field");
+    assert_eq!(
+        language_value,
+        b"fr",
+        "the language field's value must be exactly the French code, got {:?}",
+        String::from_utf8_lossy(language_value)
     );
 
     assert_eq!(requests[1].method, "POST");

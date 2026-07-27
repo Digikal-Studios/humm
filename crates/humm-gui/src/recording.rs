@@ -645,9 +645,18 @@ pub struct RecordingVm {
     /// A tolerated live-chunk failure's detail (spec §7.4, ledger #9,
     /// [`crate::live_session::SessionMessage::ChunkSkipped`]), or `None`
     /// while nothing is showing. The render fn shows this as a transient
-    /// warning line (same treatment as the realtime-fit warning); cleared
-    /// by [`crate::live_session::SessionMessage::ChunkSkippedCleared`],
-    /// sent alongside the next successful chunk.
+    /// warning line (same treatment as the realtime-fit warning), gated on
+    /// [`Self::status`] being [`RecordingStatus::Recording`] (belt-and-
+    /// braces against a stale value ever painting on the stopped/error
+    /// views). Never outlives the failure it reported: cleared by
+    /// [`crate::live_session::SessionMessage::ChunkSkippedCleared`] (the
+    /// next successful chunk), by [`crate::live_session::SessionMessage::
+    /// Error`] (review fix — the terminal 3rd-consecutive-failure error
+    /// must not show underneath its own error dialog), by [`Self::
+    /// finish_stopping`] (review fix — a Stop landing while the warning is
+    /// showing must not leave it stuck on the stopped view), and by
+    /// [`Self::on_record_clicked`]'s Stopped→Recording reset (a fresh
+    /// session starts clean).
     pub chunk_skipped_warning: Option<String>,
     /// The Api Key row's commit-failure modal (F-061b), if a commit this
     /// frame produced one — the recording window's own instance of
@@ -851,8 +860,9 @@ impl RecordingVm {
     /// `on_transcriber_finished`/`on_transcriber_error` ->
     /// `set_recording_status_stopped`, `:755-763`): restores the ordinary
     /// stopped-state UI (options/device re-enabled via `status`,
-    /// presentation bar hidden, copy bar shown) and restarts the meter-only
-    /// capture. Not called when [`Self::pending_close`] is set — the window
+    /// presentation bar hidden, copy bar shown, [`Self::chunk_skipped_warning`]
+    /// cleared — review fix) and restarts the meter-only capture. Not
+    /// called when [`Self::pending_close`] is set — the window
     /// is closing anyway, so `app.rs` sets [`Self::close_requested`]
     /// instead (Buzz's `_do_close` skips this same restore on its
     /// close-while-recording path — [`Self::close`] performs the equivalent
@@ -880,6 +890,12 @@ impl RecordingVm {
         self.presentation_bar_visible = false;
         self.copy_bar_visible = true;
         self.prep = None;
+        // Review fix: a Stop landing while a tolerated-failure warning is
+        // still showing must not leave it stuck on the stopped view --
+        // nothing else clears it on this path (the session simply ends,
+        // it need not have failed a 3rd time or ever sent another
+        // successful chunk).
+        self.chunk_skipped_warning = None;
         self.start_meter_only_capture(deps);
         self.meter_frame_log = None; // flushes via MeterFrameLog::Drop
         self.presentation.flush_pending_save(presentation_settings)

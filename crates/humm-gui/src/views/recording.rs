@@ -331,10 +331,17 @@ pub fn recording_ui(
 
     // A tolerated live-chunk failure (spec §7.4, ledger #9): a transient
     // warning line, same treatment as the realtime-fit warning above.
-    // Cleared once the next chunk succeeds
-    // (`live_session::SessionMessage::ChunkSkippedCleared`) -- never
-    // outlives the failure it reported.
-    if let Some(detail) = &vm.chunk_skipped_warning {
+    // Primary mechanism: `RecordingVm` clears the field itself on every
+    // path that ends the transient condition (a success via
+    // `ChunkSkippedCleared`, a terminal `Error`, or `finish_stopping` --
+    // see `RecordingVm::chunk_skipped_warning`'s own doc for the full
+    // list, review fix). The `status == Recording` gate here is
+    // belt-and-braces on top of that, not a substitute for it: the field
+    // is session-scoped and must never paint on the stopped/error views
+    // even if some future path forgot to clear it.
+    if vm.status == RecordingStatus::Recording
+        && let Some(detail) = &vm.chunk_skipped_warning
+    {
         ui.colored_label(
             ui.visuals().warn_fg_color,
             tr_args(
