@@ -64,10 +64,17 @@ pub(crate) fn map_lang_id(id: i32) -> Option<Language> {
 #[derive(Debug, Clone, Copy)]
 pub struct WhisperLangDetector {
     /// `true` forces CPU-only inference (no Metal/CoreML) for every context
-    /// this detector creates — resolved once from `settings.models.force_cpu`
-    /// (+ `HUMM_FORCE_CPU`) at construction time, mirroring
-    /// `humm-gui::engine_factory::GuiEngineFactory::create_whisper`'s own
-    /// combination of the two.
+    /// this detector creates. The GUI's `services::init` computes this from
+    /// the same two inputs `GuiEngineFactory::create_whisper` combines for
+    /// the main transcription engine (`HUMM_FORCE_CPU` + `settings.models.
+    /// force_cpu`) — but, unlike `create_whisper`, which re-reads the setting
+    /// fresh on every engine construction so a Preferences checkbox flip is
+    /// honored by the very next task with no restart, this detector is
+    /// constructed exactly once at startup (this struct's own `new` takes a
+    /// plain `bool`, not a live settings handle), so a force-CPU toggle only
+    /// takes effect for language detection after a restart. Documented
+    /// divergence, not a bug: `WhisperLangDetector::new(force_cpu: bool)`'s
+    /// signature is a snapshot by design.
     force_cpu: bool,
 }
 

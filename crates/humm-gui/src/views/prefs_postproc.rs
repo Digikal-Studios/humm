@@ -30,11 +30,15 @@
 //! name is genuinely lowercase-`l`, unlike its siblings' title-cased names,
 //! and stays that way here rather than being "corrected"). No section
 //! carries its own top-level explainer beyond the shared
-//! `prefs-postproc-header` line above every section; a field only gets its
-//! own hover `-desc` text when Buzz's `ConfigField` for it actually declares
-//! a `description` (`download_tiny_if_missing` does,
-//! `plugin.py:48-56`; `keep_denoised_file` doesn't, hence no
-//! `prefs-postproc-dfn-keep-file-desc`).
+//! `prefs-postproc-header` line above every section. A BOOL checkbox field
+//! gets its own hover `-desc` text only when Buzz's `ConfigField` for it
+//! actually declares a `description` (`download_tiny_if_missing` does,
+//! `plugin.py:46-55`; `keep_denoised_file` doesn't, hence no
+//! `prefs-postproc-dfn-keep-file-desc`); Buzz's few TEXT-field descriptions
+//! (`ai_summary`/`export_docx`'s `output_folder`, "Leave empty to save next
+//! to the source file") instead became this tab's shared
+//! `prefs-postproc-output-folder-hint` placeholder text, not a hover
+//! tooltip — a per-field-type rendering choice, not an inconsistency.
 //!
 //! ## Persistence
 //!
@@ -188,7 +192,7 @@ pub struct PostprocTabState {
     /// "Enable Enhanced language detection" checkbox.
     pub language_detection_enabled: bool,
     /// `download_tiny_if_missing` checkbox (Buzz "Download tiny model if
-    /// none available", `plugin.py:48-50`, label ported verbatim).
+    /// none available", `plugin.py:48`, label ported verbatim).
     pub download_tiny_if_missing: bool,
 
     // -- Automatic Transcript Resizer (F-116) --
@@ -419,7 +423,7 @@ pub fn commit_language_detection_enabled(
 }
 
 /// Commits the "Download tiny model if none available" checkbox (Buzz
-/// `config_fields` label verbatim, `plugin.py:48-50`).
+/// `config_fields` label verbatim, `plugin.py:48`).
 pub fn commit_download_tiny_if_missing(
     state: &PostprocTabState,
     settings: &Mutex<Settings>,
