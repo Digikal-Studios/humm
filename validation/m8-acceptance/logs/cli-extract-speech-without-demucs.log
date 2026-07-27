@@ -1,0 +1,2 @@
+error: demucs not found — install it (e.g. pipx install demucs) or omit --extract-speech
+Run `humm add --help` for usage.

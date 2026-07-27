@@ -1,0 +1,3 @@
+2026-07-27T17:09:00.284043+03:00 WARN whisper_rs::ggml_logging_hook:49 — ggml_metal_device_init: tensor API disabled for pre-M5 and pre-A19 devices
+error: /var/folders/mb/3vrtjl392919v841kxl94_500000gn/T/m8acc/runs/H-corrupt/media/corrupt-audio.mp3: decode failed: [mp3float @ 0x7f7ee771bec0] Header missing
+    Last message repeated 73 times

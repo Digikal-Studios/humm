@@ -1,0 +1,23 @@
+running 21 tests
+test cancel_kills_decode_mid_read ... ok
+test cancel_kills_decode_pre_canceled_fast_path ... ok
+test decode_corrupt_input_reports_stderr ... ok
+test decode_french_mp3_matches_probed_duration ... ok
+test decode_mono_at_48k_matches_requested_rate_and_duration ... ok
+test decode_playback_stereo_44100_matches_duration ... ok
+test decode_synthesized_sine_wav ... ok
+test encode_mp3_cancel_kills_mid_encode ... ok
+test encode_mp3_duration_matches_pcm ... ok
+test encode_mp3_precanceled_returns_immediately ... ok
+test encode_mp3_round_trips_through_decode ... ok
+test fetch_cancel_kills_download_mid_transfer ... ok
+test fetch_downloads_file_and_reports_progress ... ok
+test missing_binary_actionable ... ok
+test probe_and_stream_fractional_29_97_fps ... ok
+test probe_mp3 ... ok
+test probe_reports_video_info ... ok
+test real_demucs_isolates_vocals_from_whisper_french ... ok
+test video_seek_restarts_at_position ... ok
+test video_stream_yields_monotonic_frames_with_dimensions ... ok
+test yt_dlp_capability_probe_reports_version_when_present ... ok
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.63s

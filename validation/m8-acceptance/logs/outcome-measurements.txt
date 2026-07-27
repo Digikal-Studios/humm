@@ -1,0 +1,12 @@
+# Outcome measurements (ffmpeg astats RMS level dB), 2026-07-27
+
+## F-027 speech isolation — humm's own _speech.mp3 (captured mid-run from the CLI -e queue)
+input : speech-plus-music.wav  = whisper-french.mp3 + (220 Hz tremolo sine + 330 Hz sine) @0.35
+file                         full-band    220Hz        330Hz        3000Hz      
+speech-plus-music.wav        -25.065411   -33.878788   -32.648366   -63.987182  
+captured_speech.mp3          -26.728016   -38.483626   -45.143009   -63.905187  
+
+## F-112 noise reduction — humm's own _DeepFilterNet3.wav (keep_denoised_file = true)
+file                               RMS-dB       noise-floor-dB peak-dB     
+french-noisy2.wav                  -22.270461   -22.883681     -4.940919   
+french-noisy2_DeepFilterNet3.wav   -24.098112   -inf           -5.888800   
