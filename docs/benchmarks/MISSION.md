@@ -27,10 +27,15 @@ segfaults inside ggml's Metal allocator on model load).
 
 **The two `ggml-small.bin` files are byte-identical** (`md5`
 `e428ac3ab827de7b1a37328101eaf1ea` on both sides — humm's cached copy and
-Buzz's freshly-downloaded one). Both sides run the same GGML weights, the
-same Silero VAD model, on the same Metal+Core ML backend. **No backend
-asymmetry** — the whispercpp-class path built and ran on both sides; the
-Task 18 brief's torch-fallback contingency was not needed.
+Buzz's freshly-downloaded one). **The two Silero VAD models are also
+byte-identical** (`md5 ee99234b74067018b10d324cc8dc8119` on both sides —
+humm's `~/Library/Application Support/humm/models/ggml-silero-v6.2.0.bin`
+vs Buzz's `buzz/whisper_cpp/ggml-silero-v6.2.0.bin`), closing the "same VAD
+model" claim with an actual hash rather than an assumption from matching
+filenames. Both sides run the same GGML weights, the same Silero VAD
+model, on the same Metal+Core ML backend. **No backend asymmetry** — the
+whispercpp-class path built and ran on both sides; the Task 18 brief's
+torch-fallback contingency was not needed.
 
 ## 1. Environment setup (one-time, sandbox-lifted)
 
@@ -47,16 +52,28 @@ genuine environment findings, not incidental noise:
 2. **The `cmake` PyPI wheel silently built whisper.cpp for the wrong
    architecture.** Homebrew's `/usr/local/bin/uv` is an **x86_64** binary
    (this machine is arm64; Homebrew installed it under the Rosetta-only
-   `/usr/local` prefix). Even after pinning `--python` to a genuine arm64
-   CPython (`uv python install cpython-3.12.13-macos-aarch64-none`), every
-   `uv sync` that actually invoked hatchling's `make buzz/whisper_cpp`
-   build hook compiled with `-arch x86_64` throughout and died with `error:
-   unknown target CPU 'apple-m4'` (ggml's `-march=native` resolving to an
-   arm64 CPU name inside an x86_64 compile). Root cause: the `cmake` package
-   on PyPI ships a **universal2** binary, and macOS's default fat-binary
-   slice selection for a translated (Rosetta) process's descendants prefers
-   x86_64 all the way down the tree — even through a genuinely arm64-only
-   Python in between. **Fix:** bootstrap a native arm64 `uv` (`python3.12 -m
+   `/usr/local` prefix) — confirmed directly rather than inferred:
+   `file /usr/local/bin/uv` reports `Mach-O 64-bit executable x86_64`, and
+   `lipo -info /usr/local/bin/uv` confirms it is not even a fat binary
+   (`Non-fat file: /usr/local/bin/uv is architecture: x86_64`) — there is
+   no arm64 slice to fall back to. Even after pinning `--python` to a
+   genuine arm64 CPython (`uv python install
+   cpython-3.12.13-macos-aarch64-none`), every `uv sync` that actually
+   invoked hatchling's `make buzz/whisper_cpp` build hook compiled with
+   `-arch x86_64` throughout and died with `error: unknown target CPU
+   'apple-m4'` (ggml's `-march=native` resolving to an arm64 CPU name
+   inside an x86_64 compile). Root cause: the `cmake` package on PyPI ships
+   a **universal2** binary, and macOS's default fat-binary slice selection
+   for a translated (Rosetta) process's descendants prefers x86_64 all the
+   way down the tree — even through a genuinely arm64-only Python in
+   between. **Empirically confirmed, not just theorized**: spawning `uname
+   -m` and `make` *directly* from that same arm64 Python (bypassing the
+   x86_64 `uv` ancestor) reported `arm64` correctly every time; the
+   x86_64-slice selection only appeared when the same universal
+   `cmake`/`make`/`clang` chain was reached by tracing back through the
+   x86_64 `uv` process as an ancestor — isolating the cause to the
+   ancestor chain, not to the arm64 Python or to `cmake`/`make` themselves.
+   **Fix:** bootstrap a native arm64 `uv` (`python3.12 -m
    venv` + `pip install uv`, using the arm64 CPython — `uv 0.11.32
    aarch64-apple-darwin`) and re-run the sync with that binary. First
    attempt with the arm64 `uv` built whisper.cpp correctly (Metal + Core ML,
@@ -147,10 +164,10 @@ of scope — different engines/params, per the diff rules).
 
 | Pair | Order | humm wall | Buzz wall | humm peak RSS | Buzz peak RSS |
 |---|---|---|---|---|---|
-| A | humm→buzz | 8.52 s | **24.80 s** | 862.83 MB | 861.15 MB |
-| B | buzz→humm | 9.02 s | 12.76 s | 866.60 MB | 856.91 MB |
-| C | humm→buzz | 8.44 s | 12.76 s | 863.79 MB | 856.90 MB |
-| D | buzz→humm | 8.53 s | 12.67 s | 865.29 MB | 856.75 MB |
+| A | humm→buzz | 8.52 s | **24.80 s** | 862.75 MB | 861.06 MB |
+| B | buzz→humm | 9.02 s | 12.76 s | 866.52 MB | 856.83 MB |
+| C | humm→buzz | 8.44 s | 12.76 s | 863.70 MB | 856.81 MB |
+| D | buzz→humm | 8.53 s | 12.67 s | 865.20 MB | 856.67 MB |
 
 **Pair A's Buzz reading (24.80 s) is a clear outlier** against its own
 subsequent readings (12.76/12.76/12.67 s — near-identical to three decimal
@@ -158,12 +175,18 @@ places) on an otherwise-identical, already-warm invocation. Flagged rather
 than blended in, per the M7/M8 convention. humm's four readings show no
 comparable swing (8.44–9.02 s, a ~7% band) — the outlier is one-sided.
 
-- **Wall clock, pooled over all 4 pairs**: humm 8.6275 s, Buzz 15.9975 s →
-  **humm 1.85× faster**.
+- **Wall clock, pooled over all 4 pairs**: humm 8.6275 s, Buzz 15.7475 s
+  (24.80+12.76+12.76+12.67 = 62.99 s / 4) → **humm 1.83× faster**.
+  *Correction: an earlier draft of this doc summed the four Buzz readings
+  as 63.99 s instead of the correct 62.99 s, giving a pooled mean of
+  15.9975 s and a stated 1.85× — that arithmetic error also made it into
+  commit `1e68879`'s message, which is immutable; the corrected figures
+  here (15.7475 s, 1.83×) supersede it.*
 - **Wall clock, excluding pair A's Buzz outlier (pairs B–D)**: humm 8.6633 s,
-  Buzz 12.7233 s → **humm 1.47× faster**. This is the more representative
-  reading; both are reported rather than picking the more flattering one.
-- **Peak RSS, pooled over all 4 pairs**: humm 864.63 MB, Buzz 857.93 MB —
+  Buzz 12.73 s (12.76+12.76+12.67 = 38.19 s / 3) → **humm 1.47× faster**.
+  This is the more representative reading; both are reported rather than
+  picking the more flattering one.
+- **Peak RSS, pooled over all 4 pairs**: humm 864.54 MB, Buzz 857.84 MB —
   **essentially parity** (humm ~0.8% higher). This is the honest surprise
   of this benchmark: during active transcription, peak memory is dominated
   by the shared whisper.cpp engine's own working set (the identical ggml
@@ -183,7 +206,7 @@ per side (cheap, per the brief).
 |---|---|---|
 | Sample 1 | 117,328 KB | 639,904 KB |
 | Sample 2 | 117,088 KB | 650,144 KB |
-| Mean | 114.46 MB | 630.02 MB |
+| Mean | 114.46 MB | 629.91 MB |
 
 **humm's idle window uses 5.50× less memory than Buzz's.** Unlike §3's
 active-transcription RSS (engine-dominated, near parity), idle memory is
@@ -217,7 +240,7 @@ hide the split result:
 | Metric | Result | Verdict |
 |---|---|---|
 | Startup-to-interactive (warm) | humm 6.19× faster | **Decisive** |
-| E2e wall clock (small model, whispercpp-class, pooled all 4 pairs) | humm 1.85× faster | Faster, moderate |
+| E2e wall clock (small model, whispercpp-class, pooled all 4 pairs) | humm 1.83× faster | Faster, moderate |
 | E2e wall clock (outlier-pair excluded, B–D only) | humm 1.47× faster | Faster, moderate |
 | Peak RSS during transcription | ~parity (humm +0.8%) | **Not decisive — a tie** |
 | Idle-GUI RSS | humm 5.50× less | **Decisive** |
@@ -228,7 +251,7 @@ native Rust/egui binary vs. a Python/Qt/torch process), and neither
 metric is close. On the metric this project's own transcription-path
 regression gate treats as primary — actual end-to-end transcription
 time — humm is consistently faster (every pair, every reading, no sign
-flips) but by a moderate 1.5–1.85×, not an order of magnitude: both sides
+flips) but by a moderate 1.47–1.83×, not an order of magnitude: both sides
 are running the *identical* whisper.cpp engine, the identical model
 weights, and the identical VAD model on the identical GPU, so the ceiling
 on how much faster the inference itself can be is inherently limited — the
