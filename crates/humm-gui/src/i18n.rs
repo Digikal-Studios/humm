@@ -6,16 +6,18 @@
 //! things:
 //!
 //! - [`AVAILABLE_LOCALES`]: the registry of embedded catalogs — `en_US` plus
-//!   the `ca_ES`/`da_DK`/`nl`/`de_DE`/`es_ES`/`it_IT`/`ja_JP`/`pl_PL`/
-//!   `pt_BR`/`ru`/`zh_CN` set (F-008b, design spec §9.2), in Buzz's own
-//!   `ui_locales` order (review-corrected, M8 Task 13 follow-up: `nl` sits
-//!   right after `da_DK`, not after `it_IT` — see `general_preferences_
-//!   widget.py:34-50`, whose dict order is `en_US, ca_ES, da_DK, nl, de_DE,
-//!   es_ES, it_IT, ja_JP, lv_LV, pl_PL, pt_BR, ru, uk_UA, zh_CN, zh_TW`).
-//!   Adding one of Buzz's remaining 3 locales (`lv_LV`, `uk_UA`, `zh_TW`) is
-//!   one array element + one `include_str!` + one catalog file: no code
-//!   changes here, and the per-locale completeness tests at the bottom of
-//!   this module pick the new entry up automatically.
+//!   the `ca_ES`/`da_DK`/`nl`/`de_DE`/`es_ES`/`it_IT`/`ja_JP`/`lv_LV`/
+//!   `pl_PL`/`pt_BR`/`ru`/`uk_UA`/`zh_CN`/`zh_TW` set (F-008b, design spec
+//!   §9.2), in Buzz's own `ui_locales` order (review-corrected, M8 Task 13
+//!   follow-up: `nl` sits right after `da_DK`, not after `it_IT` — see
+//!   `general_preferences_widget.py:34-50`, whose dict order is `en_US,
+//!   ca_ES, da_DK, nl, de_DE, es_ES, it_IT, ja_JP, lv_LV, pl_PL, pt_BR, ru,
+//!   uk_UA, zh_CN, zh_TW`). M8 Task 15 lands the last three (`lv_LV`,
+//!   `uk_UA`, `zh_TW`) — all 15 of Buzz's own locales are now embedded, so
+//!   this registry is complete; a future Buzz-side locale addition would
+//!   still be the same one-array-element + one-`include_str!` +
+//!   one-catalog-file shape, and the per-locale completeness tests at the
+//!   bottom of this module would pick it up automatically.
 //! - [`negotiate`]/[`negotiate_in`]: Buzz's own gettext fallback chain
 //!   (`buzz/locale.py:15-21`) reimplemented over the registry — exact code
 //!   match, then language-prefix match, then `en_US`.
@@ -100,6 +102,9 @@ const IT_FTL: &str = include_str!("../assets/i18n/it/humm.ftl");
 /// The embedded Japanese catalog source (F-008b, M8 Task 14).
 const JA_FTL: &str = include_str!("../assets/i18n/ja/humm.ftl");
 
+/// The embedded Latvian catalog source (F-008b, M8 Task 15).
+const LV_FTL: &str = include_str!("../assets/i18n/lv/humm.ftl");
+
 /// The embedded Polish catalog source (F-008b, M8 Task 14).
 const PL_FTL: &str = include_str!("../assets/i18n/pl/humm.ftl");
 
@@ -109,32 +114,46 @@ const PT_BR_FTL: &str = include_str!("../assets/i18n/pt-BR/humm.ftl");
 /// The embedded Russian catalog source (F-008b, M8 Task 14).
 const RU_FTL: &str = include_str!("../assets/i18n/ru/humm.ftl");
 
+/// The embedded Ukrainian catalog source (F-008b, M8 Task 15).
+const UK_FTL: &str = include_str!("../assets/i18n/uk/humm.ftl");
+
 /// The embedded Simplified Chinese catalog source (F-008b).
 const ZH_CN_FTL: &str = include_str!("../assets/i18n/zh-CN/humm.ftl");
 
-/// The locale registry: every catalog embedded into this binary — `en_US`
-/// plus the F-008b set, listed in Buzz's own `ui_locales` order
+/// The embedded Traditional Chinese catalog source (F-008b, M8 Task 15) --
+/// renders through the same bundled Noto Sans SC font as `zh_CN`/`ja_JP`
+/// (design spec §7.1/ledger #8), so its Traditional-Han text displays with
+/// Simplified-preferred glyph variants for the handful of codepoints where
+/// SC/TC glyph shapes differ (the text itself is correct Traditional
+/// Chinese, only the *glyph rendering* is SC-shaped) -- see this catalog's
+/// own header comment for the full note.
+const ZH_TW_FTL: &str = include_str!("../assets/i18n/zh-TW/humm.ftl");
+
+/// The locale registry: every catalog embedded into this binary — all 15 of
+/// Buzz's own `ui_locales` codes (F-008b), listed in Buzz's own dict order
 /// (`general_preferences_widget.py:34-50`), which is also the order the
-/// Preferences language combo renders. Adding one of Buzz's remaining 3
-/// locales (`lv_LV`, `uk_UA`, `zh_TW`) is one array element + one
-/// `include_str!` here and one catalog file: the registry is deliberately
-/// the *entire* code diff a new locale needs, and this module's per-locale
-/// completeness tests iterate this array, so a new entry is covered the
-/// moment it lands.
+/// Preferences language combo renders. M8 Task 15 lands the last three
+/// (`lv_LV`, `uk_UA`, `zh_TW`), completing the set; this module's per-locale
+/// completeness tests iterate this array, so any future entry (a
+/// hypothetical new Buzz locale) would still be covered the moment it
+/// lands, the same one-array-element + one-`include_str!` +
+/// one-catalog-file shape as every locale added so far.
 ///
 /// Index `0` is always `en_US` — both [`negotiate_in`]'s final fallback and
 /// [`ACTIVE_LOCALE_INDEX`]'s initial value depend on that.
 ///
 /// `langid` note: `zh_CN`'s tag is the plain `zh-CN` rather than
-/// `zh-Hans-CN`. Both parse, and `unic_langid` treats the script as implicit
-/// for `zh-CN`; the shorter form keeps the tag a mechanical rewrite of the
-/// Buzz code, and Fluent only consults it for plural rules and bidi
-/// direction, neither of which differs between the two spellings. `nl`'s tag
-/// is likewise the bare `"nl"` — Buzz's own code for Dutch has no region
-/// either, and a bare primary-language subtag is already a valid BCP-47 tag,
-/// so no region needs to be invented for it. `ru`'s tag (M8 Task 14) is the
-/// same bare `"ru"` for the same reason — Buzz's own code for Russian
-/// carries no region either.
+/// `zh-Hans-CN` (and `zh_TW`'s, M8 Task 15, is likewise the plain `zh-TW`
+/// rather than `zh-Hant-TW`). Both forms parse, and `unic_langid` treats the
+/// script as implicit for both `zh-CN`/`zh-TW`; the shorter form keeps the
+/// tag a mechanical rewrite of the Buzz code, and Fluent only consults it
+/// for plural rules and bidi direction, neither of which differs between
+/// the two spellings for either locale. `nl`'s tag is likewise the bare
+/// `"nl"` — Buzz's own code for Dutch has no region either, and a bare
+/// primary-language subtag is already a valid BCP-47 tag, so no region
+/// needs to be invented for it. `ru`'s tag (M8 Task 14) is the same bare
+/// `"ru"` for the same reason — Buzz's own code for Russian carries no
+/// region either.
 pub static AVAILABLE_LOCALES: &[LocaleEntry] = &[
     LocaleEntry {
         buzz_code: "en_US",
@@ -177,6 +196,11 @@ pub static AVAILABLE_LOCALES: &[LocaleEntry] = &[
         ftl: JA_FTL,
     },
     LocaleEntry {
+        buzz_code: "lv_LV",
+        langid: "lv-LV",
+        ftl: LV_FTL,
+    },
+    LocaleEntry {
         buzz_code: "pl_PL",
         langid: "pl-PL",
         ftl: PL_FTL,
@@ -192,9 +216,19 @@ pub static AVAILABLE_LOCALES: &[LocaleEntry] = &[
         ftl: RU_FTL,
     },
     LocaleEntry {
+        buzz_code: "uk_UA",
+        langid: "uk-UA",
+        ftl: UK_FTL,
+    },
+    LocaleEntry {
         buzz_code: "zh_CN",
         langid: "zh-CN",
         ftl: ZH_CN_FTL,
+    },
+    LocaleEntry {
+        buzz_code: "zh_TW",
+        langid: "zh-TW",
+        ftl: ZH_TW_FTL,
     },
 ];
 
@@ -216,10 +250,13 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "locale-name-es-es",
         "locale-name-it-it",
         "locale-name-ja-jp",
+        "locale-name-lv-lv",
         "locale-name-pl-pl",
         "locale-name-pt-br",
         "locale-name-ru",
+        "locale-name-uk-ua",
         "locale-name-zh-cn",
+        "locale-name-zh-tw",
         "hero-drop",
         "hero-import-button",
         "table-col-file-name",
@@ -797,16 +834,24 @@ pub fn active_locale() -> &'static str {
 /// ([`active_locale`]). Buzz's own gate reads `settings.value(UI_LOCALE)`
 /// straight off the stored setting, with no negotiation step at all
 /// (`transcription_options_group_box.py:40`: `self.ui_locale =
-/// self.settings.value(Settings.Key.UI_LOCALE, QLocale().name())`); humm's
-/// [`negotiate`] exists only to resolve a request against the *subset* of
-/// Buzz's 15 locale catalogs humm currently embeds, and with `lv_LV` still
-/// not among them it can never actually resolve to `lv_LV` — it falls back
-/// to `en_US`. Gating on [`active_locale`] instead
-/// would therefore make this permanently unreachable even when a user
-/// explicitly requests `lv_LV` — design spec §9.3 calls this out explicitly:
-/// "the lv_LV Lumii gate reads the *setting*, so it works even before the lv
-/// catalog is ported (parity with Buzz, whose gate also reads the setting,
-/// not the translation files)".
+/// self.settings.value(Settings.Key.UI_LOCALE, QLocale().name())`); design
+/// spec §9.3 calls this out explicitly: "the lv_LV Lumii gate reads the
+/// *setting*, so it works even before the lv catalog is ported (parity with
+/// Buzz, whose gate also reads the setting, not the translation files)".
+///
+/// That "even before the lv catalog is ported" clause was load-bearing
+/// before M8 Task 15: with `lv_LV` not yet among [`AVAILABLE_LOCALES`],
+/// [`negotiate`] could never resolve `"lv_LV"` to itself (it fell back to
+/// `en_US`), so gating on [`active_locale`] instead would have made this
+/// permanently unreachable even when a user explicitly requested `lv_LV`.
+/// Task 15 lands the `lv_LV` catalog, so `negotiate` *can* now resolve it —
+/// but the design decision to read the raw setting rather than the
+/// negotiated locale is unchanged: it was never really "a workaround for a
+/// missing catalog", it is humm's actual port of Buzz's own
+/// no-negotiation-at-all gate, and stays exactly as direct a comparison now
+/// that the gap it also happened to route around is gone (see
+/// `lv_lv_catalog_present_and_lumii_gate_reads_raw_setting_not_negotiated`
+/// below).
 ///
 /// `system_locale` is an **injected** value, never read here — the caller
 /// derives it from [`locale_from_env_vars`] the same way `HummApp::new`'s
@@ -1365,14 +1410,25 @@ mod tests {
         assert!(!lumii_locale_requested(&settings, Some("en_US")));
     }
 
-    /// The gate's whole reason for existing (design spec §9.3): with `lv_LV`
-    /// still not among the embedded catalogs, [`negotiate`] can never
-    /// resolve `"lv_LV"` to itself — proving [`active_locale`] would be the
-    /// wrong thing to gate on, and [`lumii_locale_requested`]'s raw-request
-    /// read is what actually makes the gate reachable pre-lv-catalog.
+    /// Historical note (design spec §9.3, updated by M8 Task 15): before
+    /// the `lv_LV` catalog was ported, [`negotiate`] could never resolve
+    /// `"lv_LV"` to itself (no such entry in [`AVAILABLE_LOCALES`] yet), so
+    /// this test proved [`lumii_locale_requested`]'s raw-request read was
+    /// the *only* thing making the gate reachable at all — gating on
+    /// [`active_locale`] instead would have been permanently broken for
+    /// `lv_LV` specifically. Task 15 lands the `lv_LV` catalog (all 15 Buzz
+    /// locales are now embedded), so `negotiate` *does* resolve it now —
+    /// the gap this test used to document is gone. What doesn't change is
+    /// the design decision itself: the gate still reads the raw setting,
+    /// not the negotiated locale, because that is what Buzz's own gate
+    /// does (`transcription_options_group_box.py:40`), independent of
+    /// whether every catalog happens to be ported. This test's job changes
+    /// accordingly, from "the gate is reachable despite negotiate's gap" to
+    /// "negotiate and the gate now agree there's no gap, and the gate
+    /// still isn't wired through negotiate's result".
     #[test]
-    fn negotiate_never_resolves_lv_lv_while_lumii_locale_requested_still_does() {
-        assert_ne!(negotiate(Some("lv_LV")).buzz_code, "lv_LV");
+    fn lv_lv_catalog_present_and_lumii_gate_reads_raw_setting_not_negotiated() {
+        assert_eq!(negotiate(Some("lv_LV")).buzz_code, "lv_LV");
         let mut settings = Settings::default();
         settings.ui.locale = Some("lv_LV".to_string());
         assert!(lumii_locale_requested(&settings, None));
@@ -1687,10 +1743,13 @@ mod tests {
             ("es_ES", "Preferencias"),
             ("it_IT", "Preferenze"),
             ("ja_JP", "設定"),
+            ("lv_LV", "Iestatījumi"),
             ("pl_PL", "Ustawienia"),
             ("pt_BR", "Preferências"),
             ("ru", "Настройки"),
+            ("uk_UA", "Налаштування"),
             ("zh_CN", "偏好设置"),
+            ("zh_TW", "偏好設定"),
         ] {
             set_locale(code);
             assert_eq!(tr("prefs-title"), expected, "prefs-title under {code}");

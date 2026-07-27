@@ -7,13 +7,13 @@
 ## This is the source catalog: `en` is `AVAILABLE_LOCALES[0]`, every
 ## negotiation's final fallback, and the key set every other catalog is
 ## tested against (`i18n::tests::every_locale_has_exactly_the_en_key_set`,
-## both directions). Eleven sibling catalogs are embedded alongside it as of
-## F-008b/M8 Task 14 -- `../ca`, `../da`, `../de`, `../es`, `../it`, `../ja`,
-## `../nl`, `../pl`, `../pt-BR`, `../ru`, `../zh-CN` -- so **adding or
-## renaming a key here is not a local edit**: it must land in all twelve
-## catalogs in the same commit, or the completeness tests fail. Buzz's
-## remaining 3 locales (`lv_LV`, `uk_UA`, `zh_TW`) are mechanical additions of
-## the same shape (catalog + registry entry + `locale-name-*` keys, no code).
+## both directions). Fourteen sibling catalogs are embedded alongside it as
+## of F-008b/M8 Task 15 -- `../ca`, `../da`, `../de`, `../es`, `../it`,
+## `../ja`, `../lv`, `../nl`, `../pl`, `../pt-BR`, `../ru`, `../uk`,
+## `../zh-CN`, `../zh-TW` -- all 15 of Buzz's own `ui_locales` codes are now
+## ported, so **adding or renaming a key here is not a local edit**: it must
+## land in all fifteen catalogs in the same commit, or the completeness
+## tests fail.
 
 ## Locale display names (i18n::display_name, F-008a) -- one key per
 ## i18n::AVAILABLE_LOCALES entry; every catalog carries the *whole* set, so
@@ -29,10 +29,13 @@ locale-name-de-de = German
 locale-name-es-es = Spanish
 locale-name-it-it = Italian
 locale-name-ja-jp = Japanese
+locale-name-lv-lv = Latvian
 locale-name-pl-pl = Polish
 locale-name-pt-br = Portuguese (Brazil)
 locale-name-ru = Russian
+locale-name-uk-ua = Ukrainian
 locale-name-zh-cn = Chinese (Simplified)
+locale-name-zh-tw = Chinese (Traditional)
 
 ## Empty-state hero (views/main_window.rs)
 

@@ -49,10 +49,13 @@ locale-name-de-de = 德语
 locale-name-es-es = 西班牙语
 locale-name-it-it = 意大利语
 locale-name-ja-jp = 日语
+locale-name-lv-lv = 拉脱维亚语
 locale-name-pl-pl = 波兰语
 locale-name-pt-br = 葡萄牙语（巴西）
 locale-name-ru = 俄语
+locale-name-uk-ua = 乌克兰语
 locale-name-zh-cn = 中文（简体）
+locale-name-zh-tw = 中文（繁体）
 
 ## Empty-state hero (views/main_window.rs)
 

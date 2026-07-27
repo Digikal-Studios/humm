@@ -85,10 +85,13 @@ locale-name-de-de = Duits
 locale-name-es-es = Spaans
 locale-name-it-it = Italiaans
 locale-name-ja-jp = Japans
+locale-name-lv-lv = Lets
 locale-name-pl-pl = Pools
 locale-name-pt-br = Portugees (Brazilië)
 locale-name-ru = Russisch
+locale-name-uk-ua = Oekraïens
 locale-name-zh-cn = Chinees (Vereenvoudigd)
+locale-name-zh-tw = Chinees (Traditioneel)
 
 ## Empty-state hero (views/main_window.rs)
 

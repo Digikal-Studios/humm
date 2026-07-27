@@ -62,10 +62,13 @@ locale-name-de-de = Tysk
 locale-name-es-es = Spansk
 locale-name-it-it = Italiensk
 locale-name-ja-jp = Japansk
+locale-name-lv-lv = Lettisk
 locale-name-pl-pl = Polsk
 locale-name-pt-br = Portugisisk (Brasilien)
 locale-name-ru = Russisk
+locale-name-uk-ua = Ukrainsk
 locale-name-zh-cn = Kinesisk (forenklet)
+locale-name-zh-tw = Kinesisk (traditionelt)
 
 ## Empty-state hero (views/main_window.rs)
 

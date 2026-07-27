@@ -94,10 +94,13 @@ locale-name-de-de = ドイツ語
 locale-name-es-es = スペイン語
 locale-name-it-it = イタリア語
 locale-name-ja-jp = 日本語
+locale-name-lv-lv = ラトビア語
 locale-name-pl-pl = ポーランド語
 locale-name-pt-br = ポルトガル語（ブラジル）
 locale-name-ru = ロシア語
+locale-name-uk-ua = ウクライナ語
 locale-name-zh-cn = 中国語（簡体字）
+locale-name-zh-tw = 中国語（繁体字）
 
 ## Empty-state hero (views/main_window.rs)
 

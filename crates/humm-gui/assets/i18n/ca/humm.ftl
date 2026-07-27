@@ -79,10 +79,13 @@ locale-name-de-de = Alemany
 locale-name-es-es = Castellà
 locale-name-it-it = Italià
 locale-name-ja-jp = Japonès
+locale-name-lv-lv = Letó
 locale-name-pl-pl = Polonès
 locale-name-pt-br = Portuguès (Brasil)
 locale-name-ru = Rus
+locale-name-uk-ua = Ucraïnès
 locale-name-zh-cn = Xinès (simplificat)
+locale-name-zh-tw = Xinès (Tradicional)
 
 ## Empty-state hero (views/main_window.rs)
 

@@ -70,10 +70,13 @@ locale-name-de-de = Немецкий
 locale-name-es-es = Испанский
 locale-name-it-it = Итальянский
 locale-name-ja-jp = Японский
+locale-name-lv-lv = Латышский
 locale-name-pl-pl = Польский
 locale-name-pt-br = Португальский (Бразилия)
 locale-name-ru = Русский
+locale-name-uk-ua = Украинский
 locale-name-zh-cn = Китайский (упрощённый)
+locale-name-zh-tw = Китайский (традиционный)
 
 ## Empty-state hero (views/main_window.rs)
 
