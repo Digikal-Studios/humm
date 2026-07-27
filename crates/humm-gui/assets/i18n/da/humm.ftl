@@ -61,6 +61,10 @@ locale-name-nl = Nederlandsk
 locale-name-de-de = Tysk
 locale-name-es-es = Spansk
 locale-name-it-it = Italiensk
+locale-name-ja-jp = Japansk
+locale-name-pl-pl = Polsk
+locale-name-pt-br = Portugisisk (Brasilien)
+locale-name-ru = Russisk
 locale-name-zh-cn = Kinesisk (forenklet)
 
 ## Empty-state hero (views/main_window.rs)

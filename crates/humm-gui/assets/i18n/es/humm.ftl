@@ -39,6 +39,10 @@ locale-name-nl = Holandés
 locale-name-de-de = Alemán
 locale-name-es-es = Español
 locale-name-it-it = Italiano
+locale-name-ja-jp = Japonés
+locale-name-pl-pl = Polaco
+locale-name-pt-br = Portugués (Brasil)
+locale-name-ru = Ruso
 locale-name-zh-cn = Chino (simplificado)
 
 ## Empty-state hero (views/main_window.rs)

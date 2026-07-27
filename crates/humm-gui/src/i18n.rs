@@ -6,15 +6,16 @@
 //! things:
 //!
 //! - [`AVAILABLE_LOCALES`]: the registry of embedded catalogs — `en_US` plus
-//!   the `ca_ES`/`da_DK`/`nl`/`de_DE`/`es_ES`/`it_IT`/`zh_CN` set (F-008b,
-//!   design spec §9.2), in Buzz's own `ui_locales` order (review-corrected,
-//!   M8 Task 13 follow-up: `nl` sits right after `da_DK`, not after `it_IT`
-//!   — see `general_preferences_widget.py:34-50`, whose dict order is
-//!   `en_US, ca_ES, da_DK, nl, de_DE, es_ES, it_IT, ja_JP, lv_LV, pl_PL,
-//!   pt_BR, ru, uk_UA, zh_CN, zh_TW`). Adding one of Buzz's remaining 7
-//!   locales is one array element + one `include_str!` + one catalog file:
-//!   no code changes here, and the per-locale completeness tests at the
-//!   bottom of this module pick the new entry up automatically.
+//!   the `ca_ES`/`da_DK`/`nl`/`de_DE`/`es_ES`/`it_IT`/`ja_JP`/`pl_PL`/
+//!   `pt_BR`/`ru`/`zh_CN` set (F-008b, design spec §9.2), in Buzz's own
+//!   `ui_locales` order (review-corrected, M8 Task 13 follow-up: `nl` sits
+//!   right after `da_DK`, not after `it_IT` — see `general_preferences_
+//!   widget.py:34-50`, whose dict order is `en_US, ca_ES, da_DK, nl, de_DE,
+//!   es_ES, it_IT, ja_JP, lv_LV, pl_PL, pt_BR, ru, uk_UA, zh_CN, zh_TW`).
+//!   Adding one of Buzz's remaining 3 locales (`lv_LV`, `uk_UA`, `zh_TW`) is
+//!   one array element + one `include_str!` + one catalog file: no code
+//!   changes here, and the per-locale completeness tests at the bottom of
+//!   this module pick the new entry up automatically.
 //! - [`negotiate`]/[`negotiate_in`]: Buzz's own gettext fallback chain
 //!   (`buzz/locale.py:15-21`) reimplemented over the registry — exact code
 //!   match, then language-prefix match, then `en_US`.
@@ -96,17 +97,30 @@ const ES_FTL: &str = include_str!("../assets/i18n/es/humm.ftl");
 /// The embedded Italian catalog source (F-008b, M8 Task 13).
 const IT_FTL: &str = include_str!("../assets/i18n/it/humm.ftl");
 
+/// The embedded Japanese catalog source (F-008b, M8 Task 14).
+const JA_FTL: &str = include_str!("../assets/i18n/ja/humm.ftl");
+
+/// The embedded Polish catalog source (F-008b, M8 Task 14).
+const PL_FTL: &str = include_str!("../assets/i18n/pl/humm.ftl");
+
+/// The embedded Portuguese (Brazil) catalog source (F-008b, M8 Task 14).
+const PT_BR_FTL: &str = include_str!("../assets/i18n/pt-BR/humm.ftl");
+
+/// The embedded Russian catalog source (F-008b, M8 Task 14).
+const RU_FTL: &str = include_str!("../assets/i18n/ru/humm.ftl");
+
 /// The embedded Simplified Chinese catalog source (F-008b).
 const ZH_CN_FTL: &str = include_str!("../assets/i18n/zh-CN/humm.ftl");
 
 /// The locale registry: every catalog embedded into this binary — `en_US`
 /// plus the F-008b set, listed in Buzz's own `ui_locales` order
 /// (`general_preferences_widget.py:34-50`), which is also the order the
-/// Preferences language combo renders. Adding one of Buzz's remaining 7
-/// locales is one array element + one `include_str!` here and one catalog
-/// file: the registry is deliberately the *entire* code diff a new locale
-/// needs, and this module's per-locale completeness tests iterate this array,
-/// so a new entry is covered the moment it lands.
+/// Preferences language combo renders. Adding one of Buzz's remaining 3
+/// locales (`lv_LV`, `uk_UA`, `zh_TW`) is one array element + one
+/// `include_str!` here and one catalog file: the registry is deliberately
+/// the *entire* code diff a new locale needs, and this module's per-locale
+/// completeness tests iterate this array, so a new entry is covered the
+/// moment it lands.
 ///
 /// Index `0` is always `en_US` — both [`negotiate_in`]'s final fallback and
 /// [`ACTIVE_LOCALE_INDEX`]'s initial value depend on that.
@@ -118,7 +132,9 @@ const ZH_CN_FTL: &str = include_str!("../assets/i18n/zh-CN/humm.ftl");
 /// direction, neither of which differs between the two spellings. `nl`'s tag
 /// is likewise the bare `"nl"` — Buzz's own code for Dutch has no region
 /// either, and a bare primary-language subtag is already a valid BCP-47 tag,
-/// so no region needs to be invented for it.
+/// so no region needs to be invented for it. `ru`'s tag (M8 Task 14) is the
+/// same bare `"ru"` for the same reason — Buzz's own code for Russian
+/// carries no region either.
 pub static AVAILABLE_LOCALES: &[LocaleEntry] = &[
     LocaleEntry {
         buzz_code: "en_US",
@@ -156,6 +172,26 @@ pub static AVAILABLE_LOCALES: &[LocaleEntry] = &[
         ftl: IT_FTL,
     },
     LocaleEntry {
+        buzz_code: "ja_JP",
+        langid: "ja-JP",
+        ftl: JA_FTL,
+    },
+    LocaleEntry {
+        buzz_code: "pl_PL",
+        langid: "pl-PL",
+        ftl: PL_FTL,
+    },
+    LocaleEntry {
+        buzz_code: "pt_BR",
+        langid: "pt-BR",
+        ftl: PT_BR_FTL,
+    },
+    LocaleEntry {
+        buzz_code: "ru",
+        langid: "ru",
+        ftl: RU_FTL,
+    },
+    LocaleEntry {
         buzz_code: "zh_CN",
         langid: "zh-CN",
         ftl: ZH_CN_FTL,
@@ -179,6 +215,10 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "locale-name-de-de",
         "locale-name-es-es",
         "locale-name-it-it",
+        "locale-name-ja-jp",
+        "locale-name-pl-pl",
+        "locale-name-pt-br",
+        "locale-name-ru",
         "locale-name-zh-cn",
         "hero-drop",
         "hero-import-button",
@@ -1646,6 +1686,10 @@ mod tests {
             ("de_DE", "Einstellungen"),
             ("es_ES", "Preferencias"),
             ("it_IT", "Preferenze"),
+            ("ja_JP", "設定"),
+            ("pl_PL", "Ustawienia"),
+            ("pt_BR", "Preferências"),
+            ("ru", "Настройки"),
             ("zh_CN", "偏好设置"),
         ] {
             set_locale(code);
