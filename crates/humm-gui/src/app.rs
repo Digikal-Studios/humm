@@ -3952,7 +3952,8 @@ fn resizer_viewport_builder(title: &str) -> egui::ViewportBuilder {
 }
 
 /// The [`egui::ViewportBuilder`] for a Speaker-ID window: `title` (the
-/// source file's basename), min size 650×400 (Buzz `setMinimumWidth(650)` /
+/// task's display name — user-set row name else the source file's basename;
+/// M8 design spec ledger #13), min size 650×400 (Buzz `setMinimumWidth(650)` /
 /// `setMinimumHeight(400)`, `speaker_identification_widget.py:475-476`),
 /// default size 650×520 (a little taller than the minimum so Step 1, Step 2,
 /// and Save all fit without scrolling for a typical few-speaker result).

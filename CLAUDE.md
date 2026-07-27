@@ -12,6 +12,8 @@ humm is a Rust port of Buzz (`/Users/jawad/RustroverProjects/buzz`) with **100% 
 ## Commands
 
 ```bash
+brew install openblas libomp                             # macOS build prereq for humm-diarize
+                                                         #  (speakrs → ndarray-linalg openblas-system)
 cargo fmt --check                                        # formatting gate
 cargo clippy --workspace --all-targets -- -D warnings    # lint gate
 cargo test --workspace                                   # unit + integration + snapshot
@@ -21,11 +23,13 @@ cargo run -p humm-cli -- add <file> --srt                # CLI smoke
 cargo run -p humm-gui                                    # GUI
 ```
 
+Adapter contract tests that need a heavier external are double-gated (`#[ignore]` **and** an env flag), so the line above stays runnable with only ffmpeg/yt-dlp installed: `HUMM_DEMUCS_CONTRACT=1` (real demucs, F-027), `HUMM_DFN_CONTRACT=1` (`-p humm-dfn`, F-112), `HUMM_DIARIZE_CONTRACT=1` (`-p humm-diarize`, downloads ~60 MB of models on first run, F-087), `HUMM_LLM_TEST_BASE`/`_KEY`/`_MODEL` (a real OpenAI-compatible chat endpoint, F-031/F-111).
+
 Every commit must pass the first three. Commit at coherent boundaries; messages reference milestone + feature IDs (e.g. `M4: segment editor overlap clamping (F-081)`).
 
 ## Workspace
 
-`crates/humm-core` (domain library, `#![warn(missing_docs)]`, zero UI deps, no `unsafe`) · `humm-media` (ffmpeg/ffprobe/yt-dlp subprocess adapters) · `humm-whisper` (whisper-rs FFI; the only crate allowed `unsafe`, documented) · `humm-audio` (cpal+rubato) · `humm-store` (rusqlite+keyring) · `humm-cli` · `humm-gui` (egui/eframe). Binaries → adapters → core; core imports no adapter.
+`crates/humm-core` (domain library, `#![warn(missing_docs)]`, zero UI deps, no `unsafe`) · `humm-media` (ffmpeg/ffprobe/yt-dlp/demucs subprocess adapters) · `humm-whisper` (whisper-rs FFI; the only crate allowed `unsafe`, documented) · `humm-audio` (cpal+rubato) · `humm-store` (rusqlite+keyring) · `humm-dfn` (M8: DeepFilterNet noise reduction via the pinned `deep_filter`/tract crate; composes `humm-media` for decode/encode) · `humm-diarize` (M8: speaker diarization; the only crate naming `ort`/`speakrs`) · `humm-cli` · `humm-gui` (egui/eframe). Binaries → adapters → core; core imports no adapter.
 
 ## Standing Policy (dependencies & non-Rust boundaries) — binding
 

@@ -47,13 +47,18 @@ hand-run demucs invocation. Producer: `humm add speech-plus-music.wav -e
 | Band | Input | humm's `_speech.mp3` | Δ |
 |---|---|---|---|
 | full | −25.07 dB | −26.73 dB | −1.66 dB |
-| 220 Hz (tone 1, ±8 Hz) | −33.88 dB | −38.48 dB | **−4.61 dB** |
-| 330 Hz (tone 2, ±8 Hz) | −32.65 dB | −45.14 dB | **−12.50 dB** |
+| 220 Hz (tone 1, ±8 Hz) | −33.88 dB | −38.48 dB | **−4.60 dB** |
+| 330 Hz (tone 2, ±8 Hz) | −32.65 dB | −45.14 dB | **−12.49 dB** |
 | 3000 Hz (speech band) | −63.99 dB | −63.91 dB | +0.08 dB (unchanged) |
 
 Both injected tones are attenuated while the speech band is left alone — the
 isolated file is voice-dominant relative to its input, which is the outcome
-claim. The transcript produced *from the isolated audio* is intelligible
+claim. (*Task 19 sweep: the two bold Δs were each 0.01 dB off — they had been
+computed from the already-rounded column values rather than from the raw
+`astats` readings in `logs/outcome-measurements.txt`. Recomputed from the raw
+numbers: −33.878788 → −38.483626 = −4.604838 and −32.648366 → −45.143009 =
+−12.494643. The one-decimal figures quoted elsewhere, 4.6 dB and 12.5 dB, were
+unaffected.*) The transcript produced *from the isolated audio* is intelligible
 French: *"Bienvenue dans PassRail, un podcast, pensé pour éveiller la curiosité
 des apprenances et des apprenances de français."*
 

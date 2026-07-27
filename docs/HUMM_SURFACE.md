@@ -135,8 +135,9 @@ spirit as `store_write_failed` above (ADR-018), just with nothing to add.
 
 Human mode instead prints, to **stderr**, a per-task progress line
 `<input>  NN% — ETA: <eta>` (ETA rendered `NNm NNs` or `NNs`, Buzz's formula),
-a URL download phase line `downloading <url>  NN%`, and (once a later M8 task
-wires a producer) a `phase` line `<input>  isolating speech`; written export
+a URL download phase line `downloading <url>  NN%`, and — live since M8 Task 5
+wired the producer described above — a `phase` line `<input>  isolating
+speech` whenever `-e`/`--extract-speech` is in play; written export
 paths go to **stdout** (one per line); failures print `error: <input>: <cause>` to
 stderr; a `store_write_failed` event prints `warning: history not recorded
 (<operation>): <detail>` to stderr. A `skipped` event's terminal line is
@@ -176,6 +177,8 @@ progress and warning lines only (`post_processed`'s warnings included;
 | `HUMM_DEMUCS` | Override the `demucs` binary path (else looked up on `PATH`) — the F-027 speech-isolation subprocess (ADR-023), gated on the CLI's `-e`/`--extract-speech` flag. |
 | `HUMM_BUZZ_SQLITE` | Override the one-time Buzz-import source database. Used only if the path exists — point it at a nonexistent path to disable the import (M2 addition; used by hermetic tests). |
 | `HUMM_BUZZ_TESTDATA`, `HUMM_WHISPER_TEST_MODEL` | Test-only: locate Buzz fixtures / a real tiny model for `#[ignore]` tests. |
+| `HUMM_DEMUCS_CONTRACT`, `HUMM_DFN_CONTRACT`, `HUMM_DIARIZE_CONTRACT` | Test-only (M8): set to `1` to actually run the adapter contract test that needs the heavy external — real demucs (F-027, `humm-media`), real DeepFilterNet denoise on an ffmpeg-built fixture (F-112, `humm-dfn`), real diarization models (F-087, `humm-diarize`; downloads 59.75 MB on first run). Each is checked *in addition* to `#[ignore]`, so `cargo test -p <crate> -- --ignored` skips it with a printed reason instead of failing or silently downloading. |
+| `HUMM_LLM_TEST_BASE`, `HUMM_LLM_TEST_KEY`, `HUMM_LLM_TEST_MODEL` | Test-only: point the `#[ignore]` LLM contract tests (`real_chat_api_single_and_batch_round_trip`, F-031; `real_summary_api_round_trip`, F-111) at any OpenAI-compatible **chat** endpoint (ollama / LM Studio / llama.cpp server / cloud). Unset ⇒ both tests skip; those two rows are the matrix's named environment-blocked exceptions. |
 
 ### 5.1 `humm-gui`-only environment variables
 
@@ -411,11 +414,12 @@ rows and does not reject the assignment.
 **`[postproc]`** (F-110's four natives, Preferences → Post-processing).
 **Every hook is disabled by default**, matching Buzz, and a disabled hook
 costs a boolean check. Sub-tables, in the fixed execution order they run in
-(ledger #L2 — `skip_already_transcribed` and `noise_reduction` are the two
-*pre*-hooks, checked before transcription in that order — `noise_reduction`
-chained after F-027 speech isolation and before F-114 language detection in
-the M8 pre-transcription chain, design spec §3/§5; the rest run after
-export):
+(ledger #L2 — `skip_already_transcribed`, `noise_reduction` and
+`language_detection` are the three *pre*-hooks, and they run in that order:
+`skip_already_transcribed` first (before F-027 speech isolation, so
+skip+extract can't break each other — M8 ledger #2), then the fixed M8
+pre-transcription chain isolation → `noise_reduction` → `language_detection`
+(design spec §3/§5, M8 ledger #5). The remaining three run after export):
 
 | Sub-table | Feature | Keys |
 |-----|-----|-----|

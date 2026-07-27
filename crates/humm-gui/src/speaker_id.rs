@@ -424,7 +424,11 @@ enum SamplePlayerState {
 pub struct SpeakerIdVm {
     /// The transcript this window operates on.
     pub source: TranscriptionId,
-    /// Window title — the source file's basename (Buzz `file_path_as_title`).
+    /// Window title — the task's display name (`display_name_for`): the
+    /// user-set row name if there is one, else the source file's basename.
+    /// Buzz always uses the basename (`file_path_as_title`), so an un-renamed
+    /// task matches Buzz exactly and a renamed one shows the name the user
+    /// chose — deliberate, M8 design spec ledger #13.
     pub(crate) title: String,
     /// The source's input media file, `None` for a since-deleted/URL-only
     /// row (mirrors `ViewerVm::file`'s own defensive `None` case).

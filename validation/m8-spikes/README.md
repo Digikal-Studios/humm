@@ -288,7 +288,10 @@ speakrs `ExecutionMode::Cpu` requires exactly these files, all from HF repo
 | `plda_mean2.npy` | 640 B |
 | `wespeaker-voxceleb-resnet34.min_num_samples.txt` | 4 B |
 
-Total ≈ 58MB. Fetched all 10 via `speakrs::models::ModelManager` (an
+Total **59,751,799 B = 59.75 MB (56.98 MiB)** — the sum of the table above.
+(*Corrected in the Task 19 sweep: this line read "≈ 58MB", which is the MiB
+figure rounded and then labelled MB; ADR-024 carried the same number and is
+corrected with it.*) Fetched all 10 via `speakrs::models::ModelManager` (an
 HF-hub-cache-backed convenience the crate exposes) in **127.8s** cold on
 this network. **Confirmed layout:** `ModelBundle::from_dir(dir)` just joins
 these exact filenames flat onto `dir` — no subdirectories, no manifest file,

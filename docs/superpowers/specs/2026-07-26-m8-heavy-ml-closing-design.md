@@ -100,7 +100,11 @@ fail the spike. §6.
 (0.2.5, 2022 — DeepFilterNet1-era), **but** the repo (Rikorose/
 DeepFilterNet, MIT/Apache-2.0) is releasing: latest tag **v0.5.6
 (2024-08-31)**, `libDF` package `deep_filter` 0.5.x with a `tract` feature
-(tract-onnx ^0.21.4 — pure-Rust inference) and a `default-model` feature
+(tract-onnx ^0.19.4 — pure-Rust inference; **correction, Task 2/19**: this
+line originally read `^0.21.4`, which is what the repo's *default branch*
+declares — the pinned v0.5.6 tag itself declares `^0.19.4`, and that is what
+humm builds against. DECISIONS.md's ADR-011 addendum was corrected when the
+spike found it; this sentence is corrected here) and a `default-model` feature
 embedding the DeepFilterNet3 model. Verdict: **git-pin `deep_filter` at
 the v0.5.6 rev with `tract` + `default-model`** — pure-Rust inference, no
 ort, no model download, no absence path. If the pinned build fails the
@@ -150,6 +154,24 @@ pub trait Diarizer: Send + Sync {
 }
 pub struct SpeakerTurn { pub start: Millis, pub end: Millis, pub speaker: usize }
 ```
+
+**As-built correction (Tasks 4/9, recorded in the Task 19 sweep).** The two
+sketches above that take a *file path* actually take already-decoded audio,
+because both call sites already hold a decoded `Pcm` and re-decoding would
+double the ffmpeg cost for no gain:
+
+```rust
+fn detect(&self, audio: &Pcm, model: &Path, cancel: &CancelToken)      // F-114
+    -> Result<Option<Language>, EngineError>;
+fn diarize(&self, audio: &Pcm, progress: &mut dyn FnMut(DiarizeProgress),
+           cancel: &CancelToken) -> Result<Vec<SpeakerTurn>, DiarizeError>; // F-087
+```
+
+`SpeechIsolator`/`NoiseReducer` are as sketched (`&Path` → `PathBuf`): they
+are file-to-file transforms whose output *is* a file the decoder then reads.
+`SpeakerTurn` additionally carries two documented contracts the sketch did
+not state: implementations must return turns sorted by `start`, and turns
+from *different* speakers may overlap in time (`humm_core::diarize`).
 
 Crates: `DemucsIsolator` joins **humm-media** (the subprocess adapter crate
 — same probe/kill conventions as ffmpeg/yt-dlp). **humm-dfn** (new) holds
@@ -332,6 +354,18 @@ reduction (F-112) → language detection (F-114) — each hook
 pre-hook logs, is skipped, and the task proceeds on the original
 audio/language), mirroring `run_on_complete_chain`'s shape.
 
+**As-built correction (Task 4, recorded in the Task 19 sweep): isolation is
+deliberately exempt from that containment.** Reduction (F-112) and detection
+(F-114) *are* individually `catch_unwind`-contained and degrade exactly as
+written above, because Buzz's own plugin semantics for them are
+degrade-on-exception (`plugin.py:58-60`, `:93-95`). Isolation is not: Buzz
+fails the task when demucs raises anything other than its `no_audio`
+`IndexError`, so humm keeps that failure semantic and lets an isolation
+panic reach `run_task`'s existing outer `catch_unwind` — which fails the
+task with the panic message instead of silently transcribing audio the user
+asked to have cleaned. Same-shaped code, deliberately different blast radius;
+the comment at `queue.rs`'s isolation block states this at the call site.
+
 **Verification** (`per-strategy` → `unit + contract`): unit (gating
 matrix incl. the en-quirk, model-selection ranking with fake registry
 state, write-back threading); contract (`#[ignore]`, real tiny model):
@@ -422,8 +456,14 @@ sample strings from each CJK catalog) + windowed screenshot in gui-manual
 v6 (gates F-008 `verified`). Ride-along: fix the M7-noted tab-strip
 overflow at font_size 24 (wrap the Preferences tab strip).
 
-**7.2 Eleven locales (mechanical, de/es/zh precedent).** ca_ES, da_DK,
-it_IT, ja_JP, lv_LV, nl, pl_PL, pt_BR, ru, uk_UA, zh_TW — each: one
+**7.2 Eleven locales (mechanical, de/es/zh precedent).** ca_ES, da_DK, nl,
+it_IT, ja_JP, lv_LV, pl_PL, pt_BR, ru, uk_UA, zh_TW (**corrected, Task
+13/19**: this list was originally written alphabetized, which put `nl` after
+`lv_LV`; Buzz's real `ui_locales` order — the order the registry and the
+combo actually use — is `en_US, ca_ES, da_DK, nl, de_DE, es_ES, it_IT,
+ja_JP, lv_LV, pl_PL, pt_BR, ru, uk_UA, zh_CN, zh_TW`, so `nl` sits third,
+right after `da_DK`. Code, catalogs and `EXTERNAL_SURFACE.md` follow the
+real order and an order-pin test enforces it) — each: one
 `humm.ftl` (full 340+ keys), one `AVAILABLE_LOCALES` entry, Buzz-`.po`
 glossary reuse where the string matches (~67 % precedent), capability-
 parity divergences documented in catalog-header comments, per-locale
@@ -551,7 +591,7 @@ recipe; ort build-time binary fetch needs one lifted build (recorded).
 10. F-027/F-087 are outcome-level parity by decided strategy (ADR-011):
     demucs subprocess instead of vendored-fork Python API; ort/community-1
     diarization instead of NeMo MSDD + forced alignment + punctuation.
-11. F-087's cancel granularity is coarser than this section's own sketch
+11. F-087's cancel granularity is coarser than §6's own sketch
     ("checked between stages and inside the windowed diarization loop"):
     `speakrs::OwnedDiarizationPipeline::run` is a single monolithic call with
     no intermediate hook, so `humm-diarize`'s `OrtDiarizer` can only check
@@ -559,6 +599,33 @@ recipe; ort build-time binary fetch needs one lifted build (recorded).
     mid-run resolves at the call boundary (~9-10s worst case on the
     two-speaker fixture, ADR-024's Task 9 addendum), not sub-second like the
     rest of the codebase's cancellation points.
+
+*Entries 12-14 were added by the Task 19 closing sweep, from divergences
+found and ledgered during implementation.*
+
+12. **`HUMM_FORCE_CPU` does not reach the isolation step.** Buzz checks
+    `BUZZ_FORCE_CPU` before its own cuda-else-cpu fallback and passes the
+    resulting device to demucs; ADR-023 forbids the `-d` flag entirely (so
+    that demucs's own default device rule — the same cuda-else-cpu rule —
+    stays the single source of truth), which means humm's `HUMM_FORCE_CPU`
+    is honored by whisper inference but is a no-op for the demucs
+    subprocess specifically. No practical divergence on this project's
+    target hardware (no CUDA ⇒ both sides pick CPU anyway); recorded
+    because the env var's documented scope is otherwise "all inference".
+13. **The Speaker-ID window title is the task's *display name*, not the
+    source file's basename.** Buzz titles it `file_path_as_title(path)` —
+    always the basename. humm reuses `display_name_for`, which prefers a
+    user-set row `name` (from Rename) and falls back to the basename, so an
+    un-renamed task matches Buzz exactly and a renamed one shows the name
+    the user chose. Deliberate: within humm, that row *is* how the user
+    refers to the transcript everywhere else.
+14. **`<stem>_speech.mp3` overwrites an existing file of that name** — the
+    destination path is fixed (Buzz's naming), and the final `rename`
+    clobbers a pre-existing sibling. Buzz parity: its own
+    `file_transcriber_queue_worker.py:191` writes the same fixed path with
+    the same effect. Not "fixed" with a uniquifying suffix precisely
+    because that would diverge from Buzz's naming, which F-027's export-name
+    `_speech`-strip logic depends on.
 
 ## 12. Risks
 

@@ -12,16 +12,24 @@ humm/
 │   │                          # export writers, model registry+downloads, OpenAI API engine,
 │   │                          # LLM translator, telemetry, settings model. Zero UI deps.
 │   │                          # #![warn(missing_docs)], no unsafe.
-│   ├── humm-media/            # ADAPTER: ffmpeg / ffprobe / yt-dlp subprocesses
+│   ├── humm-media/            # ADAPTER: ffmpeg / ffprobe / yt-dlp / demucs subprocesses
 │   ├── humm-whisper/          # ADAPTER: whisper-rs FFI (Metal + CoreML), incl. Silero VAD
+│   │                          #  and the F-114 standalone language detector
 │   ├── humm-audio/            # ADAPTER: cpal capture/playback + rubato resampling
 │   ├── humm-store/            # ADAPTER: rusqlite persistence + keyring secrets + Buzz import
+│   ├── humm-dfn/              # ADAPTER (M8): DeepFilterNet3 noise reduction — git-pinned
+│   │                          #  deep_filter + tract, model embedded at compile time;
+│   │                          #  composes humm-media for decode/encode (see below)
+│   ├── humm-diarize/          # ADAPTER (M8): speaker diarization — the only crate
+│   │                          #  naming ort (=2.0.0-rc.12) or speakrs (=0.5.0)
 │   ├── humm-cli/              # binary: headless CLI (clap)
 │   └── humm-gui/              # binary: egui/eframe app
 └── docs/                      # analysis/ + design/ (living documents)
 ```
 
-Dependency rule (enforced by crate graph): binaries → adapters → core. Core depends on **no** adapter and no UI. Adapters implement core traits; nothing outside an adapter names ffmpeg, whisper.cpp, SQLite, PortAudio, or yt-dlp. `unsafe` is permitted only in `humm-whisper` (FFI edge), documented with safety invariants.
+Dependency rule (enforced by crate graph): binaries → adapters → core. Core depends on **no** adapter and no UI. Adapters implement core traits; nothing outside an adapter names ffmpeg, whisper.cpp, SQLite, PortAudio, yt-dlp, demucs, `deep_filter` or `ort`/`speakrs`. `unsafe` is permitted only in `humm-whisper` (FFI edge), documented with safety invariants.
+
+**Adapter composition (M8 as-built).** `humm-dfn` depends on `humm-media` (`FfmpegDecoder::decode_mono_at` for its 48 kHz mono input, and the same crate's atomic file placement for its output) — an adapter consuming *another adapter*, rather than duplicating ffmpeg subprocess/cancellation/binary-resolution logic or pushing that logic down into core. This does not weaken the rule the diagram states: the arrow still points away from core (core imports neither), each crate still owns exactly one non-Rust boundary, and each still has its own contract-test suite. Read the rule as "binaries → adapters → core, and adapters may compose peer adapters", never "adapters → core only".
 
 Why one adapter crate per boundary (not modules in core): Standing Policy isolation, independent compile units (whisper.cpp's C build doesn't rebuild on core changes), and per-adapter contract-test suites that validate an external-component upgrade in isolation.
 
@@ -127,9 +135,48 @@ pub trait AudioCapture: Send {
 }
 pub trait CaptureHandle: Send { fn stop(self: Box<Self>); }
 
-/// Deferred-ML boundaries (designed now, implemented in late milestones — Q-3/Q-5):
-pub trait SpeechIsolator: Send + Sync { /* demucs-equivalent vocal isolation */ }
-pub trait Diarizer: Send + Sync { /* speaker segmentation + embeddings + clustering */ }
+/// The four ML boundaries, as built in M8 (sketched here from M0 as
+/// "deferred — Q-3/Q-5"; strategies decided in ADR-011's M8 addendum and
+/// realized in ADR-023/ADR-024). Three live in `humm_core::boundary`, the
+/// fourth in `humm_core::diarize` (it carries its own types).
+///
+/// Note the split in shape: the two that transform a *file* take and return
+/// paths (their output is a file the decoder later reads); the two that
+/// *analyse* audio take an already-decoded `Pcm`, because both call sites
+/// already hold one and re-decoding would double the ffmpeg cost.
+///
+/// F-027. Impl: `humm-media`'s `DemucsIsolator` (demucs subprocess, ADR-023).
+pub trait SpeechIsolator: Send + Sync {
+    /// Writes `<input_stem>_speech.mp3` next to `input`; returns its path.
+    fn isolate(&self, input: &Path, cancel: &CancelToken) -> Result<PathBuf, MediaError>;
+    /// Cheap binary-presence probe for capability gating (CLI `-e`, GUI checkbox).
+    fn available(&self) -> bool;
+}
+
+/// F-112. Impl: `humm-dfn`'s `DfNoiseReducer` (deep_filter + tract, model
+/// embedded at compile time — no download, so no absence path).
+pub trait NoiseReducer: Send + Sync {
+    /// Writes `<input_stem>_DeepFilterNet3.wav` next to `input`; returns its path.
+    /// A failure never fails the task — the caller degrades to the prior audio.
+    fn reduce(&self, input: &Path, cancel: &CancelToken) -> Result<PathBuf, MediaError>;
+}
+
+/// F-114. Impl: `humm-whisper`'s `WhisperLangDetector` (whisper-rs's
+/// standalone `lang_detect`; fresh context+state per call, matching Buzz's
+/// per-detection `whisper-cli` process).
+pub trait LanguageDetector: Send + Sync {
+    /// `Ok(None)` = ran, no usable language ⇒ caller proceeds on auto.
+    fn detect(&self, audio: &Pcm, model: &Path, cancel: &CancelToken)
+        -> Result<Option<Language>, EngineError>;
+}
+
+/// F-087. Impl: `humm-diarize`'s `OrtDiarizer` (speakrs/ort, ADR-024).
+/// Returns turns sorted by `start` — a contract implementations must uphold,
+/// not inherit; turns from *different* speakers may overlap in time.
+pub trait Diarizer: Send + Sync {
+    fn diarize(&self, audio: &Pcm, progress: &mut dyn FnMut(DiarizeProgress),
+               cancel: &CancelToken) -> Result<Vec<SpeakerTurn>, DiarizeError>;
+}
 
 /// Cross-cutting:
 /// SecretStore as-built (M6): realized by `KeyringSecretStore`

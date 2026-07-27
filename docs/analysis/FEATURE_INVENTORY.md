@@ -224,6 +224,7 @@ Folder-per-plugin with `plugin.py` (`BuzzPlugin` subclass); hooks `before_transc
 | F-115 | skip_already_transcribed | check_skip | skip files already in DB |
 | F-116 | transcript_resizer | on_complete | auto-resize segments after completion |
 - Source: `buzz/plugins/<name>/plugin.py`.
+- **Verification-method note (M8).** All six are ported as *native features*, not as a plugin runtime (ADR-010 resolved Q-4 that way), so the matrix rows that were parked on the placeholder method `per-strategy` get real methods once their strategy is settled. F-112 and F-114 moved `per-strategy` → **`unit + contract`** (M8 design spec §9): unit tests for the gating/model-selection/write-back logic, plus a `#[ignore]` contract test against the real external — real DeepFilterNet inference on an ffmpeg-built noisy fixture (`HUMM_DFN_CONTRACT=1`) and a real ggml model detecting French (F-114). F-110/F-111/F-113/F-115/F-116 keep the methods their own rows state.
 
 ---
 
