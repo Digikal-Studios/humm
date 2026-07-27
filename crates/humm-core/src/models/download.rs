@@ -321,6 +321,49 @@ impl ModelDownloader {
         Ok(final_path)
     }
 
+    /// Ensures every diarization model file (F-087, ADR-024) is present in
+    /// the cache under `root/`[`registry::DIARIZE_DIR`], downloading or
+    /// resuming each as needed. Returns their resolved paths.
+    ///
+    /// Each of the 10 files ([`registry::DIARIZE_MODEL_FILES`]) goes through
+    /// [`Self::ensure_artifact`] independently — same resume/sentinel/
+    /// per-path-lock semantics as every other artifact this downloader
+    /// manages, so a partial run (network drop after file 4 of 10) resumes
+    /// from where it left off on the next call rather than re-fetching
+    /// completed files. `sha_repo` is `Some(registry::DIARIZE_MODEL_REPO)`
+    /// for every file: 9 of the 10 publish a Git-LFS `sha256` digest via the
+    /// same `tree/main` API the whisper.cpp/VAD downloads already use
+    /// (confirmed against the real HuggingFace API while implementing this);
+    /// the tenth (a 4-byte, non-LFS text file) has none, and
+    /// [`Self::verify_or_warn`]'s existing "no digest published, skip
+    /// verification" fallback already handles that — no special-casing
+    /// needed here.
+    ///
+    /// No cross-file progress aggregation: `progress` receives one
+    /// [`DownloadProgress`] sequence per file (its `file` field names which
+    /// one), the same shape [`Self::ensure_model`] already uses across its
+    /// ggml + CoreML-zip pair — there is no existing precedent for
+    /// synthesizing a single aggregate fraction across multiple artifacts,
+    /// and this follows it rather than inventing one.
+    pub fn ensure_diarization_models(
+        &self,
+        progress: &mut dyn FnMut(DownloadProgress),
+        cancel: &CancelToken,
+    ) -> Result<registry::DiarizationModelPaths, ModelError> {
+        let paths = registry::diarization_model_paths(&self.root);
+        for (file_name, path) in paths.files() {
+            let url = registry::diarize_model_url_with_base(&self.hf_base, file_name);
+            self.ensure_artifact(
+                &url,
+                path,
+                Some(registry::DIARIZE_MODEL_REPO),
+                progress,
+                cancel,
+            )?;
+        }
+        Ok(paths)
+    }
+
     /// The per-artifact download algorithm: fast-path if already complete,
     /// otherwise download/resume to `<final_path>.partial`, verify SHA256
     /// when `sha_repo` is given, then rename to `final_path` and write the
@@ -1674,6 +1717,67 @@ mod tests {
         assert_eq!(
             server.requests().len(),
             1,
+            "fast path must not touch the network"
+        );
+    }
+
+    /// F-087 (M8): all 10 diarization model files download and each gets its
+    /// own completeness sentinel; a second call is a pure fast path (no
+    /// further network requests at all — not even a sha-digest lookup, since
+    /// `ensure_artifact`'s sentinel check short-circuits before building any
+    /// URL).
+    ///
+    /// Binds TCP (`TestServer::start`) — blocked under the sandbox, run with
+    /// it lifted (see this task's report for the full pre-existing set).
+    #[test]
+    fn ensure_diarization_models_downloads_all_and_writes_sentinels() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = TestServer::start();
+
+        // Every diarization file gets distinct (fake, small) bytes so a mixup
+        // between files would be caught by the content assertions below.
+        for (i, file_name) in registry::DIARIZE_MODEL_FILES.iter().enumerate() {
+            let path = format!("/{}/resolve/main/{file_name}", registry::DIARIZE_MODEL_REPO);
+            server.set_route(path, Canned::ok(format!("fake-bytes-{i}").into_bytes()));
+        }
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), server.base_url());
+        let cancel = CancelToken::new();
+
+        let mut updates = Vec::new();
+        let paths = downloader
+            .ensure_diarization_models(&mut |p| updates.push(p), &cancel)
+            .expect("ensure_diarization_models should download every file");
+
+        assert_eq!(paths.dir, dir.path().join("diarization"));
+        assert!(!updates.is_empty());
+
+        for (i, (file_name, path)) in paths.files().into_iter().enumerate() {
+            assert!(path.is_file(), "{file_name} should exist at {path:?}");
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                format!("fake-bytes-{i}").into_bytes(),
+                "{file_name} content"
+            );
+            assert!(
+                sentinel_path_for(path).is_file(),
+                "{file_name} should have a completeness sentinel"
+            );
+        }
+
+        let requests_after_first_call = server.requests().len();
+        assert!(requests_after_first_call > 0);
+
+        // Fast path: every file + sentinel already present -> the second
+        // call touches the network not at all (not even the file GETs let
+        // alone the sha-digest lookups).
+        let second = downloader
+            .ensure_diarization_models(&mut |_| {}, &cancel)
+            .expect("second call should hit the fast path for every file");
+        assert_eq!(second, paths);
+        assert_eq!(
+            server.requests().len(),
+            requests_after_first_call,
             "fast path must not touch the network"
         );
     }

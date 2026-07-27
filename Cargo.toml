@@ -7,6 +7,7 @@ members = [
     "crates/humm-audio",
     "crates/humm-store",
     "crates/humm-dfn",
+    "crates/humm-diarize",
     "crates/humm-cli",
     "crates/humm-gui",
 ]
@@ -78,6 +79,24 @@ deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "978576
 # frames `DfTract::process` takes directly, so this must resolve to the same
 # `ndarray` `deep_filter` itself uses.
 ndarray = "0.15"
+# F-087 (M8): speaker diarization (segmentation ONNX + embedding ONNX + VBx
+# clustering), picked over pyannote-rs in `validation/m8-spikes/README.md`
+# Spike B / ADR-024 — pyannote-rs 0.3.4 fails to build against this ADR's
+# exact `ort =2.0.0-rc.12` pin (an upstream `Send + Sync` regression breaks
+# its `eyre`-based error conversion), while speakrs builds cleanly against
+# it. Exact-pinned per ADR-024/Standing Policy rule 5 ("one crate, exact
+# pin"). `default-features = false` drops the crate's default
+# `ndarray-linalg`/`openblas-static` (from-source OpenBLAS; fails to link
+# on this machine's Homebrew toolchain, Spike B criterion 1);
+# `openblas-system` links Homebrew's prebuilt OpenBLAS instead (macOS build
+# prerequisite: `brew install openblas libomp`). `coreml` is additive — CPU
+# mode still works with it enabled; ort's own prebuilt runtime binary fetch
+# at build time (`cdn.pyke.io`) needs a sandbox-lifted first build/fetch.
+speakrs = { version = "=0.5.0", default-features = false, features = [
+    "online",
+    "openblas-system",
+    "coreml",
+] }
 
 [profile.release]
 lto = "thin"

@@ -6,6 +6,7 @@
 
 pub mod boundary;
 pub mod cancel;
+pub mod diarize;
 pub mod domain;
 pub mod env;
 pub mod error;
