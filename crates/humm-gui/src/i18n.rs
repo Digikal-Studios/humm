@@ -5,12 +5,12 @@
 //! (`buzz/locale.py`) ported to Fluent (ADR-014). This module owns three
 //! things:
 //!
-//! - [`AVAILABLE_LOCALES`]: the registry of embedded catalogs — `en_US`
-//!   plus the `de_DE`/`es_ES`/`zh_CN` starter set (F-008b, design spec §9.2),
-//!   in Buzz's own `ui_locales` order. Adding one of Buzz's remaining 11
-//!   locales is one array element + one `include_str!` + one catalog file:
-//!   no code changes here, and the per-locale completeness tests at the
-//!   bottom of this module pick the new entry up automatically.
+//! - [`AVAILABLE_LOCALES`]: the registry of embedded catalogs — `en_US` plus
+//!   the `ca_ES`/`da_DK`/`de_DE`/`es_ES`/`it_IT`/`nl`/`zh_CN` set (F-008b,
+//!   design spec §9.2), in Buzz's own `ui_locales` order. Adding one of
+//!   Buzz's remaining 7 locales is one array element + one `include_str!` +
+//!   one catalog file: no code changes here, and the per-locale completeness
+//!   tests at the bottom of this module pick the new entry up automatically.
 //! - [`negotiate`]/[`negotiate_in`]: Buzz's own gettext fallback chain
 //!   (`buzz/locale.py:15-21`) reimplemented over the registry — exact code
 //!   match, then language-prefix match, then `en_US`.
@@ -74,19 +74,31 @@ impl std::fmt::Debug for LocaleEntry {
 /// The embedded English Fluent catalog source.
 const EN_FTL: &str = include_str!("../assets/i18n/en/humm.ftl");
 
+/// The embedded Catalan catalog source (F-008b, M8 Task 13).
+const CA_FTL: &str = include_str!("../assets/i18n/ca/humm.ftl");
+
+/// The embedded Danish catalog source (F-008b, M8 Task 13).
+const DA_FTL: &str = include_str!("../assets/i18n/da/humm.ftl");
+
 /// The embedded German catalog source (F-008b).
 const DE_FTL: &str = include_str!("../assets/i18n/de/humm.ftl");
 
 /// The embedded Spanish catalog source (F-008b).
 const ES_FTL: &str = include_str!("../assets/i18n/es/humm.ftl");
 
+/// The embedded Italian catalog source (F-008b, M8 Task 13).
+const IT_FTL: &str = include_str!("../assets/i18n/it/humm.ftl");
+
+/// The embedded Dutch catalog source (F-008b, M8 Task 13).
+const NL_FTL: &str = include_str!("../assets/i18n/nl/humm.ftl");
+
 /// The embedded Simplified Chinese catalog source (F-008b).
 const ZH_CN_FTL: &str = include_str!("../assets/i18n/zh-CN/humm.ftl");
 
 /// The locale registry: every catalog embedded into this binary — `en_US`
-/// plus the F-008b starter set, listed in Buzz's own `ui_locales` order
+/// plus the F-008b set, listed in Buzz's own `ui_locales` order
 /// (`general_preferences_widget.py:34-50`), which is also the order the
-/// Preferences language combo renders. Adding one of Buzz's remaining 11
+/// Preferences language combo renders. Adding one of Buzz's remaining 7
 /// locales is one array element + one `include_str!` here and one catalog
 /// file: the registry is deliberately the *entire* code diff a new locale
 /// needs, and this module's per-locale completeness tests iterate this array,
@@ -99,12 +111,25 @@ const ZH_CN_FTL: &str = include_str!("../assets/i18n/zh-CN/humm.ftl");
 /// `zh-Hans-CN`. Both parse, and `unic_langid` treats the script as implicit
 /// for `zh-CN`; the shorter form keeps the tag a mechanical rewrite of the
 /// Buzz code, and Fluent only consults it for plural rules and bidi
-/// direction, neither of which differs between the two spellings.
+/// direction, neither of which differs between the two spellings. `nl`'s tag
+/// is likewise the bare `"nl"` — Buzz's own code for Dutch has no region
+/// either, and a bare primary-language subtag is already a valid BCP-47 tag,
+/// so no region needs to be invented for it.
 pub static AVAILABLE_LOCALES: &[LocaleEntry] = &[
     LocaleEntry {
         buzz_code: "en_US",
         langid: "en-US",
         ftl: EN_FTL,
+    },
+    LocaleEntry {
+        buzz_code: "ca_ES",
+        langid: "ca-ES",
+        ftl: CA_FTL,
+    },
+    LocaleEntry {
+        buzz_code: "da_DK",
+        langid: "da-DK",
+        ftl: DA_FTL,
     },
     LocaleEntry {
         buzz_code: "de_DE",
@@ -115,6 +140,16 @@ pub static AVAILABLE_LOCALES: &[LocaleEntry] = &[
         buzz_code: "es_ES",
         langid: "es-ES",
         ftl: ES_FTL,
+    },
+    LocaleEntry {
+        buzz_code: "it_IT",
+        langid: "it-IT",
+        ftl: IT_FTL,
+    },
+    LocaleEntry {
+        buzz_code: "nl",
+        langid: "nl",
+        ftl: NL_FTL,
     },
     LocaleEntry {
         buzz_code: "zh_CN",
@@ -134,8 +169,12 @@ pub fn all_keys_used() -> &'static [&'static str] {
         // AVAILABLE_LOCALES entry, present in *every* catalog so the language
         // combo stays localized whichever locale is active.
         "locale-name-en-us",
+        "locale-name-ca-es",
+        "locale-name-da-dk",
         "locale-name-de-de",
         "locale-name-es-es",
+        "locale-name-it-it",
+        "locale-name-nl",
         "locale-name-zh-cn",
         "hero-drop",
         "hero-import-button",
@@ -716,9 +755,9 @@ pub fn active_locale() -> &'static str {
 /// (`transcription_options_group_box.py:40`: `self.ui_locale =
 /// self.settings.value(Settings.Key.UI_LOCALE, QLocale().name())`); humm's
 /// [`negotiate`] exists only to resolve a request against the *subset* of
-/// Buzz's 15 locale catalogs humm currently embeds, and with only
-/// `en_US`/`de_DE`/`es_ES`/`zh_CN` embedded it can never actually resolve to
-/// `lv_LV` — it falls back to `en_US`. Gating on [`active_locale`] instead
+/// Buzz's 15 locale catalogs humm currently embeds, and with `lv_LV` still
+/// not among them it can never actually resolve to `lv_LV` — it falls back
+/// to `en_US`. Gating on [`active_locale`] instead
 /// would therefore make this permanently unreachable even when a user
 /// explicitly requests `lv_LV` — design spec §9.3 calls this out explicitly:
 /// "the lv_LV Lumii gate reads the *setting*, so it works even before the lv
@@ -1282,8 +1321,8 @@ mod tests {
         assert!(!lumii_locale_requested(&settings, Some("en_US")));
     }
 
-    /// The gate's whole reason for existing (design spec §9.3): with only
-    /// `en_US`/`de_DE`/`es_ES`/`zh_CN` embedded, [`negotiate`] can never
+    /// The gate's whole reason for existing (design spec §9.3): with `lv_LV`
+    /// still not among the embedded catalogs, [`negotiate`] can never
     /// resolve `"lv_LV"` to itself — proving [`active_locale`] would be the
     /// wrong thing to gate on, and [`lumii_locale_requested`]'s raw-request
     /// read is what actually makes the gate reachable pre-lv-catalog.
@@ -1558,8 +1597,12 @@ mod tests {
         let _guard = lock_locale_for_test();
         for (code, expected) in [
             ("en_US", "Preferences"),
+            ("ca_ES", "Preferències"),
+            ("da_DK", "Indstillinger"),
             ("de_DE", "Einstellungen"),
             ("es_ES", "Preferencias"),
+            ("it_IT", "Preferenze"),
+            ("nl", "Instellingen"),
             ("zh_CN", "偏好设置"),
         ] {
             set_locale(code);

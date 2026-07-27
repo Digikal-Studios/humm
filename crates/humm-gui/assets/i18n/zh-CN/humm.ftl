@@ -42,8 +42,12 @@
 ## (general_preferences_widget.py:34-50), translated by Buzz's own po.
 
 locale-name-en-us = 英语
+locale-name-ca-es = 加泰罗尼亚语
+locale-name-da-dk = 丹麦语
 locale-name-de-de = 德语
 locale-name-es-es = 西班牙语
+locale-name-it-it = 意大利语
+locale-name-nl = 荷兰语
 locale-name-zh-cn = 中文（简体）
 
 ## Empty-state hero (views/main_window.rs)

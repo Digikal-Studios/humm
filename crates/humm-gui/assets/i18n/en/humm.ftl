@@ -7,12 +7,13 @@
 ## This is the source catalog: `en` is `AVAILABLE_LOCALES[0]`, every
 ## negotiation's final fallback, and the key set every other catalog is
 ## tested against (`i18n::tests::every_locale_has_exactly_the_en_key_set`,
-## both directions). Three sibling catalogs are embedded alongside it as of
-## F-008b -- `../de`, `../es`, `../zh-CN` -- so **adding or renaming a key
-## here is not a local edit**: it must land in all four catalogs in the same
-## commit, or the completeness tests fail. Buzz's remaining 11 locales are
-## mechanical additions of the same shape (catalog + registry entry +
-## `locale-name-*` keys, no code).
+## both directions). Seven sibling catalogs are embedded alongside it as of
+## F-008b/M8 Task 13 -- `../ca`, `../da`, `../de`, `../es`, `../it`, `../nl`,
+## `../zh-CN` -- so **adding or renaming a key here is not a local edit**: it
+## must land in all eight catalogs in the same commit, or the completeness
+## tests fail. Buzz's remaining 7 locales (`ja_JP`, `lv_LV`, `pl_PL`, `pt_BR`,
+## `ru`, `uk_UA`, `zh_TW`) are mechanical additions of the same shape (catalog
+## + registry entry + `locale-name-*` keys, no code).
 
 ## Locale display names (i18n::display_name, F-008a) -- one key per
 ## i18n::AVAILABLE_LOCALES entry; every catalog carries the *whole* set, so
@@ -21,8 +22,12 @@
 ## (general_preferences_widget.py:34-50), in Buzz's own dict order.
 
 locale-name-en-us = English
+locale-name-ca-es = Catalan
+locale-name-da-dk = Danish
 locale-name-de-de = German
 locale-name-es-es = Spanish
+locale-name-it-it = Italian
+locale-name-nl = Dutch
 locale-name-zh-cn = Chinese (Simplified)
 
 ## Empty-state hero (views/main_window.rs)

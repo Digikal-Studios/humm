@@ -143,9 +143,10 @@ fn general_harness(
     )
 }
 
-/// The UI-language combo lists exactly [`i18n::AVAILABLE_LOCALES`] (the
-/// F-008b starter set: `en_US`/`de_DE`/`es_ES`/`zh_CN`) and selecting an entry persists
-/// `ui.locale` (live apply -- design spec ledger #L10). Driving a `ComboBox`
+/// The UI-language combo lists exactly [`i18n::AVAILABLE_LOCALES`] (F-008b
+/// plus the M8 Task 13 batch: `en_US`/`ca_ES`/`da_DK`/`de_DE`/`es_ES`/`it_IT`/
+/// `nl`/`zh_CN`) and selecting an entry persists `ui.locale` (live apply --
+/// design spec ledger #L10). Driving a `ComboBox`
 /// selection by simulated click has no kittest precedent in this workspace
 /// (`kittest_import.rs`/`kittest_recording.rs` both document the same gap
 /// and mutate backing state directly instead) -- this test follows suit,
@@ -163,9 +164,10 @@ fn language_combo_lists_available_locales_and_persists() {
     let _locale_guard = i18n::lock_locale_for_test();
     assert_eq!(
         i18n::AVAILABLE_LOCALES.len(),
-        4,
-        "the F-008b starter set embeds en_US/de_DE/es_ES/zh_CN -- update this \
-         count as each of Buzz's remaining 11 locales is ported"
+        8,
+        "F-008b plus M8 Task 13 embeds en_US/ca_ES/da_DK/de_DE/es_ES/it_IT/nl/\
+         zh_CN -- update this count as each of Buzz's remaining 7 locales is \
+         ported"
     );
 
     let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
