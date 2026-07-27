@@ -494,8 +494,11 @@ carries the session's `task` (endpoint routing transcriptions vs
 translations) and `language` form field exactly as `RecordingOptions`
 specified. The test lives in **humm-gui** (it exercises the GUI-side
 `ApiLiveEngineSession::transcribe_live` field mapping — the hop L15
-names) — humm-gui's first TCP-bind test; the documented sandbox baseline
-becomes 67 humm-core + 1 humm-cli + 1 humm-gui.
+names) — humm-gui's first TCP-bind test. Predicted sandbox baseline at
+this section's write time: 67 humm-core + 1 humm-cli + 1 humm-gui — **as
+built, the actual final baseline is 68 + 1 + 1**, since Task 9 separately
+added its own humm-core TCP-bind test first (§9's Environment note carries
+the full as-built growth history).
 
 **7.6 F-044 windowed interactive pass** (acceptance phase, gui-manual v6):
 Delete + confirm modal, Show file location, a live download with cancel,
@@ -548,8 +551,14 @@ speed-badge tooltip, Lumii row under lv_LV — the never-windowed set.
 | F-002 | cli-int | `-e` goes live; cli-int updated |
 | F-031/F-111 | contract | env-gated; probe at sweep; honest exception if still absent |
 
-Environment: sandboxed TCP-bind baseline 67 humm-core + 1 humm-cli grows
-only with documented cause (§7.5 adds humm-gui's first — 67+1+1);
+Environment: sandboxed TCP-bind baseline 67 humm-core + 1 humm-cli at
+milestone entry grows only with documented cause. **As-built growth
+history** (`docs/superpowers/plans/2026-07-26-m8-heavy-ml-closing.md`):
+Task 9 added one humm-core TCP-bind test (`ensure_diarization_models`, the
+`TestServer` precedent) → 68 + 1; Task 12 added humm-gui's first (the L15
+provenance mock-server test, §7.5) → **68 + 1 + 1**, the milestone-exit
+baseline every later task's gate run matched — not the 67 + 1 + 1 this
+section originally predicted before Task 9's own addition landed;
 GPU/Metal/windowed/demucs/
 diarization-model runs are sandbox-lifted; cargo-home seeding per the M7
 recipe; ort build-time binary fetch needs one lifted build (recorded).

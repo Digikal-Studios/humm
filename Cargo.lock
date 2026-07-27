@@ -2691,7 +2691,6 @@ dependencies = [
  "deep_filter",
  "humm-core",
  "humm-media",
- "log",
  "ndarray 0.15.6",
  "pretty_assertions",
  "tempfile",
@@ -2702,7 +2701,7 @@ name = "humm-diarize"
 version = "0.1.0"
 dependencies = [
  "humm-core",
- "log",
+ "ort",
  "pretty_assertions",
  "speakrs",
  "tempfile",

@@ -323,6 +323,10 @@ fn extend_section(ui: &mut egui::Ui, vm: &mut ResizerVm) {
             ui.add(egui::TextEdit::singleline(&mut vm.extend_amount).desired_width(60.0));
             if ui.button(tr("resizer-extend-button")).clicked() {
                 vm.pending_action = Some(ResizerAction::Extend);
+                // The resizer window is itself a deferred child viewport, so
+                // this must also wake the root or `app.rs`'s harvest never
+                // runs (`views::mod`'s `wake_root_for_harvest` doc).
+                super::wake_root_for_harvest(ui.ctx());
             }
         });
     });
@@ -340,6 +344,9 @@ fn resize_section(ui: &mut egui::Ui, vm: &mut ResizerVm) {
                 ui.add(egui::DragValue::new(&mut vm.target_chars).range(1..=100));
                 if ui.button(tr("resizer-resize-button")).clicked() {
                     vm.pending_action = Some(ResizerAction::Resize);
+                    // See the Extend button above: same deferred-child-
+                    // viewport root-wake requirement.
+                    super::wake_root_for_harvest(ui.ctx());
                 }
             });
         });
@@ -364,6 +371,9 @@ fn merge_section(ui: &mut egui::Ui, vm: &mut ResizerVm) {
             merge_row(ui, "resizer-split-by-max-length", &mut vm.split_by_len);
             if ui.button(tr("resizer-merge-button")).clicked() {
                 vm.pending_action = Some(ResizerAction::Merge);
+                // See the Extend button above: same deferred-child-viewport
+                // root-wake requirement.
+                super::wake_root_for_harvest(ui.ctx());
             }
         });
     });

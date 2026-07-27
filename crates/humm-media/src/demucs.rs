@@ -61,6 +61,19 @@
 //! `CancelToken`, which this module's own cancellation check then reaches
 //! via the explicit group-SIGTERM/SIGKILL above, not by relying on the
 //! terminal to deliver a signal to demucs itself.
+//!
+//! **This covers only the *first* Ctrl-C.** `humm-cli::run::install_ctrlc`'s
+//! second SIGINT calls `std::process::exit(130)` directly — bypassing Rust's
+//! normal unwind/`Drop` machinery entirely, so nothing runs the
+//! cancel-and-wait path above, and nothing signals the detached process
+//! group at all. Because that group is no longer in the terminal's
+//! foreground group either (the same detachment this doc just explained),
+//! a second Ctrl-C during isolation now orphans the demucs child (reparented
+//! to init once humm itself exits), not killed — the same is true of yt-dlp
+//! (`fetch.rs`, the same `spawn_own_process_group`/`kill_process_group`
+//! helpers). Not fixed here (a pgid registry the second-Ctrl-C path could
+//! signal before exiting is scoped debt, not this wave); stated honestly
+//! rather than left implied-covered by the first-Ctrl-C rationale above.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};

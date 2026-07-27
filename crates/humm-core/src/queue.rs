@@ -15,14 +15,22 @@
 //!
 //! - **Single writer.** Only the runner thread touches [`TaskStore`]; it is the
 //!   sole writer of a task's status (`ARCHITECTURE.md` §5).
-//! - **Resizer-created rows are the documented exception (ADR-018 scope).**
-//!   The queue owns `status`/`progress` for tasks it *executes*. The transcript
-//!   resizer (F-086, design spec §4 "status-write boundary note") is the one
-//!   feature that writes those columns outside the queue: its
-//!   `copy_transcription` / `mark_replaced_completed` / `update_progress_direct`
-//!   store calls create and complete rows that never enter this queue at all,
-//!   so the "single writer / queue owns status transitions" invariant is scoped
-//!   to queue-executed tasks and does not conflict with them.
+//! - **Resizer- and Speaker-ID-created rows are the documented exception
+//!   (ADR-018 scope).** The queue owns `status`/`progress` for tasks it
+//!   *executes*. The transcript resizer (F-086, design spec §4 "status-write
+//!   boundary note") and Speaker-ID's Save (F-087, `humm-gui`'s
+//!   `speaker_id::save`) are the two features that write those columns
+//!   outside the queue: both call the identical `copy_transcription` +
+//!   `mark_replaced_completed` pair (the resizer's `update_progress_direct`
+//!   use has no Speaker-ID analogue) to create and complete a row that never
+//!   enters this queue at all. Still safe, for the same reason in both
+//!   cases: each only ever writes a **freshly minted** id it just created via
+//!   `copy_transcription` — never a queue-owned id already in flight — and
+//!   `copy_transcription`'s own row always starts `Queued` before either
+//!   caller immediately calls `mark_replaced_completed` on it, so the
+//!   "single writer / queue owns status transitions" invariant stays scoped
+//!   to queue-executed tasks and never actually conflicts with either
+//!   feature.
 //! - **Terminal status precedes the terminal event.** `mark_completed` /
 //!   `mark_failed` / `mark_canceled` is written to the store *before* the
 //!   matching `Completed`/`Failed`/`Canceled` event is emitted, so a consumer

@@ -111,6 +111,15 @@ speakrs = { version = "=0.5.0", default-features = false, features = [
     "openblas-system",
     "coreml",
 ] }
+# `ort` itself only ever reaches the graph transitively through `speakrs`'s
+# own `version = "2.0.0-rc.12"` requirement (a caret req, not an exact pin —
+# Cargo treats a bare pre-release version string this way), so ADR-024's
+# "exact `ort =2.0.0-rc.12` pin" claim had nothing enforcing it. Declared
+# directly here (default features — the same set `speakrs` already resolves
+# it to: `std`, `ndarray`, `tracing`, `download-binaries`, `tls-native`,
+# `copy-dylibs`, `api-24`) so the exact pin is real, in `humm-diarize` (the
+# one crate naming `ort`/`speakrs`, Standing Policy rule 5).
+ort = "=2.0.0-rc.12"
 
 [profile.release]
 lto = "thin"

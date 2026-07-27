@@ -118,9 +118,17 @@ fn rms(samples: &[f32]) -> f64 {
 #[ignore = "requires ffmpeg + Buzz testdata (set HUMM_DFN_CONTRACT=1); see this file's doc comment for provisioning"]
 fn real_dfn_denoises_the_noise_mixed_whisper_french_fixture() {
     if std::env::var("HUMM_DFN_CONTRACT").as_deref() != Ok("1") {
-        eprintln!(
-            "SKIP real_dfn_denoises_the_noise_mixed_whisper_french_fixture: \
-             HUMM_DFN_CONTRACT is not set to 1 (see this test's doc comment)"
+        // `println!`, not `eprintln!`: this test is `#[ignore]`d already, so
+        // it only ever runs under `--ignored`; when it does, the gate below
+        // means it can still report a bare `ok` without the real contract
+        // ever executing. A visible line under `--nocapture` is the only
+        // thing standing between that and a silently-trustworthy-looking
+        // green run (Standing Policy rule 5 depends on this command's
+        // output being trustworthy).
+        println!(
+            "SKIPPED (not run): real_dfn_denoises_the_noise_mixed_whisper_french_fixture — \
+             HUMM_DFN_CONTRACT is not set to 1, so this reports `ok` without touching \
+             DeepFilterNet at all (see this test's doc comment to provision it for real)"
         );
         return;
     }

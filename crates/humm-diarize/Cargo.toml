@@ -7,8 +7,11 @@ repository.workspace = true
 
 [dependencies]
 humm-core.workspace = true
-log.workspace = true
 speakrs.workspace = true
+# Direct dependency so ADR-024's exact `=2.0.0-rc.12` pin is real rather than
+# only enforced transitively through `speakrs`'s own (caret) requirement —
+# see the workspace `Cargo.toml`'s comment on this line.
+ort.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true

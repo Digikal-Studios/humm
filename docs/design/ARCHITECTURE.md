@@ -187,7 +187,18 @@ pub trait SecretStore: Send + Sync { /* keyring; get/set/delete by well-known ke
 pub trait Telemetry: Send + Sync { fn capture(&self, event: Event); } // PostHog | Noop
 ```
 
-Adapter obligations (Standing Policy): startup probe (`ffmpeg -version`, `yt-dlp --version` → capability report, actionable errors, graceful feature degradation), machine-readable interfaces only (raw PCM pipes, `-print_format json`, `--print` templates), contract tests against golden inputs.
+Adapter obligations (Standing Policy): startup probe (`ffmpeg -version`, `yt-dlp --version`, **`demucs` availability** → capability report, actionable errors, graceful feature degradation), machine-readable interfaces only (raw PCM pipes, `-print_format json`, `--print` templates), contract tests against golden inputs.
+
+**The before-transcription seam (M8, design spec §3/§4/§5/§6).** `queue::Runner::run_job` runs the four ML boundaries above in one fixed order, each gated on its own per-task/per-config switch, none skippable by reordering:
+
+1. **`SpeechIsolator::isolate`** (F-027) — gated on the task's own `options.extract_speech`, not a Preferences hook. Runs before the input is decoded; a `PhaseChanged { phase: IsolatingSpeech }` event brackets it. Failure **fails the task** (Buzz parity) — the one boundary here that doesn't degrade.
+2. **`NoiseReducer::reduce`** (F-112) — gated on `PostprocConfig::noise_reduction.enabled`. Failure or panic (`catch_unwind`-contained) degrades to the prior audio and logs; never fails the task.
+3. **`LanguageDetector::detect`** (F-114) — gated on `PostprocConfig::language_detection.enabled` plus the en-quirk check (`postproc::langdetect::should_detect`). Failure or panic degrades to auto-detect; never fails the task.
+4. Transcription proper (`TranscriptionEngine::transcribe`) runs against whatever audio survived steps 1-3.
+
+`Diarizer::diarize` (F-087) is **not** part of this chain — it runs later, on demand, from the Speaker-ID window's own Identify click, against the task's already-decoded audio; it has no config gate because there is no automatic path to gate.
+
+Cleanup: `TempAudioGuard` (`queue.rs`) removes every temp derivative file (`_speech.mp3`, `_DeepFilterNet3.wav`) on **every** exit path from `run_job`, including a panic unwind — except `_DeepFilterNet3.wav` when `PostprocConfig::noise_reduction.keep_denoised_file` is set. This seam is also documented from the settings-table angle in `docs/HUMM_SURFACE.md` §6.4-6.5 (the two documents describe the same mechanism from different entry points: this file the control flow, HUMM_SURFACE the config keys).
 
 ## 3. Concurrency model (per subsystem — different needs, different tools)
 
@@ -203,7 +214,7 @@ Adapter obligations (Standing Policy): startup probe (`ffmpeg -version`, `yt-dlp
 | OpenAI-compatible API requests (M6 as-built, ADR-022) | `openai::client::cancelable` runs each blocking call on its own short-lived, named `"openai-request"` thread while the caller polls its `CancelToken` every ~100 ms and returns as soon as cancel fires; on cancel the request thread is **detached, not killed** (Rust has no safe mid-syscall thread kill), bounded by its own request timeout. `OpenAiEngine::transcribe_one`'s 600 s per-chunk request is `cancelable`'s one production caller; `validate`'s two probes (5 s/15 s) and the translator worker's batched requests (60 s, below) deliberately bypass it and call `reqwest` directly on their own disposable threads instead | sub-second cancel *acknowledgment* even mid-request, without unsafe thread termination |
 | LLM translator worker (M6 as-built, F-031/F-063/F-085, ADR-022) | `TranslatorHandle::spawn` (`openai::translate`) — one dedicated `"humm-translator"` OS thread per active translator, draining a `flume` channel and batching up to `BATCH_SIZE` (10) items per `/chat/completions` request under its own 60 s timeout, not `cancelable` | the worker thread is disposable/cheap to spawn per task and `Stop` is already honored between requests, so wrapping every translation request in a second cancel-poll layer would only duplicate the guarantee the 60 s timeout already provides (`pipeline.rs`'s drain calls `TranslatorHandle::stop()`, joining the worker directly) |
 
-**Event bus.** `TaskEvent { task_id, kind: Queued | DownloadProgress(f32) | Started | Segment(Segment) | Progress(f32) | Completed | Failed(ErrorInfo) | Canceled }` — the single source of truth consumed by GUI table, CLI renderer, exporters, and the store (which persists state transitions). This is the Rust-shaped replacement for Buzz's Qt-signal spaghetti and fixes Buzz's restart-loses-options bug structurally: the full `JobSpec` is part of the queue record and persisted with it.
+**Event bus.** `TaskEvent { task_id, kind: Queued | DownloadProgress(f32) | Started | SegmentAdded(Segment) | Progress(f32) | Completed | Failed(ErrorInfo) | Canceled | Skipped | PostProcessed | PhaseChanged }` — the single source of truth consumed by GUI table, CLI renderer, exporters, and the store (which persists state transitions). This is the Rust-shaped replacement for Buzz's Qt-signal spaghetti and fixes Buzz's restart-loses-options bug structurally: the full `JobSpec` is part of the queue record and persisted with it.
 
 **Cancellation** is cooperative and prompt everywhere: `CancelToken` (Arc<AtomicBool> + waker) checked by the whisper abort callback, subprocess kill for ffmpeg/yt-dlp/demucs, and for HTTP the request-thread detach mechanism (`openai::client::cancelable`, ADR-022 — the design sketch's "`tokio` abort" as-built) plus per-request timeouts. Every path leaves the store consistent (terminal status written before ack).
 
@@ -236,7 +247,7 @@ Exports (`core::export`): `write_txt/srt/vtt(&[Segment], key: TextOrTranslation,
 
 ## 5. State & persistence
 
-- **DB** (humm-store, rusqlite bundled): humm-owned schema, superset of Buzz's (`transcription` + `transcription_segment` columns preserved for import) **plus** `options_json` (full `TranscriptionOptions` — fixes the restart trap) and a `kind` column admitting live-session records (Q-10). WAL mode. All access behind `TranscriptionRepository`; the queue's status transitions are the only writers of `status`.
+- **DB** (humm-store, rusqlite bundled): humm-owned schema, superset of Buzz's (`transcription` + `transcription_segment` columns preserved for import) **plus** `options_json` (full `TranscriptionOptions` — fixes the restart trap) and a `kind` column admitting live-session records (Q-10). WAL mode. All access behind `TranscriptionRepository`; the queue's status transitions are the only writers of `status` **for tasks it executes** — the transcript resizer (F-086) and Speaker-ID's Save (F-087) both write `status` outside the queue too, via the identical `copy_transcription` + `mark_replaced_completed` pair on a row they just created (`queue.rs`'s module doc has the full invariant and why it's still safe: each only ever writes a freshly minted id, never one already in flight).
 - **Buzz import** (one-time, Q-6): open `~/.../Buzz.sqlite` read-only if present on first run, map rows/segments, mark imported. Import failures are non-fatal + logged.
 - **Settings**: typed serde struct → TOML at platform config dir; atomic write (temp+rename); defaults in code (single source). No QSettings migration (approved).
 - **Secrets**: `keyring` crate behind `SecretStore` ("OpenAI API key" well-known entry, parity service name semantics — humm's own service string).
@@ -246,7 +257,7 @@ Exports (`core::export`): `write_txt/srt/vtt(&[Segment], key: TextOrTranslation,
 
 - Library crates: `thiserror` enums per crate (`MediaError`, `EngineError`, `StoreError`, `AudioError`, `CoreError` composing them). Every variant carries actionable context ("ffmpeg not found — install it or set HUMM_FFMPEG"). No `unwrap`/`expect` outside tests/provably-impossible states (documented).
 - Binaries: `anyhow` at the edge; CLI maps errors → exit codes + stderr; GUI maps → user-facing error presentation (task row status, non-modal toasts, detail dialog with log pointer).
-- Missing external binary = degraded feature, not a crash: `Capabilities` struct computed at startup (ffmpeg? yt-dlp? metal?) gates UI affordances with explanatory tooltips (Standing Policy rule 6).
+- Missing external binary = degraded feature, not a crash: `Capabilities` struct computed at startup (ffmpeg? yt-dlp? metal? demucs?) gates UI affordances with explanatory tooltips (Standing Policy rule 6).
 
 ## 7. GUI architecture (humm-gui, egui/eframe — ADR-006)
 

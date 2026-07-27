@@ -4,9 +4,9 @@
 //! gated on `HUMM_DIARIZE_CONTRACT=1` (mirrors `humm-dfn`'s `HUMM_DFN_CONTRACT`/
 //! `humm-media`'s `HUMM_DEMUCS_CONTRACT` convention, `contract.rs`): the plain
 //! documented `cargo test -p humm-diarize -- --ignored` gate must stay green
-//! even for someone who hasn't provisioned the real ~58MB model download —
+//! even for someone who hasn't provisioned the real 59.75MB model download —
 //! without this second gate, that command would either panic (no models, no
-//! network) or silently pull 58MB over the network (models absent, network
+//! network) or silently pull 59.75MB over the network (models absent, network
 //! present), neither of which is what "just run the ignored tests" should do.
 //! This test provisions the models itself via
 //! `ModelDownloader::ensure_diarization_models` against the real
@@ -101,13 +101,17 @@ fn speaker_change_boundaries_ms(turns: &[SpeakerTurn]) -> Vec<i64> {
 
 #[test]
 #[ignore = "requires HUMM_DIARIZE_CONTRACT=1 (real diarization models, downloaded from \
-            HuggingFace on first run, ~58MB); see this file's doc comment for provisioning"]
+            HuggingFace on first run, 59.75MB); see this file's doc comment for provisioning"]
 fn two_speaker_fixture_yields_two_speakers() {
     if std::env::var("HUMM_DIARIZE_CONTRACT").as_deref() != Ok("1") {
-        eprintln!(
-            "SKIP two_speaker_fixture_yields_two_speakers: HUMM_DIARIZE_CONTRACT is not \
-             set to 1 (see this test's doc comment) — set it to provision the real \
-             ~58MB model download and run the real pipeline"
+        // `println!`, not `eprintln!` — visible under `--nocapture` so a
+        // skipped gate can never be mistaken for a passed one (Standing
+        // Policy rule 5: this command's output must stay trustworthy).
+        println!(
+            "SKIPPED (not run): two_speaker_fixture_yields_two_speakers — \
+             HUMM_DIARIZE_CONTRACT is not set to 1, so this reports `ok` without \
+             downloading or running the real ~59.75MB diarization model pipeline \
+             (see this test's doc comment to provision it for real)"
         );
         return;
     }

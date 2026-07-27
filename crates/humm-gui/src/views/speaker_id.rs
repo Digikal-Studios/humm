@@ -155,7 +155,12 @@ fn show_step2(ui: &mut egui::Ui, vm: &mut SpeakerIdVm, deps: &SpeakerIdDeps, ctx
         }
 
         if ui.button(tr("speaker-id-save-button")).clicked() {
-            vm.save_requested = true;
+            // The Speaker-ID window is itself a deferred child viewport, so a
+            // bare flag latch would never reach `app.rs`'s root-only harvest
+            // (`views::mod`'s `latch_root_harvested_intent` doc — the same
+            // invariant `viewer.rs`'s Resize/Identify Speakers buttons rely
+            // on).
+            super::latch_root_harvested_intent(&mut vm.save_requested, ui.ctx());
         }
     });
 

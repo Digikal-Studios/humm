@@ -989,11 +989,16 @@ fn real_demucs_isolates_vocals_from_whisper_french() {
     // review, Important 2 — the original `panic!` here made that documented
     // command always fail this one test).
     if std::env::var("HUMM_DEMUCS_CONTRACT").as_deref() != Ok("1") {
-        eprintln!(
-            "SKIP real_demucs_isolates_vocals_from_whisper_french: \
-             HUMM_DEMUCS_CONTRACT is not set to 1 — provision a real demucs \
-             install first (see this test's doc comment) and point HUMM_DEMUCS \
-             at it if it isn't a plain `demucs` on PATH"
+        // `println!`, not `eprintln!` — visible under `--nocapture` so this
+        // gate being skipped can never be mistaken for it having run and
+        // passed (Standing Policy rule 5: this command's output must stay
+        // trustworthy).
+        println!(
+            "SKIPPED (not run): real_demucs_isolates_vocals_from_whisper_french — \
+             HUMM_DEMUCS_CONTRACT is not set to 1, so this reports `ok` without \
+             touching demucs at all — provision a real demucs install first \
+             (see this test's doc comment) and point HUMM_DEMUCS at it if it \
+             isn't a plain `demucs` on PATH"
         );
         return;
     }

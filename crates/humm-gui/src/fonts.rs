@@ -15,9 +15,11 @@
 //! all-languages zip. License and glyph coverage are identical either way;
 //! the family key stays the plan's `"noto-sc"`.
 //!
-//! Source: <https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf>
+//! Source: <https://raw.githubusercontent.com/notofonts/noto-cjk/Sans2.004/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf>
 //! (`notofonts/noto-cjk`, release tag `Sans2.004`, path
-//! `Sans/SubsetOTF/SC/NotoSansSC-Regular.otf`; fetched 2026-07-26).
+//! `Sans/SubsetOTF/SC/NotoSansSC-Regular.otf`; fetched 2026-07-26) — the URL
+//! pins the tag, not `main`, so this provenance record for a vendored binary
+//! stays accurate even after upstream's `main` moves on.
 //! SHA-256: `faa6c9df652116dde789d351359f3d7e5d2285a2b2a1f04a2d7244df706d5ea9`
 //! (8,331,336 bytes). License: SIL Open Font License 1.1, committed
 //! alongside as `assets/fonts/OFL.txt` (that same release's `Sans/LICENSE`).

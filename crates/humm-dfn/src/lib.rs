@@ -281,7 +281,21 @@ mod tests {
         }
     }
 
+    // This test's `reduce()` call composes `humm-media`'s `FfmpegDecoder`
+    // (this crate's module doc, "Adapter composition, not core") to decode
+    // the synthesized input WAV at DeepFilterNet3's own 48 kHz rate before
+    // running the real embedded model — so, unlike this module's other
+    // tests, it needs a real `ffmpeg` on `PATH`, same requirement
+    // `humm-media`'s own `#[ignore = "requires ffmpeg"]` contract tests
+    // gate on (`humm-media/tests/contract.rs`). Gated the same way here
+    // rather than left ungated, so a machine without ffmpeg still gets a
+    // green `cargo test --workspace` (S9, M8 final review); this is the
+    // workspace's only automated real-model DFN coverage, so it stays
+    // `#[ignore]`d rather than deleted — `cargo test -p humm-dfn --
+    // --ignored` (with ffmpeg on `PATH`) still runs it for real.
     #[test]
+    #[ignore = "requires ffmpeg on PATH (DfNoiseReducer composes humm-media's \
+                FfmpegDecoder to decode the synthesized input WAV)"]
     fn reduce_writes_sibling_wav_with_expected_name() {
         let dir = tempfile::tempdir().expect("tempdir");
         let input = dir.path().join("noisy-input.wav");
@@ -315,7 +329,14 @@ mod tests {
         );
     }
 
+    // Also needs a real ffmpeg on PATH: without it, the spawn itself fails
+    // with `MediaError::BinaryMissing` rather than the `DecodeFailed` this
+    // test asserts (ffmpeg genuinely trying and failing to open a
+    // nonexistent input is what produces `DecodeFailed`) — see the previous
+    // test's comment.
     #[test]
+    #[ignore = "requires ffmpeg on PATH (needs a real ffmpeg failing to open \
+                the input, not a binary-missing spawn error)"]
     fn reduce_failure_on_missing_input_is_err() {
         let dir = tempfile::tempdir().expect("tempdir");
         let missing = dir.path().join("does-not-exist.wav");

@@ -12,8 +12,10 @@ humm is a Rust port of Buzz (`/Users/jawad/RustroverProjects/buzz`) with **100% 
 ## Commands
 
 ```bash
-brew install openblas libomp                             # macOS build prereq for humm-diarize
-                                                         #  (speakrs → ndarray-linalg openblas-system)
+brew install openblas libomp                             # macOS build AND RUNTIME prereq (humm-diarize
+                                                         #  speakrs -> ndarray-linalg openblas-system links
+                                                         #  Homebrew's dylib by absolute path — humm-gui
+                                                         #  fails to launch at all without it, ADR-024)
 cargo fmt --check                                        # formatting gate
 cargo clippy --workspace --all-targets -- -D warnings    # lint gate
 cargo test --workspace                                   # unit + integration + snapshot

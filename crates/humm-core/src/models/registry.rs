@@ -302,7 +302,8 @@ pub const DIARIZE_EMBEDDING_MIN_SAMPLES_FILE: &str =
 
 /// Every diarization model file `speakrs::ExecutionMode::Cpu` needs
 /// (`validation/m8-spikes/README.md` Spike B "Model artifacts" table, 10
-/// files, ≈58MB total), in the order [`ModelDownloader::ensure_diarization_models`]
+/// files, 59.75 MB total — `59,751,799` bytes exactly, per `DECISIONS.md`
+/// ADR-024's corrected figure), in the order [`ModelDownloader::ensure_diarization_models`]
 /// fetches them and [`diarization_model_paths`] resolves them.
 ///
 /// [`ModelDownloader::ensure_diarization_models`]: crate::models::download::ModelDownloader::ensure_diarization_models

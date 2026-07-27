@@ -10,7 +10,6 @@ humm-core.workspace = true
 humm-media = { path = "../humm-media", version = "0.1.0" }
 deep_filter.workspace = true
 ndarray.workspace = true
-log.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
