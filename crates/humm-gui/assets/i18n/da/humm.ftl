@@ -57,10 +57,10 @@
 locale-name-en-us = Engelsk
 locale-name-ca-es = Catalansk
 locale-name-da-dk = Dansk
+locale-name-nl = Nederlandsk
 locale-name-de-de = Tysk
 locale-name-es-es = Spansk
 locale-name-it-it = Italiensk
-locale-name-nl = Nederlandsk
 locale-name-zh-cn = Kinesisk (forenklet)
 
 ## Empty-state hero (views/main_window.rs)

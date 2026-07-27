@@ -55,6 +55,13 @@
 ## `update-dialog-close`'s "Sluiten" is sourced from an obsolete (`#~`) po
 ## entry ("Close" -> "Sluiten"), since no live nl entry exists for a
 ## standalone "Close" — still Buzz's own word choice, just a retired msgid.
+## `prefs-general-invalid-key-body`'s Buzz msgstr spells the base64
+## character-class parenthetical with en dashes ("A–Za–z0–9+/=_-") rather
+## than plain hyphens between the ranges (only the trailing "_-" stays a
+## regular hyphen) — an upstream typographic substitution, not a garbled
+## character class the way it_IT's own po truncates it (that one drops
+## characters outright; this one just uses the wrong dash glyph for three
+## of the ranges) — used byte-verbatim per the sourcing rule.
 ##
 ## Strings naming the product "Buzz" are re-pointed at "humm", matching the
 ## en catalog's own substitution (update-dialog-header, prefs-general-test-
@@ -73,10 +80,10 @@
 locale-name-en-us = Engels
 locale-name-ca-es = Catalaans
 locale-name-da-dk = Deens
+locale-name-nl = Nederlands
 locale-name-de-de = Duits
 locale-name-es-es = Spaans
 locale-name-it-it = Italiaans
-locale-name-nl = Nederlands
 locale-name-zh-cn = Chinees (Vereenvoudigd)
 
 ## Empty-state hero (views/main_window.rs)
@@ -111,7 +118,7 @@ task-translate = Naar het Engels vertalen
 ## unlike this file's other status texts it goes through `tr` rather than
 ## staying a literal byte-exact Buzz string.
 
-status-isolating-speech = Spraak isoleren
+status-isolating-speech = spraak isoleren
 
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 

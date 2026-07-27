@@ -35,10 +35,10 @@
 locale-name-en-us = Inglés
 locale-name-ca-es = Catalán
 locale-name-da-dk = Danés
+locale-name-nl = Holandés
 locale-name-de-de = Alemán
 locale-name-es-es = Español
 locale-name-it-it = Italiano
-locale-name-nl = Holandés
 locale-name-zh-cn = Chino (simplificado)
 
 ## Empty-state hero (views/main_window.rs)

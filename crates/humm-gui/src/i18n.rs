@@ -6,11 +6,15 @@
 //! things:
 //!
 //! - [`AVAILABLE_LOCALES`]: the registry of embedded catalogs — `en_US` plus
-//!   the `ca_ES`/`da_DK`/`de_DE`/`es_ES`/`it_IT`/`nl`/`zh_CN` set (F-008b,
-//!   design spec §9.2), in Buzz's own `ui_locales` order. Adding one of
-//!   Buzz's remaining 7 locales is one array element + one `include_str!` +
-//!   one catalog file: no code changes here, and the per-locale completeness
-//!   tests at the bottom of this module pick the new entry up automatically.
+//!   the `ca_ES`/`da_DK`/`nl`/`de_DE`/`es_ES`/`it_IT`/`zh_CN` set (F-008b,
+//!   design spec §9.2), in Buzz's own `ui_locales` order (review-corrected,
+//!   M8 Task 13 follow-up: `nl` sits right after `da_DK`, not after `it_IT`
+//!   — see `general_preferences_widget.py:34-50`, whose dict order is
+//!   `en_US, ca_ES, da_DK, nl, de_DE, es_ES, it_IT, ja_JP, lv_LV, pl_PL,
+//!   pt_BR, ru, uk_UA, zh_CN, zh_TW`). Adding one of Buzz's remaining 7
+//!   locales is one array element + one `include_str!` + one catalog file:
+//!   no code changes here, and the per-locale completeness tests at the
+//!   bottom of this module pick the new entry up automatically.
 //! - [`negotiate`]/[`negotiate_in`]: Buzz's own gettext fallback chain
 //!   (`buzz/locale.py:15-21`) reimplemented over the registry — exact code
 //!   match, then language-prefix match, then `en_US`.
@@ -80,6 +84,9 @@ const CA_FTL: &str = include_str!("../assets/i18n/ca/humm.ftl");
 /// The embedded Danish catalog source (F-008b, M8 Task 13).
 const DA_FTL: &str = include_str!("../assets/i18n/da/humm.ftl");
 
+/// The embedded Dutch catalog source (F-008b, M8 Task 13).
+const NL_FTL: &str = include_str!("../assets/i18n/nl/humm.ftl");
+
 /// The embedded German catalog source (F-008b).
 const DE_FTL: &str = include_str!("../assets/i18n/de/humm.ftl");
 
@@ -88,9 +95,6 @@ const ES_FTL: &str = include_str!("../assets/i18n/es/humm.ftl");
 
 /// The embedded Italian catalog source (F-008b, M8 Task 13).
 const IT_FTL: &str = include_str!("../assets/i18n/it/humm.ftl");
-
-/// The embedded Dutch catalog source (F-008b, M8 Task 13).
-const NL_FTL: &str = include_str!("../assets/i18n/nl/humm.ftl");
 
 /// The embedded Simplified Chinese catalog source (F-008b).
 const ZH_CN_FTL: &str = include_str!("../assets/i18n/zh-CN/humm.ftl");
@@ -132,6 +136,11 @@ pub static AVAILABLE_LOCALES: &[LocaleEntry] = &[
         ftl: DA_FTL,
     },
     LocaleEntry {
+        buzz_code: "nl",
+        langid: "nl",
+        ftl: NL_FTL,
+    },
+    LocaleEntry {
         buzz_code: "de_DE",
         langid: "de-DE",
         ftl: DE_FTL,
@@ -145,11 +154,6 @@ pub static AVAILABLE_LOCALES: &[LocaleEntry] = &[
         buzz_code: "it_IT",
         langid: "it-IT",
         ftl: IT_FTL,
-    },
-    LocaleEntry {
-        buzz_code: "nl",
-        langid: "nl",
-        ftl: NL_FTL,
     },
     LocaleEntry {
         buzz_code: "zh_CN",
@@ -171,10 +175,10 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "locale-name-en-us",
         "locale-name-ca-es",
         "locale-name-da-dk",
+        "locale-name-nl",
         "locale-name-de-de",
         "locale-name-es-es",
         "locale-name-it-it",
-        "locale-name-nl",
         "locale-name-zh-cn",
         "hero-drop",
         "hero-import-button",
@@ -1429,6 +1433,45 @@ mod tests {
         assert_eq!(after_text, "Medien hier ablegen oder ⌘O");
     }
 
+    // -- registry order (F-008b, M8 Task 13 review fix) --------------------------
+
+    /// Buzz's own `ui_locales` dict order, in full — all 15 codes
+    /// (`general_preferences_widget.py:34-50`), independent of which of them
+    /// humm currently embeds. [`AVAILABLE_LOCALES`]'s own order must always
+    /// be a *subsequence* of this: a locale not yet ported is simply absent,
+    /// but any locale that *is* embedded must appear in the same relative
+    /// order it holds here.
+    const BUZZ_UI_LOCALES_ORDER: &[&str] = &[
+        "en_US", "ca_ES", "da_DK", "nl", "de_DE", "es_ES", "it_IT", "ja_JP", "lv_LV", "pl_PL",
+        "pt_BR", "ru", "uk_UA", "zh_CN", "zh_TW",
+    ];
+
+    /// Pins [`AVAILABLE_LOCALES`]'s relative order against Buzz's real
+    /// `ui_locales` dict order — added after a review caught `nl` landed in
+    /// the wrong slot (M8 Task 13: placed right after `it_IT` instead of
+    /// right after `da_DK`, its actual dict position — `general_preferences_
+    /// widget.py:34-50` puts `"nl"` as the dict's 4th entry, not its 7th).
+    /// Filtering [`BUZZ_UI_LOCALES_ORDER`] down to only the codes
+    /// [`AVAILABLE_LOCALES`] currently embeds must equal
+    /// [`AVAILABLE_LOCALES`]'s own `buzz_code` sequence exactly, so a future
+    /// locale insertion (Task 14/15 and beyond) that lands at the wrong
+    /// ordinal slot fails this test immediately, rather than shipping a
+    /// silently-wrong Preferences language-combo order the way this one did.
+    #[test]
+    fn registry_order_matches_buzz_ui_locales_subsequence() {
+        let embedded: Vec<&str> = AVAILABLE_LOCALES.iter().map(|e| e.buzz_code).collect();
+        let expected: Vec<&str> = BUZZ_UI_LOCALES_ORDER
+            .iter()
+            .copied()
+            .filter(|code| embedded.contains(code))
+            .collect();
+        assert_eq!(
+            embedded, expected,
+            "AVAILABLE_LOCALES' order has drifted from Buzz's own ui_locales \
+             dict order -- a locale landed at the wrong ordinal slot"
+        );
+    }
+
     // -- per-locale catalog completeness (F-008b) -------------------------------
 
     /// Global Constraint 5's enforcement: every embedded catalog declares
@@ -1599,10 +1642,10 @@ mod tests {
             ("en_US", "Preferences"),
             ("ca_ES", "Preferències"),
             ("da_DK", "Indstillinger"),
+            ("nl", "Instellingen"),
             ("de_DE", "Einstellungen"),
             ("es_ES", "Preferencias"),
             ("it_IT", "Preferenze"),
-            ("nl", "Instellingen"),
             ("zh_CN", "偏好设置"),
         ] {
             set_locale(code);

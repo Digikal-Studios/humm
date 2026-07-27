@@ -74,10 +74,10 @@
 locale-name-en-us = Inglese
 locale-name-ca-es = Catalano
 locale-name-da-dk = Danese
+locale-name-nl = Olandese
 locale-name-de-de = Tedesco
 locale-name-es-es = Spagnolo
 locale-name-it-it = Italiano
-locale-name-nl = Olandese
 locale-name-zh-cn = Cinese (semplificato)
 
 ## Empty-state hero (views/main_window.rs)

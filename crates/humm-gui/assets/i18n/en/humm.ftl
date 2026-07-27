@@ -24,10 +24,10 @@
 locale-name-en-us = English
 locale-name-ca-es = Catalan
 locale-name-da-dk = Danish
+locale-name-nl = Dutch
 locale-name-de-de = German
 locale-name-es-es = Spanish
 locale-name-it-it = Italian
-locale-name-nl = Dutch
 locale-name-zh-cn = Chinese (Simplified)
 
 ## Empty-state hero (views/main_window.rs)

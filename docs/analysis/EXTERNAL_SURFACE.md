@@ -179,7 +179,7 @@ Root: `user_cache_dir("Buzz")/models`, override `BUZZ_MODEL_ROOT` (line 119-122)
 
 ## 7. i18n
 
-- UI: GNU gettext, domain `buzz`, locale dir `buzz/locale`; UI language from setting `ui-locale` (default system `QLocale().name()`), fallback English. 15 languages: ca_ES, da_DK, de_DE, en_US, es_ES, it_IT, ja_JP, lv_LV, nl, pl_PL, pt_BR, ru, uk_UA, zh_CN, zh_TW (`.po` compiled to `.mo` at build).
+- UI: GNU gettext, domain `buzz`, locale dir `buzz/locale`; UI language from setting `ui-locale` (default system `QLocale().name()`), fallback English. 15 languages, in `ui_locales`' own dict order (`general_preferences_widget.py:34-50` — this is also the Preferences language combo's render order, not just an unordered set): en_US, ca_ES, da_DK, nl, de_DE, es_ES, it_IT, ja_JP, lv_LV, pl_PL, pt_BR, ru, uk_UA, zh_CN, zh_TW (`.po` compiled to `.mo` at build).
 - Transcription languages: ~100-entry Whisper map in `transcriber.py:37-138` (distinct from UI locales); `BUZZ_FAVORITE_LANGUAGES` pins favorites.
 
 ## 8. Exit codes
