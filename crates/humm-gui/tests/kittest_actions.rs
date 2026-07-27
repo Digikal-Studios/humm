@@ -644,3 +644,45 @@ fn modal_open_suppresses_delete_and_command_s_while_rename_is_open() {
     harness.run();
     harness.get_by_label_contains("Are you sure you want to delete");
 }
+
+// -- Task 17 defect 3: does ⌘, (OpenPreferencesWindow's default sequence)
+//    actually open Preferences? -----------------------------------------
+//
+// The M8 windowed acceptance pass (`docs/gui-manual/M8.md` §8.3) found ⌘,
+// did nothing under synthetic `CGEvent` keyboard input, while ⌘O (consumed
+// two lines away in the same `handle_global_shortcuts` block,
+// `views/main_window.rs:432`) worked, and rebinding the action to ⌘⇧K then
+// worked too. That isolates the failure to *key delivery/mapping*
+// (CGEvent → winit → egui never producing a `Key::Comma` for that physical
+// keystroke) — not `consume_shortcut`, not the preferences-opening code,
+// and not `shortcuts::parse_key`/`key_token` (both map `,` <-> `Key::Comma`
+// correctly; see `shortcuts.rs`'s own `#[cfg(test)]` module).
+//
+// This test injects the egui `Key::Comma` + `Modifiers::COMMAND` event
+// directly — the same `Harness::key_press_modifiers` seam
+// `retry_shortcut_disabled_while_a_modal_is_open` above uses — bypassing
+// CGEvent/winit entirely. A pass here proves the in-app handling
+// (`parse_key`/`consume_shortcut`/`handle_global_shortcuts`/the
+// `preferences_requested` harvest) is correct end to end; it cannot by
+// itself prove or disprove the CGEvent-delivery layer M8.md flagged, which
+// stays a physical-keyboard confirmation per that document's own caveat.
+#[test]
+fn cmd_comma_opens_preferences_via_the_global_shortcut() {
+    let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
+    let (mut harness, _dir) = wide_harness(store, Box::new(NeverCalledEngineFactory));
+    harness.run();
+
+    assert!(
+        !harness.state().is_preferences_open_for_test(),
+        "premise: Preferences starts closed"
+    );
+
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Comma);
+    harness.run();
+
+    assert!(
+        harness.state().is_preferences_open_for_test(),
+        "a genuine egui Key::Comma+COMMAND event must open Preferences via \
+         the default OPEN_PREFERENCES_WINDOW = \"Ctrl+,\" shortcut"
+    );
+}

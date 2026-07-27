@@ -1119,3 +1119,79 @@ fn update_chip_appears_when_available_notice_is_injected() {
 
     harness.get_by_label("Update Available");
 }
+
+// -- Task 17 defect 1: the download-row Cancel button must stay reachable --
+//
+// `row_ui`'s `Downloading` branch used to render an undersized-`desired_width`
+// `ProgressBar` (defaults to "all remaining width") directly followed by the
+// Cancel button in a plain left-to-right `ui.horizontal` — the bar always
+// claimed the whole row, laying the button out past the visible edge
+// (`docs/gui-manual/M8.md` §8.2, observed unreachable at both the 650pt
+// Preferences min-width and a widened 901pt). A prior naive kittest
+// (`harness.get_by_label("Cancel").click()`) would not have caught this: it
+// clicks by accesskit node id, not by pixel, so it "succeeds" even when the
+// button's own rect starts at (or past) the row's right edge — this test
+// pins reachability by checking the rendered node's *geometry* against the
+// harness's declared width instead, empirically confirmed to reproduce the
+// bug (`rect.min.x == 650.0`, the exact right edge, on the unfixed code).
+#[test]
+fn downloading_row_cancel_button_stays_within_the_650pt_width_and_is_enabled() {
+    let root = tempfile::tempdir().expect("model root tempdir");
+    let mut state = ModelsTabState::new(root.path(), None, false);
+    // Splice a live Downloading state onto the Tiny row — the same
+    // `RowState::Downloading { status, cancel }` shape `start_download`
+    // installs, built directly here (no thread/network) since only the
+    // row's rendered layout is under test.
+    let status = Arc::new(Mutex::new(models_ui::DownloadStatus {
+        downloaded: 40_000_000,
+        total: Some(74_000_000),
+        finished: None,
+    }));
+    let cancel = humm_core::cancel::CancelToken::new();
+    {
+        let tiny_row = state
+            .rows
+            .iter_mut()
+            .find(|r| r.size == ModelSize::Tiny)
+            .expect("tiny row present");
+        tiny_row.state = models_ui::RowState::Downloading { status, cancel };
+    }
+
+    let fixture = ModelsFixture {
+        state,
+        root: root.path().to_path_buf(),
+        settings: Arc::new(Mutex::new(Settings::default())),
+        settings_path: root.path().join("unused-settings.toml"),
+    };
+
+    // The Preferences window's real min width (`app.rs::HummApp::
+    // show_preferences_viewport`, the same 650pt the tab-strip regression
+    // above reuses) — the exact width M8.md's acceptance pass reproduced
+    // the defect at.
+    let mut harness = HarnessBuilder::default()
+        .with_size(egui::Vec2::new(650.0, 500.0))
+        .build_ui_state(
+            |ui, fixture: &mut ModelsFixture| {
+                models_ui::ui(
+                    ui,
+                    &mut fixture.state,
+                    &fixture.root,
+                    &fixture.settings,
+                    &fixture.settings_path,
+                );
+            },
+            fixture,
+        );
+    harness.run();
+
+    let cancel_node = harness.get_by_label("Cancel");
+    let rect = cancel_node.rect();
+    assert!(
+        rect.right() <= 650.0,
+        "Cancel button must be fully inside the 650pt window, got rect {rect:?}"
+    );
+    assert!(
+        !cancel_node.accesskit_node().is_disabled(),
+        "Cancel must stay enabled/clickable while a download is in flight"
+    );
+}

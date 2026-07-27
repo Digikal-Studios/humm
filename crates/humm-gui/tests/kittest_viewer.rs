@@ -1385,3 +1385,62 @@ fn resizer_close_semantics_unchanged() {
         "close_source: true still closes the resizer too"
     );
 }
+
+// -- Task 17 defect 2: a viewer's Resize/Identify Speakers intents must wake
+//    the ROOT viewport, not just latch a flag ------------------------------
+//
+// `app.rs::show_viewer_viewports` harvests `resize_requested`/
+// `identify_speakers_requested` in the ROOT viewport's own update pass
+// (`app.rs:2412-2443`), but the viewer is a *deferred child* viewport
+// (`ctx.show_viewport_deferred`) — its own repaints, driven by input landing
+// directly on the viewer window, never re-run the root's update loop. A
+// user who clicks Identify Speakers (or Resize) and keeps the mouse over the
+// viewer therefore sees nothing happen until something unrelated happens to
+// repaint the root (observed as a ~90 s stall in the M8 windowed acceptance
+// pass, `docs/gui-manual/M8.md` §8.1). The fix (`views::viewer::
+// latch_root_harvested_intent`) latches the flag *and* requests a repaint of
+// `ViewportId::ROOT` at the same click site.
+//
+// The repaint-targeting half is pinned by `views::viewer::tests::
+// latch_root_harvested_intent_requests_a_root_repaint` instead of here:
+// `egui_kittest::Harness::run()` loops steps *until the root settles* (its
+// own `_try_run`, which keeps calling `step()` while
+// `root_viewport_output().repaint_delay == Duration::ZERO`), so by the time
+// any `harness.run()` call returns, `has_requested_repaint_for(ROOT)` is
+// always `false` again — through a `Harness` this fix is unobservable no
+// matter which side of the bug is on screen (confirmed empirically: this
+// assertion failed identically before *and* after the fix landed). These two
+// tests instead pin the half a `Harness` *can* observe: that a real click
+// still latches the flag itself, unchanged by refactoring the click site to
+// call the new helper.
+#[test]
+fn resize_click_latches_the_intent_flag() {
+    let (fixture, _dir) = fixture("/tmp/a.wav", &[seg(0, 1000, "hello", "")]);
+    let mut harness = build_harness(fixture);
+    harness.run();
+    assert!(!harness.state().vm.resize_requested);
+
+    harness.get_by_label("Resize").click();
+    harness.run();
+
+    assert!(
+        harness.state().vm.resize_requested,
+        "clicking Resize must still latch resize_requested"
+    );
+}
+
+#[test]
+fn identify_speakers_click_latches_the_intent_flag() {
+    let (fixture, _dir) = fixture("/tmp/a.wav", &[seg(0, 1000, "hello", "")]);
+    let mut harness = build_harness(fixture);
+    harness.run();
+    assert!(!harness.state().vm.identify_speakers_requested);
+
+    harness.get_by_label("Identify Speakers").click();
+    harness.run();
+
+    assert!(
+        harness.state().vm.identify_speakers_requested,
+        "clicking Identify Speakers must still latch identify_speakers_requested"
+    );
+}

@@ -406,17 +406,32 @@ fn row_ui(
             }
             RowState::Downloading { status, cancel } => {
                 let snapshot = status.lock().map(|guard| guard.clone()).unwrap_or_default();
-                match snapshot.fraction() {
-                    Some(fraction) => {
-                        ui.add(egui::ProgressBar::new(fraction).show_percentage());
+                // `ProgressBar` defaults to *all remaining width* when no
+                // `desired_width` is set (its own doc), so a plain
+                // left-to-right row lays the Cancel button out past the
+                // right edge — unreachable regardless of window width
+                // (Task 17 defect 1, `docs/gui-manual/M8.md` §8.2: observed
+                // at both the 650pt Preferences min-width and a widened
+                // 901pt, since the bar simply grows with the window). Same
+                // "egui has no automatic flex layout" shape `recording.rs`'s
+                // Record/meter row already documents: the button is laid
+                // out first (right-to-left, ending up rightmost at its own
+                // natural width), then the bar fills whatever's left via
+                // `ui.available_size_before_wrap()`, which by then correctly
+                // excludes the button's space.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(tr("models-cancel-button")).clicked() {
+                        actions.push(RowAction::Cancel(cancel.clone()));
                     }
-                    None => {
-                        ui.add(egui::ProgressBar::new(0.0).animate(true));
+                    match snapshot.fraction() {
+                        Some(fraction) => {
+                            ui.add(egui::ProgressBar::new(fraction).show_percentage());
+                        }
+                        None => {
+                            ui.add(egui::ProgressBar::new(0.0).animate(true));
+                        }
                     }
-                }
-                if ui.button(tr("models-cancel-button")).clicked() {
-                    actions.push(RowAction::Cancel(cancel.clone()));
-                }
+                });
             }
         }
     });

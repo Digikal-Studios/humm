@@ -3801,6 +3801,15 @@ impl HummApp {
         Arc::clone(&self.shortcuts)
     }
 
+    /// Whether the Preferences window is currently open. Preferences is a
+    /// deferred OS viewport an `egui_kittest` Harness cannot reach into (the
+    /// resizer/Speaker-ID windows' own constraint), so a global-shortcut
+    /// delivery test (Task 17 defect 3, `⌘,`) uses this instead of reading
+    /// the window's own rendered content to confirm the intent flipped.
+    pub fn is_preferences_open_for_test(&self) -> bool {
+        self.preferences_open
+    }
+
     // -- Test seams (F-060 recording window) ---------------------------------
     // The recording window is a deferred OS viewport an `egui_kittest` Harness
     // cannot reach into (the viewer/resizer windows' own constraint); these

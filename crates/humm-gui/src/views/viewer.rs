@@ -270,6 +270,24 @@ fn consume_mode_shortcuts(ui: &egui::Ui, vm: &mut ViewerVm, shortcuts: &Shortcut
     }
 }
 
+/// Latches a one-shot "the root viewport must harvest this" intent flag
+/// (`ViewerVm::resize_requested`/`identify_speakers_requested`) *and* wakes
+/// the ROOT viewport so `app.rs`'s harvest loop — which runs only in the
+/// root's own update pass (`show_viewer_viewports`) — actually gets to run.
+///
+/// The viewer is a *deferred* child viewport (`ctx.show_viewport_deferred`);
+/// a click landing directly on it repaints only that child, never the root,
+/// so a bare flag latch could sit unconsumed until something unrelated
+/// happened to repaint the root — observed as a ~90 s stall in the M8
+/// windowed acceptance pass (Task 17 defect 2, `docs/gui-manual/M8.md`
+/// §8.1). This is the inverse of `app.rs::HummApp::
+/// repaint_other_open_viewports` (Task 11's fix, root → children): here it's
+/// child → root.
+fn latch_root_harvested_intent(flag: &mut bool, ctx: &egui::Context) {
+    *flag = true;
+    ctx.request_repaint_of(egui::ViewportId::ROOT);
+}
+
 /// The toolbar: View menu, Export menu, Translate, Resize, Identify
 /// Speakers, and Find — all live. Identify Speakers (F-087) is the last of
 /// these to go live: its own window's `MissingAudio` gate handles the "no
@@ -337,13 +355,13 @@ fn show_toolbar(
         // task; the click only latches `resize_requested`, which `app.rs`
         // harvests to open/focus the resizer (Buzz `on_resize_button_clicked`).
         if ui.button(tr("viewer-resize")).clicked() {
-            vm.resize_requested = true;
+            latch_root_harvested_intent(&mut vm.resize_requested, ui.ctx());
         }
         // Identify Speakers (F-087): opens this transcript's Speaker-ID
         // window. Always enabled — a missing audio file gates the window's
         // own Identify button, not this click (`speaker_id`'s module doc).
         if ui.button(tr("viewer-identify-speakers")).clicked() {
-            vm.identify_speakers_requested = true;
+            latch_root_harvested_intent(&mut vm.identify_speakers_requested, ui.ctx());
         }
         viewer_search::toolbar_button(ui, vm);
         show_autosave_indicator(ui, vm);
@@ -755,4 +773,53 @@ fn show_current_segment_frame(ui: &mut egui::Ui, vm: &ViewerVm) {
 /// (`viewer_search::render_highlighted_text`, F-082).
 fn show_text_body(ui: &mut egui::Ui, vm: &mut ViewerVm) {
     viewer_search::render_highlighted_text(ui, vm);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::latch_root_harvested_intent;
+
+    /// Task 17 defect 2 (`docs/gui-manual/M8.md` §8.1): a click that only
+    /// latched `resize_requested`/`identify_speakers_requested` (a bare
+    /// `vm.resize_requested = true`) left the intent stranded — `app.rs`'s
+    /// harvest for both flags runs in the ROOT viewport's own update pass,
+    /// but the viewer is a deferred child viewport whose own repaints never
+    /// drive the root. This pins the fix directly against the helper, the
+    /// same "call the pure function against a raw `egui::Context`, no `Ui`/
+    /// click machinery at all" shape `speaker_id.rs`'s
+    /// `set_stage_requests_repaint_of_the_given_viewport_specifically` uses
+    /// (and for the identical reason: an `egui_kittest` `Harness::run()`
+    /// loops steps *until the root settles*, per its own `_try_run`, so it
+    /// always observes `has_requested_repaint_for(ROOT) == false` by the
+    /// time it returns — through a `Harness` this fix would be
+    /// unobservable no matter which side of the bug is on screen).
+    ///
+    /// `egui::Context::default()` seeds `ViewportId::ROOT` as already
+    /// wanting its first frame (the same quirk the `speaker_id.rs` test's
+    /// own comment documents for that non-root case), and empirically takes
+    /// *two* settled `run_ui` passes — not one — to actually clear (checked
+    /// against a standalone `egui`-only probe: pass 1 still reads `true`,
+    /// pass 2 reads `false`) before the "false, then true only after the
+    /// call" witness below means anything.
+    #[test]
+    fn latch_root_harvested_intent_requests_a_root_repaint() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+        let _ = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+        assert!(
+            !ctx.has_requested_repaint_for(&egui::ViewportId::ROOT),
+            "a settled context must not already be wanting a root repaint"
+        );
+
+        let mut flag = false;
+        latch_root_harvested_intent(&mut flag, &ctx);
+
+        assert!(flag, "the intent flag itself must still be latched");
+        assert!(
+            ctx.has_requested_repaint_for(&egui::ViewportId::ROOT),
+            "latching the intent must also request a repaint of the ROOT \
+             viewport, so app.rs's harvest (which runs only in the root's \
+             own update pass) actually gets to run"
+        );
+    }
 }
