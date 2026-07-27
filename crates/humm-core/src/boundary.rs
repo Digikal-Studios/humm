@@ -509,9 +509,10 @@ pub trait TranscriptionEngine: Send {
 ///
 /// Implemented by `humm-media`'s `DemucsIsolator` (a killable `demucs`
 /// subprocess, ADR-023) — wired into [`crate::queue::RunnerDeps::isolator`]
-/// (Task 5: the CLI's `-e` always wires a real one; the GUI still passes
-/// `None` until a later M8 task). Ported from Buzz's demucs pre-pass
-/// (`file_transcriber_queue_worker.py:60-91,180-206`).
+/// by both binaries: the CLI's `-e` flag always wires a real one, and the
+/// GUI wires one unconditionally too (gated per-task on
+/// `extract_speech`/`run_job`, not on this seam). Ported from Buzz's demucs
+/// pre-pass (`file_transcriber_queue_worker.py:60-91,180-206`).
 pub trait SpeechIsolator: Send + Sync {
     /// Writes an isolated-vocals file next to `input` (Buzz naming:
     /// `<input_stem>_speech.mp3`, `file_transcriber_queue_worker.py:191`) and
@@ -531,9 +532,12 @@ pub trait SpeechIsolator: Send + Sync {
 /// Reduces background noise before transcription (F-112).
 ///
 /// Implemented by `humm-dfn`'s `DfNoiseReducer` (pure-Rust DeepFilterNet3 via
-/// `deep_filter`/`tract`, no subprocess, no model download) — wired into
-/// [`crate::queue::RunnerDeps::reducer`] (`None` until a later M8 task).
-/// Ported from Buzz's `deep_filter_net` plugin (`plugins/deep_filter_net/plugin.py`).
+/// `deep_filter`/`tract`, no subprocess, no model download) — the GUI wires
+/// this into [`crate::queue::RunnerDeps::reducer`] unconditionally; the CLI
+/// leaves it `None` (its settings.toml `noise_reduction.enabled` has no
+/// effect there — see `humm-cli::run::execute`'s `RunnerDeps` construction).
+/// Ported from Buzz's `deep_filter_net` plugin
+/// (`plugins/deep_filter_net/plugin.py`).
 pub trait NoiseReducer: Send + Sync {
     /// Writes a denoised file next to `input` (Buzz naming:
     /// `<input_stem>_DeepFilterNet3.wav`, `plugin.py:48`) and returns its
@@ -547,9 +551,12 @@ pub trait NoiseReducer: Send + Sync {
 /// (F-114).
 ///
 /// Implemented by `humm-whisper`'s `WhisperLangDetector` (whisper-rs's
-/// standalone `lang_detect` API on a freshly created context/state) — wired
-/// into [`crate::queue::RunnerDeps::lang_detector`] (`None` until a later M8
-/// task). Ported from Buzz's `enhanced_language_detection` plugin
+/// standalone `lang_detect` API on a freshly created context/state) — the
+/// GUI wires this into [`crate::queue::RunnerDeps::lang_detector`]
+/// unconditionally; the CLI leaves it `None` (its settings.toml
+/// `language_detection.enabled` has no effect there — see
+/// `humm-cli::run::execute`'s `RunnerDeps` construction). Ported from Buzz's
+/// `enhanced_language_detection` plugin
 /// (`plugins/enhanced_language_detection/plugin.py:59-115`), which spawns a
 /// fresh `whisper-cli --detect-language` process per detection — same cost
 /// shape as this trait's per-call context/state.

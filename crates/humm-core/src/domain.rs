@@ -511,9 +511,9 @@ pub struct TranscriptionOptions {
     /// Whether to isolate speech from background noise/music with demucs
     /// before transcription (F-027, design spec §3): `true` runs the
     /// decode input through a [`crate::boundary`]-defined `SpeechIsolator`
-    /// (wired in a later M8 task) first. `#[serde(default)]` resolves every
-    /// pre-M8 `options_json` row — which has no `extract_speech` key at
-    /// all — to `false`.
+    /// first (both binaries wire a real one — see that trait's doc).
+    /// `#[serde(default)]` resolves every pre-M8 `options_json` row — which
+    /// has no `extract_speech` key at all — to `false`.
     #[serde(default)]
     pub extract_speech: bool,
 }

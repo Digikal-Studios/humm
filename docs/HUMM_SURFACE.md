@@ -431,17 +431,25 @@ pre-transcription chain isolation → `noise_reduction` → `language_detection`
 | `language_detection` (M8) | F-114 | `enabled` (false), `download_tiny_if_missing` (**true**) — whether the `tiny` model is fetched automatically when no already-downloaded model is available to detect with |
 
 A hook failure is logged and reported in the `post_processed` event's `errors`
-array (§3); it **never** fails the transcription. Both binaries read this same
-table — the CLI has no post-processing flags, so `settings.toml` is the only
-switch (§3). `noise_reduction`'s before-transcription hook is fully wired as
-of M8 Task 7 (`humm-dfn`'s `DfNoiseReducer`, wired into `RunnerDeps.reducer`
-in the GUI's `services::init` — the CLI has no post-processing flags to wire
-it from, same as every other `[postproc]` hook) — see F-112's `PARITY_MATRIX.md`
-row for the full detail. `language_detection`'s before-transcription hook is
-fully wired as of M8 Task 8 (`humm-whisper`'s `WhisperLangDetector`, wired
-into `RunnerDeps.lang_detector` in the GUI's `services::init`, same
-CLI-has-no-post-processing-flags stance) — see F-114's `PARITY_MATRIX.md` row
-for the full detail.
+array (§3); it **never** fails the transcription. Both binaries read this
+same table — the CLI has no post-processing *flags*, so `settings.toml` is
+the only switch for it (§3) — but **not every hook the table configures
+actually runs on the CLI**. `skip_already_transcribed`, `transcript_resizer`,
+`ai_summary`, and `export_docx` are fully wired on both binaries
+(`RunnerDeps.postproc`, `Some` on both the CLI's `execute` and the GUI's
+`services::init`). `noise_reduction`'s and `language_detection`'s
+before-transcription hooks are fully wired **only on the GUI**
+(`humm-dfn`'s `DfNoiseReducer`/`humm-whisper`'s `WhisperLangDetector`,
+wired into `RunnerDeps.reducer`/`RunnerDeps.lang_detector` in the GUI's
+`services::init` — see F-112/F-114's `PARITY_MATRIX.md` rows for the full
+detail); the CLI leaves both `RunnerDeps.reducer`/`RunnerDeps.lang_detector`
+`None` (`crates/humm-cli/src/run.rs`'s `execute`), so a CLI user who sets
+`noise_reduction.enabled`/`language_detection.enabled = true` in
+`settings.toml` gets **silence, not an error**: the config is read, but
+`run_job`'s gate (`cfg.enabled && self.reducer/lang_detector.is_some()`)
+never passes on the CLI. This is a real, named CLI/GUI parity gap — not a
+deliberate "CLI has no post-processing flags" stance, since the other four
+`[postproc]` hooks demonstrate the CLI already has a working postproc seam.
 
 ## 7. First-run migration
 

@@ -520,11 +520,20 @@ speed-badge tooltip, Lumii row under lv_LV — the never-windowed set.
   CLI `-e` usage-fail) with their kittest/cli-int assertions updated.
 - New crates humm-dfn, humm-diarize join workspace lint/profile settings;
   clippy/fmt/test gates unchanged.
-- Wiring: the GUI wires all three `RunnerDeps` seams; the CLI wires only
-  the isolator (`-e`) — the F-112/F-114 pre-hooks follow the existing
-  `postproc: None` CLI stance (GUI-configured hooks are GUI-only; the
-  M7-documented deviation extends to the pre-chain — Buzz's CLI runs
-  plugins only because it drives a hidden GUI).
+- Wiring: the GUI wires all three `RunnerDeps` seams (isolator, reducer,
+  lang_detector); the CLI wires only the isolator (`-e`) — `reducer`/
+  `lang_detector` stay `None` there. This is **not** the CLI's existing
+  `postproc: None`-precedent shape: the CLI's `postproc` field is `Some`
+  (it already runs `skip_already_transcribed`/`transcript_resizer`/
+  `ai_summary`/`export_docx` from `settings.toml`, §8's cross-cutting
+  changes above). F-112/F-114 are simply GUI-only pre-hooks with no CLI
+  adapter wired yet: a CLI user who sets `noise_reduction.enabled`/
+  `language_detection.enabled = true` in `settings.toml` gets silence, not
+  an error or a usage rejection — the config is read into the snapshot but
+  `run_job`'s `cfg.enabled && self.reducer/lang_detector.is_some()` gate
+  never passes. Named honestly here rather than justified as a deliberate
+  stance; see `docs/HUMM_SURFACE.md` §6's postproc table and
+  `crates/humm-cli/src/run.rs`'s `execute`.
 
 ## 9. Verification map (matrix methods)
 
@@ -640,6 +649,21 @@ found and ledgered during implementation.*
     rule 4 is extended to cover both generated-artifact classes rather than
     porting the bug faithfully — a deliberate, more-defensive deviation from
     Buzz's literal source, not a new invented rule.
+16. **The CLI silently ignores `noise_reduction.enabled`/
+    `language_detection.enabled` in `settings.toml`.** Both are read into
+    every CLI task's `PostprocConfig` snapshot (`CliPostprocSource::
+    snapshot`) same as the other four `[postproc]` sub-tables, but
+    `RunnerDeps.reducer`/`RunnerDeps.lang_detector` are `None` on the CLI
+    (`crates/humm-cli/src/run.rs`'s `execute` — only `isolator` is wired),
+    so `queue::Runner::run_job`'s gate (`cfg.enabled &&
+    self.reducer/lang_detector.is_some()`) never passes there: a CLI user
+    who enables either setting sees no effect and no error. Not a
+    deliberate "CLI has no postproc" stance — the other four hooks
+    (`skip_already_transcribed`/`transcript_resizer`/`ai_summary`/
+    `export_docx`) already run on the CLI from the same table. A real
+    CLI/GUI parity gap, named here rather than papered over with a false
+    justification; closing it (a CLI adapter for both hooks) is scoped
+    debt, not this wave's fix.
 
 ## 12. Risks
 

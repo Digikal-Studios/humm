@@ -43,9 +43,9 @@ use crate::domain::{Millis, Segment};
 ///   binarizes one frame-activation column per speaker), so two speakers'
 ///   turns can genuinely overlap (simultaneous/cross-talk speech) — the
 ///   turn list is not a clean non-overlapping partition of the timeline.
-///   Task 10's overlap-to-transcript-segment mapping must handle overlapping
-///   candidate turns explicitly (e.g. "maximal overlap wins"), not assume
-///   at most one turn is ever active at a given instant.
+///   The overlap-to-transcript-segment mapping ([`assign_speakers`]) must
+///   handle overlapping candidate turns explicitly (e.g. "maximal overlap
+///   wins"), not assume at most one turn is ever active at a given instant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpeakerTurn {
     /// Turn start time.

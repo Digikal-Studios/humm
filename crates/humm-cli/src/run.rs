@@ -309,15 +309,24 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         postproc: Some(Arc::new(CliPostprocSource {
             postproc: settings.postproc.clone(),
         }) as Arc<dyn PostprocConfigSource>),
-        // M8 pre-transcription seam: wired in Tasks 5-8. Task 5 wires the
-        // CLI's `-e` flag to a real `isolator` (design spec §9's F-002 "`-e`
-        // goes live" row) — always constructed (not gated on
-        // `args.extract_speech`), since `queue::Runner::run_job` only ever
-        // calls `isolate` when the *task's own* `options.extract_speech` is
-        // set (`RunnerDeps::isolator`'s doc); `reducer`/`lang_detector` stay
-        // `None` on the CLI even after that (design spec §8: the F-112/F-114
-        // pre-hooks are GUI-configured-only, the `postproc: None` CLI stance
-        // extended to the pre-chain).
+        // M8 pre-transcription seam. The CLI's `-e` flag wires a real
+        // `isolator` (design spec §9's F-002 "`-e` goes live" row) — always
+        // constructed (not gated on `args.extract_speech`), since
+        // `queue::Runner::run_job` only ever calls `isolate` when the
+        // *task's own* `options.extract_speech` is set (`RunnerDeps::
+        // isolator`'s doc). `reducer`/`lang_detector` stay `None` on the CLI,
+        // unlike `postproc` above (which the CLI wires, not `None`): F-112
+        // noise reduction and F-114 language detection are GUI-configured-
+        // only pre-hooks with no CLI adapter yet, so a CLI user who enables
+        // `noise_reduction.enabled`/`language_detection.enabled` in
+        // settings.toml sees no effect and no error — `run_job`'s own gate
+        // is `cfg.enabled && self.reducer/lang_detector.is_some()`, and the
+        // CLI's `None` here silently fails that second half. A real
+        // deviation from GUI parity (see `docs/HUMM_SURFACE.md`'s
+        // postproc-hook table and this milestone's deviations ledger), not
+        // a deliberate "postproc: None" stance — the CLI's `postproc` field
+        // is `Some` and does run skip/resizer/summary/docx from
+        // settings.toml.
         isolator: Some(Arc::new(DemucsIsolator::new()) as Arc<dyn SpeechIsolator>),
         reducer: None,
         lang_detector: None,

@@ -4,7 +4,7 @@ humm is a Rust port of Buzz (`/Users/jawad/RustroverProjects/buzz`) with **100% 
 
 ## Read before coding
 
-1. `docs/analysis/PARITY_MATRIX.md` — the project spine. Done = every row `verified`.
+1. `docs/analysis/PARITY_MATRIX.md` — the project spine. Done = every row `verified`, or a named, blocker-documented exception; final state: 46 verified / 4 exceptions.
 2. `docs/analysis/FEATURE_INVENTORY.md` — feature IDs (F-###) with Buzz source refs. **Re-read the cited Buzz files before implementing a feature** — implement from source, not memory.
 3. `docs/design/ARCHITECTURE.md`, `docs/design/DECISIONS.md` (ADRs), `docs/design/UX_SPEC.md`, `docs/design/IMPLEMENTATION_PLAN.md` (current milestone).
 4. `docs/OPEN_QUESTIONS.md` — never invent behavior; log genuine ambiguity there.

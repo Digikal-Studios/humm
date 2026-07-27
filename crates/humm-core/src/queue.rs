@@ -200,8 +200,9 @@ pub enum TaskEventKind {
     /// plain progress fraction (M8, design spec §3/§8) — additive, like
     /// [`Self::Skipped`]/[`Self::PostProcessed`] before it. Currently
     /// emitted only for [`TaskPhase::IsolatingSpeech`] (F-027's demucs
-    /// pre-pass, wired in a later M8 task); extensible to future phases
-    /// without another `TaskEventKind` variant.
+    /// pre-pass, wired in both binaries — see
+    /// [`crate::boundary::SpeechIsolator`]'s doc); extensible to future
+    /// phases without another `TaskEventKind` variant.
     PhaseChanged {
         /// Which phase the task entered.
         phase: TaskPhase,
@@ -342,9 +343,9 @@ pub struct RunnerDeps {
     pub postproc: Option<Arc<dyn PostprocConfigSource>>,
     /// Isolates speech from background noise/music before transcription
     /// (F-027, design spec §3), gated on [`crate::domain::TranscriptionOptions::extract_speech`].
-    /// `None` (every pre-M8 caller, and Tasks 1-4's own binaries) means the
-    /// hook never runs — `run_job` behaves byte-for-byte as it did before
-    /// this field existed, the `postproc: None` precedent.
+    /// `None` (every pre-M8 caller, and any test double that doesn't need
+    /// the hook) means it never runs — `run_job` behaves byte-for-byte as it
+    /// did before this field existed, the `postproc: None` precedent.
     pub isolator: Option<Arc<dyn SpeechIsolator>>,
     /// Reduces background noise before transcription (F-112, design spec
     /// §4), gated on `PostprocConfig::noise_reduction.enabled`. `None`
