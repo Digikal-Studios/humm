@@ -38,7 +38,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use humm_core::boundary::{
-    AudioDecoder, EngineOptions, Pcm, SAMPLE_RATE, SegmentSink, TranscriptionEngine,
+    AudioDecoder, EngineOptions, LanguageDetector, Pcm, SAMPLE_RATE, SegmentSink,
+    TranscriptionEngine,
 };
 use humm_core::cancel::CancelToken;
 use humm_core::domain::{Millis, ModelSize, Segment, TaskKind};
@@ -46,7 +47,7 @@ use humm_core::error::EngineError;
 use humm_core::language::Language;
 use humm_core::models::download::ModelDownloader;
 use humm_media::FfmpegDecoder;
-use humm_whisper::{LiveOptions, WhisperEngine};
+use humm_whisper::{LiveOptions, WhisperEngine, WhisperLangDetector};
 
 fn testdata_dir() -> PathBuf {
     std::env::var_os("HUMM_BUZZ_TESTDATA")
@@ -636,5 +637,86 @@ fn second_session_after_begin_produces_same_output_as_first() {
         "identical input in a fresh session must reproduce identical output \
          -- begin_live_session's own clear, not end_live_session's, must be \
          what keeps session one's state from leaking into session two"
+    );
+}
+
+/// Contract 9 (F-114): [`WhisperLangDetector`] detects French on the real
+/// `whisper-french.mp3` fixture, using the real cached tiny model.
+///
+/// **Empirical sandboxed-CPU finding (2026-07-27, recorded per task-8's
+/// brief):** every other contract test in this file loads its engine via
+/// `engine()` (`WhisperEngine::load(.., true)` — GPU **on**), which needs the
+/// sandbox lifted (Metal context creation segfaults under this coding
+/// harness's sandboxed shell — the standing precedent from M2 onward,
+/// `docs/benchmarks/M2.md`/`M3.md`/`M4.md`/`M5.md`). This test instead builds
+/// `WhisperLangDetector::new(true)` (`force_cpu`, i.e. `use_gpu(false)`
+/// throughout) and was run **both** ways to check the premise empirically
+/// rather than assume it: sandboxed, `cargo test -p humm-whisper --test
+/// contract -- --ignored detects_french_fixture` passed (twice, non-flaky)
+/// with no crash and the correct `fr` result; the unsandboxed run produced
+/// the identical result. A CPU-only `WhisperContext` genuinely never touches
+/// Metal, so it is **not** sandbox-fatal the way GPU contexts are — this test
+/// is `#[ignore]`d only for the ordinary contract-test reason (network on
+/// first model fetch, ffmpeg on `PATH`), not for any sandbox restriction, and
+/// needs no sandbox-lift to run.
+///
+/// One harmless sandboxed-only side effect observed, recorded honestly:
+/// after the test's own `ok` result, the process prints `E5RT encountered an
+/// STL exception. msg = filesystem error: in create_directories: Operation
+/// not permitted [".../Library/Caches/contract-<hash>"]` to stderr — some
+/// CoreML-adjacent framework (the crate is compiled with the `coreml`
+/// feature on macOS, module doc of `crate::engine`) still probes for a
+/// process-wide cache directory at load time even though `use_gpu(false)`
+/// means CoreML/Metal are never actually invoked for this test's own
+/// inference path. It never touched Metal/CoreML init (the test's own
+/// success proves it — a real GPU touch is what segfaults), never affects
+/// the test's `ok` result or exit code (confirmed `0` both sandboxed and
+/// not), and doesn't reproduce at all when the sandbox is lifted (the cache
+/// directory is simply writable there, so the same probe succeeds
+/// silently) — a sandbox-filesystem cosmetic, not a functional issue.
+#[test]
+#[ignore = "requires ffmpeg + a real whisper tiny model (downloaded/cached on first run) -- \
+            runs sandboxed with force_cpu(true), see this test's doc comment"]
+fn detects_french_fixture() {
+    let pcm = decode("whisper-french.mp3");
+    let detector = WhisperLangDetector::new(true);
+
+    let detected = detector
+        .detect(&pcm, &ensure_tiny_model(), &CancelToken::new())
+        .expect("language detection should succeed");
+
+    assert_eq!(
+        detected,
+        Language::parse("fr"),
+        "expected French to be detected, got {detected:?}"
+    );
+}
+
+/// Contract 9b: a pre-canceled token aborts the real detector promptly
+/// without ever loading the model — the real-model complement to
+/// `detect_pre_canceled_token_errors_before_touching_the_model` in
+/// `src/langdetect.rs`'s own unit tests (that one uses a nonexistent path to
+/// prove the same thing without a real model; this one proves it against the
+/// real cached tiny model too).
+#[test]
+#[ignore = "requires ffmpeg + a real whisper tiny model (downloaded/cached on first run) -- \
+            runs sandboxed with force_cpu(true), see detects_french_fixture's doc comment"]
+fn detect_pre_canceled_errors_promptly_against_the_real_model() {
+    let pcm = decode("whisper-french.mp3");
+    let detector = WhisperLangDetector::new(true);
+    let cancel = CancelToken::new();
+    cancel.cancel();
+
+    let start = Instant::now();
+    let result = detector.detect(&pcm, &ensure_tiny_model(), &cancel);
+    let elapsed = start.elapsed();
+
+    assert!(
+        matches!(result, Err(EngineError::Canceled)),
+        "expected Canceled, got {result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "pre-canceled detection took too long: {elapsed:?}"
     );
 }

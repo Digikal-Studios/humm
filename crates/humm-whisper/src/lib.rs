@@ -4,7 +4,9 @@
 //! each occurrence documented with a `// SAFETY:` invariant comment.
 
 mod engine;
+mod langdetect;
 mod words;
 
 pub use engine::{LiveOptions, WhisperEngine};
+pub use langdetect::WhisperLangDetector;
 pub use words::{TokenInfo, group_words};

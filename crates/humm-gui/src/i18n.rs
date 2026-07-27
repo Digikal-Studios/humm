@@ -368,6 +368,11 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "prefs-postproc-dfn-title",
         "prefs-postproc-dfn-enable",
         "prefs-postproc-dfn-keep-file",
+        // Enhanced language detection (F-114, M8 Task 8).
+        "prefs-postproc-langdetect-title",
+        "prefs-postproc-langdetect-enable",
+        "prefs-postproc-langdetect-download-tiny",
+        "prefs-postproc-langdetect-download-tiny-desc",
         "prefs-postproc-resizer-title",
         "prefs-postproc-resizer-enable",
         "prefs-postproc-resizer-merge-by-gap",

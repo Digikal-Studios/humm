@@ -328,7 +328,7 @@ prefs-fw-delete-checkbox = Delete processed files
 prefs-fw-disposition-note = Once transcribed, the source file is moved into the output folder — or deleted, if Delete processed files is checked.
 
 ## Preferences Post-processing tab (views/prefs_postproc.rs, ADR-010, design
-## spec §8.5, Task 16 + M8 Task 7) -- the config home for the native
+## spec §8.5, Task 16 + M8 Tasks 7/8) -- the config home for the native
 ## post-processing hooks (F-110's resolution: features, not plugins). Section
 ## titles and field labels/descriptions are Buzz's own `plugins/*/plugin.py`
 ## `config_fields` strings, ported byte-faithful (they were user-facing
@@ -345,6 +345,10 @@ prefs-postproc-skip-check-db-desc = Skip if this file has already been transcrib
 prefs-postproc-dfn-title = DeepFilterNet Noise Reduction
 prefs-postproc-dfn-enable = Enable DeepFilterNet Noise Reduction
 prefs-postproc-dfn-keep-file = Keep denoised file after transcription
+prefs-postproc-langdetect-title = Enhanced language detection
+prefs-postproc-langdetect-enable = Enable Enhanced language detection
+prefs-postproc-langdetect-download-tiny = Download tiny model if none available
+prefs-postproc-langdetect-download-tiny-desc = If no whisper.cpp model is downloaded, download the tiny model to use for language detection.
 prefs-postproc-resizer-title = Automatic Transcript Resizer
 prefs-postproc-resizer-enable = Enable Automatic Transcript Resizer
 prefs-postproc-resizer-merge-by-gap = Merge by gap

@@ -125,8 +125,11 @@ fn centiseconds_to_millis(cs: i64) -> Millis {
 static LOG_HOOK: Once = Once::new();
 
 /// Routes whisper.cpp/GGML logging through the `log` crate exactly once
-/// (idempotent; safe to call on every load).
-fn init_logging() {
+/// (idempotent; safe to call on every load). `pub(crate)` so
+/// [`crate::langdetect::WhisperLangDetector`] (F-114) shares the exact same
+/// log-capture hygiene as [`WhisperEngine::load`] rather than installing its
+/// own separate hook.
+pub(crate) fn init_logging() {
     LOG_HOOK.call_once(whisper_rs::install_logging_hooks);
 }
 
@@ -545,8 +548,10 @@ impl Bridge<'_> {
 
 /// Default whisper thread count when `options.threads` is `None`:
 /// `max(1, logical_cpus / 2)`, matching Buzz's `(os.cpu_count() or 8) // 2`
-/// (`buzz/transcriber/whisper_cpp.py:178`).
-fn default_threads() -> u32 {
+/// (`buzz/transcriber/whisper_cpp.py:178`). `pub(crate)` so
+/// [`crate::langdetect::WhisperLangDetector`] (F-114) uses this exact same
+/// default rather than picking its own thread count.
+pub(crate) fn default_threads() -> u32 {
     let logical = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(8);

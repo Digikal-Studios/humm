@@ -27,7 +27,9 @@ use std::sync::{Arc, Mutex};
 
 use chrono::NaiveDateTime;
 
-use humm_core::boundary::{AudioEncoder, MediaFetcher, NoiseReducer, SpeechIsolator, TaskStore};
+use humm_core::boundary::{
+    AudioEncoder, LanguageDetector, MediaFetcher, NoiseReducer, SpeechIsolator, TaskStore,
+};
 use humm_core::env::{threads_from_env, use_gpu_from_env};
 use humm_core::error::StoreError;
 use humm_core::openai::LlmEndpointSource;
@@ -47,6 +49,7 @@ use humm_media::{
     DemucsIsolator, FfmpegDecoder, FfprobeProber, MediaCapabilities, YtDlpFetcher, probe_binaries,
 };
 use humm_store::{KeyringSecretStore, SqliteStore};
+use humm_whisper::WhisperLangDetector;
 
 use crate::engine_factory::{DownloaderEnsurer, GuiEngineFactory};
 use crate::i18n::locale_from_env_vars;
@@ -324,6 +327,21 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
     let model_root = paths::model_root();
 
     let use_gpu = use_gpu_from_env(std::env::var("HUMM_FORCE_CPU").ok().as_deref());
+    // The F-114 language detector (wired into `RunnerDeps` below) combines
+    // the same two `force_cpu` inputs `GuiEngineFactory::create_whisper`
+    // combines for the main transcription engine — `HUMM_FORCE_CPU` (already
+    // folded into `use_gpu` above) and `settings.models.force_cpu` — just
+    // read once here at startup rather than fresh per call, since
+    // `WhisperLangDetector` is constructed once, not per task (unlike
+    // `create_whisper`, which re-reads the setting on every engine build so a
+    // checkbox flip is honored without a restart). `HUMM_FORCE_CPU` still
+    // wins whenever it forces CPU.
+    let lang_detect_force_cpu = !use_gpu
+        || settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .models
+            .force_cpu;
     let ensurer = DownloaderEnsurer {
         root: model_root.clone(),
         // Shared, not snapshotted: `DownloaderEnsurer` reads
@@ -390,9 +408,7 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
         // (`queue::Runner::run_job`'s gate), so this is wired unconditionally
         // rather than behind `if capabilities.demucs` (an absent binary still
         // degrades per-task, via `SpeechIsolator::isolate`'s own error path,
-        // not by leaving the seam `None`). `lang_detector` lands in a later
-        // M8 task; `None` for now keeps that seam inert exactly like every
-        // field here did before it existed.
+        // not by leaving the seam `None`).
         isolator: Some(isolator as Arc<dyn SpeechIsolator>),
         // F-112: wired unconditionally too, same reasoning as `isolator`
         // above — but for a different reason underneath. `deep_filter`'s
@@ -403,7 +419,17 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
         // noise_reduction.enabled`'s job (`queue::Runner::run_job`'s own
         // gate), not this wiring site's.
         reducer: Some(reducer as Arc<dyn NoiseReducer>),
-        lang_detector: None,
+        // F-114: wired unconditionally too — same reasoning again. Whether
+        // detection actually runs for a given task is entirely
+        // `PostprocConfig::language_detection.enabled` + the en-quirk gate in
+        // `queue::Runner::run_job`/`postproc::langdetect::should_detect`, not
+        // this wiring site's job. `WhisperLangDetector` needs no availability
+        // probe either (whisper-rs is always linked in; the model it runs
+        // against is resolved per-job by `postproc::langdetect::select_model`
+        // / the tiny-download fallback, both already inside `run_job`).
+        lang_detector: Some(
+            Arc::new(WhisperLangDetector::new(lang_detect_force_cpu)) as Arc<dyn LanguageDetector>
+        ),
     };
     let queue = spawn_task_runner(deps);
     let events = queue.subscribe();

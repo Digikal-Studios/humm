@@ -1,14 +1,16 @@
 //! Preferences → Post-processing tab (ADR-010, design spec §8.5): the config
-//! home for the native post-processing hooks (F-110's resolution) — two
-//! **pre**-transcription hooks, **Skip Already Transcribed** (F-115) and
-//! **Noise Reduction (DeepFilterNet)** (F-112, M8), rendered first (in that
-//! order — `check_skip` runs before the M8 isolation/reduction/detection
-//! chain in `queue::Runner::run_job`), then, in the fixed execution order
-//! design spec §2.1 establishes for the **on_complete** hooks, **Automatic
-//! Transcript Resizer** (F-116) → **AI Summary** (F-111) → **Export to
-//! DOCX** (F-113). Each section is an `egui::CollapsingHeader` with an
-//! enable checkbox first, then its fields (gated by that section's own
-//! `enabled`, `ui`'s own `add_enabled_ui` blocks).
+//! home for the native post-processing hooks (F-110's resolution) — three
+//! **pre**-transcription hooks, **Skip Already Transcribed** (F-115),
+//! **Noise Reduction (DeepFilterNet)** (F-112, M8), and **Enhanced language
+//! detection** (F-114, M8), rendered first (in that order — `check_skip`
+//! runs before the M8 isolation/reduction/detection chain in
+//! `queue::Runner::run_job`, which itself runs reduce then detect), then, in
+//! the fixed execution order design spec §2.1 establishes for the
+//! **on_complete** hooks, **Automatic Transcript Resizer** (F-116) → **AI
+//! Summary** (F-111) → **Export to DOCX** (F-113). Each section is an
+//! `egui::CollapsingHeader` with an enable checkbox first, then its fields
+//! (gated by that section's own `enabled`, `ui`'s own `add_enabled_ui`
+//! blocks).
 //!
 //! ADR-010: these are first-class features, not a plugin system — there is
 //! no enable/ordering list here and no install surface. Buzz rendered each
@@ -18,9 +20,21 @@
 //! (the source of every `en` ftl string below):
 //! - `buzz/plugins/skip_already_transcribed/plugin.py:28-47`
 //! - `buzz/plugins/deep_filter_net/plugin.py:32-39`
+//! - `buzz/plugins/enhanced_language_detection/plugin.py:45-56`
 //! - `buzz/plugins/transcript_resizer/plugin.py:51-88`
 //! - `buzz/plugins/ai_summary/plugin.py:47-93`
 //! - `buzz/plugins/export_docx/plugin.py:74-88`
+//!
+//! Every section title is Buzz's own plugin `metadata.name`, ported
+//! byte-faithful (case included — **Enhanced language detection**'s Buzz
+//! name is genuinely lowercase-`l`, unlike its siblings' title-cased names,
+//! and stays that way here rather than being "corrected"). No section
+//! carries its own top-level explainer beyond the shared
+//! `prefs-postproc-header` line above every section; a field only gets its
+//! own hover `-desc` text when Buzz's `ConfigField` for it actually declares
+//! a `description` (`download_tiny_if_missing` does,
+//! `plugin.py:48-56`; `keep_denoised_file` doesn't, hence no
+//! `prefs-postproc-dfn-keep-file-desc`).
 //!
 //! ## Persistence
 //!
@@ -170,6 +184,13 @@ pub struct PostprocTabState {
     /// transcription", `plugin.py:35`, label ported verbatim).
     pub keep_denoised_file: bool,
 
+    // -- Enhanced language detection (F-114, M8) --
+    /// "Enable Enhanced language detection" checkbox.
+    pub language_detection_enabled: bool,
+    /// `download_tiny_if_missing` checkbox (Buzz "Download tiny model if
+    /// none available", `plugin.py:48-50`, label ported verbatim).
+    pub download_tiny_if_missing: bool,
+
     // -- Automatic Transcript Resizer (F-116) --
     /// "Enable Automatic Transcript Resizer" checkbox.
     pub resizer_enabled: bool,
@@ -246,6 +267,9 @@ impl PostprocTabState {
             noise_reduction_enabled: settings.noise_reduction.enabled,
             keep_denoised_file: settings.noise_reduction.keep_denoised_file,
 
+            language_detection_enabled: settings.language_detection.enabled,
+            download_tiny_if_missing: settings.language_detection.download_tiny_if_missing,
+
             resizer_enabled: settings.transcript_resizer.enabled,
             merge_by_gap: settings.transcript_resizer.merge_by_gap,
             merge_gap_seconds_buffer: settings.transcript_resizer.merge_gap_seconds.clone(),
@@ -281,6 +305,11 @@ impl std::fmt::Debug for PostprocTabState {
             .field("check_database", &self.check_database)
             .field("noise_reduction_enabled", &self.noise_reduction_enabled)
             .field("keep_denoised_file", &self.keep_denoised_file)
+            .field(
+                "language_detection_enabled",
+                &self.language_detection_enabled,
+            )
+            .field("download_tiny_if_missing", &self.download_tiny_if_missing)
             .field("resizer_enabled", &self.resizer_enabled)
             .field("merge_by_gap", &self.merge_by_gap)
             .field("merge_gap_seconds_buffer", &self.merge_gap_seconds_buffer)
@@ -372,6 +401,33 @@ pub fn commit_keep_denoised_file(
     let value = state.keep_denoised_file;
     persist_postproc(settings, settings_path, |p| {
         p.noise_reduction.keep_denoised_file = value
+    });
+}
+
+// -- Enhanced language detection (F-114, M8) --
+
+/// Commits the "Enable Enhanced language detection" checkbox.
+pub fn commit_language_detection_enabled(
+    state: &PostprocTabState,
+    settings: &Mutex<Settings>,
+    settings_path: &Path,
+) {
+    let value = state.language_detection_enabled;
+    persist_postproc(settings, settings_path, |p| {
+        p.language_detection.enabled = value
+    });
+}
+
+/// Commits the "Download tiny model if none available" checkbox (Buzz
+/// `config_fields` label verbatim, `plugin.py:48-50`).
+pub fn commit_download_tiny_if_missing(
+    state: &PostprocTabState,
+    settings: &Mutex<Settings>,
+    settings_path: &Path,
+) {
+    let value = state.download_tiny_if_missing;
+    persist_postproc(settings, settings_path, |p| {
+        p.language_detection.download_tiny_if_missing = value
     });
 }
 
@@ -604,14 +660,14 @@ pub fn commit_docx_include_timestamps(
 
 // -- Render -------------------------------------------------------------------
 
-/// Renders the Post-processing tab: a header caption, then the five sections
-/// as `CollapsingHeader`s in execution order (module doc) — the two
-/// pre-transcription hooks first, Skip Already Transcribed then Noise
-/// Reduction (DeepFilterNet), then the on_complete hooks: Automatic
-/// Transcript Resizer → AI Summary → Export to DOCX (design spec §2.1).
-/// Every section defaults open (no ADR-010 enable/ordering list to hide
-/// behind — the whole point of this tab is being the features' visible
-/// config home).
+/// Renders the Post-processing tab: a header caption, then the six sections
+/// as `CollapsingHeader`s in execution order (module doc) — the three
+/// pre-transcription hooks first, Skip Already Transcribed → Noise
+/// Reduction (DeepFilterNet) → Enhanced language detection, then the
+/// on_complete hooks: Automatic Transcript Resizer → AI Summary → Export to
+/// DOCX (design spec §2.1). Every section defaults open (no ADR-010
+/// enable/ordering list to hide behind — the whole point of this tab is
+/// being the features' visible config home).
 pub fn ui(
     ui: &mut egui::Ui,
     state: &mut PostprocTabState,
@@ -662,9 +718,9 @@ pub fn ui(
             });
         });
 
-    // 2. Noise Reduction / DeepFilterNet (F-112, M8) -- the second (and
-    // last) pre-hook, run after isolation and before language detection in
-    // the M8 chain (design spec §4).
+    // 2. Noise Reduction / DeepFilterNet (F-112, M8) -- the second of three
+    // pre-hooks, run after isolation and before language detection in the M8
+    // chain (design spec §4).
     egui::CollapsingHeader::new(tr("prefs-postproc-dfn-title"))
         .id_salt("humm-prefs-postproc-dfn")
         .default_open(true)
@@ -689,7 +745,38 @@ pub fn ui(
             });
         });
 
-    // 3. Automatic Transcript Resizer (F-116).
+    // 3. Enhanced language detection (F-114, M8) -- the third (and last)
+    // pre-hook, run after noise reduction and before transcription in the M8
+    // chain (design spec §5).
+    egui::CollapsingHeader::new(tr("prefs-postproc-langdetect-title"))
+        .id_salt("humm-prefs-postproc-langdetect")
+        .default_open(true)
+        .show(ui, |ui| {
+            let mut enabled = state.language_detection_enabled;
+            if ui
+                .checkbox(&mut enabled, tr("prefs-postproc-langdetect-enable"))
+                .changed()
+            {
+                state.language_detection_enabled = enabled;
+                commit_language_detection_enabled(state, settings, settings_path);
+            }
+            ui.add_enabled_ui(state.language_detection_enabled, |ui| {
+                let mut download_tiny_if_missing = state.download_tiny_if_missing;
+                if ui
+                    .checkbox(
+                        &mut download_tiny_if_missing,
+                        tr("prefs-postproc-langdetect-download-tiny"),
+                    )
+                    .on_hover_text(tr("prefs-postproc-langdetect-download-tiny-desc"))
+                    .changed()
+                {
+                    state.download_tiny_if_missing = download_tiny_if_missing;
+                    commit_download_tiny_if_missing(state, settings, settings_path);
+                }
+            });
+        });
+
+    // 4. Automatic Transcript Resizer (F-116).
     egui::CollapsingHeader::new(tr("prefs-postproc-resizer-title"))
         .id_salt("humm-prefs-postproc-resizer")
         .default_open(true)
@@ -759,7 +846,7 @@ pub fn ui(
             });
         });
 
-    // 4. AI Summary (F-111).
+    // 5. AI Summary (F-111).
     egui::CollapsingHeader::new(tr("prefs-postproc-summary-title"))
         .id_salt("humm-prefs-postproc-summary")
         .default_open(true)
@@ -854,7 +941,7 @@ pub fn ui(
             });
         });
 
-    // 5. Export to DOCX (F-113).
+    // 6. Export to DOCX (F-113).
     egui::CollapsingHeader::new(tr("prefs-postproc-docx-title"))
         .id_salt("humm-prefs-postproc-docx")
         .default_open(true)
@@ -953,6 +1040,8 @@ mod tests {
         settings.skip_already_transcribed.check_database = true;
         settings.noise_reduction.enabled = true;
         settings.noise_reduction.keep_denoised_file = true;
+        settings.language_detection.enabled = true;
+        settings.language_detection.download_tiny_if_missing = false;
         settings.transcript_resizer.enabled = true;
         settings.transcript_resizer.max_length = "80".to_string();
         settings.ai_summary.enabled = true;
@@ -968,6 +1057,8 @@ mod tests {
         assert!(state.check_database);
         assert!(state.noise_reduction_enabled);
         assert!(state.keep_denoised_file);
+        assert!(state.language_detection_enabled);
+        assert!(!state.download_tiny_if_missing);
         assert!(state.resizer_enabled);
         assert_eq!(state.max_length_buffer, "80");
         assert!(state.summary_enabled);
@@ -995,6 +1086,14 @@ mod tests {
             "Buzz plugins default-disabled"
         );
         assert!(!state.keep_denoised_file);
+        assert!(
+            !state.language_detection_enabled,
+            "Buzz plugins default-disabled"
+        );
+        assert!(
+            state.download_tiny_if_missing,
+            "Buzz config field default: true"
+        );
         assert!(!state.resizer_enabled);
         assert!(!state.summary_enabled);
         assert_eq!(state.summary_api_url_buffer, "");
@@ -1077,6 +1176,23 @@ mod tests {
         let guard = settings.lock().unwrap();
         assert!(guard.postproc.noise_reduction.enabled);
         assert!(guard.postproc.noise_reduction.keep_denoised_file);
+    }
+
+    #[test]
+    fn commit_language_detection_enabled_and_download_tiny_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.toml");
+        let settings = Mutex::new(Settings::default());
+
+        let mut state = fresh_state();
+        state.language_detection_enabled = true;
+        commit_language_detection_enabled(&state, &settings, &settings_path);
+        state.download_tiny_if_missing = false;
+        commit_download_tiny_if_missing(&state, &settings, &settings_path);
+
+        let guard = settings.lock().unwrap();
+        assert!(guard.postproc.language_detection.enabled);
+        assert!(!guard.postproc.language_detection.download_tiny_if_missing);
     }
 
     #[test]

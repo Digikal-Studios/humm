@@ -433,8 +433,11 @@ switch (§3). `noise_reduction`'s before-transcription hook is fully wired as
 of M8 Task 7 (`humm-dfn`'s `DfNoiseReducer`, wired into `RunnerDeps.reducer`
 in the GUI's `services::init` — the CLI has no post-processing flags to wire
 it from, same as every other `[postproc]` hook) — see F-112's `PARITY_MATRIX.md`
-row for the full detail. `language_detection` remains vocabulary only —
-a later M8 task wires its before-transcription hook into `run_job`.
+row for the full detail. `language_detection`'s before-transcription hook is
+fully wired as of M8 Task 8 (`humm-whisper`'s `WhisperLangDetector`, wired
+into `RunnerDeps.lang_detector` in the GUI's `services::init`, same
+CLI-has-no-post-processing-flags stance) — see F-114's `PARITY_MATRIX.md` row
+for the full detail.
 
 ## 7. First-run migration
 
