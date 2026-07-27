@@ -496,6 +496,7 @@ recording-microphone-label = Microphone:
 recording-record-button = Record
 recording-stop-button = Stop
 recording-realtime-warning = { $size } transcribed at { $ratio }× realtime last run — live transcription may fall behind
+recording-chunk-skipped-warning = A chunk failed and was skipped: { $detail }
 recording-panel-placeholder = Click Record to begin...
 # Byte-exact Buzz string (`recording_transcriber_widget.py:193`,
 # `translation_text_box.setPlaceholderText(_("Waiting for AI translation..."))`).

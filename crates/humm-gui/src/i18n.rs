@@ -486,6 +486,7 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "recording-record-button",
         "recording-stop-button",
         "recording-realtime-warning",
+        "recording-chunk-skipped-warning",
         "recording-panel-placeholder",
         "recording-panel-translation-placeholder",
         "recording-model-downloading",
@@ -1471,6 +1472,10 @@ mod tests {
             (
                 "recording-realtime-warning",
                 &[("size", "Large"), ("ratio", "0.4")],
+            ),
+            (
+                "recording-chunk-skipped-warning",
+                &[("detail", "inference failed: boom")],
             ),
             ("recording-model-downloading", &[("percent", "42")]),
             ("models-speed-badge", &[("ratio", "2.5")]),

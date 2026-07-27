@@ -473,6 +473,7 @@ recording-microphone-label = Micrófono:
 recording-record-button = Grabar
 recording-stop-button = Detener
 recording-realtime-warning = { $size } se transcribió a { $ratio }× tiempo real en la última ejecución — la transcripción en vivo puede quedarse atrás
+recording-chunk-skipped-warning = Un fragmento falló y se omitió: { $detail }
 recording-panel-placeholder = Pulse en Grabar para comenzar...
 recording-panel-translation-placeholder = A la espera de la traducción de la IA...
 recording-model-downloading = Descargando modelo… { $percent } %

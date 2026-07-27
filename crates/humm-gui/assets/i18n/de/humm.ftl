@@ -472,6 +472,7 @@ recording-microphone-label = Mikrofon:
 recording-record-button = Aufnehmen
 recording-stop-button = Stoppen
 recording-realtime-warning = { $size } wurde beim letzten Lauf mit { $ratio }× Echtzeit transkribiert — die Live-Transkription könnte zurückfallen
+recording-chunk-skipped-warning = Ein Abschnitt ist fehlgeschlagen und wurde übersprungen: { $detail }
 recording-panel-placeholder = Auf Aufnehmen klicken um zu beginnen …
 recording-panel-translation-placeholder = Warten auf KI-Übersetzung...
 recording-model-downloading = Modell wird heruntergeladen… { $percent } %

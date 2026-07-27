@@ -642,6 +642,13 @@ pub struct RecordingVm {
     /// while no error is showing. The render fn shows this as a dismissible
     /// `egui::Modal`; dismissing clears it.
     pub error_dialog: Option<String>,
+    /// A tolerated live-chunk failure's detail (spec §7.4, ledger #9,
+    /// [`crate::live_session::SessionMessage::ChunkSkipped`]), or `None`
+    /// while nothing is showing. The render fn shows this as a transient
+    /// warning line (same treatment as the realtime-fit warning); cleared
+    /// by [`crate::live_session::SessionMessage::ChunkSkippedCleared`],
+    /// sent alongside the next successful chunk.
+    pub chunk_skipped_warning: Option<String>,
     /// The Api Key row's commit-failure modal (F-061b), if a commit this
     /// frame produced one — the recording window's own instance of
     /// [`crate::views::options_sheet::OptionsSheet::modal`]'s identical role
@@ -741,6 +748,7 @@ impl RecordingVm {
             pending_close: false,
             prep: None,
             error_dialog: None,
+            chunk_skipped_warning: None,
             api_key_modal: None,
             session: None,
             session_id: None,
@@ -807,6 +815,7 @@ impl RecordingVm {
                 // it here so a prior session's translation never lingers).
                 self.translation_panel_text.clear();
                 self.error_dialog = None;
+                self.chunk_skipped_warning = None;
                 self.prep = None;
                 self.session_id = None;
                 self.pending_intent = Some(RecordingIntent::StartRequested);

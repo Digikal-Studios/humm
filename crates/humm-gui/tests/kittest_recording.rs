@@ -952,6 +952,61 @@ impl LiveEngineSession for PanickingEngine {
     }
 }
 
+struct FailThenSucceedEngineFactory {
+    calls: Arc<AtomicUsize>,
+}
+
+impl LiveEngineFactory for FailThenSucceedEngineFactory {
+    fn load(
+        &self,
+        _model_path: &Path,
+        _use_gpu: bool,
+    ) -> Result<Box<dyn LiveEngineSession>, EngineError> {
+        Ok(Box::new(FailThenSucceedEngine {
+            calls: Arc::clone(&self.calls),
+        }))
+    }
+}
+
+/// M8 Task 12 (spec §7.4, ledger #9): fails the first chunk with a genuine
+/// (non-canceled) `EngineError`, then succeeds on the second — the
+/// `chunk_skipped_shows_transient_warning` kittest's own scripted-session
+/// seam, proving the tolerate-3 wiring end to end: `run_session` emits
+/// `LiveEvent::ChunkSkipped`, `run_live_session`'s sink forwards
+/// `SessionMessage::ChunkSkipped`, `app.rs::apply_session_message` sets
+/// `RecordingVm::chunk_skipped_warning`, and the second call's success
+/// clears it again via `SessionMessage::ChunkSkippedCleared`.
+///
+/// Deliberately does **not** pump the second batch itself (unlike
+/// `ScriptedEngine` above): the chunk-skipped warning is transient by
+/// design, so if the second batch were already queued the moment the first
+/// call returns, the session thread could race straight through both calls
+/// before the test's own polling ever observed the warning in between. The
+/// test pumps the second batch itself, only after it has confirmed the
+/// warning is showing — deterministic pacing instead of a race.
+struct FailThenSucceedEngine {
+    calls: Arc<AtomicUsize>,
+}
+
+impl LiveEngineSession for FailThenSucceedEngine {
+    fn transcribe_live(
+        &mut self,
+        _samples: &[f32],
+        _opts: &LiveOptions,
+        _prompt: &str,
+        _cancel: &CancelToken,
+    ) -> Result<String, EngineError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            Err(EngineError::Inference {
+                detail: "boom".to_string(),
+            })
+        } else {
+            Ok("utterance two".to_string())
+        }
+    }
+}
+
 /// Resolves instantly to a scripted path — never a real ggml file, and
 /// never opened for real (`ScriptedEngine` ignores it entirely).
 struct InstantEnsurer {
@@ -1268,6 +1323,160 @@ fn scripted_end_to_end_record_two_utterances_then_stop() {
     assert_eq!(reopened_segments.len(), 2);
     assert_eq!(reopened_segments[0].text, "utterance one");
     assert_eq!(reopened_segments[1].text, "utterance two");
+}
+
+// -- M8 Task 12: tolerate-3 chunk-skipped warning (spec §7.4, ledger #9) -----
+//
+// The transcript e2e's exact shape (Record -> Stop through a full `HummApp`),
+// scripted so the first chunk fails and the second succeeds
+// (`FailThenSucceedEngine` above) — proves the whole wiring chain from
+// `LiveEvent::ChunkSkipped` (humm-core) through `SessionMessage::ChunkSkipped`
+// (`live_session::run_live_session`'s sink) to `app.rs::apply_session_message`
+// setting `RecordingVm::chunk_skipped_warning`, and that the second chunk's
+// success clears it again via `SessionMessage::ChunkSkippedCleared`. The
+// recording window itself is a deferred OS viewport this harness cannot
+// query (this file's own module doc) — asserting on the running app's own
+// `RecordingVm` state is the correct-altitude proof, the same convention
+// every other assertion in this file's e2e tests already uses.
+
+#[test]
+fn chunk_skipped_shows_transient_warning() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("humm.sqlite3");
+    let store = Arc::new(SqliteStore::open(&db_path).expect("open store"));
+    let model_path = dir.path().join("fake-model.bin");
+    std::fs::write(&model_path, b"never opened by the scripted engine").expect("write");
+
+    let services = services::init_with(TestDeps {
+        store: Arc::clone(&store),
+        media_dir: dir.path().join("media"),
+        model_root: dir.path().join("models"),
+        settings: Settings::default(),
+        settings_path: dir.path().join("settings.toml"),
+        engines: Box::new(NeverCalledEngineFactory),
+        fetcher: None,
+        capabilities: Capabilities::default(),
+        artifacts: None,
+        secrets: services::default_test_secrets(),
+        translate: services::default_test_translate(),
+        llm: None,
+        validate: services::default_test_validate(),
+    });
+
+    let mock_capture = Arc::new(Mutex::new(MockCapture::new(vec![0.5; 2 * BATCH_SAMPLES])));
+    let engine_calls = Arc::new(AtomicUsize::new(0));
+
+    let scripted_deps = RecordingDeps {
+        capture: Mutex::new(Box::new(SharedMockCapture(Arc::clone(&mock_capture)))),
+        store: Arc::clone(&store) as Arc<dyn LiveStore>,
+        model_ensurer: Arc::new(InstantEnsurer { model_path }),
+        engine_factory: Arc::new(FailThenSucceedEngineFactory {
+            calls: Arc::clone(&engine_calls),
+        }),
+        upload_factory: Arc::new(NeverCalledUploadFactory),
+        dialogs: Arc::new(humm_gui::import::RfdFileDialogs),
+        secrets: Arc::new(MemorySecretStore::new()),
+    };
+
+    let mut harness = HarnessBuilder::default()
+        .with_size(egui::Vec2::new(1000.0, 600.0))
+        .build_eframe(move |_cc| {
+            let mut app = HummApp::new_for_test(services);
+            app.set_recording_deps_for_test(scripted_deps);
+            app
+        });
+    harness.step();
+
+    harness.state_mut().open_recording_window_for_test();
+    harness.step();
+    let vm_arc = harness
+        .state()
+        .recording_vm_for_test()
+        .expect("window is open");
+    let deps_arc = harness.state().recording_deps_for_test();
+
+    assert!(
+        vm_arc
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .chunk_skipped_warning
+            .is_none(),
+        "no warning before a session ever starts"
+    );
+
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    harness.step();
+
+    // The first (failing) chunk's detail lands on the VM as a transient
+    // warning.
+    wait_for(&mut harness, "the chunk-skipped warning to appear", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            vm_arc
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .chunk_skipped_warning
+                .is_some()
+        }
+    });
+    {
+        let vm = vm_arc.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(
+            vm.chunk_skipped_warning
+                .as_deref()
+                .is_some_and(|detail| detail.contains("boom")),
+            "the warning must carry the engine error's own detail, got {:?}",
+            vm.chunk_skipped_warning
+        );
+        assert!(
+            vm.panel_text.is_empty(),
+            "a skipped chunk contributes no panel text"
+        );
+    }
+
+    // Now feed the second batch (deliberately withheld until this point —
+    // see `FailThenSucceedEngine`'s own doc comment for why): the session
+    // thread was idle-pausing on an empty ring since the first (failed)
+    // chunk, so this is the only thing that can make a second engine call
+    // happen.
+    mock_capture
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .pump(BATCH_SAMPLES);
+
+    // The second (successful) chunk clears the warning again — proving it's
+    // transient, not sticky for the rest of the session.
+    wait_for(&mut harness, "the second chunk to clear the warning", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            let vm = vm_arc.lock().unwrap_or_else(|p| p.into_inner());
+            vm.chunk_skipped_warning.is_none() && vm.panel_text.contains("utterance two")
+        }
+    });
+
+    // Stop click — the session ends cleanly despite the earlier tolerated
+    // failure.
+    vm_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .on_record_clicked(&deps_arc);
+    wait_for(&mut harness, "the session to stop", {
+        let vm_arc = Arc::clone(&vm_arc);
+        move |_app| {
+            vm_arc.lock().unwrap_or_else(|p| p.into_inner()).status == RecordingStatus::Stopped
+        }
+    });
+    assert!(
+        vm_arc
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .chunk_skipped_warning
+            .is_none(),
+        "no lingering warning once the session has stopped"
+    );
 }
 
 // -- Task 18: API backend end-to-end (F-061b) --------------------------------

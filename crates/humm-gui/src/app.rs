@@ -3398,6 +3398,18 @@ impl HummApp {
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 vm.panel_text = text;
             }
+            SessionMessage::ChunkSkipped { detail } => {
+                let mut vm = vm_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                vm.chunk_skipped_warning = Some(detail);
+            }
+            SessionMessage::ChunkSkippedCleared => {
+                let mut vm = vm_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                vm.chunk_skipped_warning = None;
+            }
             SessionMessage::Error(cause) => {
                 let mut vm = vm_arc
                     .lock()

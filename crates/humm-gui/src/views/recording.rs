@@ -8,7 +8,9 @@
 //! row, realtime-fit warning (spec §2.8, rendered just above the meter/record
 //! row per its own prose even though the design doc lists it last), meter +
 //! Record/Stop row, presentation options bar (`views::presentation::bar_ui`,
-//! F-065 §2.6, Task 12), transcription panel, copy bar
+//! F-065 §2.6, Task 12), the tolerate-3 chunk-skipped warning (spec §7.4,
+//! ledger #9 -- M8 Task 12, shown below the presentation bar, above the
+//! panel), transcription panel, copy bar
 //! ([`copy_click_outcome`]/[`CopyLabelState`] below, F-065 §2.7, Task 12),
 //! then the advanced settings sheet (`views::recording_advanced::ui`, an
 //! `egui::Modal` overlay, Task 12), the Api Key row's commit-failure modal
@@ -325,6 +327,21 @@ pub fn recording_ui(
     // Presentation options bar (spec §2.6): hidden until recording starts.
     if vm.presentation_bar_visible {
         presentation::bar_ui(ui, &mut vm.presentation, settings, settings_path);
+    }
+
+    // A tolerated live-chunk failure (spec §7.4, ledger #9): a transient
+    // warning line, same treatment as the realtime-fit warning above.
+    // Cleared once the next chunk succeeds
+    // (`live_session::SessionMessage::ChunkSkippedCleared`) -- never
+    // outlives the failure it reported.
+    if let Some(detail) = &vm.chunk_skipped_warning {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            tr_args(
+                "recording-chunk-skipped-warning",
+                &[("detail", detail.as_str())],
+            ),
+        );
     }
 
     ui.add_space(4.0);

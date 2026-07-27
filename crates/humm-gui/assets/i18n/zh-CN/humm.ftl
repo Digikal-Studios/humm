@@ -488,6 +488,7 @@ recording-microphone-label = 麦克风:
 recording-record-button = 录制
 recording-stop-button = 停止
 recording-realtime-warning = { $size } 上次运行以 { $ratio }× 实时速度完成识别——实时识别可能会跟不上
+recording-chunk-skipped-warning = 一个片段处理失败并被跳过：{ $detail }
 recording-panel-placeholder = 点击开始录制
 recording-panel-translation-placeholder = 等待AI翻译...
 recording-model-downloading = 模型下载中… { $percent }%

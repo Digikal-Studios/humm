@@ -53,6 +53,18 @@ const IDLE_PAUSE: Duration = Duration::from_millis(500);
 /// whose injected [`Sleeper`] never really blocks.
 const PACE_SLICE: Duration = Duration::from_millis(50);
 
+/// How many **consecutive** non-canceled engine-call failures a session
+/// tolerates before ending in a terminal [`LiveEvent::Error`] (spec §7.4,
+/// ledger #9 -- supersedes M7's L17 fail-on-first ruling). Each tolerated
+/// failure emits a non-terminal [`LiveEvent::ChunkSkipped`] instead and the
+/// loop continues; a success resets the count to zero.
+///
+/// N=3 rationale (spec §7.4): one transient 429/500 no longer kills a
+/// session Buzz would survive, while a sustained outage (>= 15 s at this
+/// mode's ~5 s chunk cadence) still fails loud rather than silently eating
+/// audio forever.
+const MAX_CONSECUTIVE_CHUNK_FAILURES: usize = 3;
+
 /// One update emitted by [`run_session`] as the live loop progresses.
 ///
 /// Buzz's transcriber exposes these as five separate Qt signals
@@ -85,11 +97,32 @@ pub enum LiveEvent {
         /// Samples remaining in the accumulation queue after the cut.
         queue_len: usize,
     },
+    /// A live chunk's engine call failed for a genuine reason (not a
+    /// cancellation), but the session tolerates it: fewer than
+    /// [`MAX_CONSECUTIVE_CHUNK_FAILURES`] consecutive failures have
+    /// happened, so the loop continues instead of ending (spec §7.4, ledger
+    /// #9 -- supersedes M7's L17 fail-on-first ruling). The chunk's text is
+    /// dropped entirely -- the rolling prompt stays whatever the last
+    /// *successful* call produced (or `initial_prompt`, if none yet has) --
+    /// never Buzz's own behavior of feeding a fake `"Error: ..."` string
+    /// back in as the next chunk's prompt
+    /// (`recording_transcriber.py:355-359`, M7 ledger #L17). A subsequent
+    /// success resets the consecutive-failure count to zero; the
+    /// [`MAX_CONSECUTIVE_CHUNK_FAILURES`]th consecutive failure instead
+    /// emits [`LiveEvent::Error`] and ends the loop.
+    ChunkSkipped {
+        /// The underlying `EngineError`'s message (e.g. `"inference failed:
+        /// ..."`, `"OpenAI API backend error: ..."`).
+        detail: String,
+    },
     /// The engine call failed for a genuine reason (not a cancellation --
     /// `Err(`[`EngineError::Canceled`]`)` ends the loop silently instead, no
     /// `Error` event, so a plain Stop landing mid-call never surfaces as an
-    /// error). The loop has already stopped (Buzz: `result is None:
-    /// return`); a [`LiveEvent::Stopped`] follows immediately.
+    /// error) **and** this was the [`MAX_CONSECUTIVE_CHUNK_FAILURES`]th
+    /// consecutive such failure -- fewer than that tolerates the failure via
+    /// [`LiveEvent::ChunkSkipped`] instead. The loop has already stopped
+    /// (Buzz: `result is None: return`); a [`LiveEvent::Stopped`] follows
+    /// immediately.
     Error(String),
     /// The loop has exited -- via cancellation (including a canceled
     /// in-flight engine call), or after a genuine [`LiveEvent::Error`] --
@@ -232,12 +265,17 @@ fn idle_pause(sleeper: &dyn Sleeper, cancel: &CancelToken) {
 ///    skips it (RMS below `config.silence_threshold`: no engine call, no
 ///    `Text`, idle-paused same as an empty queue) or transcribes it with
 ///    the rolling prompt (starts at `config.initial_prompt`, becomes each
-///    successful call's output). A genuine engine error emits
-///    [`LiveEvent::Error`] and ends the loop (Buzz: `result is None:
+///    successful call's output -- a tolerated failure never changes it,
+///    see [`LiveEvent::ChunkSkipped`]). A genuine engine error tolerates up
+///    to [`MAX_CONSECUTIVE_CHUNK_FAILURES`] - 1 consecutive failures via
+///    [`LiveEvent::ChunkSkipped`] (loop continues, chunk's text dropped);
+///    the [`MAX_CONSECUTIVE_CHUNK_FAILURES`]th consecutive failure instead
+///    emits [`LiveEvent::Error`] and ends the loop (Buzz: `result is None:
 ///    return`) -- but `Err(`[`EngineError::Canceled`]`)` ends the loop
-///    *silently*, no `Error` event: that variant is what a canceled
-///    in-flight call returns (see below), and a plain Stop must not look
-///    like a failure to the GUI. Buzz draws the same distinction
+///    *silently*, no `Error`/`ChunkSkipped` event, regardless of the
+///    consecutive-failure count: that variant is what a canceled in-flight
+///    call returns (see below), and a plain Stop must not look like a
+///    failure to the GUI. Buzz draws the same distinction
 ///    (`recording_transcriber.py:356-359`: `if self.is_running: ...emit
 ///    error...` else swallow it).
 /// 3. If no batch is ready: idle-pauses the same way.
@@ -284,6 +322,11 @@ pub fn run_session(
     let mut audio_secs = 0.0_f64;
     let mut engine_secs = 0.0_f64;
     let mut transcribed_calls = 0_usize;
+    // Consecutive (non-canceled) engine-call failures since the last
+    // success -- spec §7.4's tolerate-N counter. Reset on every `Ok`;
+    // never touched by `Err(EngineError::Canceled)`, which ends the loop
+    // outright before this counter would matter.
+    let mut consecutive_failures = 0_usize;
 
     while !cancel.is_canceled() {
         drain_ring(&mut consumer, &mut chunker);
@@ -313,6 +356,7 @@ pub fn run_session(
                 audio_secs += batch.samples.len() as f64 / f64::from(SAMPLE_RATE);
                 engine_secs += elapsed.as_secs_f64();
                 transcribed_calls += 1;
+                consecutive_failures = 0;
                 prompt = text.clone();
                 sink(LiveEvent::Text {
                     text,
@@ -327,9 +371,20 @@ pub fn run_session(
             // `#[non_exhaustive]`, so this still needs a catch-all arm for
             // any future variant, which is treated as a genuine error.
             Err(EngineError::Canceled) => break,
+            // Tolerate-N (spec §7.4, ledger #9): the chunk's own text is
+            // dropped -- `prompt` is deliberately left untouched here, so
+            // the next call still sees the last *successful* output (or
+            // `initial_prompt`), never a fake error string injected as
+            // prompt text (M7 ledger #L17).
             Err(err) => {
-                sink(LiveEvent::Error(err.to_string()));
-                break;
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_CONSECUTIVE_CHUNK_FAILURES {
+                    sink(LiveEvent::Error(err.to_string()));
+                    break;
+                }
+                sink(LiveEvent::ChunkSkipped {
+                    detail: err.to_string(),
+                });
             }
         }
     }
@@ -728,12 +783,20 @@ mod tests {
         assert_eq!(meter_queue_lens, vec![240_000, 160_000]);
     }
 
-    // -- engine error -> Error then Stopped, once, in order, loop ended ------
+    // -- tolerate-3 consecutive chunk failures (spec §7.4, ledger #9) --------
 
+    /// The `MAX_CONSECUTIVE_CHUNK_FAILURES`th (3rd) *consecutive* engine
+    /// failure -- not the 1st -- is what ends the loop: the first two are
+    /// tolerated as [`LiveEvent::ChunkSkipped`], and only the third emits
+    /// the terminal [`LiveEvent::Error`] followed by exactly one
+    /// [`LiveEvent::Stopped`]. Supersedes the pre-M8 fail-on-first behavior
+    /// this test used to assert (M7 ledger #L17).
     #[test]
-    fn engine_error_emits_error_then_stopped_once_and_ends_the_loop() {
-        let (mut producer, consumer) = ring(100_000);
-        for _ in 0..80_000 {
+    fn third_consecutive_failure_ends_with_error() {
+        let (mut producer, consumer) = ring(300_000);
+        // Three consecutive 80_000-sample (5s @ 16kHz) batches -- one per
+        // engine call, all uniform-loud so none is silence-skipped.
+        for _ in 0..240_000 {
             producer.push(0.5).unwrap();
         }
 
@@ -763,18 +826,235 @@ mod tests {
             &NoopSleeper,
         );
 
-        assert_eq!(engine_calls, 1);
+        assert_eq!(
+            engine_calls, 3,
+            "the loop must keep calling the engine through the first two tolerated failures"
+        );
         let events = events.into_inner();
         assert_eq!(
             events,
             vec![
                 LiveEvent::MeterBatch {
                     rms: 0.5,
+                    queue_len: 160_000
+                },
+                LiveEvent::ChunkSkipped {
+                    detail: "inference failed: boom".to_string()
+                },
+                LiveEvent::MeterBatch {
+                    rms: 0.5,
+                    queue_len: 80_000
+                },
+                LiveEvent::ChunkSkipped {
+                    detail: "inference failed: boom".to_string()
+                },
+                LiveEvent::MeterBatch {
+                    rms: 0.5,
                     queue_len: 0
                 },
                 LiveEvent::Error("inference failed: boom".to_string()),
                 LiveEvent::Stopped { measurement: None },
+            ],
+            "only the 3rd consecutive failure may emit Error, and Stopped must follow exactly once"
+        );
+    }
+
+    /// A tolerated failure (fewer than 3 consecutive) drops that chunk's
+    /// text but does not end the session: the very next batch is still
+    /// handed to the engine, and its rolling prompt is the last
+    /// *successful* call's output -- never anything derived from the
+    /// skipped chunk (M7 ledger #L17's "no fake error-text prompt
+    /// injection" ruling carried forward).
+    #[test]
+    fn chunk_error_emits_chunk_skipped_and_continues() {
+        let (mut producer, consumer) = ring(300_000);
+        // Three consecutive batches: success, a tolerated failure, success
+        // again.
+        for _ in 0..240_000 {
+            producer.push(0.5).unwrap();
+        }
+
+        let mut call_num = 0usize;
+        let mut seen_prompts: Vec<String> = Vec::new();
+        let mut engine = |_samples: &[f32], prompt: &str| {
+            call_num += 1;
+            seen_prompts.push(prompt.to_string());
+            match call_num {
+                1 => Ok("first".to_string()),
+                2 => Err(EngineError::Inference {
+                    detail: "boom".to_string(),
+                }),
+                _ => Ok("third".to_string()),
+            }
+        };
+
+        let cancel = CancelToken::new();
+        let cancel_for_sink = cancel.clone();
+        let text_count = Cell::new(0usize);
+        let events: RefCell<Vec<LiveEvent>> = RefCell::new(Vec::new());
+        let sink = |event: LiveEvent| {
+            if matches!(event, LiveEvent::Text { .. }) {
+                text_count.set(text_count.get() + 1);
+                if text_count.get() >= 2 {
+                    cancel_for_sink.cancel();
+                }
+            }
+            events.borrow_mut().push(event);
+        };
+
+        let clock = ScriptedClock::new(vec![
+            Duration::from_secs_f64(1.0),
+            Duration::from_secs_f64(0.3),
+            Duration::from_secs_f64(4.0),
+        ]);
+        let meter = MeterSnapshot::new();
+        let cfg = config(RecordingMode::AppendBelow, 3.5);
+
+        run_session(
+            consumer,
+            &mut engine,
+            &meter,
+            &sink,
+            &cancel,
+            &cfg,
+            &clock,
+            &NoopSleeper,
+        );
+
+        assert_eq!(
+            call_num, 3,
+            "the chunk after a tolerated failure must still be transcribed"
+        );
+        // Every call after the first success sees that success's text as
+        // its prompt -- including the call right after the skipped chunk,
+        // proving the failure never became (or corrupted) the rolling
+        // prompt.
+        assert_eq!(
+            seen_prompts,
+            vec!["".to_string(), "first".to_string(), "first".to_string()]
+        );
+
+        let events = events.into_inner();
+        assert_eq!(
+            events,
+            vec![
+                LiveEvent::MeterBatch {
+                    rms: 0.5,
+                    queue_len: 160_000
+                },
+                LiveEvent::Text {
+                    text: "first".to_string(),
+                    start: Millis(0),
+                    end: Millis(5_000),
+                },
+                LiveEvent::MeterBatch {
+                    rms: 0.5,
+                    queue_len: 80_000
+                },
+                LiveEvent::ChunkSkipped {
+                    detail: "inference failed: boom".to_string()
+                },
+                LiveEvent::MeterBatch {
+                    rms: 0.5,
+                    queue_len: 0
+                },
+                LiveEvent::Text {
+                    text: "third".to_string(),
+                    start: Millis(10_000),
+                    end: Millis(15_000),
+                },
+                LiveEvent::Stopped {
+                    measurement: Some(LiveMeasurement {
+                        audio_secs: 10.0,
+                        engine_secs: 5.0,
+                    }),
+                },
             ]
+        );
+    }
+
+    /// fail, fail, ok, fail, fail -- the middle success must reset the
+    /// consecutive-failure count, so the trailing two failures (only 2
+    /// consecutive, never reaching 3) must not end the session.
+    #[test]
+    fn success_resets_consecutive_counter() {
+        let (mut producer, consumer) = ring(500_000);
+        for _ in 0..400_000 {
+            producer.push(0.5).unwrap();
+        }
+
+        let mut call_num = 0usize;
+        let mut engine = |_samples: &[f32], _prompt: &str| {
+            call_num += 1;
+            if call_num == 3 {
+                Ok("ok".to_string())
+            } else {
+                Err(EngineError::Inference {
+                    detail: format!("boom{call_num}"),
+                })
+            }
+        };
+
+        let cancel = CancelToken::new();
+        let cancel_for_sink = cancel.clone();
+        let skip_count = Cell::new(0usize);
+        let events: RefCell<Vec<LiveEvent>> = RefCell::new(Vec::new());
+        let sink = |event: LiveEvent| {
+            if matches!(event, LiveEvent::ChunkSkipped { .. }) {
+                skip_count.set(skip_count.get() + 1);
+                // The 4th ChunkSkipped is this run's 5th (and last)
+                // engine call -- cancel right after it so the loop ends
+                // deterministically instead of idle-pausing forever once
+                // the ring runs dry.
+                if skip_count.get() >= 4 {
+                    cancel_for_sink.cancel();
+                }
+            }
+            events.borrow_mut().push(event);
+        };
+
+        let meter = MeterSnapshot::new();
+        let cfg = config(RecordingMode::AppendBelow, 3.5);
+
+        run_session(
+            consumer,
+            &mut engine,
+            &meter,
+            &sink,
+            &cancel,
+            &cfg,
+            &RealClock,
+            &NoopSleeper,
+        );
+
+        assert_eq!(
+            call_num, 5,
+            "a mid-run success must reset the streak so trailing failures don't end the session early"
+        );
+        let events = events.into_inner();
+        assert!(
+            !events.iter().any(|e| matches!(e, LiveEvent::Error(_))),
+            "only 2 consecutive trailing failures -- must never reach the terminal Error: {events:?}"
+        );
+        let skip_details: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                LiveEvent::ChunkSkipped { detail } => Some(detail.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            skip_details,
+            vec![
+                "inference failed: boom1",
+                "inference failed: boom2",
+                "inference failed: boom4",
+                "inference failed: boom5",
+            ]
+        );
+        assert!(
+            matches!(events.last(), Some(LiveEvent::Stopped { .. })),
+            "a canceled (not failed) end must still emit Stopped last: {events:?}"
         );
     }
 

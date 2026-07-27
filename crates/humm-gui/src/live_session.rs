@@ -270,12 +270,21 @@ impl LiveEngineFactory for RealLiveEngineFactory {
 /// and language-gating apply exactly as the file engine's do -- this wrapper
 /// makes no decisions of its own, it only maps field names across the two
 /// crates' `LiveOptions`/`transcribe_chunk` shapes.
-struct ApiLiveEngineSession {
+///
+/// `pub` (M8 Task 12, spec §7.5): the L15 provenance test
+/// (`crates/humm-gui/tests/live_api_provenance.rs`) constructs this directly
+/// against a local mock server and drives it through [`LiveEngineSession::
+/// transcribe_live`] -- the only way to prove *this* field-mapping wrapper
+/// (not just [`LiveApiTranscriber`] itself, already covered by `humm-core`'s
+/// own mock-server tests) threads `opts.language`/`opts.task` correctly.
+pub struct ApiLiveEngineSession {
     transcriber: LiveApiTranscriber,
 }
 
 impl ApiLiveEngineSession {
-    fn new(cfg: OpenAiEngineConfig) -> Self {
+    /// Builds a session against `cfg` (base URL, key, model) -- see the
+    /// struct doc for why this is `pub`.
+    pub fn new(cfg: OpenAiEngineConfig) -> Self {
         ApiLiveEngineSession {
             transcriber: LiveApiTranscriber::new(cfg),
         }
@@ -394,6 +403,22 @@ pub enum SessionMessage {
     /// replace, not an append (the sender already holds the full text via
     /// its own [`PanelText`]).
     PanelText(String),
+    /// A live chunk's engine call failed but the session tolerated it
+    /// (spec §7.4, ledger #9) -- forwarded verbatim from
+    /// [`humm_core::live::LiveEvent::ChunkSkipped`]'s `detail`. The
+    /// recording window shows this as a transient warning line, cleared by
+    /// the next [`SessionMessage::ChunkSkippedCleared`].
+    ChunkSkipped {
+        /// The underlying engine error's message.
+        detail: String,
+    },
+    /// The chunk-skipped warning line, if showing, should clear -- sent
+    /// once per successful [`LiveEvent::Text`] (spec §7.4: "cleared on the
+    /// next successful Text event"), independent of whether that
+    /// utterance's text survived `filter_text` into a
+    /// [`SessionMessage::PanelText`] (a successful-but-filtered-away
+    /// utterance still proves the engine itself is healthy again).
+    ChunkSkippedCleared,
     /// A genuine failure (Buzz's error-dialog cause, still the raw
     /// message -- `app.rs` wraps it in the byte-exact dialog text, since
     /// [`crate::i18n::tr`] may only run on the UI thread). The loop has
@@ -964,6 +989,12 @@ pub fn run_live_session(
         std::cell::Cell::new(None);
     let live_sink = |event: LiveEvent| match event {
         LiveEvent::Text { text, start, end } => {
+            // Sent unconditionally, before `apply_text` -- a successful
+            // engine call proves the failure streak is over regardless of
+            // whether this utterance's text survives `filter_text` into a
+            // `PanelText` (spec §7.4: "cleared on the next successful Text
+            // event", not "the next PanelText").
+            sink(SessionMessage::ChunkSkippedCleared);
             let outcome = applier.borrow_mut().apply_text(&text, start, end);
             if let Some(detail) = outcome.store_error {
                 sink(SessionMessage::StoreWriteFailed {
@@ -979,6 +1010,9 @@ pub fn run_live_session(
             // No forwarding needed -- `run_session` already wrote
             // `average_rms`/`queue_len` directly onto `request.meter`
             // (module doc).
+        }
+        LiveEvent::ChunkSkipped { detail } => {
+            sink(SessionMessage::ChunkSkipped { detail });
         }
         LiveEvent::Error(msg) => {
             sink(SessionMessage::Error(msg));
