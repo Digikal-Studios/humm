@@ -385,7 +385,6 @@ viewer-export = Exportar
 viewer-translate = Traducir
 viewer-resize = Cambiar el tamaño
 viewer-identify-speakers = Identificar hablantes
-viewer-identify-speakers-tooltip = La identificación de hablantes llegará en una versión posterior
 viewer-find = Buscar
 viewer-find-label = Encontrar:
 viewer-find-placeholder = Introducir texto para encontrar...
@@ -447,6 +446,23 @@ resizer-merge-disabled-tooltip = Disponible solo si los tiempos a nivel de palab
 resizer-merging = Fusionando…
 resizer-merge-error = No se pudo ejecutar la fusión:
 resizer-save-error = No se pudieron guardar los cambios:
+
+## Speaker-ID window (views/speaker_id.rs, speaker_id.rs, F-087, J-7)
+
+speaker-id-step1-heading = Paso 1: Identificar hablantes
+speaker-id-step2-heading = Paso 2: Nombrar hablantes
+speaker-id-ready-label = Listo para identificar hablantes
+speaker-id-missing-audio-label = Archivo de audio no encontrado
+speaker-id-identify-button = Identificar
+speaker-id-cancel-button = Cancelar
+speaker-id-cancelling = Cancelando...
+speaker-id-decoding = Decodificando audio…
+speaker-id-downloading-models = Descargando modelos…
+speaker-id-identifying = Identificando hablantes…
+speaker-id-play-sample = Reproducir muestra
+speaker-id-merge-checkbox = Fusionar frases del hablante
+speaker-id-save-button = Guardar
+speaker-id-save-error = No se pudieron guardar los cambios:
 
 ## Live-recording window (views/recording.rs, views/audio_meter.rs, F-060)
 

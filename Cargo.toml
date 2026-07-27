@@ -64,6 +64,14 @@ egui_kittest = { version = "0.35", features = ["eframe"] }
 notify = "8"
 ab_glyph = "0.2"
 nix = { version = "0.31", default-features = false, features = ["signal"] }
+# F-087 (M8): sample-selection randomness for the Speaker-ID window's Play
+# sample button (`humm-gui`'s `speaker_id` module) — picks a random candidate
+# segment for the chosen speaker (Buzz `random.choice`,
+# `speaker_identification_widget.py:714`). Pinned to `0.8` (not `0.9`/`0.10`):
+# `speakrs`'s own dependency chain (`cauchy` -> `ndarray-linalg`) already
+# resolves `rand 0.8.7` into the workspace lockfile, so this adds no new
+# major version to the dependency graph.
+rand = "0.8"
 # F-112 (M8): pure-Rust DeepFilterNet3 noise reduction. Git-pinned per
 # `validation/m8-spikes/README.md` Spike A / ADR-011 addendum — the
 # crates.io release is stale (DeepFilterNet1-era 0.2.5); this rev is tag

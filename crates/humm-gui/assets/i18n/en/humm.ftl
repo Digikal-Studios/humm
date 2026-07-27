@@ -383,7 +383,6 @@ viewer-export = Export
 viewer-translate = Translate
 viewer-resize = Resize
 viewer-identify-speakers = Identify Speakers
-viewer-identify-speakers-tooltip = Speaker identification arrives in a later release
 viewer-find = Find
 viewer-find-label = Find:
 viewer-find-placeholder = Enter text to find...
@@ -459,6 +458,31 @@ resizer-merge-disabled-tooltip = Available only if word level timings were enabl
 resizer-merging = Merging…
 resizer-merge-error = The merge could not run:
 resizer-save-error = The changes could not be saved:
+
+## Speaker-ID window (views/speaker_id.rs, speaker_id.rs, F-087, J-7)
+##
+## Step-heading/button/checkbox strings are byte-exact ports of Buzz's
+## `speaker_identification_widget.py` (`:490,502,506,515,517,543,558,573,578,
+## 620`). The three progress-stage labels below the button strings are humm's
+## own (Buzz's numbered "N/8 ..." steps are not ported -- design spec §6/this
+## milestone's task brief); speaker-id-save-error has no Buzz equivalent
+## either (Buzz's own save path cannot fail audibly at all -- UX_SPEC's
+## "never silent" terminal-state rule is why humm surfaces one).
+
+speaker-id-step1-heading = Step 1: Identify speakers
+speaker-id-step2-heading = Step 2: Name speakers
+speaker-id-ready-label = Ready to identify speakers
+speaker-id-missing-audio-label = Audio file not found
+speaker-id-identify-button = Identify
+speaker-id-cancel-button = Cancel
+speaker-id-cancelling = Cancelling...
+speaker-id-decoding = Decoding audio…
+speaker-id-downloading-models = Downloading models…
+speaker-id-identifying = Identifying speakers…
+speaker-id-play-sample = Play sample
+speaker-id-merge-checkbox = Merge speaker sentences
+speaker-id-save-button = Save
+speaker-id-save-error = The changes could not be saved:
 
 ## Live-recording window (views/recording.rs, views/audio_meter.rs, F-060)
 ##

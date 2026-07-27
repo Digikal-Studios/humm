@@ -54,6 +54,7 @@ use humm_whisper::WhisperLangDetector;
 use crate::engine_factory::{DownloaderEnsurer, GuiEngineFactory};
 use crate::i18n::locale_from_env_vars;
 use crate::llm_source::GuiLlmSource;
+use crate::speaker_id::{DiarizeService, RealDiarizeService, ScriptedDiarizeService};
 use crate::translate_seam::{RealTranslateSpawner, ScriptedTranslateSpawner, TranslateSpawner};
 use crate::views::prefs_general::{ValidateFn, real_validate_fn, stub_validate_fn};
 
@@ -194,6 +195,14 @@ pub struct Services {
     /// ([`init`]), a scripted/stub [`ValidateFn`] in tests ([`init_with`]) so
     /// a kittest click on Test never issues a real HTTP request.
     pub validate: ValidateFn,
+    /// The Speaker-ID window's diarization seam (F-087, `speaker_id`'s module
+    /// doc): a [`RealDiarizeService`] wrapping `ModelDownloader` + a
+    /// freshly-built `OrtDiarizer` per call in production ([`init`]), a
+    /// [`ScriptedDiarizeService`] double in tests ([`init_with`]) so a
+    /// kittest never touches the network or `ort`. Threaded into
+    /// `HummApp`'s `speaker_deps` (`app.rs`) alongside `viewer_deps`'s own
+    /// decoder/audio-output `Arc`s.
+    pub diarize: Arc<dyn DiarizeService>,
 }
 
 impl Services {
@@ -429,6 +438,10 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
     let (update_tx, update_rx) = flume::unbounded();
     maybe_spawn_startup_update_check(&settings, &settings_path, update_tx.clone());
 
+    // Built from a clone *before* `model_root` moves into the `Services`
+    // literal's own `model_root` field below.
+    let diarize = Arc::new(RealDiarizeService::new(model_root.clone())) as Arc<dyn DiarizeService>;
+
     Ok(Services {
         settings,
         settings_path,
@@ -442,6 +455,7 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
         secrets,
         translate: Arc::new(RealTranslateSpawner) as Arc<dyn TranslateSpawner>,
         validate: real_validate_fn(),
+        diarize,
     })
 }
 
@@ -678,6 +692,25 @@ pub fn default_test_validate() -> ValidateFn {
     stub_validate_fn()
 }
 
+/// The default test diarization seam: a [`ScriptedDiarizeService`] that
+/// succeeds instantly with zero speaker turns — neutral for harnesses that
+/// never open the Speaker-ID window through a real `HummApp`.
+///
+/// Not a [`TestDeps`] field (unlike `translate`/`validate`): every kittest
+/// task's `SpeakerIdVm`/`views::speaker_id::ui` coverage builds its own
+/// [`crate::speaker_id::SpeakerIdDeps`] directly (the exact same
+/// "bypass `HummApp`'s wiring, construct the window's deps locally" shape
+/// `tests/kittest_viewer.rs`'s own `fake_deps` already uses for `ViewerDeps`)
+/// — so, unlike `translate`, no existing or brief-listed kittest needs a
+/// *scripted* diarizer reachable through `Services`/`HummApp::new_for_test`
+/// itself. Threading one more required field through [`TestDeps`] would
+/// touch every one of this crate's ~20 existing `TestDeps { .. }` literals
+/// for no test that actually needs it; adding it later, when a test genuinely
+/// does, is one field plus that test's own call sites — not this one's.
+pub fn default_test_diarize() -> Arc<dyn DiarizeService> {
+    Arc::new(ScriptedDiarizeService::ready(Vec::new()))
+}
+
 /// Builds [`Services`] from caller-supplied fakes/temp state — no real
 /// settings file, database, or subprocess is ever touched. Used by kittest
 /// harnesses (this task's smoke test, and every later kittest task that
@@ -733,6 +766,7 @@ pub fn init_with(deps: TestDeps) -> Services {
         secrets: deps.secrets,
         translate: deps.translate,
         validate: deps.validate,
+        diarize: default_test_diarize(),
     }
 }
 

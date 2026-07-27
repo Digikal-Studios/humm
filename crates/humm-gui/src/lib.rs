@@ -25,6 +25,7 @@ pub mod models_ui;
 pub mod recording;
 pub mod services;
 pub mod shortcuts;
+pub mod speaker_id;
 pub mod translate_seam;
 pub mod viewer;
 pub mod viewmodel;

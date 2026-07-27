@@ -400,7 +400,6 @@ viewer-export = 导出
 viewer-translate = 翻译
 viewer-resize = 调整大小
 viewer-identify-speakers = 识别说话人
-viewer-identify-speakers-tooltip = 说话人识别将在后续版本中推出
 viewer-find = 查找
 viewer-find-label = 查找：
 viewer-find-placeholder = 输入要查找的文本...
@@ -462,6 +461,23 @@ resizer-merge-disabled-tooltip = 仅在转录时启用逐词时间戳时可用
 resizer-merging = 正在合并…
 resizer-merge-error = 无法执行合并：
 resizer-save-error = 无法保存更改：
+
+## Speaker-ID window (views/speaker_id.rs, speaker_id.rs, F-087, J-7)
+
+speaker-id-step1-heading = 第1步：识别说话人
+speaker-id-step2-heading = 第2步：命名说话人
+speaker-id-ready-label = 准备好识别说话人
+speaker-id-missing-audio-label = 未找到音频文件
+speaker-id-identify-button = 识别
+speaker-id-cancel-button = 取消
+speaker-id-cancelling = 正在取消...
+speaker-id-decoding = 正在解码音频…
+speaker-id-downloading-models = 正在下载模型…
+speaker-id-identifying = 正在识别说话人…
+speaker-id-play-sample = 播放样本
+speaker-id-merge-checkbox = 合并说话人句子
+speaker-id-save-button = 保存
+speaker-id-save-error = 无法保存更改：
 
 ## Live-recording window (views/recording.rs, views/audio_meter.rs, F-060)
 

@@ -1323,3 +1323,65 @@ fn merge_save_failure_surfaces_error_and_keeps_windows() {
         "the resizer stays open on a merge save failure"
     );
 }
+
+// -- F-087 interface note: `AppEvent::TranscriptionsUpdated::close_source` --
+//
+// Task 11 (Speaker-ID window) split `AppEvent::TranscriptionsUpdated` to add
+// a `close_source: bool` field so the Speaker-ID window's own Save (which
+// must *not* close the source viewer) could share this event with the
+// resizer's (which must). This is the regression pin for the resizer half of
+// that split; `kittest_speaker_id.rs::save_writes_copied_transcription_with_
+// labels` is its sibling for the speaker-id half (asserts the source viewer
+// stays open after a speaker-id save).
+
+/// The resizer's synchronous Extend/Resize path (and, by the same shared
+/// `apply_transcriptions_updated`, its background Merge path too) must keep
+/// sending `close_source: true` and keep closing the originating viewer +
+/// resizer exactly as before that field existed.
+#[test]
+fn resizer_close_semantics_unchanged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(SqliteStore::open(&dir.path().join("humm.db")).expect("open store"));
+    let source = TranscriptionId::new();
+    store
+        .create_task(
+            &source,
+            &spec_for_wt("/tmp/a.wav", false),
+            Source::FileImport,
+        )
+        .expect("create source");
+    store
+        .mark_completed(&source, &[seg(0, 1000, "hello world", "")])
+        .expect("complete");
+
+    let mut app = HummApp::new_for_test(resizer_test_services(Arc::clone(&store), dir.path()));
+    app.open_viewer_for_test(source);
+    app.open_resizer_for_test(source);
+    assert!(app.is_viewer_open_for_test(source));
+    assert!(app.is_resizer_open_for_test(source));
+
+    // In-place, not create-new (`settings.viewer.resizer_create_new_transcript`
+    // defaults `true` — override it so `affected == source` is the simplest
+    // possible case for this regression pin).
+    {
+        let resizer = app.resizer_for_test(source).expect("resizer is open");
+        resizer.lock().expect("lock resizer").create_new = false;
+    }
+
+    let affected = app
+        .run_resizer_action_for_test(source, ResizerAction::Extend)
+        .expect("extend returns the affected id");
+    assert_eq!(
+        affected, source,
+        "in-place Extend affects the source itself"
+    );
+
+    assert!(
+        !app.is_viewer_open_for_test(source),
+        "close_source: true still closes the viewer (unchanged by the close_source split)"
+    );
+    assert!(
+        !app.is_resizer_open_for_test(source),
+        "close_source: true still closes the resizer too"
+    );
+}

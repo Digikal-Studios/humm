@@ -537,6 +537,12 @@ pub struct ViewerVm {
     /// action (it owns the resizer-window map), the same intent-latch shape as
     /// [`Self::close_requested`]/[`Self::focus_requested`].
     pub resize_requested: bool,
+    /// One-shot latch set by the Identify Speakers toolbar button (F-087,
+    /// now live): the app harvests it each frame to open (or focus) this
+    /// transcript's Speaker-ID window, then clears it (Buzz
+    /// `on_speaker_identification_button_clicked`) — the same intent-latch
+    /// shape as [`Self::resize_requested`].
+    pub identify_speakers_requested: bool,
     /// The shared viewer geometry captured from settings at open, applied to
     /// this window's viewport builder for its whole lifetime (Buzz applies
     /// geometry once, at window open — `load_geometry`). Captured per-VM rather
@@ -747,6 +753,7 @@ impl ViewerVm {
             close_requested: false,
             focus_requested: false,
             resize_requested: false,
+            identify_speakers_requested: false,
             initial_geometry: settings.viewer.geometry,
             observed_geometry: None,
             playback_controls_visible: settings.viewer.playback_controls_visible,
@@ -816,6 +823,7 @@ impl ViewerVm {
             close_requested: false,
             focus_requested: false,
             resize_requested: false,
+            identify_speakers_requested: false,
             initial_geometry: None,
             observed_geometry: None,
             playback_controls_visible: false,

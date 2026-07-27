@@ -19,6 +19,7 @@ pub mod recording_advanced;
 pub mod rename_notes;
 pub mod resizer;
 pub mod secret_field;
+pub mod speaker_id;
 pub mod task_table;
 pub mod toasts;
 pub mod update_notice;

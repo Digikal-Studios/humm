@@ -44,6 +44,7 @@ use crate::live_translation::LiveTranslator;
 use crate::recording::{RecordingDeps, RecordingStatus, RecordingVm, measured_speed_key};
 use crate::services::{self, Services, UpdateNotice};
 use crate::shortcuts::ShortcutMap;
+use crate::speaker_id::{self, SpeakerIdDeps, SpeakerIdStage, SpeakerIdVm};
 use crate::viewer::{ViewerDeps, ViewerVm};
 use crate::viewmodel::{TableAction, TasksVm};
 use crate::views;
@@ -70,24 +71,36 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// A GUI-internal event a background worker sends back to the app (design spec
 /// §1.2). Distinct from [`humm_core::queue::TaskEvent`] (the queue's own
 /// lifecycle stream): this carries viewer-side effects that must run on the UI
-/// thread. Its producer is the resize/merge feature (F-086): the merge worker
-/// thread sends it on completion (the synchronous extend/resize path applies
-/// the same effect inline via [`HummApp::apply_transcriptions_updated`]).
+/// thread. Its producers are the resize/merge feature (F-086, the merge
+/// worker thread; the synchronous extend/resize path applies the same effect
+/// inline via [`HummApp::apply_transcriptions_updated`]) and the Speaker-ID
+/// window's Save (F-087, always synchronous — see `speaker_id`'s module doc).
 #[derive(Debug, Clone)]
 pub enum AppEvent {
-    /// A resize/merge produced or replaced a transcript's segments (F-086):
-    /// refresh (or insert) the `affected` transcript's table row, then close
-    /// the `source` transcript's viewer *and* its resizer (Buzz
-    /// `transcriptions_updated_signal` → viewer `close`,
-    /// `transcription_viewer_widget.py:1333`; humm also closes the resizer).
-    /// `affected == source` for an in-place save; `affected` is the new copy's
-    /// id for a "Create new transcript" save.
+    /// A resize/merge/speaker-id save produced or replaced a transcript's
+    /// segments: refresh (or insert) the `affected` transcript's table row,
+    /// then — only when `close_source` is set — close the `source`
+    /// transcript's viewer *and* its resizer.
+    ///
+    /// The resizer (Buzz `transcriptions_updated_signal` → viewer `close`,
+    /// `transcription_viewer_widget.py:1333`; humm also closes the resizer)
+    /// always sends `close_source: true`. The Speaker-ID window
+    /// (F-087) always sends `false`: Buzz's own widget only closes itself
+    /// (`speaker_identification_widget.py:800`) — the viewer closing too, in
+    /// Buzz, is an accident of a *different*, shared wire (see `speaker_id`'s
+    /// module doc's Save section for the full story) that this explicit field
+    /// deliberately does not reproduce.
+    ///
+    /// `affected == source` for an in-place save; `affected` is the new
+    /// copy's id for a "Create new transcript" (or speaker-id) save.
     TranscriptionsUpdated {
         /// The transcript whose table row must be refreshed/inserted.
         affected: TranscriptionId,
-        /// The source transcript whose viewer + resizer opened the operation
-        /// and must now close.
+        /// The source transcript whose viewer (and resizer, if
+        /// `close_source`) opened the operation.
         source: TranscriptionId,
+        /// Whether `source`'s viewer (and resizer) must close.
+        close_source: bool,
     },
 }
 
@@ -167,9 +180,24 @@ pub struct HummApp {
     /// resizer). The `Arc<Mutex<_>>` is shared with both the deferred render
     /// closure and (for merge) the worker thread.
     resizers: BTreeMap<TranscriptionId, Arc<Mutex<ResizerVm>>>,
+    /// Open Speaker-ID windows (F-087), one per **source** transcript, keyed
+    /// by that source id — each a deferred egui viewport
+    /// (`Self::show_speaker_viewports`). Opened by a viewer's Identify
+    /// Speakers button; closed on save, when the user closes the window, or
+    /// when the originating viewer closes (Buzz `closeEvent` closes its
+    /// speaker-id dialog, `transcription_viewer_widget.py:1495-1496`). The
+    /// `Arc<Mutex<_>>` is shared with the deferred render closure and the
+    /// background Identify worker.
+    speakers: BTreeMap<TranscriptionId, Arc<Mutex<SpeakerIdVm>>>,
     /// The adapter bundle every viewer window shares (built once from the real
     /// ffmpeg/cpal/rfd adapters). Cloned into each deferred-viewport closure.
     viewer_deps: Arc<ViewerDeps>,
+    /// The Speaker-ID window's adapter bundle (F-087): reuses `viewer_deps`'s
+    /// own decoder/audio-output `Arc`s (this window decodes/plays back the
+    /// same source file a viewer would) plus `services.store` and the
+    /// diarization seam ([`Services::diarize`] — real in production, a
+    /// scripted double in tests).
+    speaker_deps: Arc<SpeakerIdDeps>,
     /// The live-recording window (F-060), single instance — `None` until
     /// opened via the toolbar Record button or Ctrl+R
     /// (`self.action_state.record_requested`), then a deferred egui viewport
@@ -597,6 +625,15 @@ impl HummApp {
             // the very next export.
             settings: Arc::clone(&services.settings),
         });
+        // The Speaker-ID window's adapter bundle (F-087): shares `viewer_deps`'s
+        // own decoder/audio-output `Arc`s (see `speaker_deps`'s field doc) plus
+        // `services.diarize` — real in production, scripted in kittest.
+        let speaker_deps = Arc::new(SpeakerIdDeps {
+            store: Arc::clone(&services.store),
+            decoder: Arc::clone(&viewer_deps.decoder),
+            audio_output: Arc::clone(&viewer_deps.audio_output),
+            diarize: Arc::clone(&services.diarize),
+        });
         // The recording window's adapter bundle (F-060/F-061/F-064, Q-10):
         // `capture`/`model_ensurer`/`engine_factory`/`upload_factory` are
         // real or scripted per the constructor that called `build`
@@ -650,7 +687,9 @@ impl HummApp {
             last_shortcuts_generation: 0,
             viewers: BTreeMap::new(),
             resizers: BTreeMap::new(),
+            speakers: BTreeMap::new(),
             viewer_deps,
+            speaker_deps,
             recording: None,
             recording_deps,
             use_gpu,
@@ -1863,6 +1902,9 @@ impl HummApp {
         for id in self.resizers.keys() {
             ctx.request_repaint_of(egui::ViewportId::from_hash_of(("resizer", *id)));
         }
+        for id in self.speakers.keys() {
+            ctx.request_repaint_of(egui::ViewportId::from_hash_of(("speakers", *id)));
+        }
         if let Some(vm_arc) = &self.recording {
             ctx.request_repaint_of(egui::ViewportId::from_hash_of(("recording",)));
             let presentation_open = vm_arc
@@ -1952,6 +1994,31 @@ impl HummApp {
                 self.resizers.insert(source, Arc::new(Mutex::new(vm)));
             }
             Err(err) => log::warn!("could not open transcript resizer for {source}: {err}"),
+        }
+    }
+
+    /// Opens a Speaker-ID window for `source`, or focuses the existing one if
+    /// this transcript already has one open (one per source — the
+    /// viewer/resizer deviation #1 shape). Triggered by a viewer's Identify
+    /// Speakers button, now live (Buzz `on_speaker_identification_button_
+    /// clicked`; humm's Intel-Mac gate is not ported — humm targets Apple
+    /// Silicon only). The window always opens: a missing audio file gates
+    /// only the Identify button inside it ([`SpeakerIdVm::open`]'s own
+    /// `MissingAudio` stage, Buzz `:514-518`), not the window itself. A
+    /// store-read failure at open is logged and opens nothing.
+    fn open_speakers(&mut self, source: TranscriptionId) {
+        if let Some(existing) = self.speakers.get(&source) {
+            existing
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .focus_requested = true;
+            return;
+        }
+        match SpeakerIdVm::open(source, &self.speaker_deps) {
+            Ok(vm) => {
+                self.speakers.insert(source, Arc::new(Mutex::new(vm)));
+            }
+            Err(err) => log::warn!("could not open speaker-id window for {source}: {err}"),
         }
     }
 
@@ -2072,7 +2139,7 @@ impl HummApp {
     ) -> Option<TranscriptionId> {
         match resizer::save_segments(&self.services.store, source, create_new, out) {
             Ok(affected) => {
-                self.apply_transcriptions_updated(affected, source);
+                self.apply_transcriptions_updated(affected, source, true);
                 Some(affected)
             }
             Err(err) => {
@@ -2184,7 +2251,11 @@ impl HummApp {
                     };
                     match saved {
                         Ok(()) => {
-                            let _ = tx.send(AppEvent::TranscriptionsUpdated { affected, source });
+                            let _ = tx.send(AppEvent::TranscriptionsUpdated {
+                                affected,
+                                source,
+                                close_source: true,
+                            });
                         }
                         Err(err) => {
                             // Save failed (final review, F-086): surface it on
@@ -2223,23 +2294,34 @@ impl HummApp {
         });
     }
 
-    /// Applies the [`AppEvent::TranscriptionsUpdated`] effect (F-086): refresh
-    /// (or insert) the `affected` transcript's table row, then close the
-    /// `source`'s viewer and its resizer (Buzz `transcriptions_updated` →
-    /// viewer `close`). Shared by the synchronous extend/resize path and the
-    /// merge worker's drained event.
-    fn apply_transcriptions_updated(&mut self, affected: TranscriptionId, source: TranscriptionId) {
+    /// Applies the [`AppEvent::TranscriptionsUpdated`] effect: refresh (or
+    /// insert) the `affected` transcript's table row, then — only when
+    /// `close_source` is set — close the `source`'s viewer and its resizer
+    /// (Buzz `transcriptions_updated` → viewer `close`, F-086's resizer;
+    /// F-087's Speaker-ID window always passes `false` — see the
+    /// `AppEvent::TranscriptionsUpdated` variant doc). Shared by the
+    /// synchronous resize/extend and speaker-id-save paths and the merge
+    /// worker's drained event.
+    fn apply_transcriptions_updated(
+        &mut self,
+        affected: TranscriptionId,
+        source: TranscriptionId,
+        close_source: bool,
+    ) {
         // `refresh_row` re-reads the row and replaces it in place, or inserts it
         // when untracked (a create-new copy) — so one call covers both shapes.
         self.tasks.refresh_row(affected, &self.services.store);
-        self.close_viewer(source);
+        if close_source {
+            self.close_viewer(source);
+        }
     }
 
     /// Closes `id`'s viewer window (persisting its geometry through the shared
     /// last-close-wins path — the watch-item fix: the dormant `AppEvent` path
     /// previously dropped a viewer without persisting geometry) and, with it,
-    /// `id`'s resizer window (Buzz `closeEvent` closes its child resizer). A
-    /// no-op for an id with neither window open.
+    /// `id`'s resizer and Speaker-ID windows (Buzz `closeEvent` closes both
+    /// child dialogs, `transcription_viewer_widget.py:1492-1496`). A no-op
+    /// for an id with none of the three open.
     fn close_viewer(&mut self, id: TranscriptionId) {
         if let Some(vm_arc) = self.viewers.remove(&id) {
             let geometry = vm_arc
@@ -2248,8 +2330,10 @@ impl HummApp {
                 .observed_geometry;
             self.persist_viewer_geometry_if_changed(geometry);
         }
-        // Closing a viewer closes its resizer too (Buzz closeEvent parity).
+        // Closing a viewer closes its resizer and speaker-id window too
+        // (Buzz closeEvent parity).
         self.resizers.remove(&id);
+        self.speakers.remove(&id);
     }
 
     /// Renders every open viewer as a deferred egui viewport
@@ -2340,6 +2424,22 @@ impl HummApp {
             .collect();
         for id in resize_reqs {
             self.open_resizer(id);
+        }
+
+        // Harvest Identify Speakers requests (F-087), same ordering rationale
+        // as the resize harvest just above.
+        let speaker_reqs: Vec<TranscriptionId> = self
+            .viewers
+            .iter()
+            .filter_map(|(id, vm_arc)| {
+                let mut vm = vm_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                std::mem::take(&mut vm.identify_speakers_requested).then_some(*id)
+            })
+            .collect();
+        for id in speaker_reqs {
+            self.open_speakers(id);
         }
 
         let closing: Vec<TranscriptionId> = self
@@ -2444,6 +2544,133 @@ impl HummApp {
             .collect();
         for id in closing {
             self.resizers.remove(&id);
+        }
+    }
+
+    /// Renders every open Speaker-ID window as a deferred egui viewport
+    /// (mirroring [`Self::show_resizer_viewports`], F-087), then harvests each
+    /// window's intents: a Save click runs [`Self::apply_speaker_save`]
+    /// (closing the window on success), and a close request drops it. Unlike
+    /// the resizer's Merge, an in-flight Identify never hides this window —
+    /// Buzz's own widget keeps rendering progress in place while its worker
+    /// runs (`:593-661`), so there is no `window_visible` bookkeeping here.
+    ///
+    /// The deferred callback captures only `Arc`-shared state (the same
+    /// `Send + Sync + 'static` constraint the viewer/resizer viewports
+    /// carry); this viewport plumbing is verifiable only in a windowed run —
+    /// `views::speaker_id::ui` and the save-apply seam are kittest-driven
+    /// directly.
+    fn show_speaker_viewports(&mut self, ctx: &egui::Context) {
+        if self.speakers.is_empty() {
+            return;
+        }
+        for (source, vm_arc) in &self.speakers {
+            let title = {
+                vm_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .title
+                    .clone()
+            };
+            let builder = speaker_viewport_builder(&title);
+
+            let vm_for_cb = Arc::clone(vm_arc);
+            let deps = Arc::clone(&self.speaker_deps);
+
+            ctx.show_viewport_deferred(
+                egui::ViewportId::from_hash_of(("speakers", *source)),
+                builder,
+                move |ctx, _class| {
+                    let mut vm = vm_for_cb
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        crate::views::speaker_id::ui(ui, &mut vm, &deps);
+                    });
+                    if std::mem::take(&mut vm.focus_requested) {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                    if ctx.input(|input| input.viewport().close_requested()) {
+                        vm.close_requested = true;
+                    }
+                },
+            );
+        }
+
+        // Harvest Save clicks (one at most per window per frame) before the
+        // close harvest, mirroring the resizer's own action-then-close order.
+        let saves: Vec<TranscriptionId> = self
+            .speakers
+            .iter()
+            .filter_map(|(source, vm_arc)| {
+                let mut vm = vm_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                std::mem::take(&mut vm.save_requested).then_some(*source)
+            })
+            .collect();
+        for source in saves {
+            self.apply_speaker_save(source);
+        }
+
+        let closing: Vec<TranscriptionId> = self
+            .speakers
+            .iter()
+            .filter(|(_, vm_arc)| {
+                vm_arc
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .close_requested
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in closing {
+            self.speakers.remove(&id);
+        }
+    }
+
+    /// Executes one Speaker-ID Save click (F-087, [`speaker_id::save`]):
+    /// reads the window's current `Ready` state, labels + copies + completes
+    /// it, then — on success — applies `AppEvent::TranscriptionsUpdated`
+    /// inline with `close_source: false` (refresh the table row; the source
+    /// viewer stays open, per this window's own module doc) and closes this
+    /// window. A failure records the message on `vm.save_error` (a test
+    /// reads it via [`SpeakerIdVm::save_error_for_test`]) and leaves the
+    /// window — and its still-`Ready` Step 2 form — open, the same
+    /// "error is a side channel, not a state replacement" shape
+    /// [`Self::finish_sync_resize`]'s failure arm uses. A no-op (defensive)
+    /// if the window vanished, or isn't `Ready`, before this ran. Returns the
+    /// new transcript's id on success (the resizer's own
+    /// `apply_resizer_action` return-value convention — the real harvest
+    /// discards it, [`Self::run_speaker_save_for_test`] doesn't).
+    fn apply_speaker_save(&mut self, source: TranscriptionId) -> Option<TranscriptionId> {
+        let vm_arc = self.speakers.get(&source)?;
+        let ready = {
+            let vm = vm_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match &vm.stage {
+                SpeakerIdStage::Ready(ready) => ready.clone(),
+                _ => return None,
+            }
+        };
+
+        match speaker_id::save(&self.services.store, source, &ready) {
+            Ok(new_id) => {
+                self.apply_transcriptions_updated(new_id, source, false);
+                self.speakers.remove(&source);
+                Some(new_id)
+            }
+            Err(err) => {
+                log::warn!("speaker-id: could not save labeled segments for {source}: {err}");
+                if let Some(vm_arc) = self.speakers.get(&source) {
+                    let mut vm = vm_arc
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    vm.save_error = Some(format!("{} {err}", tr("speaker-id-save-error")));
+                }
+                None
+            }
         }
     }
 
@@ -3415,8 +3642,12 @@ impl HummApp {
         let events: Vec<AppEvent> = self.app_event_rx.try_iter().collect();
         for event in events {
             match event {
-                AppEvent::TranscriptionsUpdated { affected, source } => {
-                    self.apply_transcriptions_updated(affected, source);
+                AppEvent::TranscriptionsUpdated {
+                    affected,
+                    source,
+                    close_source,
+                } => {
+                    self.apply_transcriptions_updated(affected, source, close_source);
                 }
             }
         }
@@ -3502,6 +3733,47 @@ impl HummApp {
     /// Whether the task table's view-model currently has a row for `id`.
     pub fn has_task_row_for_test(&self, id: TranscriptionId) -> bool {
         self.tasks.sorted_rows().iter().any(|row| row.id == id)
+    }
+
+    // -- Test seams (F-087 Speaker-ID window) --------------------------------
+    // The Speaker-ID window is a deferred OS viewport an `egui_kittest`
+    // Harness cannot reach into, so these plain `pub fn`s (the resizer's own
+    // precedent) let an integration test drive open → Identify/Cancel → Save
+    // → close directly. Identify/Cancel/poll themselves need no seam here —
+    // `SpeakerIdVm`'s own methods are already public, so a test drives them
+    // straight off the `Arc<Mutex<SpeakerIdVm>>` [`Self::speaker_vm_for_test`]
+    // returns.
+
+    /// Opens (or focuses) a Speaker-ID window for `source` — the originating
+    /// viewer a save closes only via the shared table refresh, never the
+    /// viewer itself (`close_source: false`, this module's `AppEvent` doc).
+    pub fn open_speakers_for_test(&mut self, source: TranscriptionId) {
+        self.open_speakers(source);
+    }
+
+    /// The live Speaker-ID view-model for `source`, so a test can drive
+    /// `start_identify`/`cancel_identify`/`poll_identify` directly, or set
+    /// `Ready`'s `names`/`merge` before saving.
+    pub fn speaker_vm_for_test(&self, source: TranscriptionId) -> Option<Arc<Mutex<SpeakerIdVm>>> {
+        self.speakers.get(&source).map(Arc::clone)
+    }
+
+    /// Whether a Speaker-ID window is open for `source`.
+    pub fn is_speakers_open_for_test(&self, source: TranscriptionId) -> bool {
+        self.speakers.contains_key(&source)
+    }
+
+    /// Runs the Save harvest for `source`'s open Speaker-ID window exactly as
+    /// [`Self::show_speaker_viewports`] would on a real click — labels +
+    /// copies + completes, applies `TranscriptionsUpdated { close_source:
+    /// false, .. }` on success (closing this window and returning the new
+    /// transcript's id), or records the failure on `save_error_for_test`
+    /// (leaving the window open, returning `None`) on failure.
+    pub fn run_speaker_save_for_test(
+        &mut self,
+        source: TranscriptionId,
+    ) -> Option<TranscriptionId> {
+        self.apply_speaker_save(source)
     }
 
     /// The app's currently-resolved shortcut map (Task 14) — so a test can
@@ -3652,6 +3924,18 @@ fn resizer_viewport_builder(title: &str) -> egui::ViewportBuilder {
         .with_title(title)
         .with_min_inner_size([600.0, 300.0])
         .with_inner_size([600.0, 480.0])
+}
+
+/// The [`egui::ViewportBuilder`] for a Speaker-ID window: `title` (the
+/// source file's basename), min size 650×400 (Buzz `setMinimumWidth(650)` /
+/// `setMinimumHeight(400)`, `speaker_identification_widget.py:475-476`),
+/// default size 650×520 (a little taller than the minimum so Step 1, Step 2,
+/// and Save all fit without scrolling for a typical few-speaker result).
+fn speaker_viewport_builder(title: &str) -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_min_inner_size([650.0, 400.0])
+        .with_inner_size([650.0, 520.0])
 }
 
 /// [`Self::new_for_test`]'s default `recording_deps.model_ensurer` — every
@@ -4002,6 +4286,7 @@ impl eframe::App for HummApp {
         }
         self.show_viewer_viewports(ui.ctx());
         self.show_resizer_viewports(ui.ctx(), now);
+        self.show_speaker_viewports(ui.ctx());
         self.show_recording_viewport(ui.ctx());
         self.show_presentation_viewport(ui.ctx());
         self.harvest_recording_intent(ui.ctx());

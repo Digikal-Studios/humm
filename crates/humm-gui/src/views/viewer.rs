@@ -1,5 +1,5 @@
-//! The transcript-viewer window chrome (F-080): toolbar (View menu + Find
-//! live; the rest disabled stubs this task), the search bar
+//! The transcript-viewer window chrome (F-080): a fully-live toolbar (View
+//! menu, Export, Translate, Resize, Identify Speakers, Find), the search bar
 //! ([`crate::views::viewer_search`], F-082), the per-mode central content,
 //! and the empty-state label.
 //!
@@ -17,7 +17,9 @@
 //! all driven off the [`ViewerVm`]'s player (the audio master clock). Export
 //! is a live menu ([`crate::views::export_menu`], F-084); Resize opens the
 //! resizer window (F-086 — the button latches `resize_requested`, which
-//! `app.rs` harvests to open/focus the resizer). Translate is live (F-085,
+//! `app.rs` harvests to open/focus the resizer); Identify Speakers opens the
+//! Speaker-ID window the same way (F-087, `identify_speakers_requested`,
+//! `crate::speaker_id`'s module doc). Translate is live (F-085,
 //! Task 15, design spec §7.3): the toolbar button drives [`ViewerVm::
 //! on_translate_clicked`]'s Buzz-ported gate order, [`show_translate_modals`]
 //! renders whichever gate modal it armed, and [`viewer_ui`] harvests arrived
@@ -268,11 +270,13 @@ fn consume_mode_shortcuts(ui: &egui::Ui, vm: &mut ViewerVm, shortcuts: &Shortcut
     }
 }
 
-/// The toolbar: View menu (live), Export menu (live, F-084), Translate
-/// (live, F-085), Find (live, F-082) then the remaining disabled-stub
-/// button. Identify Speakers keeps its permanent "lands in M8" tooltip; the
-/// Translate button used to carry the same shape until this task made it
-/// live.
+/// The toolbar: View menu, Export menu, Translate, Resize, Identify
+/// Speakers, and Find — all live. Identify Speakers (F-087) is the last of
+/// these to go live: its own window's `MissingAudio` gate handles the "no
+/// audio file" case that Buzz's toolbar-button-disable did
+/// (`transcription_viewer_widget.py:514-518`), so the toolbar button here is
+/// unconditionally enabled — see `speaker_id`'s module doc for why the gate
+/// belongs to the window, not this click.
 fn show_toolbar(
     ui: &mut egui::Ui,
     vm: &mut ViewerVm,
@@ -335,11 +339,12 @@ fn show_toolbar(
         if ui.button(tr("viewer-resize")).clicked() {
             vm.resize_requested = true;
         }
-        disabled_button(
-            ui,
-            tr("viewer-identify-speakers"),
-            tr("viewer-identify-speakers-tooltip"),
-        );
+        // Identify Speakers (F-087): opens this transcript's Speaker-ID
+        // window. Always enabled — a missing audio file gates the window's
+        // own Identify button, not this click (`speaker_id`'s module doc).
+        if ui.button(tr("viewer-identify-speakers")).clicked() {
+            vm.identify_speakers_requested = true;
+        }
         viewer_search::toolbar_button(ui, vm);
         show_autosave_indicator(ui, vm);
         export_menu::show_export_flash(ui, vm);
@@ -462,12 +467,6 @@ fn mode_menu_entry(
     let hint = ui.ctx().format_shortcut(&shortcuts.get(action));
     ui.add(egui::Button::new(label).shortcut_text(hint))
         .clicked()
-}
-
-/// A permanently-disabled toolbar button carrying `tooltip` on hover.
-fn disabled_button(ui: &mut egui::Ui, label: String, tooltip: String) {
-    ui.add_enabled(false, egui::Button::new(label))
-        .on_disabled_hover_text(tooltip);
 }
 
 /// The empty-transcript state: a centered explanatory label (UX_SPEC §1).
