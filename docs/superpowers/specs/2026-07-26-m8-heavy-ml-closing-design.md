@@ -626,6 +626,20 @@ found and ledgered during implementation.*
     the same effect. Not "fixed" with a uniquifying suffix precisely
     because that would diverge from Buzz's naming, which F-027's export-name
     `_speech`-strip logic depends on.
+15. **Folder watch's rule 4 also skips `_DeepFilterNet3.wav`, beyond Buzz's
+    literal rule text.** `humm-dfn` writes `<stem>_DeepFilterNet3.wav`
+    beside the input (`plugin.py:48`'s naming), i.e. into the very folder
+    folder-watch scans. Buzz's `deep_filter_net` plugin does the same
+    (`buzz/plugins/deep_filter_net/plugin.py:47-48`: `output_path =
+    f"{stem}_DeepFilterNet3.wav"`, same directory as `input_path`) and its
+    folder watcher (`transcription_task_folder_watcher.py:70-81`) has no
+    corresponding skip rule — so Buzz has the same latent bug: with folder
+    watch + noise reduction both enabled, the denoised output gets
+    re-enqueued (spurious failed task once `TempAudioGuard` deletes it, or
+    runaway re-denoising generations if "Keep denoised file" is on). humm's
+    rule 4 is extended to cover both generated-artifact classes rather than
+    porting the bug faithfully — a deliberate, more-defensive deviation from
+    Buzz's literal source, not a new invented rule.
 
 ## 12. Risks
 

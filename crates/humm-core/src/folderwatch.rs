@@ -106,8 +106,13 @@ pub struct Candidate {
 /// 3. temp double-extension conversion files, e.g. `file.ogg.wav` (the
 ///    *secondary* extension — re-splitting the stem, `:66-68` — is itself
 ///    supported);
-/// 4. `"_speech.mp3"` as a substring of the file name (not just the
-///    extension) — Buzz's extracted-speech output files;
+/// 4. `"_speech.mp3"` or `"_DeepFilterNet3.wav"` as a substring of the file
+///    name (not just the extension) — Buzz's extracted-speech output files,
+///    plus humm's own DeepFilterNet3 denoised-output files (deviations
+///    ledger entry 15: Buzz's `deep_filter_net` plugin writes its output
+///    beside the input the same way and has the same latent re-enqueue bug;
+///    this is the same rule, applied to humm's second generated-artifact
+///    class, not a new rule);
 /// 5. `known(path)` is `true` — already a known task (the store, in
 ///    practice, via `has_task_for_file`);
 /// 6. [`SeenSet::matches`] is `true` — already emitted at this exact
@@ -240,8 +245,11 @@ fn is_folder_watch_candidate(path: &Path, seen: &SeenSet, known: &dyn Fn(&Path) 
         return false;
     }
 
-    // Rule 4: extracted-speech output files.
-    if file_name.contains("_speech.mp3") {
+    // Rule 4: extracted-speech and DeepFilterNet3 denoised-output files —
+    // both are generated artifacts humm (like Buzz) writes beside the input
+    // file, in the very folder being watched; without this, folder watch
+    // re-enqueues its own output (deviations ledger entry 15).
+    if file_name.contains("_speech.mp3") || file_name.contains("_DeepFilterNet3.wav") {
         return false;
     }
 
@@ -361,6 +369,38 @@ mod tests {
         touch(
             &dir.path().join("episode_speech.mp3_final.wav"),
             b"speech output",
+        );
+
+        let candidates = scan(dir.path(), &SeenSet::new(), &never_known);
+
+        assert_eq!(candidates, Vec::new());
+    }
+
+    #[test]
+    fn deep_filter_net_output_skipped() {
+        // F-030 x F-112: DeepFilterNet3 writes `<stem>_DeepFilterNet3.wav`
+        // beside the input, inside the watched folder — without rule 4
+        // covering this suffix too, folder watch would re-enqueue its own
+        // denoised output (see deviations ledger entry 15).
+        let dir = tempfile::tempdir().expect("tempdir");
+        touch(&dir.path().join("talk_DeepFilterNet3.wav"), b"denoised");
+        touch(&dir.path().join("_DeepFilterNet3.wav"), b"denoised");
+
+        let candidates = scan(dir.path(), &SeenSet::new(), &never_known);
+
+        assert_eq!(candidates, Vec::new());
+    }
+
+    #[test]
+    fn doubled_deep_filter_net_suffix_skipped() {
+        // If "Keep denoised file" is on and a kept output somehow gets
+        // re-run through the reducer, Buzz's naming produces a doubled
+        // suffix (`..._DeepFilterNet3_DeepFilterNet3.wav`); confirm it's
+        // still caught by the substring check regardless of repetition.
+        let dir = tempfile::tempdir().expect("tempdir");
+        touch(
+            &dir.path().join("talk_DeepFilterNet3_DeepFilterNet3.wav"),
+            b"denoised twice",
         );
 
         let candidates = scan(dir.path(), &SeenSet::new(), &never_known);
