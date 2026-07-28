@@ -412,6 +412,44 @@ mod tests {
         );
     }
 
+    // The M9 streaming rework (D5b-6) changes `reduce()`'s output path from
+    // full-buffer accumulation to a streamed write. This test pins the one
+    // property that rework must not change: the exact output bytes for a
+    // fixed deterministic input. `tests/golden/sine_440_denoised.wav` was
+    // captured by running the *pre-rework* `reduce()` against this same
+    // `write_sine_wav(440.0, 0.3, 16_000, 0.4)` fixture (task-5-report.md
+    // records the exact steps) — this test is "red-first in spirit" per the
+    // task brief: it passes trivially before the rework (comparing
+    // `reduce()`'s current output to a golden captured from that same
+    // current output) and is the guard that must still pass after.
+    // Requires ffmpeg on PATH for the same reason as this module's other
+    // real-`reduce()` tests (see `reduce_writes_sibling_wav_with_expected_name`).
+    #[test]
+    #[ignore = "requires ffmpeg on PATH (DfNoiseReducer composes humm-media's \
+                FfmpegDecoder to decode the synthesized input WAV)"]
+    fn streamed_output_is_byte_identical_to_pre_stream_golden() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = dir.path().join("noisy-input.wav");
+        write_sine_wav(&input, 440.0, 0.3, 16_000, 0.4);
+
+        let decoder = Arc::new(FfmpegDecoder::new());
+        let reducer = DfNoiseReducer::new(decoder);
+        let cancel = CancelToken::new();
+
+        let output = reducer
+            .reduce(&input, &cancel)
+            .expect("reduce should succeed against a real tiny fixture");
+
+        let golden_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/sine_440_denoised.wav");
+        let actual = std::fs::read(&output).expect("read reduce() output");
+        let golden = std::fs::read(&golden_path).expect("read golden fixture");
+        assert_eq!(
+            actual, golden,
+            "streamed reduce() output must stay byte-identical to the pre-stream golden fixture"
+        );
+    }
+
     #[test]
     fn write_wav_sibling_writes_a_valid_wav_and_no_leftover_temp_file() {
         let dir = tempfile::tempdir().expect("tempdir");
