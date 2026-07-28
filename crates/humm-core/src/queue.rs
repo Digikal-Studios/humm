@@ -20,17 +20,24 @@
 //!   *executes*. The transcript resizer (F-086, design spec §4 "status-write
 //!   boundary note") and Speaker-ID's Save (F-087, `humm-gui`'s
 //!   `speaker_id::save`) are the two features that write those columns
-//!   outside the queue: both call the identical `copy_transcription` +
-//!   `mark_replaced_completed` pair (the resizer's `update_progress_direct`
-//!   use has no Speaker-ID analogue) to create and complete a row that never
-//!   enters this queue at all. Still safe, for the same reason in both
-//!   cases: each only ever writes a **freshly minted** id it just created via
-//!   `copy_transcription` — never a queue-owned id already in flight — and
-//!   `copy_transcription`'s own row always starts `Queued` before either
-//!   caller immediately calls `mark_replaced_completed` on it, so the
-//!   "single writer / queue owns status transitions" invariant stays scoped
-//!   to queue-executed tasks and never actually conflicts with either
-//!   feature.
+//!   outside the queue, on a **freshly minted** id — never a queue-owned id
+//!   already in flight — so the "single writer / queue owns status
+//!   transitions" invariant stays scoped to queue-executed tasks and never
+//!   actually conflicts with either feature. Since M9 Task 2 (D5b-3), most of
+//!   those writes go through `SqliteStore::copy_replaced_completed`, one
+//!   transaction that creates the new row already `Completed`: Speaker-ID's
+//!   Save and the resizer's synchronous Resize/Extend "create new
+//!   transcript" save (`views::resizer::save_segments`) both use it, so
+//!   those rows are never even observably `Queued`. The one holdout is the
+//!   resizer's background Merge worker (`app.rs::start_merge`): it still
+//!   copies first (`copy_transcription`, row shown at 0% via
+//!   `update_progress_direct` — no Speaker-ID analogue) and completes later
+//!   (`mark_replaced_completed`), because the row must be visible and
+//!   progressing *before* the merge produces final segments — something a
+//!   single copy+complete transaction can't do. That path stays safe by the
+//!   original reasoning: `copy_transcription`'s row always starts `Queued`
+//!   under an id nothing else can be racing on, and `start_merge`'s own
+//!   thread is the only writer that ever touches it again.
 //! - **Terminal status precedes the terminal event.** `mark_completed` /
 //!   `mark_failed` / `mark_canceled` is written to the store *before* the
 //!   matching `Completed`/`Failed`/`Canceled` event is emitted, so a consumer

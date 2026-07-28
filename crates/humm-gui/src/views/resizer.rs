@@ -237,10 +237,13 @@ pub fn parse_extend_amount(s: &str) -> Millis {
 /// The resize/merge save path (Buzz `save_segments` /
 /// `on_transcription_completed`, `transcription_resizer_widget.py:337-352,
 /// 479-489`): with "Create new transcript" on, copy the source row to a fresh
-/// id and mark it completed with `segs`; otherwise replace the source's
-/// segments in place. Either way translations are dropped (the store's
-/// `mark_replaced_completed`/`replace_segments` insert an empty translation —
-/// Buzz parity). Returns the *affected* id (the new copy, or the source).
+/// id already completed with `segs`, in one store transaction
+/// ([`SqliteStore::copy_replaced_completed`], D5b-3 — no intermediate
+/// `Queued` row is ever written, so a crash mid-save can't orphan one);
+/// otherwise replace the source's segments in place. Either way translations
+/// are dropped (the store's `copy_replaced_completed`/`replace_segments`
+/// insert an empty translation — Buzz parity). Returns the *affected* id (the
+/// new copy, or the source).
 pub fn save_segments(
     store: &SqliteStore,
     source: TranscriptionId,
@@ -248,9 +251,7 @@ pub fn save_segments(
     segs: &[Segment],
 ) -> Result<TranscriptionId, StoreError> {
     if create_new {
-        let new_id = store.copy_transcription(source)?;
-        store.mark_replaced_completed(new_id, segs)?;
-        Ok(new_id)
+        store.copy_replaced_completed(source, segs)
     } else {
         store.replace_segments(source, segs)?;
         Ok(source)

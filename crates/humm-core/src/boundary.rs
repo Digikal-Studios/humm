@@ -591,9 +591,12 @@ pub trait TaskStore: Send + Sync {
 
     /// Resets an already-terminated task's *existing* row back to `queued`
     /// for a retry — no new row is inserted: `status` becomes `queued`,
-    /// `progress` resets to `0.0`, and `time_started`/`time_ended`/
-    /// `error_message` are cleared to `NULL`. Every other column (name,
-    /// notes, the persisted spec, ...) is left untouched.
+    /// `progress` resets to `0.0`, `time_started`/`time_ended`/
+    /// `error_message` are cleared to `NULL`, and any segments left over from
+    /// a previous run are deleted (D5b-12) so the retry's eventual
+    /// `mark_completed` starts from zero rows instead of appending onto the
+    /// old run's segments. Every other column (name, notes, the persisted
+    /// spec, ...) is left untouched. One transaction.
     ///
     /// Ported from Buzz's `TranscriptionDAO.reset_transcription_for_restart`
     /// (`transcription_dao.py:353-370`), which raises when the row doesn't

@@ -97,8 +97,8 @@
 //! # Save (Buzz `:727-800`)
 //!
 //! [`save`] mirrors `views::resizer::save_segments`'s create-new shape
-//! exactly (`store.copy_transcription` + `store.mark_replaced_completed`),
-//! fed by [`humm_core::diarize::label_segments`] for the merge/name-prefix
+//! exactly (`store.copy_replaced_completed`, one transaction, D5b-3), fed by
+//! [`humm_core::diarize::label_segments`] for the merge/name-prefix
 //! text. It is synchronous — like the resizer's Extend/Resize tail, not its
 //! background Merge — because by the time Save is clickable all the heavy
 //! work already ran in Step 1; only a fast DB write remains. The interface
@@ -990,10 +990,12 @@ pub fn pick_sample(
 
 /// The Save button's synchronous save path (Buzz `on_save_button_clicked`,
 /// `:727-800`): labels `ready`'s segments (merge/name-prefix applied,
-/// [`label_segments`]), copies `source` to a fresh transcript, and marks it
-/// completed with the labeled segments — the same
-/// `copy_transcription`/`mark_replaced_completed` pair
-/// `views::resizer::save_segments`'s create-new arm uses. Returns the new
+/// [`label_segments`]), then copies `source` to a fresh transcript already
+/// completed with the labeled segments in one store transaction
+/// ([`SqliteStore::copy_replaced_completed`], D5b-3) — the same call
+/// `views::resizer::save_segments`'s create-new arm uses. Unlike the old
+/// copy-then-complete pair this replaced, no intermediate `Queued` row is
+/// ever written, so a crash mid-save can't orphan one. Returns the new
 /// transcript's id; `app.rs`'s harvest sends
 /// `AppEvent::TranscriptionsUpdated { close_source: false, .. }` and closes
 /// this window on success, or records the error on [`SpeakerIdVm::save_error`]
@@ -1005,9 +1007,7 @@ pub fn save(
     ready: &ReadyState,
 ) -> Result<TranscriptionId, StoreError> {
     let labeled = label_segments(&ready.segments, &ready.speakers, &ready.names, ready.merge);
-    let new_id = store.copy_transcription(source)?;
-    store.mark_replaced_completed(new_id, &labeled)?;
-    Ok(new_id)
+    store.copy_replaced_completed(source, &labeled)
 }
 
 #[cfg(test)]

@@ -1104,6 +1104,84 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Fuses [`Self::copy_transcription`] and [`Self::mark_replaced_completed`]
+    /// into one transaction (D5b-3): the resize/merge and Speaker-ID
+    /// "create new transcript" save paths' *entire* copy+complete step, not
+    /// just its second half. Copies `source`'s row to a freshly-minted
+    /// [`TranscriptionId`] using the exact same column set
+    /// [`Self::copy_transcription`] copies (see its doc for the full list),
+    /// but writes the new row directly as `Status::Completed` with
+    /// `time_ended = now` — the same `now` used for `time_queued` — instead
+    /// of `Status::Queued`. `segs` are then inserted against the new id with
+    /// `translation` forced to `""` (Buzz parity, matching
+    /// [`Self::mark_replaced_completed`]).
+    ///
+    /// The point of fusing the two calls: the old call-then-call pattern
+    /// (`copy_transcription` then `mark_replaced_completed`, still used by
+    /// `speaker_id::save` and `resizer::save_segments` before this method
+    /// existed) materializes a real `Queued` row in between. A crash, panic,
+    /// or process kill between the two calls leaves that row behind
+    /// permanently `Queued` — nothing ever dequeues it, because it was never
+    /// pushed onto the in-memory queue, only written to the store. This
+    /// method never writes an intermediate state: either both the row and
+    /// its segments land, or (on error) the whole transaction rolls back and
+    /// the table is exactly as it was before the call — no row, `Queued` or
+    /// otherwise, is left orphaned. (`app.rs::start_merge`'s "Create new
+    /// transcript" path is the one call site that still does copy-first on
+    /// purpose, for a different reason — see its doc.)
+    ///
+    /// Errs if `source` doesn't exist (mirrors [`Self::copy_transcription`]);
+    /// on that error no row is inserted at all, `Queued` or otherwise.
+    pub fn copy_replaced_completed(
+        &self,
+        source: TranscriptionId,
+        segs: &[Segment],
+    ) -> Result<TranscriptionId, StoreError> {
+        let new_id = TranscriptionId::new();
+        let now = now_iso();
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(query_error)?;
+        let affected = tx
+            .execute(
+                "INSERT INTO transcription (
+                    id, export_formats, file, output_folder, language, model_type,
+                    source, status, task, time_queued, url, whisper_model_size,
+                    hugging_face_model_id, word_level_timings, extract_speech,
+                    name, notes, options_json, kind, last_export_folder, time_ended
+                )
+                SELECT
+                    ?1, export_formats, file, output_folder, language, model_type,
+                    source, ?2, task, ?3, url, whisper_model_size,
+                    hugging_face_model_id, word_level_timings, extract_speech,
+                    name, notes, options_json, kind, NULL, ?4
+                FROM transcription WHERE id = ?5",
+                params![
+                    new_id.to_string(),
+                    Status::Completed.as_str(),
+                    now,
+                    now,
+                    source.to_string(),
+                ],
+            )
+            .map_err(query_error)?;
+        if affected == 0 {
+            return Err(StoreError::Query {
+                detail: format!("copy_replaced_completed: no task with id {source}"),
+            });
+        }
+        for seg in segs {
+            tx.execute(
+                "INSERT INTO transcription_segment \
+                 (start_time, end_time, text, translation, transcription_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![seg.start.0, seg.end.0, seg.text, "", new_id.to_string()],
+            )
+            .map_err(query_error)?;
+        }
+        tx.commit().map_err(query_error)?;
+        Ok(new_id)
+    }
+
     /// Writes `fraction` (clamped `0.0..=1.0`) to `id`'s `progress` column
     /// directly, without touching `status`. Distinct from
     /// `TaskStore::update_progress` (which also flips status to
@@ -1400,8 +1478,9 @@ impl TaskStore for SqliteStore {
     }
 
     fn requeue_task(&self, id: &TranscriptionId) -> Result<(), StoreError> {
-        let conn = self.lock();
-        let affected = conn
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(query_error)?;
+        let affected = tx
             .execute(
                 "UPDATE transcription SET status = ?1, progress = 0.0, time_started = NULL, \
                  time_ended = NULL, error_message = NULL WHERE id = ?2",
@@ -1413,6 +1492,20 @@ impl TaskStore for SqliteStore {
                 detail: format!("requeue_task: no task with id {id}"),
             });
         }
+        // D5b-12: a requeued task is about to run again and (on success)
+        // `mark_completed` will INSERT a fresh set of segments — it never
+        // clears the old ones first (`replace_segments`/
+        // `mark_replaced_completed` do that; `mark_completed` doesn't,
+        // because the queue's normal `create_task` -> ... -> `mark_completed`
+        // path never has pre-existing segments to worry about). Without this
+        // DELETE, retrying a previously-Completed task appends the new run's
+        // segments onto the old run's instead of replacing them.
+        tx.execute(
+            "DELETE FROM transcription_segment WHERE transcription_id = ?1",
+            params![id.to_string()],
+        )
+        .map_err(query_error)?;
+        tx.commit().map_err(query_error)?;
         Ok(())
     }
 
@@ -1606,6 +1699,18 @@ mod tests {
                 paragraph_split: Millis(2000),
                 source_disposition: None,
             },
+        }
+    }
+
+    /// Terse [`Segment`] builder for tests that only care about start/end/text
+    /// (translation is always empty — mirrors `humm-gui`'s own test helpers
+    /// of the same name in `speaker_id.rs`/`views/resizer.rs`).
+    fn seg(start: i64, end: i64, text: &str) -> Segment {
+        Segment {
+            start: Millis(start),
+            end: Millis(end),
+            text: text.to_string(),
+            translation: String::new(),
         }
     }
 
@@ -2355,7 +2460,7 @@ mod tests {
     // -- Task 3: retry/rename/notes/delete/spec_from_columns (F-026) --------
 
     #[test]
-    fn requeue_task_resets_status_progress_and_clears_timestamps_and_error_only() {
+    fn requeue_task_resets_status_progress_clears_timestamps_error_and_segments() {
         let store = SqliteStore::open_in_memory().expect("open");
         let id = TranscriptionId::new();
         let mut spec = sample_task_spec();
@@ -2367,12 +2472,31 @@ mod tests {
         store.update_progress(&id, 0.75).expect("progress");
         store.mark_failed(&id, "boom").expect("failed");
 
+        // Segments left over from an earlier run (D5b-12: e.g. a task that
+        // completed once, was retried, and failed on the retry before
+        // reaching `mark_completed` again) must not survive a requeue either
+        // — inserted directly since this store has no path that leaves a
+        // `failed` row with segments attached, but `requeue_task`'s
+        // contract is "no segments survive," full stop, regardless of how
+        // they got there.
+        {
+            let conn = store.lock();
+            conn.execute(
+                "INSERT INTO transcription_segment \
+                 (start_time, end_time, text, translation, transcription_id) \
+                 VALUES (0, 100, 'stale', '', ?1)",
+                params![id.to_string()],
+            )
+            .expect("seed stale segment");
+        }
+
         let before = fetch_full_row(&store, &id);
         assert_eq!(before.status.as_deref(), Some("failed"));
         assert_eq!(before.progress, 0.75);
         assert!(before.time_started.is_some());
         assert!(before.time_ended.is_some());
         assert_eq!(before.error_message.as_deref(), Some("boom"));
+        assert_eq!(store.get_segment_rows(id).expect("rows before").len(), 1);
 
         store.requeue_task(&id).expect("requeue");
 
@@ -2382,6 +2506,10 @@ mod tests {
         assert_eq!(after.time_started, None);
         assert_eq!(after.time_ended, None);
         assert_eq!(after.error_message, None);
+        assert!(
+            store.get_segment_rows(id).expect("rows after").is_empty(),
+            "requeue_task must clear any segments from a previous run"
+        );
 
         // Every other column is untouched by requeue.
         assert_eq!(after.export_formats, before.export_formats);
@@ -2409,6 +2537,49 @@ mod tests {
         let id = TranscriptionId::new();
         let err = store.requeue_task(&id).expect_err("missing id must error");
         assert!(matches!(err, StoreError::Query { .. }));
+    }
+
+    // D5b-12 investigation: `requeue_task` is a bare status/timestamp UPDATE
+    // and never clears `transcription_segment` rows, but `mark_completed`
+    // unconditionally INSERTs. A Completed task that gets retried (Command::
+    // Retry -> requeue_task) and then completes again therefore *appends* the
+    // second run's segments onto the first run's, instead of replacing them.
+    #[test]
+    fn requeue_then_recomplete_leaves_only_second_run_segments() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        store
+            .create_task(&id, &sample_task_spec(), Source::FileImport)
+            .expect("create");
+
+        store
+            .mark_completed(
+                &id,
+                &[
+                    seg(0, 100, "one"),
+                    seg(100, 200, "two"),
+                    seg(200, 300, "three"),
+                ],
+            )
+            .expect("first mark_completed");
+        assert_eq!(store.get_segment_rows(id).expect("rows").len(), 3);
+
+        store.requeue_task(&id).expect("requeue");
+
+        store
+            .mark_completed(&id, &[seg(0, 50, "uno"), seg(50, 100, "dos")])
+            .expect("second mark_completed");
+
+        let rows = store.get_segment_rows(id).expect("rows after re-complete");
+        assert_eq!(
+            rows.len(),
+            2,
+            "requeue_task must clear the previous run's segments so a \
+             re-complete doesn't append onto them; got {} rows: {rows:?}",
+            rows.len()
+        );
+        assert_eq!(rows[0].text, "uno");
+        assert_eq!(rows[1].text, "dos");
     }
 
     #[test]
@@ -2983,6 +3154,102 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].text, "one");
         assert_eq!(stored[0].translation, "", "translations are dropped");
+    }
+
+    // -- Task 2 (D5b-3): copy_replaced_completed, one-transaction pair ------
+
+    #[test]
+    fn copy_replaced_completed_inserts_completed_row_with_segments() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        let spec = sample_task_spec();
+        store
+            .create_task(&id, &spec, Source::FileImport)
+            .expect("create");
+        store.set_task_name(&id, "My Recording").expect("name");
+        store
+            .update_transcription_notes(&id, "notes here")
+            .expect("notes");
+        store.mark_started(&id).expect("start");
+        store
+            .mark_completed(&id, &[seg(0, 1000, "hi")])
+            .expect("complete");
+
+        let segments = vec![
+            Segment {
+                start: Millis(0),
+                end: Millis(500),
+                text: "one".to_string(),
+                translation: "should-drop".to_string(),
+            },
+            Segment {
+                start: Millis(500),
+                end: Millis(900),
+                text: "two".to_string(),
+                translation: "should-drop-2".to_string(),
+            },
+        ];
+        let new_id = store
+            .copy_replaced_completed(id, &segments)
+            .expect("copy_replaced_completed");
+        assert_ne!(new_id, id);
+
+        // The new row is Completed with time_ended set, never having passed
+        // through a Queued state.
+        let new_row = store.get_task(&new_id).expect("get new").expect("present");
+        assert_eq!(new_row.status, Status::Completed);
+        assert!(new_row.time_ended.is_some());
+        assert_eq!(new_row.name.as_deref(), Some("My Recording"));
+        assert_eq!(new_row.notes.as_deref(), Some("notes here"));
+
+        let new_full = fetch_full_row(&store, &new_id);
+        assert_eq!(new_full.last_export_folder, None);
+
+        let stored = store.get_segment_rows(new_id).expect("segments");
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].text, "one");
+        assert_eq!(stored[0].translation, "", "translations are dropped");
+        assert_eq!(stored[1].text, "two");
+        assert_eq!(stored[1].translation, "", "translations are dropped");
+
+        // Source row and its own segments are untouched.
+        let source_row = store.get_task(&id).expect("get source").expect("present");
+        assert_eq!(source_row.status, Status::Completed);
+        let source_segs = store.get_segment_rows(id).expect("source segments");
+        assert_eq!(source_segs.len(), 1);
+        assert_eq!(source_segs[0].text, "hi");
+    }
+
+    #[test]
+    fn copy_replaced_completed_bogus_source_errors_and_leaves_no_row() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let bogus = TranscriptionId::new();
+
+        let before = {
+            let conn = store.lock();
+            conn.query_row("SELECT COUNT(*) FROM transcription", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count before")
+        };
+
+        let err = store
+            .copy_replaced_completed(bogus, &[seg(0, 100, "x")])
+            .expect_err("bogus source must error");
+        assert!(matches!(err, StoreError::Query { .. }));
+
+        let after = {
+            let conn = store.lock();
+            conn.query_row("SELECT COUNT(*) FROM transcription", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count after")
+        };
+        assert_eq!(
+            before, after,
+            "a failed copy_replaced_completed must leave no row behind — \
+             no Queued (or any other) orphan is ever possible"
+        );
     }
 
     #[test]

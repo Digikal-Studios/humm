@@ -2272,6 +2272,26 @@ impl HummApp {
                             // changed here — if the user never retries, the
                             // next launch's stale-task sweep flips it to
                             // `Canceled` (§21 semantics).
+                            //
+                            // M9 Task 2 (D5b-3) added `SqliteStore::
+                            // copy_replaced_completed`, a one-transaction
+                            // fusion of `copy_transcription` +
+                            // `mark_replaced_completed` that never
+                            // materializes this intermediate `Queued` row at
+                            // all (`speaker_id::save` and
+                            // `resizer::save_segments`'s create-new arm were
+                            // switched to it). This call site was deliberately
+                            // *not* switched: the visible-at-0% row above is
+                            // the whole point here — the merge runs on a
+                            // background thread the user can watch progress
+                            // on, so the row must exist (and be `Queued`, soon
+                            // `in_progress`) before the segments are known,
+                            // which `copy_replaced_completed` — which writes
+                            // the row and its final segments together — can't
+                            // provide. The stale-task sweep above is exactly
+                            // the mechanism that makes this copy-first
+                            // ordering safe despite the resulting `Queued`
+                            // window.
                             log::warn!(
                                 "resizer merge: could not save segments for {affected}: {err}"
                             );
