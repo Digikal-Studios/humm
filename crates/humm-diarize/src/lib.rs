@@ -328,4 +328,215 @@ mod tests {
         assert_eq!(turn.end, Millis(21614));
         assert_eq!(turn.speaker, 1);
     }
+
+    // ---- speakrs API-surface pins (M9, D5b-10) -----------------------------
+    //
+    // Everything below runs with no real model files (a nonexistent
+    // directory, or ten garbage-byte stand-ins for the real ~59.75MB model
+    // set) and no network. It pins the exact `speakrs` (`=0.5.0`, ADR-024)
+    // surface `OrtDiarizer` calls:
+    //   - `ExecutionMode::Cpu` (the only mode this adapter ever uses, ~:173)
+    //     and its `as_str()` behavior.
+    //   - `OwnedDiarizationPipeline::from_dir`'s call signature, and its
+    //     *runtime* failure behavior on a missing/garbage model directory
+    //     (fails fast, no network) — this is the one claim in this crate a
+    //     compile check alone cannot verify.
+    //   - `speakrs::Segment::new`'s constructor and the concrete types of
+    //     its `start`/`end`/`speaker` fields, which `to_speaker_turn` reads
+    //     directly.
+    //   - `speakrs::segment::to_segments` (a pure function over an
+    //     `ndarray::Array2<f32>` — no model, no `OwnedDiarizationPipeline`
+    //     needed) exercised end-to-end through this crate's own
+    //     `to_speaker_turn`, pinning the `"SPEAKER_NN"` label format
+    //     `parse_speaker_index` depends on.
+    //   - `OwnedDiarizationPipeline::run`'s signature and
+    //     `DiarizationResult`'s `segments` field type: both are only ever
+    //     reachable after a *real* model load succeeds, so they cannot be
+    //     runtime-exercised here at all; pinned as typed `fn`/closure
+    //     bindings instead — a breaking change to either fails this test
+    //     module to *compile*, which is the test (the brief's "compile-pin"
+    //     fallback).
+    //
+    // Honest scope: this seam catches API and loading breaks — a renamed
+    // method, a changed error variant, a `from_dir` that stops failing fast
+    // or starts silently accepting garbage input, a `Segment` field type
+    // change. It does NOT catch *silent inference-quality* regressions (a
+    // `speakrs` upgrade that quietly produces worse speaker boundaries on
+    // real audio) — only `tests/contract.rs`'s `#[ignore]`d,
+    // `HUMM_DIARIZE_CONTRACT=1`-gated test against the real committed
+    // two-speaker fixture exercises that.
+    //
+    // Empirical correction to this task's own brief (recorded per the task's
+    // TDD instructions): the brief named the missing/garbage-dir tests
+    // `..._errors_models_missing`, expecting `from_dir`'s failure to map to
+    // `DiarizeError::ModelsMissing`. Measured against this workspace's
+    // pinned `speakrs =0.5.0` + `ort =2.0.0-rc.12`, that is not what
+    // happens: `from_dir` on a missing dir fails in ~39ms with
+    // `PipelineError::ModelLoad(ModelLoadError::Ort(ort::Error { code:
+    // NoSuchFile, .. }))`; on ten garbage-byte files it fails in ~53ms with
+    // `ort::Error { code: InvalidProtobuf, .. }`. Both are purely local,
+    // fast failures (this build never enables speakrs's `online` feature,
+    // so no HuggingFace/network code path exists to reach at all) — so the
+    // "fails fast and sandboxed" empirical claim holds, but the *mapped
+    // error variant* does not: per `OrtDiarizer::new`'s own doc comment
+    // above (~:127-134), `DiarizeError::ModelsMissing` is produced *only* by
+    // `OrtDiarizer::new`'s file-existence pre-check, which never calls into
+    // `speakrs` at all; `from_dir`'s own failure — reachable only from
+    // inside `Diarizer::diarize`, after `new` already succeeded — maps to
+    // `DiarizeError::Failed` (~:173-176). The tests below assert that real,
+    // reachable mapping instead.
+
+    /// The exact one-line mapping `Diarizer::diarize` applies to `from_dir`'s
+    /// result (~:173-176), reproduced here so these tests exercise the same
+    /// expression the production code contains rather than a paraphrase of
+    /// it.
+    fn map_from_dir_error(e: speakrs::PipelineError) -> DiarizeError {
+        DiarizeError::Failed {
+            detail: e.to_string(),
+        }
+    }
+
+    #[test]
+    fn from_dir_on_missing_dir_fails_fast_and_maps_to_diarize_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("does-not-exist");
+
+        let start = std::time::Instant::now();
+        let result =
+            speakrs::OwnedDiarizationPipeline::from_dir(&missing, speakrs::ExecutionMode::Cpu);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "from_dir on a nonexistent directory should fail fast (no network or model \
+             probing); took {elapsed:?}"
+        );
+
+        // `.expect_err()` needs `T: Debug`, and `OwnedDiarizationPipeline`
+        // (the `Ok` side) does not implement it — matching manually instead.
+        let err = match result {
+            Ok(_) => panic!("from_dir on a nonexistent directory should fail"),
+            Err(e) => e,
+        };
+        let mapped = map_from_dir_error(err);
+        let DiarizeError::Failed { detail } = mapped else {
+            panic!("expected DiarizeError::Failed (see this test module's doc comment)");
+        };
+        assert!(
+            !detail.is_empty(),
+            "mapped detail should carry the underlying ort error message"
+        );
+    }
+
+    #[test]
+    fn from_dir_on_garbage_files_fails_fast_and_maps_to_diarize_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The ten expected filenames (see DIARIZE_MODEL_FILES), each holding
+        // bytes that are neither a valid ONNX model nor a valid .npy array.
+        let paths = humm_core::models::registry::diarization_model_paths(dir.path());
+        std::fs::create_dir_all(&paths.dir).expect("mkdir diarization dir");
+        for (_, path) in paths.files() {
+            std::fs::write(path, b"not a real onnx/npy model, just garbage bytes")
+                .expect("write garbage model file");
+        }
+
+        let start = std::time::Instant::now();
+        let result =
+            speakrs::OwnedDiarizationPipeline::from_dir(&paths.dir, speakrs::ExecutionMode::Cpu);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "from_dir over garbage-byte model files should fail fast (no network or retry \
+             loop); took {elapsed:?}"
+        );
+
+        // Same `.expect_err()` / `T: Debug` constraint as above.
+        let err = match result {
+            Ok(_) => panic!("from_dir over garbage bytes should fail to parse a model"),
+            Err(e) => e,
+        };
+        let mapped = map_from_dir_error(err);
+        assert!(
+            matches!(mapped, DiarizeError::Failed { .. }),
+            "expected DiarizeError::Failed (see this test module's doc comment)"
+        );
+    }
+
+    #[test]
+    fn execution_mode_cpu_as_str_pin() {
+        // Pins the exact variant OrtDiarizer::diarize hardcodes (~:173) and
+        // its stable string form (used in logs/user-facing messages
+        // elsewhere in the workspace's model-download plumbing).
+        assert_eq!(speakrs::ExecutionMode::Cpu.as_str(), "cpu");
+    }
+
+    #[test]
+    fn segment_new_exposes_typed_start_end_speaker_fields() {
+        // Extends the :325-shape test above: pins the concrete field types
+        // to_speaker_turn relies on (`f64`/`f64`/`String`), not just that
+        // the values round-trip through it.
+        let segment = speakrs::Segment::new(1.5, 2.75, "SPEAKER_03");
+        let start: f64 = segment.start;
+        let end: f64 = segment.end;
+        let speaker: String = segment.speaker;
+        assert_eq!(start, 1.5);
+        assert_eq!(end, 2.75);
+        assert_eq!(speaker, "SPEAKER_03");
+    }
+
+    #[test]
+    fn to_segments_output_flows_through_to_speaker_turn() {
+        // `speakrs::segment::to_segments` needs no model — it is a pure
+        // function over a frame-level binary activation matrix — so unlike
+        // `from_dir`/`run` it is directly runtime-testable. Two speakers
+        // over four frames: speaker 0 active frames 0-1, speaker 1 active
+        // frames 2-3 (same shape as speakrs's own `multi_speaker_sorted_by_
+        // start` unit test in `segment.rs`, reproduced independently here
+        // rather than depended on).
+        let activations = ndarray::Array2::<f32>::from_shape_vec(
+            (4, 2),
+            vec![1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0],
+        )
+        .expect("4x2 activation matrix");
+
+        let segments = speakrs::segment::to_segments(&activations, 0.1, 0.2);
+        assert_eq!(
+            segments.len(),
+            2,
+            "expected one segment per active speaker: {segments:?}"
+        );
+
+        let turns = segments
+            .iter()
+            .map(to_speaker_turn)
+            .collect::<Result<Vec<_>, _>>()
+            .expect(
+                "to_speaker_turn should map every speakrs::Segment to_segments produces \
+                 (pins the \"SPEAKER_NN\" label format parse_speaker_index depends on)",
+            );
+
+        let speakers: std::collections::BTreeSet<usize> = turns.iter().map(|t| t.speaker).collect();
+        assert_eq!(speakers, std::collections::BTreeSet::from([0, 1]));
+    }
+
+    #[test]
+    fn run_and_diarization_result_segments_signature_pin() {
+        // `OwnedDiarizationPipeline::run` and `DiarizationResult::segments`
+        // (both used at ~:186-199) are reachable only after a real model
+        // load already succeeded, so — unlike everything above — they
+        // cannot be runtime-exercised without the real ~60MB model set
+        // (`tests/contract.rs`, `HUMM_DIARIZE_CONTRACT=1`). Pinned as typed
+        // bindings instead: if `speakrs` changes either shape, this test
+        // module fails to *compile*, which is the test (never called, and
+        // deliberately so).
+        let _run_pin: fn(
+            &mut speakrs::OwnedDiarizationPipeline,
+            &[f32],
+        ) -> Result<speakrs::DiarizationResult, speakrs::PipelineError> =
+            speakrs::OwnedDiarizationPipeline::run;
+
+        let _segments_field_pin: fn(speakrs::DiarizationResult) -> Vec<speakrs::Segment> =
+            |result| result.segments;
+    }
 }

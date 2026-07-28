@@ -16,3 +16,11 @@ ort.workspace = true
 [dev-dependencies]
 pretty_assertions.workspace = true
 tempfile.workspace = true
+# Not `ndarray.workspace = true` (the workspace pin is `0.15`, for
+# `humm-dfn`/`deep_filter`'s `ArrayView2` interop) — `speakrs` 0.5.0 itself
+# depends on `ndarray 0.17.2` (its own `Cargo.toml`), and the D5b-10 test
+# coverage below constructs an `Array2<f32>` to feed `speakrs::segment::
+# to_segments` directly, so it must resolve to the same `ndarray` `speakrs`
+# uses. Already present in `Cargo.lock` via `speakrs`'s own dependency; this
+# adds no new major version to the workspace's dependency graph.
+ndarray = "0.17"
