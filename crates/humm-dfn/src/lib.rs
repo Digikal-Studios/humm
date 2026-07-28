@@ -51,16 +51,18 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use df::tract::{DfParams, DfTract, RuntimeParams};
-use ndarray::{Array2, Axis};
+use ndarray::{Array2, ArrayView2};
 
 use humm_core::boundary::NoiseReducer;
 use humm_core::cancel::CancelToken;
 use humm_core::error::MediaError;
-use humm_core::wav::write_wav_mono_i16;
+use humm_core::wav::{write_wav_header_mono_i16, write_wav_samples_mono_i16};
 use humm_media::FfmpegDecoder;
 
 /// Reduces background noise before transcription via an embedded
@@ -111,69 +113,107 @@ impl NoiseReducer for DfNoiseReducer {
             return Err(MediaError::Canceled);
         }
 
-        let enhanced_samples = denoise(&mut model, pcm.samples(), cancel)?;
-
         let output = denoised_output_path(input);
-        write_wav_sibling(&output, &enhanced_samples, model.sr as u32)?;
+        let sample_rate = model.sr as u32;
+        denoise_and_write_sibling(&mut model, pcm.samples(), cancel, &output, sample_rate)?;
         Ok(output)
     }
 }
 
-/// Runs `samples` (mono `f32` at `model.sr`) through `model`, hop-size frame
-/// by hop-size frame, checking `cancel` between frames — the loop can run
-/// long on big files, and this is the only place in the call chain that
-/// iterates rather than making one subprocess/model call.
+/// Runs `samples` (mono `f32` at `sample_rate`) through `model`, hop-size
+/// frame by hop-size frame, streaming each hop's enhanced output straight
+/// into `dest` as it's produced, then atomically places the result (M9,
+/// D5b-6: replaces the earlier full-buffer `denoise` + `write_wav_sibling`
+/// pair — see `docs/analysis/PARITY_MATRIX.md`/the M9 task brief for the
+/// memory-profile motivation).
 ///
-/// A canceled token mid-loop returns `Err(MediaError::Canceled)`; the queue
-/// seam that calls [`DfNoiseReducer::reduce`] treats *any* `Err` as a
-/// degrade-to-prior-audio signal rather than a distinct cancel path (unlike
-/// the isolation step, which does distinguish cancellation) — acceptable
-/// here because the pipeline's own top-level cancel check runs again
-/// immediately after this step returns (`queue.rs`'s `run_job`), so a
-/// cancellation noticed here is never silently lost, just classified one
-/// step later than it technically could be.
+/// `dest`'s exact eventual byte length is knowable *before* any hop is
+/// processed — `samples.len()` mono 16-bit samples, since (matching the
+/// prior implementation's behavior, preserved here byte-for-byte) the
+/// output is always exactly as long as the input, trailing partial hop
+/// included as silence (see below) — so the WAV header is written once, up
+/// front, from that count, and never needs seek-patching afterward. Only
+/// one hop-sized scratch buffer (`enh_frame`) is reused across the whole
+/// file: no full-length `enhanced` accumulator and no intermediate `Vec<u8>`
+/// byte buffer are ever held in memory, unlike the prior implementation.
 ///
-/// The trailing partial hop (fewer than `model.hop_size` samples) is left
-/// as silence rather than processed or copied through — the reference CLI
-/// (`libDF/src/bin/enhance_wav.rs`, the exact pattern the M8 spike
-/// recorded) does the same: `process` requires an exact `hop_size`-length
-/// frame, so the reference breaks out of its loop on a shorter final chunk.
-/// The output buffer is pre-sized to the *full* input length, so this only
-/// silences a sub-hop remainder (well under 10ms at 48kHz) rather than
-/// shortening the file.
-fn denoise(
+/// Checks `cancel` between hops — the loop can run long on big files, and
+/// this is the only place in the call chain that iterates rather than
+/// making one subprocess/model call. A canceled token mid-loop returns
+/// `Err(MediaError::Canceled)`; the queue seam that calls
+/// [`DfNoiseReducer::reduce`] treats *any* `Err` as a degrade-to-prior-audio
+/// signal rather than a distinct cancel path (unlike the isolation step,
+/// which does distinguish cancellation) — acceptable here because the
+/// pipeline's own top-level cancel check runs again immediately after this
+/// step returns (`queue.rs`'s `run_job`), so a cancellation noticed here is
+/// never silently lost, just classified one step later than it technically
+/// could be.
+///
+/// The trailing partial hop (fewer than `model.hop_size` samples) is
+/// streamed as silence rather than processed or copied through — the
+/// reference CLI (`libDF/src/bin/enhance_wav.rs`, the exact pattern the M8
+/// spike recorded) does the same: `process` requires an exact
+/// `hop_size`-length frame, so the reference breaks out of its loop on a
+/// shorter final chunk, leaving its pre-sized-to-input-length output
+/// buffer's tail zeroed. This writes that same silence for the tail
+/// (well under 10ms at 48kHz) rather than shortening the file, matching the
+/// prior implementation's output length exactly.
+fn denoise_and_write_sibling(
     model: &mut DfTract,
     samples: &[f32],
     cancel: &CancelToken,
-) -> Result<Vec<f32>, MediaError> {
+    dest: &Path,
+    sample_rate: u32,
+) -> Result<(), MediaError> {
     let hop = model.hop_size;
-    // Row-major (1, n) — DfTract's mono (`n_ch = 1`) shape convention.
-    let noisy = Array2::from_shape_vec((1, samples.len()), samples.to_vec()).map_err(|err| {
-        MediaError::ReductionFailed {
-            detail: format!("failed to shape decoded PCM for DeepFilterNet: {err}"),
-        }
-    })?;
-    let mut enhanced = Array2::<f32>::zeros((1, samples.len()));
 
-    for (noisy_frame, enh_frame) in noisy
-        .view()
-        .axis_chunks_iter(Axis(1), hop)
-        .zip(enhanced.view_mut().axis_chunks_iter_mut(Axis(1), hop))
-    {
-        if cancel.is_canceled() {
-            return Err(MediaError::Canceled);
-        }
-        if noisy_frame.len_of(Axis(1)) < hop {
-            break;
-        }
-        model
-            .process(noisy_frame, enh_frame)
-            .map_err(|err| MediaError::ReductionFailed {
-                detail: format!("DeepFilterNet inference failed: {err}"),
+    write_atomically(dest, |writer| {
+        write_wav_header_mono_i16(samples.len(), sample_rate, writer).map_err(MediaError::Io)?;
+
+        // Reused across every hop rather than allocated per hop — `process`
+        // fully overwrites it each call, so it never needs re-zeroing.
+        let mut enh_frame = Array2::<f32>::zeros((1, hop));
+        let mut processed = 0usize;
+
+        for chunk in samples.chunks(hop) {
+            if cancel.is_canceled() {
+                return Err(MediaError::Canceled);
+            }
+            if chunk.len() < hop {
+                break;
+            }
+
+            // Zero-copy (1, hop) view over this hop's slice — DfTract's
+            // mono (`n_ch = 1`) shape convention.
+            let noisy_frame = ArrayView2::from_shape((1, hop), chunk).map_err(|err| {
+                MediaError::ReductionFailed {
+                    detail: format!("failed to shape a decoded PCM hop for DeepFilterNet: {err}"),
+                }
             })?;
-    }
+            model
+                .process(noisy_frame, enh_frame.view_mut())
+                .map_err(|err| MediaError::ReductionFailed {
+                    detail: format!("DeepFilterNet inference failed: {err}"),
+                })?;
+            write_wav_samples_mono_i16(
+                enh_frame
+                    .as_slice()
+                    .expect("hop scratch buffer is contiguous"),
+                writer,
+            )
+            .map_err(MediaError::Io)?;
+            processed += hop;
+        }
 
-    Ok(enhanced.row(0).to_vec())
+        let remainder = samples.len() - processed;
+        if remainder > 0 {
+            // Bounded by `hop` (well under 10ms of audio) — not part of the
+            // memory profile this rework targets.
+            write_wav_samples_mono_i16(&vec![0.0f32; remainder], writer).map_err(MediaError::Io)?;
+        }
+
+        Ok(())
+    })
 }
 
 /// `<input_stem>_DeepFilterNet3.wav` next to `input` (Buzz naming,
@@ -187,29 +227,67 @@ fn denoised_output_path(input: &Path) -> PathBuf {
     parent.join(format!("{stem}_DeepFilterNet3.wav"))
 }
 
-/// Writes `samples` (mono `f32` at `sample_rate`) to `dest` atomically: a
-/// same-directory temp file, written in full, then renamed into place — the
-/// Task 5 precedent (`humm_core::fsutil::copy_then_rename`, applied here to
-/// an in-memory buffer rather than an existing file) so no partial WAV is
-/// ever observable at `dest` on any failure path.
-fn write_wav_sibling(dest: &Path, samples: &[f32], sample_rate: u32) -> Result<(), MediaError> {
-    let mut bytes = Vec::new();
-    write_wav_mono_i16(samples, sample_rate, &mut bytes).map_err(MediaError::Io)?;
-
+/// Same-directory temp path for `dest`: `<dest file name>.tmp-<pid>` in
+/// `dest`'s own directory (falling back to `.`/`"output.wav"` if `dest` has
+/// no parent/file name respectively) — mirrors
+/// `humm_core::fsutil::copy_then_rename`'s same-directory-temp-then-rename
+/// convention (an unrelated helper — that one copies an existing file
+/// rather than streaming freshly generated content — but the same
+/// atomicity philosophy).
+fn temp_sibling_path(dest: &Path) -> PathBuf {
     let parent = dest.parent().unwrap_or_else(|| Path::new("."));
     let file_name = dest
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "output.wav".to_string());
-    let temp = parent.join(format!("{file_name}.tmp-{}", std::process::id()));
+    parent.join(format!("{file_name}.tmp-{}", std::process::id()))
+}
 
-    match std::fs::write(&temp, &bytes).and_then(|_| std::fs::rename(&temp, dest)) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            let _ = std::fs::remove_file(&temp);
-            Err(MediaError::Io(err))
-        }
+/// Writes `dest` atomically: `write_body` runs exactly once against a
+/// `BufWriter` over a freshly created same-directory temp file; on success,
+/// that temp file is flushed and `rename`d into place as the final step —
+/// the one moment `dest` itself is touched. On *any* failure (creating the
+/// temp file, `write_body` itself, flushing, or the rename), the temp file
+/// is removed and the error is propagated; `dest` is never partially
+/// written. This is the atomic-placement primitive both
+/// [`denoise_and_write_sibling`] (the real streaming path) and this
+/// module's `write_wav_sibling` test helper share, so both are provably
+/// exercising the same guarantee.
+fn write_atomically(
+    dest: &Path,
+    write_body: impl FnOnce(&mut BufWriter<File>) -> Result<(), MediaError>,
+) -> Result<(), MediaError> {
+    let temp = temp_sibling_path(dest);
+
+    let result: Result<(), MediaError> = (|| {
+        let file = File::create(&temp).map_err(MediaError::Io)?;
+        let mut writer = BufWriter::new(file);
+        write_body(&mut writer)?;
+        writer.flush().map_err(MediaError::Io)?;
+        drop(writer);
+        std::fs::rename(&temp, dest).map_err(MediaError::Io)
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
+    result
+}
+
+/// Test-only convenience: atomically writes `samples` as a complete WAV
+/// file via [`write_atomically`], the same primitive
+/// [`denoise_and_write_sibling`] uses — lets this module's atomic-placement
+/// tests exercise that real shared guarantee without needing a real model
+/// run. Not part of the production `reduce()` path (which streams
+/// hop-by-hop rather than ever handing over one fully-buffered slice), so
+/// it's `#[cfg(test)]`-gated rather than flagged as dead code in a normal
+/// build.
+#[cfg(test)]
+fn write_wav_sibling(dest: &Path, samples: &[f32], sample_rate: u32) -> Result<(), MediaError> {
+    write_atomically(dest, |writer| {
+        write_wav_header_mono_i16(samples.len(), sample_rate, writer).map_err(MediaError::Io)?;
+        write_wav_samples_mono_i16(samples, writer).map_err(MediaError::Io)
+    })
 }
 
 #[cfg(test)]

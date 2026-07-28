@@ -79,6 +79,13 @@ const BLOCK_ALIGN: u16 = NUM_CHANNELS * (BITS_PER_SAMPLE / 8);
 /// `sample_rate` Hz, 16-bit signed little-endian samples, `data` chunk
 /// immediately following the header with no extension chunks.
 ///
+/// A thin composition of [`write_wav_header_mono_i16`] (sized for
+/// `pcm.len()` samples) followed by [`write_wav_samples_mono_i16`] — kept as
+/// its own function since most callers have the whole buffer in hand and
+/// don't need the two halves split apart (M9, D5b-6 introduced the split so
+/// `humm-dfn` could stream samples to a file as they're produced instead of
+/// accumulating a full in-memory buffer first).
+///
 /// # Errors
 ///
 /// Propagates any [`std::io::Error`] from writing to `w`.
@@ -87,8 +94,32 @@ pub fn write_wav_mono_i16(
     sample_rate: u32,
     w: &mut impl Write,
 ) -> std::io::Result<()> {
+    write_wav_header_mono_i16(pcm.len(), sample_rate, w)?;
+    write_wav_samples_mono_i16(pcm, w)
+}
+
+/// Writes just the 44-byte canonical RIFF/WAVE header for `num_samples`
+/// mono 16-bit PCM samples at `sample_rate` Hz — no sample data. Pair with
+/// [`write_wav_samples_mono_i16`] to stream the data chunk incrementally
+/// (e.g. one hop at a time) once the *total* sample count is known up
+/// front, without holding the samples themselves in memory all at once.
+///
+/// `num_samples` must be the exact final count that will be written via
+/// [`write_wav_samples_mono_i16`] afterward — this function has no way to
+/// patch the header later; a caller that can't compute the total in
+/// advance must seek back and rewrite the `RIFF`/`data` size fields itself
+/// once the real count is known.
+///
+/// # Errors
+///
+/// Propagates any [`std::io::Error`] from writing to `w`.
+pub fn write_wav_header_mono_i16(
+    num_samples: usize,
+    sample_rate: u32,
+    w: &mut impl Write,
+) -> std::io::Result<()> {
     let byte_rate = sample_rate * u32::from(BLOCK_ALIGN);
-    let data_len = pcm.len() as u32 * u32::from(BLOCK_ALIGN);
+    let data_len = num_samples as u32 * u32::from(BLOCK_ALIGN);
     let chunk_size = 36 + data_len;
 
     w.write_all(b"RIFF")?;
@@ -107,6 +138,22 @@ pub fn write_wav_mono_i16(
     w.write_all(b"data")?;
     w.write_all(&data_len.to_le_bytes())?;
 
+    Ok(())
+}
+
+/// Writes just the sample-data bytes for `pcm` (mono `f32` samples,
+/// expected in `[-1.0, 1.0]` — clamped if not, see the [module doc](self)):
+/// each sample clamped then scaled to a 16-bit signed little-endian PCM
+/// value, with no header. Call this any number of times in sequence — once
+/// per hop/chunk as samples become available — after a single upfront
+/// [`write_wav_header_mono_i16`] sized for the eventual total, to stream a
+/// WAV file's data chunk without ever holding the whole signal in memory at
+/// once.
+///
+/// # Errors
+///
+/// Propagates any [`std::io::Error`] from writing to `w`.
+pub fn write_wav_samples_mono_i16(pcm: &[f32], w: &mut impl Write) -> std::io::Result<()> {
     for &sample in pcm {
         let clamped = sample.clamp(-1.0, 1.0);
         let scaled = (clamped * 32767.0) as i16;
@@ -257,5 +304,91 @@ mod tests {
         write_wav_mono_i16(&pcm, SAMPLE_RATE, &mut via_general).expect("write");
 
         assert_eq!(via_wrapper, via_general);
+    }
+
+    // -- write_wav_header_mono_i16 / write_wav_samples_mono_i16 (M9,
+    // D5b-6: streaming split for humm-dfn's output rework) ----------------
+
+    #[test]
+    fn header_alone_matches_the_first_44_bytes_of_the_combined_writer() {
+        let pcm = [0.0f32, 1.0, -1.0, 0.5];
+        let mut combined = Vec::new();
+        write_wav_mono_i16(&pcm, 48_000, &mut combined).expect("write");
+
+        let mut header_only = Vec::new();
+        write_wav_header_mono_i16(pcm.len(), 48_000, &mut header_only).expect("write header");
+
+        assert_eq!(header_only.len(), 44, "header is always exactly 44 bytes");
+        assert_eq!(header_only, combined[..44]);
+    }
+
+    #[test]
+    fn header_data_len_and_chunk_size_scale_with_num_samples_not_a_slice_length() {
+        // The header function takes a bare `usize` count rather than a
+        // slice — this pins that its size math (RIFF ChunkSize and the
+        // `data` Subchunk2Size) is purely a function of that count, exactly
+        // matching what `write_wav_mono_i16` would compute for a same-length
+        // slice, for several sizes including zero.
+        for num_samples in [0usize, 1, 2, 100_000] {
+            let mut header_only = Vec::new();
+            write_wav_header_mono_i16(num_samples, 16_000, &mut header_only).expect("write header");
+
+            let data_len = num_samples as u32 * u32::from(BLOCK_ALIGN);
+            let expected_chunk_size = 36 + data_len;
+            assert_eq!(
+                u32::from_le_bytes([
+                    header_only[4],
+                    header_only[5],
+                    header_only[6],
+                    header_only[7]
+                ]),
+                expected_chunk_size,
+                "RIFF ChunkSize for num_samples={num_samples}"
+            );
+            assert_eq!(
+                u32::from_le_bytes([
+                    header_only[40],
+                    header_only[41],
+                    header_only[42],
+                    header_only[43]
+                ]),
+                data_len,
+                "data Subchunk2Size for num_samples={num_samples}"
+            );
+        }
+    }
+
+    #[test]
+    fn header_then_samples_written_separately_equals_the_combined_writer() {
+        let pcm = [0.0f32, 1.0, -1.0, 0.5, 2.0, -2.0];
+        let mut combined = Vec::new();
+        write_wav_mono_i16(&pcm, 44_100, &mut combined).expect("write");
+
+        let mut streamed = Vec::new();
+        write_wav_header_mono_i16(pcm.len(), 44_100, &mut streamed).expect("write header");
+        write_wav_samples_mono_i16(&pcm, &mut streamed).expect("write samples");
+
+        assert_eq!(streamed, combined);
+    }
+
+    #[test]
+    fn samples_can_be_appended_across_multiple_calls_matching_one_call() {
+        // The whole point of splitting the samples writer out: a caller can
+        // call it once per hop/chunk as data becomes available, rather than
+        // needing the full buffer up front. This pins that two calls with
+        // slices back-to-back produce identical bytes to one call with the
+        // concatenation.
+        let hop_a = [0.1f32, -0.2, 0.3];
+        let hop_b = [-0.4f32, 0.5, -0.6, 0.7];
+
+        let mut in_two_calls = Vec::new();
+        write_wav_samples_mono_i16(&hop_a, &mut in_two_calls).expect("write hop a");
+        write_wav_samples_mono_i16(&hop_b, &mut in_two_calls).expect("write hop b");
+
+        let mut all_at_once = Vec::new();
+        let concatenated: Vec<f32> = hop_a.iter().chain(hop_b.iter()).copied().collect();
+        write_wav_samples_mono_i16(&concatenated, &mut all_at_once).expect("write concatenated");
+
+        assert_eq!(in_two_calls, all_at_once);
     }
 }
