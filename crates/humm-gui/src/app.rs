@@ -26,7 +26,9 @@ use humm_core::openai::{
 };
 use humm_core::queue::{ArtifactEnsurer, QueueHandle, TaskEvent, TaskEventKind};
 use humm_core::settings::{FileTranscriberSettings, GuiSettings, Settings, ViewerGeometry};
-use humm_media::{FfmpegDecoder, FfmpegVideoStreamer, FfprobeProber};
+use humm_media::{
+    FfmpegDecoder, FfmpegVideoStreamer, FfprobeProber, kill_all_registered_process_groups,
+};
 use humm_whisper::LiveOptions;
 
 use crate::engine_factory::{DownloaderEnsurer, resolve_openai_config};
@@ -4356,7 +4358,14 @@ impl eframe::App for HummApp {
     /// canceled task's terminal store write lands before the process exits
     /// rather than being cut off mid-write by a bare process kill. A no-op
     /// if the queue was somehow already taken (defensive only — `on_exit`
-    /// fires at most once per process).
+    /// fires at most once per process). Finally, an emergency last-resort
+    /// sweep (D5b-2/D5b-4, M9): [`kill_all_registered_process_groups`]
+    /// SIGKILLs any process-grouped demucs/yt-dlp children still
+    /// registered. This runs *after* the graceful path above has had its
+    /// normal chance — never instead of it — catching only whatever
+    /// `shutdown_queue`'s own bounded drain left running (or, in the
+    /// still-shared-queue branch, whatever never got a graceful drain
+    /// attempt at all).
     fn on_exit(&mut self) {
         if let Some(service) = self.folder_watch.take() {
             service.stop();
@@ -4371,6 +4380,7 @@ impl eframe::App for HummApp {
                 ),
             }
         }
+        kill_all_registered_process_groups();
     }
 }
 

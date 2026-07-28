@@ -298,6 +298,193 @@ fn e_flag_accepted_with_stub_demucs() {
     );
 }
 
+// --- D5b-2/D5b-4 (M9): second Ctrl-C reaps a detached process group --------
+//
+// `crates/humm-media/src/demucs.rs`'s module doc used to end with "This
+// covers only the *first* Ctrl-C": a second SIGINT during isolation called
+// `std::process::exit(130)` directly, bypassing every `Drop`/unwind path,
+// so the detached demucs process group was orphaned (reparented to init)
+// instead of killed. This test proves the fix: `install_ctrlc`'s
+// second-signal arm now calls `kill_all_registered_process_groups` right
+// before exiting.
+
+/// Writes a stub `demucs` that traps `TERM`/`INT` and loops forever,
+/// writing its own pgid (`$$` — its own pid, since `spawn_own_process_group`
+/// makes every demucs child its own group leader) to `pgid_file` first. The
+/// trap makes it immune to the *first* Ctrl-C's own cooperative
+/// SIGTERM-then-5s-grace-then-SIGKILL ladder (`demucs.rs`'s
+/// `terminate_then_kill`) — only a genuine, untrappable SIGKILL can end it.
+/// That makes this test discriminate cleanly between "the second-Ctrl-C
+/// sweep is wired" and "it isn't", regardless of exactly how the two
+/// SIGINTs race the first Ctrl-C's own ladder.
+#[cfg(unix)]
+fn write_stub_demucs_immune_to_sigterm(dir: &Path, pgid_file: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("demucs");
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\ntrap '' TERM INT\necho $$ > \"{}\"\nwhile :; do sleep 1; done\n",
+            pgid_file.display()
+        ),
+    )
+    .expect("write stub demucs script");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod stub demucs");
+}
+
+/// Polls `path` until it holds a parseable pid — proves the stub demucs
+/// actually spawned (and is thus running, with its process group alive)
+/// before either signal is sent.
+#[cfg(unix)]
+fn wait_for_pid_file(path: &Path, timeout: Duration) -> i32 {
+    let start = Instant::now();
+    loop {
+        if let Ok(contents) = fs::read_to_string(path)
+            && let Ok(pid) = contents.trim().parse()
+        {
+            return pid;
+        }
+        assert!(
+            start.elapsed() < timeout,
+            "timed out waiting for {} to be written",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Reads `child`'s stderr on a background thread, blocking (bounded by
+/// `timeout`) until a line containing `needle` appears. Bounded with
+/// `recv_timeout` on a channel — like `fetch.rs`'s own cancel-poll loop —
+/// rather than a plain blocking `read_line`, so a humm that never prints
+/// the line times out this test instead of hanging it.
+#[cfg(unix)]
+fn wait_for_stderr_line(child: &mut Child, needle: &str, timeout: Duration) {
+    use std::sync::mpsc;
+
+    let stderr = child.stderr.take().expect("stderr was piped at spawn");
+    let (tx, rx) = mpsc::channel::<String>();
+    thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for a stderr line containing {needle:?}"
+        );
+        match rx.recv_timeout(remaining.min(Duration::from_millis(200))) {
+            Ok(line) if line.contains(needle) => return,
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("humm's stderr closed before printing a line containing {needle:?}")
+            }
+        }
+    }
+}
+
+/// Polls `kill -0 -<pgid>` (the whole process group) until it fails —
+/// ESRCH, the group is fully gone — bounded by `timeout`. `true` if the
+/// group died within the deadline.
+#[cfg(unix)]
+fn wait_for_group_dead(pgid: i32, timeout: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        let status = StdCommand::new("kill")
+            .arg("-0")
+            .arg(format!("-{pgid}"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run kill -0");
+        if !status.success() {
+            return true;
+        }
+        if start.elapsed() > timeout {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn second_sigint_kills_detached_process_group() {
+    let env = Env::new();
+    let input_dir = tempfile::tempdir().unwrap();
+    let wav = input_dir.path().join("clip.wav");
+    fs::copy(testdata_dir().join("whisper-latvian.wav"), &wav).expect("copy fixture");
+
+    let demucs_dir = tempfile::tempdir().unwrap();
+    let pgid_dir = tempfile::tempdir().unwrap();
+    let pgid_file = pgid_dir.path().join("demucs.pgid");
+    write_stub_demucs_immune_to_sigterm(demucs_dir.path(), &pgid_file);
+    let path_var = format!(
+        "{}:{}",
+        demucs_dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let bin = assert_cmd::cargo::cargo_bin("humm");
+    let mut child = StdCommand::new(bin)
+        .env("HUMM_LOG_DIR", env.log.path())
+        .env("HUMM_DATA_DIR", env.data.path())
+        .env("HUMM_CONFIG_DIR", env.config.path())
+        .env("HUMM_MODEL_ROOT", env.model_root.path())
+        .env("HUMM_BUZZ_SQLITE", env.data.path().join("no-buzz.sqlite"))
+        .env("HUMM_FORCE_CPU", "true")
+        .env("HUMM_DISABLE_VAD", "1")
+        .env("PATH", path_var)
+        .env_remove("HUMM_DEMUCS")
+        .arg("add")
+        .arg(&wav)
+        .arg("--txt")
+        .arg("-s")
+        .arg("tiny")
+        .arg("-e")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn humm");
+
+    // Proves the stub demucs (and thus its process group) is actually up
+    // before either signal is sent.
+    let pgid = wait_for_pid_file(&pgid_file, Duration::from_secs(10));
+
+    // First SIGINT: the normal cooperative-cancel path — `install_ctrlc`
+    // prints "canceling…" essentially synchronously with flipping every
+    // task's cancel token.
+    StdCommand::new("kill")
+        .arg("-INT")
+        .arg(child.id().to_string())
+        .status()
+        .expect("send first SIGINT");
+    wait_for_stderr_line(&mut child, "canceling", Duration::from_secs(10));
+
+    // Second SIGINT: the emergency-exit path under test.
+    StdCommand::new("kill")
+        .arg("-INT")
+        .arg(child.id().to_string())
+        .status()
+        .expect("send second SIGINT");
+
+    let status = wait_for_exit(&mut child, Duration::from_secs(15)).expect("process should exit");
+    assert_eq!(status.code(), Some(130), "second SIGINT should exit 130");
+
+    assert!(
+        wait_for_group_dead(pgid, Duration::from_secs(5)),
+        "expected the stub demucs's process group {pgid} to be dead after the second SIGINT"
+    );
+}
+
 // 11 moved to the wired tier below (`openaiapi_without_token_or_keyring_fails_actionably`
 // et al.) — `-m openaiapi` is real now (Task 11, F-002/F-041 completion), so
 // exercising it needs the hermetic `Env` (settings/store), not the bare

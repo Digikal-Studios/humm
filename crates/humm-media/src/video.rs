@@ -193,6 +193,12 @@ impl FfmpegFrameStream {
     fn stop_current(&self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Ok(mut child) = self.child.lock() {
+            // Single-PID `Child::kill()` is correct here (D5b-4 audit, M9):
+            // this ffmpeg child is never spawned via
+            // `crate::spawn_own_process_group` (unlike `demucs.rs`/
+            // `fetch.rs`), so it stays in humm's own foreground process
+            // group — a terminal Ctrl-C already reaches it directly, with
+            // no detached group for a second Ctrl-C to orphan.
             let _ = child.kill();
         }
     }
@@ -279,6 +285,8 @@ fn read_loop(
     }
 
     if let Ok(mut child) = child.lock() {
+        // Single-PID is correct here too — see `stop_current`'s comment
+        // above (D5b-4 audit, M9): same never-process-grouped ffmpeg child.
         let _ = child.kill();
         let _ = child.wait();
     }

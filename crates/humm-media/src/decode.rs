@@ -152,6 +152,14 @@ fn run_ffmpeg_pcm(
     let mut chunk = [0u8; READ_CHUNK_BYTES];
     loop {
         if cancel.is_canceled() {
+            // Single-PID `Child::kill()` is correct here (D5b-4 audit,
+            // M9): unlike `demucs.rs`/`fetch.rs`, this ffmpeg child is
+            // never spawned via `crate::spawn_own_process_group` — it
+            // stays in humm's own foreground process group, so a
+            // terminal Ctrl-C already reaches it directly through the
+            // OS's own group-signal fanout, with no orphan-on-second-
+            // Ctrl-C gap to close (there is no separate group to
+            // detach into or later reap).
             let _ = child.kill();
             let _ = child.wait();
             let _ = stderr_handle.join();

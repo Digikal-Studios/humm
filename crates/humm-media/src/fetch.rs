@@ -137,6 +137,15 @@ impl MediaFetcher for YtDlpFetcher {
                     err,
                 )
             })?;
+        // Registered for the child's whole lifetime (dropped — and thus
+        // unregistered — on every return path below, including the panic
+        // path, since it's a plain scope-bound local): closes the gap
+        // where a second Ctrl-C's `std::process::exit` would otherwise
+        // bypass this function's own cancellation handling entirely and
+        // orphan this detached group (D5b-2, M9; see `demucs.rs`'s module
+        // doc for the full "why the whole process group" / "second
+        // Ctrl-C" story, which applies identically here).
+        let _group_registration = crate::register_process_group(&child);
 
         let stdout = child.stdout.take().expect("stdout was piped at spawn");
         let stderr = child.stderr.take().expect("stderr was piped at spawn");
@@ -391,6 +400,16 @@ mod tests {
     fn cancel_kills_grandchild_process_not_just_direct_child() {
         use std::os::unix::fs::PermissionsExt;
         use std::time::Instant;
+
+        // This spawns a real process-grouped child via `fetch()` (registered
+        // in `crate::PROCESS_GROUPS`) — a shared read lock against
+        // `crate::PROCESS_GROUP_TEST_LOCK` keeps it from being collaterally
+        // SIGKILLed by a concurrently-running "kill everything" registry
+        // test in `lib.rs` (that lock's own doc comment explains the
+        // hazard).
+        let _serialize = crate::PROCESS_GROUP_TEST_LOCK
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let dir = tempfile::tempdir().expect("tempdir");
         let stub = dir.path().join("yt-dlp-stub.sh");

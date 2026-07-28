@@ -85,6 +85,13 @@ impl AudioEncoder for FfmpegDecoder {
 
         loop {
             if cancel.is_canceled() {
+                // Single-PID `Child::kill()` is correct here (D5b-4 audit,
+                // M9) — same rationale as `decode.rs`'s cancel path: this
+                // ffmpeg child is never spawned via
+                // `crate::spawn_own_process_group`, so it stays in humm's
+                // own foreground process group and a terminal Ctrl-C
+                // already reaches it directly; there's no detached group
+                // for a second Ctrl-C to orphan.
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = writer_handle.join();

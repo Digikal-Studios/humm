@@ -62,18 +62,19 @@
 //! via the explicit group-SIGTERM/SIGKILL above, not by relying on the
 //! terminal to deliver a signal to demucs itself.
 //!
-//! **This covers only the *first* Ctrl-C.** `humm-cli::run::install_ctrlc`'s
-//! second SIGINT calls `std::process::exit(130)` directly — bypassing Rust's
-//! normal unwind/`Drop` machinery entirely, so nothing runs the
-//! cancel-and-wait path above, and nothing signals the detached process
-//! group at all. Because that group is no longer in the terminal's
-//! foreground group either (the same detachment this doc just explained),
-//! a second Ctrl-C during isolation now orphans the demucs child (reparented
-//! to init once humm itself exits), not killed — the same is true of yt-dlp
-//! (`fetch.rs`, the same `spawn_own_process_group`/`kill_process_group`
-//! helpers). Not fixed here (a pgid registry the second-Ctrl-C path could
-//! signal before exiting is scoped debt, not this wave); stated honestly
-//! rather than left implied-covered by the first-Ctrl-C rationale above.
+//! **The above covers only the *first* Ctrl-C on its own** —
+//! `humm-cli::run::install_ctrlc`'s second SIGINT calls
+//! `std::process::exit(130)` directly, bypassing Rust's normal
+//! unwind/`Drop` machinery entirely, so nothing would run the
+//! cancel-and-wait path above and nothing would signal the detached
+//! process group. **Closed in M9 (D5b-2/D5b-4):** every `isolate()` call
+//! registers this child's group ([`crate::register_process_group`]) for
+//! the duration of the spawn, and `install_ctrlc`'s second-signal arm now
+//! calls [`crate::kill_all_registered_process_groups`] immediately before
+//! that `exit(130)` — so even a second Ctrl-C mid-isolation reaps this
+//! detached group instead of orphaning it (reparented to init) — the same
+//! is true of yt-dlp (`fetch.rs`, the same `spawn_own_process_group`/
+//! `kill_process_group`/`register_process_group` helpers).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -193,6 +194,14 @@ impl SpeechIsolator for DemucsIsolator {
                 err,
             )
         })?;
+        // Registered for the child's whole lifetime (dropped — and thus
+        // unregistered — on every return path below, including the panic
+        // path, since it's a plain scope-bound local): closes the gap where
+        // a second Ctrl-C's `std::process::exit` would otherwise bypass
+        // this function's own cancel-then-terminate machinery entirely and
+        // orphan this detached group (D5b-2, M9; see this module's doc
+        // comment, "This covers only the *first* Ctrl-C").
+        let _group_registration = crate::register_process_group(&child);
 
         let mut stdout = child.stdout.take().expect("stdout was piped at spawn");
         let mut stderr = child.stderr.take().expect("stderr was piped at spawn");
@@ -493,6 +502,17 @@ printf 'fake no_vocals data' > "$outdir/htdemucs/no_vocals.mp3"
     #[test]
     #[cfg(unix)]
     fn isolate_renames_vocals_next_to_input() {
+        // This spawns a real process-grouped child via `isolate()`
+        // (registered in `crate::PROCESS_GROUPS`) — a shared read lock
+        // against `crate::PROCESS_GROUP_TEST_LOCK` keeps it from being
+        // collaterally SIGKILLed by a concurrently-running "kill
+        // everything" registry test (that lock's own doc comment explains
+        // the hazard), while still running freely alongside other normal
+        // spawning tests like this one.
+        let _serialize = crate::PROCESS_GROUP_TEST_LOCK
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         let script_dir = tempfile::tempdir().expect("tempdir");
         let stub = write_stub(script_dir.path(), "demucs", STUB_WRITES_VOCALS);
 
@@ -524,6 +544,12 @@ printf 'fake no_vocals data' > "$outdir/htdemucs/no_vocals.mp3"
     #[test]
     #[cfg(unix)]
     fn isolate_kill_on_cancel_acks_promptly() {
+        // See `isolate_renames_vocals_next_to_input`'s comment above — same
+        // shared-registry hazard, same fix.
+        let _serialize = crate::PROCESS_GROUP_TEST_LOCK
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         let script_dir = tempfile::tempdir().expect("tempdir");
         let stub = write_stub(script_dir.path(), "demucs", "sleep 30");
 
@@ -555,6 +581,12 @@ printf 'fake no_vocals data' > "$outdir/htdemucs/no_vocals.mp3"
     #[test]
     #[cfg(unix)]
     fn nonzero_exit_yields_actionable_error() {
+        // See `isolate_renames_vocals_next_to_input`'s comment above — same
+        // shared-registry hazard, same fix.
+        let _serialize = crate::PROCESS_GROUP_TEST_LOCK
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         let script_dir = tempfile::tempdir().expect("tempdir");
         let stub = write_stub(
             script_dir.path(),

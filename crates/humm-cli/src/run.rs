@@ -71,7 +71,10 @@ use humm_core::queue::{
 };
 use humm_core::secrets::{SecretKey, SecretStore};
 use humm_core::settings::{OpenAiSettings, PostprocSettings, Settings};
-use humm_media::{DemucsIsolator, FfmpegDecoder, FfprobeProber, YtDlpFetcher, probe_binaries};
+use humm_media::{
+    DemucsIsolator, FfmpegDecoder, FfprobeProber, YtDlpFetcher, kill_all_registered_process_groups,
+    probe_binaries,
+};
 use humm_store::{KeyringSecretStore, SqliteStore};
 use humm_whisper::WhisperEngine;
 
@@ -782,11 +785,34 @@ fn drain_and_render(
 /// task (turning the run into exit 130); a second exits immediately. The
 /// handler borrows the shared handle (`cancel_all` is `&self`); the main flow
 /// later `take`s it for `finish`.
+///
+/// Locking `shared` (a plain `std::sync::Mutex`) inside this closure is
+/// sound: the `ctrlc` crate's own signal handler (the thing actually
+/// registered via `sigaction`) does nothing but `sem_post` an
+/// async-signal-safe semaphore and return immediately — this closure never
+/// runs in that async-signal context at all. `ctrlc::set_handler` instead
+/// spawns a dedicated, ordinary `"ctrl-c"` OS thread that blocks on that
+/// semaphore (`sem_wait_forever`) and invokes this closure only after that
+/// blocking wait returns, i.e. in normal thread context, exactly where a
+/// `Mutex::lock` (or, below, `kill_all_registered_process_groups`'s own
+/// lock) is fine to call (confirmed by reading the vendored `ctrlc` 3.5.2
+/// source, `src/lib.rs`'s `set_handler_inner` and
+/// `src/platform/unix/mod.rs`'s `os_handler`/`block_ctrl_c`).
 fn install_ctrlc(shared: Arc<Mutex<Option<QueueHandle>>>) {
     let signaled = Arc::new(AtomicBool::new(false));
     let result = ctrlc::set_handler(move || {
         if signaled.swap(true, Ordering::SeqCst) {
-            // Second signal: don't wait for a graceful drain.
+            // Second signal: don't wait for a graceful drain. Emergency
+            // last-resort sweep first (D5b-2/D5b-4, M9): SIGKILLs any
+            // process-grouped demucs/yt-dlp children still registered,
+            // since `std::process::exit` bypasses Rust's normal
+            // unwind/`Drop` machinery entirely — nothing else would ever
+            // signal their detached process groups, orphaning them
+            // (`crates/humm-media/src/demucs.rs`'s module doc explains why
+            // they're detached from this terminal's foreground group in
+            // the first place, so a second Ctrl-C at the terminal never
+            // reaches them directly either).
+            kill_all_registered_process_groups();
             std::process::exit(130);
         }
         if let Ok(guard) = shared.lock()
