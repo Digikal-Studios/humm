@@ -58,7 +58,6 @@ pub(crate) fn spawn_stderr_tail(mut stderr: ChildStderr) -> JoinHandle<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::{Command, Stdio};
 
     #[cfg(unix)]
     fn write_stub(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
@@ -72,6 +71,7 @@ mod tests {
 
     #[cfg(unix)]
     fn spawn_stub_stderr(script: &std::path::Path) -> (std::process::Child, ChildStderr) {
+        use std::process::{Command, Stdio};
         let mut child = Command::new(script)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
