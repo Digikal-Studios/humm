@@ -9,6 +9,7 @@ mod demucs;
 mod encode;
 mod fetch;
 mod probe;
+mod stderr;
 mod video;
 
 pub use capabilities::{MediaCapabilities, probe_binaries};

@@ -13,6 +13,7 @@ pub mod error;
 pub mod export;
 pub mod folderwatch;
 pub mod format;
+pub mod fsutil;
 pub mod instance;
 pub mod language;
 pub mod live;

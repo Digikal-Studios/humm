@@ -8,7 +8,6 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::thread;
 
 use humm_core::boundary::{AudioDecoder, Pcm, PlaybackPcm, SAMPLE_RATE};
 use humm_core::cancel::CancelToken;
@@ -137,16 +136,14 @@ fn run_ffmpeg_pcm(
         })?;
 
     let mut stdout = child.stdout.take().expect("stdout was piped at spawn");
-    let mut stderr = child.stderr.take().expect("stderr was piped at spawn");
+    let stderr = child.stderr.take().expect("stderr was piped at spawn");
 
     // Drain stderr on a separate thread: ffmpeg can block writing to a
     // full stderr pipe while we're still reading stdout, deadlocking
-    // both sides if we read them sequentially instead.
-    let stderr_handle = thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf);
-        buf
-    });
+    // both sides if we read them sequentially instead. Bounded via the
+    // shared tail helper (`crate::stderr`), same as every other subprocess
+    // adapter in this crate.
+    let stderr_handle = crate::stderr::spawn_stderr_tail(stderr);
 
     let mut raw = Vec::new();
     let mut chunk = [0u8; READ_CHUNK_BYTES];
@@ -181,10 +178,9 @@ fn run_ffmpeg_pcm(
     }
 
     let status = child.wait().map_err(MediaError::Io)?;
-    let stderr_bytes = stderr_handle.join().unwrap_or_default();
+    let detail = stderr_handle.join().unwrap_or_default();
 
     if !status.success() {
-        let detail = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
         return Err(MediaError::DecodeFailed { detail });
     }
 

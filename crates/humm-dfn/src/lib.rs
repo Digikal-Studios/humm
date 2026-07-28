@@ -189,9 +189,9 @@ fn denoised_output_path(input: &Path) -> PathBuf {
 
 /// Writes `samples` (mono `f32` at `sample_rate`) to `dest` atomically: a
 /// same-directory temp file, written in full, then renamed into place — the
-/// Task 5 precedent (`humm_media`'s `copy_then_rename`, applied here to an
-/// in-memory buffer rather than an existing file) so no partial WAV is ever
-/// observable at `dest` on any failure path.
+/// Task 5 precedent (`humm_core::fsutil::copy_then_rename`, applied here to
+/// an in-memory buffer rather than an existing file) so no partial WAV is
+/// ever observable at `dest` on any failure path.
 fn write_wav_sibling(dest: &Path, samples: &[f32], sample_rate: u32) -> Result<(), MediaError> {
     let mut bytes = Vec::new();
     write_wav_mono_i16(samples, sample_rate, &mut bytes).map_err(MediaError::Io)?;

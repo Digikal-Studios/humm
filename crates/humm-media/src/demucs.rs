@@ -76,7 +76,6 @@
 //! is true of yt-dlp (`fetch.rs`, the same `spawn_own_process_group`/
 //! `kill_process_group`/`register_process_group` helpers).
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
@@ -86,6 +85,7 @@ use std::time::{Duration, Instant};
 use humm_core::boundary::SpeechIsolator;
 use humm_core::cancel::CancelToken;
 use humm_core::error::MediaError;
+use humm_core::fsutil::copy_then_rename;
 
 use crate::map_spawn_error;
 
@@ -97,10 +97,6 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Grace period between SIGTERM and SIGKILL (Buzz's `process.join(timeout=5)`,
 /// `file_transcriber_queue_worker.py:344`).
 const TERM_GRACE: Duration = Duration::from_secs(5);
-
-/// Bytes of trailing stderr retained for an actionable [`MediaError::IsolationFailed`]
-/// diagnostic, bounding memory for demucs's chatty tqdm progress output.
-const STDERR_TAIL_CAP: usize = 2 * 1024;
 
 /// Isolates speech via a `demucs` subprocess (F-027, ADR-023).
 pub struct DemucsIsolator {
@@ -204,7 +200,7 @@ impl SpeechIsolator for DemucsIsolator {
         let _group_registration = crate::register_process_group(&child);
 
         let mut stdout = child.stdout.take().expect("stdout was piped at spawn");
-        let mut stderr = child.stderr.take().expect("stderr was piped at spawn");
+        let stderr = child.stderr.take().expect("stderr was piped at spawn");
 
         // Drain both pipes on background threads: demucs's tqdm progress
         // goes to stderr and could in principle write enough to stdout too
@@ -214,7 +210,7 @@ impl SpeechIsolator for DemucsIsolator {
         // an unbounded growing buffer (there's nothing in it worth keeping,
         // unlike stderr's bounded diagnostic tail below).
         let stdout_handle = thread::spawn(move || std::io::copy(&mut stdout, &mut std::io::sink()));
-        let stderr_handle = thread::spawn(move || read_stderr_tail(&mut stderr));
+        let stderr_handle = crate::stderr::spawn_stderr_tail(stderr);
 
         let status = match wait_checking_cancel(&mut child, cancel) {
             Ok(status) => status,
@@ -327,84 +323,16 @@ fn send_terminate(child: &mut Child) {
     let _ = child.kill();
 }
 
-/// Reads `stderr` to completion in the background (so demucs never blocks
-/// writing to a full pipe), retaining only the last `STDERR_TAIL_CAP` bytes
-/// for an `IsolationFailed` diagnostic — same shape as `fetch.rs`'s
-/// `read_stderr_tail`.
-fn read_stderr_tail(stderr: &mut impl Read) -> String {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        match stderr.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                buf.extend_from_slice(&chunk[..n]);
-                if buf.len() > STDERR_TAIL_CAP {
-                    let excess = buf.len() - STDERR_TAIL_CAP;
-                    buf.drain(0..excess);
-                }
-            }
-        }
-    }
-    String::from_utf8_lossy(&buf).trim().to_string()
-}
-
-/// Renames `from` to `to`, falling back to [`copy_then_rename`] when the
-/// rename fails (`fs::rename` cannot cross filesystem/device boundaries —
-/// demucs's scratch tempdir and the input's own directory are very often on
-/// different filesystems, e.g. `/tmp` vs. a user media directory).
+/// Renames `from` to `to`, falling back to [`copy_then_rename`] (promoted to
+/// `humm_core::fsutil` in M9, D5b-1/D5b-13 — see that function's doc for the
+/// full atomic-placement rationale) when the rename fails (`fs::rename`
+/// cannot cross filesystem/device boundaries — demucs's scratch tempdir and
+/// the input's own directory are very often on different filesystems, e.g.
+/// `/tmp` vs. a user media directory).
 fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
         Err(_) => copy_then_rename(from, to),
-    }
-}
-
-/// Cross-device fallback for [`move_file`]: copies `from` to a sibling temp
-/// file in **`to`'s own directory** (same filesystem as the eventual
-/// destination), then `rename`s that temp file into place as the one
-/// atomic last step — a same-filesystem rename can't itself fail with a
-/// cross-device error, and rename is atomic, so `to` either doesn't exist
-/// yet or is fully, correctly present; never partial.
-///
-/// Review fix (task-5 Important 1): the original version called
-/// `fs::copy(from, to)` directly, writing straight to the final
-/// destination. A copy failing partway (disk full, I/O error) could leave a
-/// partial file *at* `to`; worse, if the copy fully succeeded but the
-/// following `remove_file(from)` failed, the function still returned `Err`
-/// even though `to` now held a complete file — the caller's `?` propagates
-/// that error, so `isolate` returns `Err` and the queue's cleanup guard
-/// never learns `to`'s path, permanently orphaning it. This version never
-/// writes to `to` directly: the temp file is removed on *any* failure
-/// (copy or rename), and `to` only ever comes into existence via one atomic
-/// `rename` once the copy is already known-complete. Mirrors
-/// `Settings::save`'s `<file_name>.tmp-<pid>` atomic-write convention
-/// (`settings.rs`) — same-directory temp name, rename-into-place last.
-fn copy_then_rename(from: &Path, to: &Path) -> std::io::Result<()> {
-    let parent = to.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = to
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "output".to_string());
-    let temp = parent.join(format!("{file_name}.tmp-{}", std::process::id()));
-
-    match std::fs::copy(from, &temp).and_then(|_| std::fs::rename(&temp, to)) {
-        Ok(_) => {
-            // `from` lives in the isolator's own ephemeral scratch tempdir
-            // (deleted wholesale on drop regardless of what happens here) —
-            // a failure removing it doesn't undo the now-complete,
-            // correctly-placed `to`, so it isn't treated as this
-            // function's own failure.
-            let _ = std::fs::remove_file(from);
-            Ok(())
-        }
-        Err(err) => {
-            // Never leave a partial/orphaned file behind: on *any* failure
-            // (the copy itself, or the rename-into-place), the temp file is
-            // removed and `to` is never touched at all.
-            let _ = std::fs::remove_file(&temp);
-            Err(err)
-        }
     }
 }
 
@@ -677,81 +605,7 @@ printf 'fake no_vocals data' > "$outdir/htdemucs/no_vocals.mp3"
         assert!(!from.exists());
     }
 
-    #[test]
-    fn copy_then_rename_places_file_atomically() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let from = dir.path().join("source.mp3");
-        let to = dir.path().join("dest.mp3");
-        std::fs::write(&from, b"payload").expect("write source");
-
-        copy_then_rename(&from, &to).expect("copy_then_rename should succeed");
-
-        assert_eq!(std::fs::read_to_string(&to).unwrap(), "payload");
-        assert!(
-            !from.exists(),
-            "source should be removed after a successful move"
-        );
-        // No leftover temp file beside the destination.
-        let siblings: Vec<_> = std::fs::read_dir(dir.path())
-            .expect("read_dir")
-            .map(|e| e.expect("entry").file_name())
-            .collect();
-        assert_eq!(
-            siblings.len(),
-            1,
-            "expected only the destination file, no leftover temp: {siblings:?}"
-        );
-    }
-
-    #[test]
-    fn copy_then_rename_cleans_up_temp_on_copy_failure() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        // Source doesn't exist: the initial `fs::copy` fails immediately,
-        // before any temp file is even created.
-        let from = dir.path().join("does-not-exist.mp3");
-        let to = dir.path().join("dest.mp3");
-
-        let err = copy_then_rename(&from, &to).expect_err("missing source should fail the copy");
-        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
-
-        let siblings: Vec<_> = std::fs::read_dir(dir.path()).expect("read_dir").collect();
-        assert!(
-            siblings.is_empty(),
-            "expected no leftover files after a failed copy: {siblings:?}"
-        );
-    }
-
-    #[test]
-    fn copy_then_rename_cleans_up_temp_on_rename_failure() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let from = dir.path().join("source.mp3");
-        std::fs::write(&from, b"payload").expect("write source");
-        // `to` is an existing directory: a file can't be renamed onto a
-        // directory, giving a copy-succeeds/rename-fails case.
-        let to = dir.path().join("dest-is-a-dir");
-        std::fs::create_dir(&to).expect("create directory at dest path");
-
-        let result = copy_then_rename(&from, &to);
-        assert!(
-            result.is_err(),
-            "renaming a file onto an existing directory should fail"
-        );
-
-        // Regardless of the exact (platform-dependent) error kind: no
-        // leftover temp file, and `to` is still the empty directory it was
-        // (never touched).
-        let siblings: Vec<_> = std::fs::read_dir(dir.path())
-            .expect("read_dir")
-            .map(|e| e.expect("entry").file_name())
-            .collect();
-        assert_eq!(
-            siblings.len(),
-            2,
-            "expected only source + the dest dir, no leftover temp: {siblings:?}"
-        );
-        assert!(
-            to.is_dir(),
-            "dest path should still be the untouched directory"
-        );
-    }
+    // `copy_then_rename`'s own unit tests (atomic placement, temp cleanup on
+    // copy/rename failure) moved to `humm_core::fsutil` alongside the
+    // function itself (M9, D5b-1/D5b-13).
 }

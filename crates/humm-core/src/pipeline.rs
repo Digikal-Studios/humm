@@ -482,18 +482,29 @@ fn apply_source_disposition(
     }
 }
 
-/// Renames `from` to `to`, falling back to a copy-then-delete when the rename
-/// fails (`fs::rename` cannot cross filesystem/device boundaries; Buzz's
-/// `shutil.move` handles this transparently — this is that same fallback,
-/// ported explicitly since `fs::rename` doesn't have one built in).
+/// Renames `from` to `to`, falling back to [`move_file_via_copy`] when the
+/// rename fails (`fs::rename` cannot cross filesystem/device boundaries;
+/// Buzz's `shutil.move` handles this transparently — this is that same
+/// fallback, ported explicitly since `fs::rename` doesn't have one built
+/// in).
 fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
-        Err(_) => {
-            std::fs::copy(from, to)?;
-            std::fs::remove_file(from)
-        }
+        Err(_) => move_file_via_copy(from, to),
     }
+}
+
+/// [`move_file`]'s cross-device fallback arm, extracted as its own function
+/// so it's directly unit-testable: an in-tempdir test can't force a real
+/// `EXDEV` cross-device rename failure, so `move_file`'s own fallback branch
+/// is otherwise untestable in isolation (the ADR-023 review-round precedent
+/// — `humm-media::demucs`'s own `move_file` fallback is tested the same
+/// way, via its directly-tested `copy_then_rename` helper). Delegates
+/// entirely to [`crate::fsutil::copy_then_rename`], which does the atomic
+/// placement and removes `from` on success — see that function's doc for
+/// why a failure removing `from` isn't treated as this call's own failure.
+fn move_file_via_copy(from: &Path, to: &Path) -> std::io::Result<()> {
+    crate::fsutil::copy_then_rename(from, to)
 }
 
 #[cfg(test)]
@@ -1513,5 +1524,29 @@ mod tests {
 
         assert_eq!(outcome.written.len(), 1);
         assert!(input.exists(), "no disposition set -- the source stays put");
+    }
+
+    // -- move_file_via_copy (M9, D5b-13: back-ported from `humm-media::demucs`'s
+    // own already-fixed `move_file`) ----------------------------------------
+
+    #[test]
+    fn move_file_fallback_removes_source_after_copy() {
+        // `move_file`'s primary `fs::rename` branch can't be forced to fail
+        // with a real cross-device error from within a single tempdir (the
+        // ADR-023 review-round precedent — see `move_file_via_copy`'s doc),
+        // so this calls the extracted fallback arm directly instead of going
+        // through `move_file`/`run_file_job`.
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("source.mp3");
+        let to = dir.path().join("dest.mp3");
+        std::fs::write(&from, b"payload").unwrap();
+
+        move_file_via_copy(&from, &to).expect("move_file_via_copy should succeed");
+
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "payload");
+        assert!(
+            !from.exists(),
+            "source should be removed after the fallback copy+rename succeeds"
+        );
     }
 }

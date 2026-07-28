@@ -30,7 +30,7 @@
 //!   derived from the video title), without duplicating that logic or
 //!   requiring a separate metadata-only round trip.
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -53,10 +53,6 @@ const PROGRESS_PREFIX: &str = "humm-dl:";
 /// stalled mid-download (a throttled/hung server), since the blocking
 /// stdout read happens on a separate reader thread, not here.
 const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
-
-/// Bytes of trailing stderr retained for [`MediaError::FetchFailed`]
-/// diagnostics, bounding memory for a chatty subprocess.
-const STDERR_TAIL_CAP: usize = 2 * 1024;
 
 /// Downloads remote media via a `yt-dlp` subprocess (ADR-016).
 pub struct YtDlpFetcher {
@@ -166,7 +162,7 @@ impl MediaFetcher for YtDlpFetcher {
         // `FfmpegDecoder::decode`: yt-dlp can block writing to a full
         // stderr pipe while we're still reading stdout, deadlocking both
         // sides if we read them sequentially instead.
-        let stderr_handle = thread::spawn(move || read_stderr_tail(stderr));
+        let stderr_handle = crate::stderr::spawn_stderr_tail(stderr);
 
         let mut last_line: Option<String> = None;
         loop {
@@ -246,27 +242,6 @@ fn parse_progress_line(line: &str) -> Option<FetchProgress> {
 /// and any other non-numeric text alike as `None`.
 fn parse_u64(field: &str) -> Option<u64> {
     field.trim().parse::<u64>().ok()
-}
-
-/// Reads `stderr` to completion in the background (so the child never
-/// blocks writing to a full pipe), retaining only the last
-/// `STDERR_TAIL_CAP` bytes for a `FetchFailed` diagnostic.
-fn read_stderr_tail(mut stderr: impl Read) -> String {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        match stderr.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                buf.extend_from_slice(&chunk[..n]);
-                if buf.len() > STDERR_TAIL_CAP {
-                    let excess = buf.len() - STDERR_TAIL_CAP;
-                    buf.drain(0..excess);
-                }
-            }
-        }
-    }
-    String::from_utf8_lossy(&buf).trim().to_string()
 }
 
 #[cfg(test)]

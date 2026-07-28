@@ -55,11 +55,14 @@ impl AudioEncoder for FfmpegDecoder {
 
         let mut stdin = child.stdin.take().expect("stdin was piped at spawn");
         let mut stdout = child.stdout.take().expect("stdout was piped at spawn");
-        let mut stderr = child.stderr.take().expect("stderr was piped at spawn");
+        let stderr = child.stderr.take().expect("stderr was piped at spawn");
 
         // Drain stdout on its own thread: ffmpeg is not expected to write
         // anything there (the encoded audio goes to `dest`), but draining
-        // unconditionally avoids a pipe-full stall if it ever does.
+        // unconditionally avoids a pipe-full stall if it ever does. Left
+        // unbounded on purpose, unlike stderr below: this is payload-adjacent
+        // drainage, not an open-ended diagnostic stream, so there's no
+        // chatty-subprocess memory hazard here to bound.
         let stdout_handle = thread::spawn(move || {
             let mut buf = Vec::new();
             let _ = stdout.read_to_end(&mut buf);
@@ -67,11 +70,9 @@ impl AudioEncoder for FfmpegDecoder {
         // Drain stderr on its own thread for the same reason `run_ffmpeg_pcm`
         // does in `decode.rs`: ffmpeg can block writing to a full stderr pipe
         // while we're still writing stdin, deadlocking both sides otherwise.
-        let stderr_handle = thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = stderr.read_to_end(&mut buf);
-            buf
-        });
+        // Bounded via the shared tail helper (`crate::stderr`), same as every
+        // other subprocess adapter in this crate.
+        let stderr_handle = crate::stderr::spawn_stderr_tail(stderr);
 
         // Writer thread streams the PCM's f32le bytes to stdin, then drops
         // it to close the pipe — ffmpeg reads `-i -` until EOF before it
@@ -118,10 +119,9 @@ impl AudioEncoder for FfmpegDecoder {
 
             let _ = writer_handle.join();
             let _ = stdout_handle.join();
-            let stderr_bytes = stderr_handle.join().unwrap_or_default();
+            let stderr_detail = stderr_handle.join().unwrap_or_default();
 
             if !status.success() {
-                let stderr_detail = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
                 // `MediaError::EncodeFailed`'s format string is tool-agnostic
                 // (core has no ffmpeg-specific knowledge); the adapter names
                 // the tool in `detail` itself so messages still say "ffmpeg".
