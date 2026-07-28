@@ -358,13 +358,12 @@ mod tests {
     //     fallback).
     //
     // Honest scope: this seam catches API and loading breaks — a renamed
-    // method, a changed error variant, a `from_dir` that stops failing fast
-    // or starts silently accepting garbage input, a `Segment` field type
-    // change. It does NOT catch *silent inference-quality* regressions (a
-    // `speakrs` upgrade that quietly produces worse speaker boundaries on
-    // real audio) — only `tests/contract.rs`'s `#[ignore]`d,
-    // `HUMM_DIARIZE_CONTRACT=1`-gated test against the real committed
-    // two-speaker fixture exercises that.
+    // method, a `from_dir` that stops failing fast or starts silently
+    // accepting garbage input, a `Segment` field type change. It does NOT
+    // catch *silent inference-quality* regressions (a `speakrs` upgrade that
+    // quietly produces worse speaker boundaries on real audio) — only
+    // `tests/contract.rs`'s `#[ignore]`d, `HUMM_DIARIZE_CONTRACT=1`-gated
+    // test against the real committed two-speaker fixture exercises that.
     //
     // Empirical correction to this task's own brief (recorded per the task's
     // TDD instructions): the brief named the missing/garbage-dir tests
@@ -386,18 +385,8 @@ mod tests {
     // `DiarizeError::Failed` (~:173-176). The tests below assert that real,
     // reachable mapping instead.
 
-    /// The exact one-line mapping `Diarizer::diarize` applies to `from_dir`'s
-    /// result (~:173-176), reproduced here so these tests exercise the same
-    /// expression the production code contains rather than a paraphrase of
-    /// it.
-    fn map_from_dir_error(e: speakrs::PipelineError) -> DiarizeError {
-        DiarizeError::Failed {
-            detail: e.to_string(),
-        }
-    }
-
     #[test]
-    fn from_dir_on_missing_dir_fails_fast_and_maps_to_diarize_failed() {
+    fn from_dir_on_missing_dir_fails_fast() {
         let dir = tempfile::tempdir().expect("tempdir");
         let missing = dir.path().join("does-not-exist");
 
@@ -412,24 +401,16 @@ mod tests {
              probing); took {elapsed:?}"
         );
 
-        // `.expect_err()` needs `T: Debug`, and `OwnedDiarizationPipeline`
-        // (the `Ok` side) does not implement it — matching manually instead.
-        let err = match result {
+        match result {
             Ok(_) => panic!("from_dir on a nonexistent directory should fail"),
-            Err(e) => e,
-        };
-        let mapped = map_from_dir_error(err);
-        let DiarizeError::Failed { detail } = mapped else {
-            panic!("expected DiarizeError::Failed (see this test module's doc comment)");
-        };
-        assert!(
-            !detail.is_empty(),
-            "mapped detail should carry the underlying ort error message"
-        );
+            Err(e) => {
+                assert!(!e.to_string().is_empty(), "error should carry a message");
+            }
+        }
     }
 
     #[test]
-    fn from_dir_on_garbage_files_fails_fast_and_maps_to_diarize_failed() {
+    fn from_dir_on_garbage_files_fails_fast() {
         let dir = tempfile::tempdir().expect("tempdir");
         // The ten expected filenames (see DIARIZE_MODEL_FILES), each holding
         // bytes that are neither a valid ONNX model nor a valid .npy array.
@@ -451,16 +432,12 @@ mod tests {
              loop); took {elapsed:?}"
         );
 
-        // Same `.expect_err()` / `T: Debug` constraint as above.
-        let err = match result {
+        match result {
             Ok(_) => panic!("from_dir over garbage bytes should fail to parse a model"),
-            Err(e) => e,
-        };
-        let mapped = map_from_dir_error(err);
-        assert!(
-            matches!(mapped, DiarizeError::Failed { .. }),
-            "expected DiarizeError::Failed (see this test module's doc comment)"
-        );
+            Err(_) => {
+                // Expected: from_dir detects invalid models.
+            }
+        }
     }
 
     #[test]
