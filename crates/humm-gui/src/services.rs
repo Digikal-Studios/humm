@@ -203,6 +203,24 @@ pub struct Services {
     /// `HummApp`'s `speaker_deps` (`app.rs`) alongside `viewer_deps`'s own
     /// decoder/audio-output `Arc`s.
     pub diarize: Arc<dyn DiarizeService>,
+    /// The same [`DemucsIsolator`] instance wired into `RunnerDeps::isolator`
+    /// (an `Arc::clone`, not a second probe) — kept here so `HummApp::
+    /// open_options_sheet` (`app.rs`) can re-probe `capabilities.demucs`
+    /// every time the sheet opens instead of trusting [`init`]'s one-time
+    /// startup snapshot (M9, D5b-7: install-while-running staleness —
+    /// `demucs` installed mid-session must be seen the next time the user
+    /// opens the sheet, not only after a restart). `None` in every existing
+    /// [`init_with`] fixture (not threaded through [`TestDeps`] — same
+    /// "don't force a field through ~20 literals nothing needs" reasoning as
+    /// [`default_test_diarize`]'s own doc comment): a test that wants to
+    /// exercise the re-probe assigns this field directly on the `Services`
+    /// [`init_with`] already returned, with a scripted [`SpeechIsolator`]
+    /// double, before handing it to `HummApp::new_for_test`
+    /// (`tests/kittest_import.rs`'s `options_sheet_reprobes_demucs_capability_on_open`).
+    /// A `None` here makes `open_options_sheet` a no-op on this field, so
+    /// `capabilities.demucs` keeps whatever the test fixture set it to —
+    /// every pre-existing kittest is unaffected.
+    pub demucs_isolator: Option<Arc<dyn SpeechIsolator>>,
 }
 
 impl Services {
@@ -313,10 +331,15 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
 
     // The one isolator instance both probes availability (`capabilities.demucs`,
     // gating the options sheet's checkbox) and is wired into `RunnerDeps`
-    // below — a single `available()` cache so the capability the checkbox
-    // renders against and the isolator the queue actually runs are never out
-    // of sync (design spec §3/§8).
-    let isolator = Arc::new(DemucsIsolator::new());
+    // below — so the capability the checkbox renders against and the
+    // isolator the queue actually runs are the same underlying binary
+    // resolution (design spec §3/§8). Unlike a version-string cache, this is
+    // *not* a one-time snapshot: `DemucsIsolator::available` re-probes the
+    // filesystem on every call (M9, D5b-7), and `Services::demucs_isolator`
+    // (below, an `Arc::clone` of this same instance) lets
+    // `HummApp::open_options_sheet` call it again on every sheet open, so
+    // `demucs` installed mid-session is picked up without a restart.
+    let isolator: Arc<dyn SpeechIsolator> = Arc::new(DemucsIsolator::new());
     capabilities.demucs = isolator.available();
 
     let decoder = Arc::new(FfmpegDecoder::new());
@@ -397,13 +420,16 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
             secrets: Arc::clone(&secrets),
         }) as Arc<dyn PostprocConfigSource>),
         // M8 pre-transcription seam (F-027): the same isolator instance
-        // `capabilities.demucs` was just probed from, above — a task only
-        // ever runs it when its own `options.extract_speech` is set
+        // `capabilities.demucs` was just probed from, above — cloned (an
+        // `Arc::clone`, not a second probe) rather than moved, since
+        // `Services::demucs_isolator` (below) needs its own handle on the
+        // very same instance for its own later re-probes. A task only ever
+        // runs it when its own `options.extract_speech` is set
         // (`queue::Runner::run_job`'s gate), so this is wired unconditionally
         // rather than behind `if capabilities.demucs` (an absent binary still
         // degrades per-task, via `SpeechIsolator::isolate`'s own error path,
         // not by leaving the seam `None`).
-        isolator: Some(isolator as Arc<dyn SpeechIsolator>),
+        isolator: Some(Arc::clone(&isolator)),
         // F-112: wired unconditionally too, same reasoning as `isolator`
         // above — but for a different reason underneath. `deep_filter`'s
         // `default-model` feature embeds the DeepFilterNet3 weights at
@@ -456,6 +482,7 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
         translate: Arc::new(RealTranslateSpawner) as Arc<dyn TranslateSpawner>,
         validate: real_validate_fn(),
         diarize,
+        demucs_isolator: Some(isolator),
     })
 }
 
@@ -767,6 +794,13 @@ pub fn init_with(deps: TestDeps) -> Services {
         translate: deps.translate,
         validate: deps.validate,
         diarize: default_test_diarize(),
+        // Not threaded through `TestDeps` (see this field's own doc comment
+        // on `Services` for why) — `None` here means `open_options_sheet`
+        // never re-probes for a kittest fixture built this way, leaving
+        // `capabilities.demucs` exactly as `deps.capabilities` set it, same
+        // as every kittest before this field existed. A test exercising the
+        // re-probe assigns this field directly on the returned `Services`.
+        demucs_isolator: None,
     }
 }
 

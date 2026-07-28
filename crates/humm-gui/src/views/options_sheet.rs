@@ -1028,8 +1028,10 @@ pub(crate) fn render_llm_model_prompt_fields(
 /// same "app.rs computes, this module only renders" split as
 /// `custom_model_available`. `demucs_available` (F-027, design spec §3)
 /// gates the "Extract speech" checkbox the same way — `app.rs`'s
-/// `Services.capabilities.demucs`, probed once at startup from the very
-/// `DemucsIsolator` wired into `RunnerDeps::isolator`.
+/// `Services.capabilities.demucs`, probed from the very `DemucsIsolator`
+/// wired into `RunnerDeps::isolator`. Re-probed on every options-sheet open
+/// (`HummApp::open_options_sheet`, M9 D5b-7), not just once at startup, so a
+/// `demucs` install mid-session is reflected the next time this sheet opens.
 pub fn ui(
     ctx: &egui::Context,
     sheet: &mut Option<OptionsSheet>,

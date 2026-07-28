@@ -78,7 +78,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -101,12 +100,6 @@ const TERM_GRACE: Duration = Duration::from_secs(5);
 /// Isolates speech via a `demucs` subprocess (F-027, ADR-023).
 pub struct DemucsIsolator {
     binary: PathBuf,
-    /// Lazily computed, cached availability probe (`available()`'s doc:
-    /// "cheap" — demucs's own startup pulls in PyTorch and is far too slow
-    /// to spawn just to check whether it's installed, unlike ffmpeg/yt-dlp's
-    /// quick `-version`/`--version` in `capabilities.rs`), so this checks the
-    /// filesystem directly instead of spawning anything.
-    available: OnceLock<bool>,
 }
 
 impl DemucsIsolator {
@@ -125,10 +118,7 @@ impl DemucsIsolator {
         let binary = override_value
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("demucs"));
-        DemucsIsolator {
-            binary,
-            available: OnceLock::new(),
-        }
+        DemucsIsolator { binary }
     }
 
     /// Uses an explicit binary path/name, bypassing `HUMM_DEMUCS` entirely.
@@ -136,7 +126,6 @@ impl DemucsIsolator {
     pub fn with_binary(path: impl Into<PathBuf>) -> Self {
         DemucsIsolator {
             binary: path.into(),
-            available: OnceLock::new(),
         }
     }
 }
@@ -256,9 +245,16 @@ impl SpeechIsolator for DemucsIsolator {
     }
 
     fn available(&self) -> bool {
-        *self
-            .available
-            .get_or_init(|| binary_is_available(&self.binary))
+        // M9 (D5b-7): re-probes the filesystem on every call — no caching.
+        // `binary_is_available` is an env-override existence check or a
+        // `PATH` scan (file `metadata` calls only, never a subprocess spawn
+        // — see that function's own doc), cheap enough to re-run on every
+        // options-sheet open (the GUI's re-probe trigger, `humm-gui`'s
+        // `HummApp::open_options_sheet`) or CLI invocation (`-e` validates
+        // at invocation time, already a fresh process/probe either way) —
+        // an `OnceLock` here would otherwise mean `demucs` installed
+        // mid-session is never seen without a restart.
+        binary_is_available(&self.binary)
     }
 }
 
@@ -425,6 +421,34 @@ printf 'fake no_vocals data' > "$outdir/htdemucs/no_vocals.mp3"
         let stub = write_stub(dir.path(), "demucs", "exit 0");
         let isolator = DemucsIsolator::with_binary(&stub);
         assert!(isolator.available());
+    }
+
+    /// M9 (D5b-7): install-while-running staleness. `available()` must
+    /// re-probe the filesystem on every call rather than caching its first
+    /// result for the isolator's lifetime — a user who installs `demucs`
+    /// mid-session (e.g. `pipx install demucs` while humm is already
+    /// running) must see the capability flip without restarting. Uses the
+    /// `from_env` seam (never `std::env::set_var`) to point `HUMM_DEMUCS` at
+    /// a path that doesn't exist yet inside a tempdir, then creates the
+    /// executable stub there after the first (false) probe.
+    #[test]
+    #[cfg(unix)]
+    fn available_sees_binary_installed_after_first_probe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("demucs");
+        let isolator = DemucsIsolator::from_env(Some(path.clone().into_os_string()));
+
+        assert!(
+            !isolator.available(),
+            "must be false before the binary exists"
+        );
+
+        write_stub(dir.path(), "demucs", "exit 0");
+
+        assert!(
+            isolator.available(),
+            "install-while-running: available() must re-probe rather than reuse a cached false"
+        );
     }
 
     #[test]

@@ -15,12 +15,14 @@ use std::time::{Duration, Instant};
 
 use egui_kittest::kittest::NodeT;
 use egui_kittest::{Harness, HarnessBuilder, kittest::Queryable};
-use humm_core::boundary::{EngineCaps, EngineOptions, Pcm, SegmentSink, TranscriptionEngine};
+use humm_core::boundary::{
+    EngineCaps, EngineOptions, Pcm, SegmentSink, SpeechIsolator, TranscriptionEngine,
+};
 use humm_core::cancel::CancelToken;
 use humm_core::domain::{
     Backend, DEFAULT_TEMPERATURE, ModelSize, ModelSpec, OutputFormat, TaskKind,
 };
-use humm_core::error::{CoreError, EngineError};
+use humm_core::error::{CoreError, EngineError, MediaError};
 use humm_core::secrets::{FailingSecretStore, MemorySecretStore, SecretKey, SecretStore};
 use humm_gui::app::HummApp;
 use humm_gui::i18n::tr;
@@ -263,6 +265,88 @@ fn extract_speech_checkbox_disabled_with_tooltip_when_demucs_absent() {
     harness.run();
 
     harness.get_by_label(&tr("options-extract-speech-missing-tooltip"));
+}
+
+/// A [`SpeechIsolator`] double whose `available()` reads a caller-controlled
+/// `AtomicBool` on every call, rather than any fixed script — the shared
+/// flag lets a test flip "is demucs installed" *between* two sheet opens
+/// (an install-while-running scenario) and assert the checkbox actually
+/// reflects the change, the same way `humm-media`'s own
+/// `available_sees_binary_installed_after_first_probe` unit test proves the
+/// underlying probe re-runs rather than caching. `isolate` is never called
+/// by this file's tests (no scenario here runs a task through to isolation),
+/// so it panics loudly instead of silently doing nothing wrong.
+struct FlippingIsolator {
+    available: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl SpeechIsolator for FlippingIsolator {
+    fn isolate(&self, _input: &Path, _cancel: &CancelToken) -> Result<PathBuf, MediaError> {
+        unreachable!(
+            "FlippingIsolator only exercises capability gating in this test file, \
+             never a real isolation run"
+        )
+    }
+
+    fn available(&self) -> bool {
+        self.available.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// M9 (D5b-7): install-while-running staleness. `Services::demucs_isolator`
+/// is a scripted [`FlippingIsolator`] here, assigned directly onto the
+/// `Services` [`services::init_with`] already returned (not threaded through
+/// [`TestDeps`] — see [`services::Services::demucs_isolator`]'s own doc for
+/// why). The checkbox starts disabled (matching both `Capabilities::default()`
+/// and the isolator's initial `false`); the test then flips the shared flag
+/// — simulating a `pipx install demucs` that happened while humm stayed
+/// running — and reopens the sheet. If `open_options_sheet` didn't re-probe,
+/// the checkbox would stay disabled forever (`capabilities.demucs` frozen at
+/// its startup snapshot); it must instead be enabled on the reopen.
+#[test]
+fn options_sheet_reprobes_demucs_capability_on_open() {
+    let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut services = test_services_with_secrets(
+        store,
+        Capabilities::default(),
+        dir.path(),
+        services::default_test_secrets(),
+    );
+    services.demucs_isolator = Some(Arc::new(FlippingIsolator {
+        available: Arc::clone(&flag),
+    }));
+    let mut harness = HarnessBuilder::default()
+        .with_size(egui::Vec2::new(1000.0, 700.0))
+        .with_max_steps(32)
+        .build_eframe(move |_cc| HummApp::new_for_test(services));
+    harness.run();
+
+    harness
+        .state_mut()
+        .open_options_sheet_for_test(ImportRequest::Files(vec![PathBuf::from("/no/such/a.wav")]));
+    harness.run();
+    let checkbox = harness.get_by_label("Extract speech");
+    assert!(
+        checkbox.accesskit_node().is_disabled(),
+        "Extract speech must be disabled before demucs is installed"
+    );
+
+    // "demucs installed mid-session" — nothing else about the running
+    // process changes, only the isolator's own re-probe result.
+    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    harness
+        .state_mut()
+        .open_options_sheet_for_test(ImportRequest::Files(vec![PathBuf::from("/no/such/b.wav")]));
+    harness.run();
+    let checkbox = harness.get_by_label("Extract speech");
+    assert!(
+        !checkbox.accesskit_node().is_disabled(),
+        "Extract speech must be enabled on reopen once demucs is installed \
+         (install-while-running: no restart needed)"
+    );
 }
 
 // -- Run -> enqueue -> sticky prefs -------------------------------------------

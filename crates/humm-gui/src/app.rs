@@ -1017,7 +1017,21 @@ impl HummApp {
 
     /// Opens the options sheet for `request`, prefilled from the current
     /// `settings.file_transcriber`/`settings.models` snapshot.
+    ///
+    /// Re-probes `capabilities.demucs` first (M9, D5b-7): opening the sheet
+    /// is the explicit user-visible moment the "Extract speech" checkbox is
+    /// about to render, so this is where install-while-running staleness
+    /// gets fixed — `Services::demucs_isolator`'s `available()` re-probes
+    /// the filesystem on every call (`humm_media::DemucsIsolator`'s own doc),
+    /// rather than trusting `init`'s one-time startup snapshot. Deliberately
+    /// *not* done per-frame: a re-probe on every render would be the wrong
+    /// place even though the probe itself is cheap (file `metadata` calls,
+    /// no subprocess) — this call site is gated on the one user gesture that
+    /// actually needs a fresh answer.
     fn open_options_sheet(&mut self, request: ImportRequest) {
+        if let Some(isolator) = &self.services.demucs_isolator {
+            self.services.capabilities.demucs = isolator.available();
+        }
         let prefill: FileTranscriberSettings = {
             let settings = self
                 .services

@@ -525,7 +525,11 @@ pub trait SpeechIsolator: Send + Sync {
     /// `HUMM_DEMUCS`?) for capability gating — the CLI's `-e` flag and the
     /// GUI's extract-speech checkbox both disable themselves (with an
     /// actionable tooltip/usage message) when this is `false`, rather than
-    /// enqueueing a task doomed to fail at isolation time.
+    /// enqueueing a task doomed to fail at isolation time. **Re-probes on
+    /// every call** (M9, D5b-7) — implementations must not cache their
+    /// result across calls, so a caller polling this (the GUI's
+    /// `HummApp::open_options_sheet`, on every sheet open) sees a binary
+    /// installed mid-session without needing a fresh instance or a restart.
     fn available(&self) -> bool;
 }
 

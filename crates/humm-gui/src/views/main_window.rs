@@ -280,6 +280,10 @@ pub struct ShowResult {
 /// `capabilities.demucs`) — this module never reads `Services` directly.
 /// `demucs_available` gates the options sheet's "Extract speech" checkbox
 /// the same way `yt_dlp_available` gates URL import (F-027, design spec §3).
+/// Unlike `yt_dlp_available`, `capabilities.demucs` isn't a startup-only
+/// snapshot: `app.rs`'s `HummApp::open_options_sheet` re-probes it every
+/// time the sheet opens (M9, D5b-7), so the value this function reads each
+/// frame reflects whatever the most recent sheet-open call last found.
 /// `current_version` is
 /// `env!("CARGO_PKG_VERSION")`, threaded in for the update dialog's
 /// "Current version: …" line. `secrets` is threaded straight through to the
