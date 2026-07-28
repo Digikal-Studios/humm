@@ -58,13 +58,11 @@ pub(crate) fn spawn_stderr_tail(mut stderr: ChildStderr) -> JoinHandle<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::process::{Command, Stdio};
 
-    /// Writes an executable stub script (mirrors the stub-script technique
-    /// used throughout this crate's other adapter tests, e.g.
-    /// `demucs.rs::tests::write_stub`).
+    #[cfg(unix)]
     fn write_stub(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write stub script");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
@@ -72,9 +70,7 @@ mod tests {
         path
     }
 
-    /// Spawns `script`, returning both the `Child` (so the caller can
-    /// `wait()` it and avoid a zombie process — `clippy::zombie_processes`)
-    /// and the piped `ChildStderr` to hand to `spawn_stderr_tail`.
+    #[cfg(unix)]
     fn spawn_stub_stderr(script: &std::path::Path) -> (std::process::Child, ChildStderr) {
         let mut child = Command::new(script)
             .stdin(Stdio::null())
@@ -87,6 +83,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn stderr_tail_caps_oversized_output() {
         let dir = tempfile::tempdir().expect("tempdir");
         // 64 KiB of filler followed by a short, unique marker at the very
@@ -120,6 +117,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn stderr_tail_passes_small_output_through() {
         let dir = tempfile::tempdir().expect("tempdir");
         let stub = write_stub(
