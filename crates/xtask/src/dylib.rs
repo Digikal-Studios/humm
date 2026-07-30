@@ -39,14 +39,18 @@
 //! defeating the point.
 //!
 //! Structure, per the brief: **parsing** ([`parse_otool_libs`],
-//! [`parse_relative_dep_names`], [`parse_otool_rpaths`]) and **planning**
-//! ([`plan_rewrites`]) are pure functions over strings/paths — unit-tested
-//! with no Apple CLI involved. [`bundle_closure`] and [`sign_bundle`] are
-//! the thin exec wrappers that actually shell out to
+//! [`parse_relative_dep_names`], [`parse_otool_rpaths`],
+//! [`parse_relative_ref_targets`]) and **planning** ([`plan_rewrites`],
+//! [`claim_destination`]/[`files_have_identical_content`],
+//! [`check_relative_refs_resolve`], [`sign_plan`]) are pure functions over
+//! strings/paths (or, for the last few, real-but-cheap filesystem reads —
+//! no Apple CLI) — all unit-tested without shelling out. [`bundle_closure`],
+//! [`verify_no_external_refs`], and [`sign_bundle`]/[`sign_one`] are the
+//! thin exec wrappers that actually shell out to
 //! `otool`/`install_name_tool`/`codesign`; no `#[cfg(test)]` path ever
 //! calls them (Task 10 environment note, still binding in Task 11).
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -174,6 +178,95 @@ pub fn parse_relative_dep_names(output: &str) -> Vec<String> {
                 return None;
             }
             Some(name.to_string())
+        })
+        .collect()
+}
+
+/// Which relative-reference prefix a dependency entry uses — the two forms
+/// [`verify_no_external_refs`]'s post-condition resolves and checks for
+/// existence (task-11 review finding: the closure walk copies whatever it
+/// finds, but nothing previously confirmed the *reference itself* resolves
+/// once the file lands in the bundle). `@rpath/<name>` resolves against
+/// `Contents/Frameworks/` — every bundled dylib's own `LC_RPATH` is either
+/// deleted (if absolute-external, [`strip_external_rpaths`]) or left as
+/// `@loader_path` (module doc), and `@loader_path` itself always means
+/// "next to the file that's loading it", which for every bundled dylib is
+/// `Contents/Frameworks/` too. `@loader_path/<name>` is checked directly
+/// against the referencing file's own directory, without assuming that
+/// directory is `Frameworks/` (a main binary in `Contents/MacOS/` could in
+/// principle carry one). `@executable_path/…` entries are
+/// [`plan_rewrites`]'s own main-binary rewrite target and resolve
+/// correctly by construction of the bundle layout, so they're not
+/// re-checked here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelPrefix {
+    Rpath,
+    LoaderPath,
+}
+
+/// Bare filenames of `@rpath/`/`@loader_path/`-prefixed dependency entries
+/// (minus the self-referential entry — see [`self_basename`]), tagged with
+/// which prefix each used. Pure text parsing, like [`parse_otool_libs`] and
+/// [`parse_relative_dep_names`]; [`check_relative_refs_resolve`] (given the
+/// filesystem) decides whether each one actually resolves.
+fn parse_relative_ref_targets(output: &str) -> Vec<(RelPrefix, String)> {
+    let self_name = self_basename(output);
+    output
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let entry = line.trim().split(" (").next()?.trim();
+            let prefix = if entry.starts_with("@rpath/") {
+                RelPrefix::Rpath
+            } else if entry.starts_with("@loader_path/") {
+                RelPrefix::LoaderPath
+            } else {
+                return None;
+            };
+            let name = entry_basename(entry)?;
+            if Some(name) == self_name {
+                return None;
+            }
+            Some((prefix, name.to_string()))
+        })
+        .collect()
+}
+
+/// For each `(prefix, name)` target found in `file`'s own dependency list
+/// ([`parse_relative_ref_targets`]), checks whether the file it names
+/// actually exists where that prefix says it should — `frameworks` for
+/// `@rpath`, next to `file` itself for `@loader_path` — and returns one
+/// "offender" string per target that doesn't. Split out as its own
+/// filesystem-only (no `otool`/Mach-O) function so this resolution logic is
+/// unit-testable against a constructed tempdir, independent of
+/// [`verify_no_external_refs`]'s real `otool` invocation.
+fn check_relative_refs_resolve(
+    file: &Path,
+    targets: &[(RelPrefix, String)],
+    frameworks: &Path,
+) -> Vec<String> {
+    targets
+        .iter()
+        .filter_map(|(prefix, name)| {
+            let expected = match prefix {
+                RelPrefix::Rpath => frameworks.join(name),
+                RelPrefix::LoaderPath => match file.parent() {
+                    Some(dir) => dir.join(name),
+                    None => PathBuf::from(name),
+                },
+            };
+            if expected.is_file() {
+                return None;
+            }
+            let prefix_str = match prefix {
+                RelPrefix::Rpath => "@rpath",
+                RelPrefix::LoaderPath => "@loader_path",
+            };
+            Some(format!(
+                "{}: dangling {prefix_str}/{name} reference — expected {}",
+                file.display(),
+                expected.display()
+            ))
         })
         .collect()
 }
@@ -334,6 +427,58 @@ fn copy_and_prepare_dylib(src: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Byte-for-byte comparison of two files — used by [`claim_destination`] to
+/// decide whether a `Contents/Frameworks/<name>` filename collision (two
+/// different source paths both wanting to land at the same destination) is
+/// a harmless re-discovery of the identical dylib (safe to skip) or a real
+/// ambiguity (must error). These are dylibs, always well under 100MB, so
+/// reading both fully in one shot is cheap — no need for a
+/// streaming/chunked comparison or a hash.
+fn files_have_identical_content(a: &Path, b: &Path) -> Result<bool> {
+    let a_bytes = fs::read(a).with_context(|| format!("failed to read {}", a.display()))?;
+    let b_bytes = fs::read(b).with_context(|| format!("failed to read {}", b.display()))?;
+    Ok(a_bytes == b_bytes)
+}
+
+/// Records that `dest` (a `Contents/Frameworks/<name>` destination path) is
+/// claimed by `src`, tracking *which* source path claimed it — not just
+/// that the destination name is taken (task-11 review finding: dedupe-by-
+/// filename alone silently merges two different files that happen to share
+/// a basename). Returns:
+///
+/// - `Ok(true)` — `dest` was unclaimed; the caller must physically copy
+///   `src` in.
+/// - `Ok(false)` — `dest` was already claimed by a source that is
+///   byte-identical to `src` (the common, legitimate case: two binaries, or
+///   two dylibs, depending on the same real file) — safe to skip.
+/// - `Err` — `dest` was already claimed by a source with *different*
+///   content: an ambiguous closure. A release must not silently pick one
+///   file over the other, so this fails the build naming both sources and
+///   the colliding basename.
+fn claim_destination(
+    queued: &mut BTreeMap<PathBuf, PathBuf>,
+    dest: &Path,
+    src: &Path,
+) -> Result<bool> {
+    if let Some(existing_src) = queued.get(dest) {
+        if existing_src == src {
+            return Ok(false);
+        }
+        if files_have_identical_content(existing_src, src)? {
+            return Ok(false);
+        }
+        bail!(
+            "dylib closure collision: {} and {} are different files but both would be copied \
+             to {} — a release with an ambiguous closure must not build silently",
+            existing_src.display(),
+            src.display(),
+            dest.display()
+        );
+    }
+    queued.insert(dest.to_path_buf(), src.to_path_buf());
+    Ok(true)
+}
+
 /// Deletes every absolute, non-system `LC_RPATH` from `path` (the
 /// `libopenblas.0.dylib` finding — see the module doc), recording each one
 /// into `report`. Returns whether anything was deleted, so the caller
@@ -378,8 +523,11 @@ pub fn bundle_closure(app: &Path) -> Result<ClosureReport> {
     let mut report = ClosureReport::default();
     // Dedup dylib copies by destination path (i.e. by filename) — two
     // binaries (or two dylibs) depending on the same library must not copy
-    // it twice or re-walk its own closure twice.
-    let mut queued: BTreeSet<PathBuf> = BTreeSet::new();
+    // it twice or re-walk its own closure twice. Maps destination path to
+    // the *source* path that claimed it, so a same-basename-but-different-
+    // source collision can be detected instead of silently merged
+    // ([`claim_destination`]).
+    let mut queued: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
     // (bundle path to scan, the *original* directory a same-directory
     // sibling reference should resolve against, kind). For a main binary
     // this is its own directory (main binaries have no such siblings in
@@ -414,7 +562,7 @@ pub fn bundle_closure(app: &Path) -> Result<ClosureReport> {
                 .and_then(|n| n.to_str())
                 .with_context(|| format!("non-utf8 dylib filename: {}", op.old.display()))?;
             let dest = frameworks.join(name);
-            if queued.insert(dest.clone()) {
+            if claim_destination(&mut queued, &dest, &op.old)? {
                 copy_and_prepare_dylib(&op.old, &dest)?;
                 report.copied.push(op.old.clone());
                 let dest_dir = op
@@ -428,14 +576,13 @@ pub fn bundle_closure(app: &Path) -> Result<ClosureReport> {
 
         for name in &relative_names {
             let dest = frameworks.join(name);
-            if queued.contains(&dest) {
+            let candidate = original_dir.join(name);
+            if !candidate.is_file() {
                 continue;
             }
-            let candidate = original_dir.join(name);
-            if candidate.is_file() {
-                queued.insert(dest.clone());
+            if claim_destination(&mut queued, &dest, &candidate)? {
                 copy_and_prepare_dylib(&candidate, &dest)?;
-                report.copied.push(candidate);
+                report.copied.push(candidate.clone());
                 frontier.push_back((dest, original_dir.clone(), RefKind::Dylib));
             }
         }
@@ -470,9 +617,16 @@ pub fn bundle_closure(app: &Path) -> Result<ClosureReport> {
 /// absolute dependency ([`parse_otool_libs`]) *or* a non-system absolute
 /// `LC_RPATH` ([`parse_otool_rpaths`] + [`is_external_absolute`]) — the
 /// module doc's two ways a Homebrew path can hide in an otherwise
-/// "portable-looking" bundle.
+/// "portable-looking" bundle — *or* a `@rpath`/`@loader_path` dependency
+/// entry whose target doesn't actually exist where that prefix resolves
+/// ([`parse_relative_ref_targets`] + [`check_relative_refs_resolve`]): a
+/// dangling relative reference that copied cleanly through the closure walk
+/// (nothing here was ever an absolute Homebrew path) but would still fail
+/// to resolve at `dyld` launch time, so this asserts it as a build-time
+/// verify error instead of a launch-time crash.
 pub fn verify_no_external_refs(app: &Path) -> Result<()> {
     let mut offenders = Vec::new();
+    let frameworks = app.join("Contents/Frameworks");
 
     for subdir in ["Contents/MacOS", "Contents/Frameworks"] {
         let dir = app.join(subdir);
@@ -500,6 +654,13 @@ pub fn verify_no_external_refs(app: &Path) -> Result<()> {
                     offenders.push(format!("{}: LC_RPATH {rpath}", file.display()));
                 }
             }
+
+            let relative_targets = parse_relative_ref_targets(&deps);
+            offenders.extend(check_relative_refs_resolve(
+                &file,
+                &relative_targets,
+                &frameworks,
+            ));
         }
     }
 
@@ -513,27 +674,72 @@ pub fn verify_no_external_refs(app: &Path) -> Result<()> {
 }
 
 /// Final "sign inside-out" pass (spec §1.3 item 4): every dylib in
-/// `Contents/Frameworks/` first, then the `.app` bundle as a whole (which
-/// covers `Contents/MacOS/*`, `Info.plist`, and `Resources/`). `identity`
-/// present → a real Developer ID identity with `--options runtime`
-/// (hardened runtime, required for notarization); absent → ad-hoc (`-s -`),
-/// consistent with [`bundle_closure`]'s own per-file ad-hoc signing so an
-/// unsigned build stays internally consistent end to end.
+/// `Contents/Frameworks/` first, then every executable in
+/// `Contents/MacOS/` individually, then the `.app` bundle as a whole
+/// (which re-signs the bundle's primary `CFBundleExecutable` under the
+/// bundle seal and covers `Info.plist`/`Resources/`).
+///
+/// The middle step is not redundant with the last: `codesign` on a bundle
+/// only signs the one binary named by `CFBundleExecutable` in `Info.plist`
+/// (`humm-gui`) and seals the rest by hash — it does **not** recursively
+/// sign other executables sitting in `Contents/MacOS/` (task-11 review
+/// finding). Without this step the secondary CLI binary
+/// (`Contents/MacOS/humm`) keeps whatever ad-hoc signature `cargo build`
+/// gave it; harmless under ad-hoc signing, but under a real `--identity` the
+/// identity mismatch (build-time ad-hoc vs. the requested Developer ID)
+/// would very likely fail notarization. Signing `humm-gui` here too (before
+/// it's re-signed again as part of the bundle) is standard practice, not a
+/// bug — codesign is idempotent per-file.
+///
+/// `identity` present → a real Developer ID identity with `--options
+/// runtime` (hardened runtime, required for notarization); absent → ad-hoc
+/// (`-s -`), consistent with [`bundle_closure`]'s own per-file ad-hoc
+/// signing so an unsigned build stays internally consistent end to end.
 pub fn sign_bundle(app: &Path, identity: Option<&str>) -> Result<()> {
+    for path in sign_plan(app)? {
+        sign_one(&path, identity)?;
+    }
+    Ok(())
+}
+
+/// The exact ordered list of paths [`sign_bundle`] signs: every file in
+/// `Contents/Frameworks/` (sorted, for a deterministic plan), then every
+/// file in `Contents/MacOS/` (sorted — this is what fixes the task-11
+/// review finding: the secondary CLI binary gets signed here, individually,
+/// not just swept up by the final bundle-level sign), then the `.app`
+/// bundle itself, last. Split out from [`sign_bundle`] as a pure
+/// (filesystem-reading, no `codesign` exec) planning step specifically so
+/// this ordering is unit-testable without a real signing identity or a
+/// sandbox lift — `sign_bundle`/`sign_one` remain the exec-wrapper code no
+/// `#[cfg(test)]` path calls (module doc, Task 10 environment note, still
+/// binding).
+fn sign_plan(app: &Path) -> Result<Vec<PathBuf>> {
+    let mut plan = Vec::new();
+
     let frameworks = app.join("Contents/Frameworks");
     if frameworks.exists() {
-        for entry in fs::read_dir(&frameworks)
+        let mut entries: Vec<PathBuf> = fs::read_dir(&frameworks)
             .with_context(|| format!("failed to read {}", frameworks.display()))?
-        {
-            let path = entry
-                .with_context(|| format!("failed to read an entry of {}", frameworks.display()))?
-                .path();
-            if path.is_file() {
-                sign_one(&path, identity)?;
-            }
-        }
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .collect();
+        entries.sort();
+        plan.extend(entries);
     }
-    sign_one(app, identity)
+
+    let macos = app.join("Contents/MacOS");
+    let mut entries: Vec<PathBuf> = fs::read_dir(&macos)
+        .with_context(|| format!("failed to read {}", macos.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect();
+    entries.sort();
+    plan.extend(entries);
+
+    plan.push(app.to_path_buf());
+    Ok(plan)
 }
 
 fn sign_one(path: &Path, identity: Option<&str>) -> Result<()> {
@@ -728,5 +934,149 @@ mod tests {
         );
         assert!(!is_external_absolute(&rpaths[0]));
         assert!(is_external_absolute(&rpaths[1]));
+    }
+
+    // --- task-11 review fixes: dedupe-by-filename collision detection,
+    // dangling relative-ref verification, and signing order ---------------
+
+    /// The common, legitimate case [`claim_destination`] must keep silent:
+    /// two different source paths, same basename, byte-identical content
+    /// (e.g. two binaries depending on the exact same real dylib via
+    /// different symlink aliases) — the second claim is a no-op skip, not
+    /// an error.
+    #[test]
+    fn duplicate_name_same_content_is_skipped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src_a = dir.path().join("a/libfoo.dylib");
+        let src_b = dir.path().join("b/libfoo.dylib");
+        fs::create_dir_all(src_a.parent().unwrap()).unwrap();
+        fs::create_dir_all(src_b.parent().unwrap()).unwrap();
+        fs::write(&src_a, b"identical-bytes").unwrap();
+        fs::write(&src_b, b"identical-bytes").unwrap();
+
+        let mut queued: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
+        let dest = dir.path().join("Frameworks/libfoo.dylib");
+
+        assert!(
+            claim_destination(&mut queued, &dest, &src_a).expect("first claim succeeds"),
+            "first claim of an unclaimed destination must report true (caller must copy)"
+        );
+        assert!(
+            !claim_destination(&mut queued, &dest, &src_b).expect("second claim succeeds"),
+            "a byte-identical same-basename source must be silently skipped"
+        );
+    }
+
+    /// The bug this finding is about: two *different* files sharing a
+    /// basename must not be silently merged — [`claim_destination`] must
+    /// hard-error, naming both source paths and the colliding destination,
+    /// rather than picking one and discarding the other.
+    #[test]
+    fn duplicate_name_different_content_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src_a = dir.path().join("a/libfoo.dylib");
+        let src_b = dir.path().join("b/libfoo.dylib");
+        fs::create_dir_all(src_a.parent().unwrap()).unwrap();
+        fs::create_dir_all(src_b.parent().unwrap()).unwrap();
+        fs::write(&src_a, b"version-one-content").unwrap();
+        fs::write(&src_b, b"version-two-content-differs").unwrap();
+
+        let mut queued: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
+        let dest = dir.path().join("Frameworks/libfoo.dylib");
+
+        assert!(claim_destination(&mut queued, &dest, &src_a).expect("first claim succeeds"));
+        let err = claim_destination(&mut queued, &dest, &src_b)
+            .expect_err("different-content same-basename collision must error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&src_a.display().to_string()),
+            "error must name the first source: {msg}"
+        );
+        assert!(
+            msg.contains(&src_b.display().to_string()),
+            "error must name the second source: {msg}"
+        );
+        assert!(
+            msg.contains("libfoo.dylib"),
+            "error must name the colliding basename/destination: {msg}"
+        );
+    }
+
+    /// [`parse_relative_ref_targets`] + [`check_relative_refs_resolve`]:
+    /// a `@rpath/<name>` entry whose file is present in `Frameworks/` is not
+    /// flagged; a `@loader_path/<name>` entry whose file is absent next to
+    /// the referencing dylib *is* flagged — canned `otool -L` text plus a
+    /// tempdir standing in for the bundle, no real Mach-O or `otool`
+    /// involved (the resolution logic, not the exec wrapper, is under
+    /// test).
+    #[test]
+    fn verify_flags_dangling_relative_ref() {
+        let output = "libgfortran.5.dylib:\n\
+             \t@rpath/libgfortran.5.dylib (compatibility version 6.0.0, current version 6.0.0)\n\
+             \t@rpath/libquadmath.0.dylib (compatibility version 1.0.0, current version 1.0.0)\n\
+             \t@loader_path/libgcc_s.1.1.dylib (compatibility version 1.0.0, current version 1.1.0)\n\
+             \t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1.0.0)\n";
+
+        let targets = parse_relative_ref_targets(output);
+        assert_eq!(
+            targets,
+            vec![
+                (RelPrefix::Rpath, "libquadmath.0.dylib".to_string()),
+                (RelPrefix::LoaderPath, "libgcc_s.1.1.dylib".to_string()),
+            ],
+            "self entry must be excluded, system entry must be excluded"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let frameworks = dir.path().join("Contents/Frameworks");
+        fs::create_dir_all(&frameworks).unwrap();
+        // The @rpath target exists in Frameworks/; the @loader_path target
+        // (expected next to the referencing file itself) does not.
+        fs::write(frameworks.join("libquadmath.0.dylib"), b"stub").unwrap();
+        let file = frameworks.join("libgfortran.5.dylib");
+        fs::write(&file, b"stub").unwrap();
+
+        let offenders = check_relative_refs_resolve(&file, &targets, &frameworks);
+
+        assert_eq!(
+            offenders.len(),
+            1,
+            "only the missing libgcc_s.1.1.dylib @loader_path target should be flagged: {offenders:?}"
+        );
+        assert!(offenders[0].contains("libgcc_s.1.1.dylib"));
+        assert!(offenders[0].contains("@loader_path"));
+    }
+
+    /// [`sign_plan`]: pins the signing order (spec §1.3 item 4, task-11
+    /// review finding) — every `Contents/Frameworks/` file, then every
+    /// `Contents/MacOS/` file (this is the fix: the secondary CLI binary
+    /// must appear here, not be skipped), then the `.app` bundle itself,
+    /// last. Dummy files stand in for real Mach-Os; no `codesign` involved.
+    #[test]
+    fn sign_plan_orders_frameworks_then_macos_then_bundle() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let app = staging.path().join("humm.app");
+        let frameworks = app.join("Contents/Frameworks");
+        let macos = app.join("Contents/MacOS");
+        fs::create_dir_all(&frameworks).unwrap();
+        fs::create_dir_all(&macos).unwrap();
+
+        fs::write(frameworks.join("libopenblas.0.dylib"), b"stub").unwrap();
+        fs::write(macos.join("humm-gui"), b"stub").unwrap();
+        fs::write(macos.join("humm"), b"stub").unwrap();
+
+        let plan = sign_plan(&app).expect("sign_plan succeeds");
+
+        assert_eq!(
+            plan,
+            vec![
+                frameworks.join("libopenblas.0.dylib"),
+                macos.join("humm"),
+                macos.join("humm-gui"),
+                app.clone(),
+            ],
+            "Frameworks/* must precede MacOS/* (sorted), the .app bundle must be signed last, \
+             and both MacOS binaries — including the secondary CLI — must appear individually"
+        );
     }
 }
