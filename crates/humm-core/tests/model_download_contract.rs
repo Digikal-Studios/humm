@@ -10,6 +10,7 @@
 use std::time::SystemTime;
 
 use humm_core::cancel::CancelToken;
+use humm_core::error::ModelError;
 use humm_core::models::download::{DownloadProgress, ModelDownloader};
 use humm_core::models::registry;
 
@@ -161,6 +162,127 @@ fn ensure_vad_model_recovers_from_http_416_completed_partial() {
         sha256_of(&recovered),
         expected_sha,
         "promoted file must be byte-identical to the verified download"
+    );
+}
+
+/// Contract test for `ModelDownloader::resolve_hf_repo` and
+/// `ModelDownloader::ensure_custom_model` against a fixed, real third-party
+/// Hugging Face repo (F-042, `docs/analysis/PARITY_MATRIX.md`):
+/// `ggerganov/whisper.cpp` itself — the exact repo humm's own runtime
+/// already depends on for every ordinary ggml model download
+/// (`registry::WHISPER_CPP_REPO`), so the M2 judgement that "no fixed real
+/// target exists" no longer holds (see `docs/design/DECISIONS.md` ADR-008's
+/// M9 addendum). `#[ignore]` as usual, and additionally gated on
+/// `HUMM_HF_THIRDPARTY_CONTRACT=1` (mirrors `humm-dfn`'s
+/// `HUMM_DFN_CONTRACT`/`humm-diarize`'s `HUMM_DIARIZE_CONTRACT` convention):
+/// this is a second, independent gate on top of `#[ignore]`, so a plain
+/// `cargo test -p humm-core -- --ignored` (this crate's own documented gate)
+/// does not also have to budget this test's ~32 MB download by default.
+///
+/// Run with:
+///
+/// ```text
+/// CARGO_HOME="$(git rev-parse --show-toplevel)/.cargo-home" \
+///     HUMM_HF_THIRDPARTY_CONTRACT=1 cargo test -p humm-core --test model_download_contract \
+///     -- --ignored third_party_hf_repo
+/// ```
+#[test]
+#[ignore = "requires network (huggingface.co); additionally gated on HUMM_HF_THIRDPARTY_CONTRACT=1"]
+fn third_party_hf_repo_resolves_and_custom_model_downloads() {
+    if std::env::var("HUMM_HF_THIRDPARTY_CONTRACT").as_deref() != Ok("1") {
+        // Same rationale as `humm-dfn`'s contract test: `println!`, not
+        // `eprintln!`, and an early `Ok`-shaped return rather than a panic —
+        // this test is already `#[ignore]`d, so it only runs under
+        // `--ignored`; the second gate means it can still report a bare `ok`
+        // there without ever touching huggingface.co. This line is what
+        // keeps that from looking like a silently-trustworthy green run.
+        println!(
+            "SKIPPED (not run): third_party_hf_repo_resolves_and_custom_model_downloads — \
+             HUMM_HF_THIRDPARTY_CONTRACT is not set to 1, so this reports `ok` without touching \
+             huggingface.co at all (see this test's doc comment to provision it for real)"
+        );
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let downloader = ModelDownloader::new(dir.path());
+    let cancel = CancelToken::new();
+
+    // --- (1) resolve_hf_repo against the live Hub API. `ggerganov/whisper.cpp`
+    // publishes dozens of `ggml-*.bin` candidates (verified via the tree API
+    // while writing this test, 2026-07-28: 33 `ggml-*.bin` siblings), so
+    // `resolve_hf_repo` must refuse to auto-pick one — its `Unsupported`
+    // error's `detail` names every candidate, which is the only
+    // externally-observable proof (from outside the crate,
+    // `list_hf_repo_files`/`select_ggml_candidates` are both private) that
+    // the real API was fetched and filtered correctly rather than stubbed. ---
+    let repo_err = downloader
+        .resolve_hf_repo(registry::WHISPER_CPP_REPO, false, &mut |_| {}, &cancel)
+        .expect_err(
+            "ggerganov/whisper.cpp publishes many ggml-*.bin files, not one, so resolve_hf_repo \
+             must return Unsupported rather than guessing",
+        );
+    let ModelError::Unsupported { detail } = repo_err else {
+        panic!("expected ModelError::Unsupported (multiple candidates), got {repo_err:?}");
+    };
+    assert!(
+        detail.contains("ggml-tiny.bin"),
+        "the real repo's candidate list should be non-empty and include ggml-tiny.bin: {detail}"
+    );
+
+    // --- (2) ensure_custom_model against the pinned real third-party URL
+    // (exact file name confirmed present via the tree API before pinning
+    // it here — see this task's report). ---
+    let url = format!(
+        "{}/{}/resolve/main/ggml-tiny-q5_1.bin",
+        registry::HF_BASE,
+        registry::WHISPER_CPP_REPO
+    );
+
+    let mut updates: Vec<DownloadProgress> = Vec::new();
+    let final_path = downloader
+        .ensure_custom_model(&url, &mut |p| updates.push(p), &cancel)
+        .expect("ensure_custom_model should download the pinned third-party artifact");
+
+    assert!(final_path.is_file(), "model file should exist");
+    let size = std::fs::metadata(&final_path)
+        .expect("stat downloaded file")
+        .len();
+    assert!(
+        (10_000_000..100_000_000).contains(&size),
+        "ggml-tiny-q5_1.bin should be a plausible ~32MB file, got {size} bytes"
+    );
+
+    let sentinel_path = dir.path().join(format!(
+        "{}{}",
+        registry::custom_model_file_name(),
+        registry::SENTINEL_SUFFIX
+    ));
+    assert!(sentinel_path.is_file(), "sentinel should exist");
+    assert!(
+        !updates.is_empty(),
+        "progress callback should have fired at least once"
+    );
+
+    let mtime_after_first = mtime(&final_path);
+
+    // --- Second call must be a no-download no-op: same technique as
+    // `ensure_vad_model_downloads_verifies_and_resumes` above (empty
+    // progress callback + unchanged mtime), since a real HTTP server here
+    // has no request-count observation to assert against instead. ---
+    let mut replay_updates: Vec<DownloadProgress> = Vec::new();
+    let replay_path = downloader
+        .ensure_custom_model(&url, &mut |p| replay_updates.push(p), &cancel)
+        .expect("second ensure_custom_model call should hit the fast path");
+    assert_eq!(replay_path, final_path);
+    assert!(
+        replay_updates.is_empty(),
+        "fast path should not touch the network or report progress"
+    );
+    assert_eq!(
+        mtime(&final_path),
+        mtime_after_first,
+        "fast-path replay must not rewrite the file (mtime unchanged)"
     );
 }
 
