@@ -1,6 +1,8 @@
 //! Contract test for `humm_core::models::download::ModelDownloader` against
 //! the real Silero VAD artifact on huggingface.co (the smallest real
-//! artifact the registry knows about). `#[ignore]`; run with:
+//! artifact the registry knows about). Also holds the F-042 third-party HF repo
+//! contract test (`third_party_hf_repo_resolves_and_custom_model_downloads`),
+//! double-gated on `#[ignore]` and `HUMM_HF_THIRDPARTY_CONTRACT=1`. `#[ignore]`; run with:
 //!
 //! ```text
 //! CARGO_HOME="$(git rev-parse --show-toplevel)/.cargo-home" \
