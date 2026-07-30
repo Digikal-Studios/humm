@@ -1,0 +1,24 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Dev-only release tooling: assembles humm.app, renders Info.plist/version_info.json, generates the app icon (ADR-025). Never shipped."
+
+# Kept deliberately dependency-light so `cargo xtask` stays fast: no humm
+# crates in [dependencies] (Task 10 brief item 2) and no argument-parsing
+# crate — subcommand dispatch in `main.rs` is a handful of `match` arms over
+# `std::env::args()`.
+[dependencies]
+png = "0.17"
+serde_json = { workspace = true }
+
+# humm-core is a dev-dependency only, for the version_info round-trip test
+# against `humm_core::update::parse_version_info` — it must never leak into
+# the main dependency graph.
+[dev-dependencies]
+humm-core = { workspace = true }
+tempfile = { workspace = true }
+pretty_assertions = { workspace = true }
