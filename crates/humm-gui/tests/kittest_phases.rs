@@ -246,20 +246,16 @@ fn wide_harness(services: Services) -> Harness<'static, HummApp> {
 /// to move it onto the egui-visible buffer is expected, not a bug (same
 /// pattern as `kittest_actions.rs`'s `retry_on_a_failed_row_reaches_completion`).
 ///
-/// This also covers the store-poll loop's own terminal check (Task 8,
-/// M9 flake fix): `store.get_task(..).status` going `Completed` proves only
+/// This also covers the store-poll loop's own terminal check: `store.get_task(..).status` going `Completed` proves only
 /// that the runner thread's `mark_completed` write landed — queue.rs's own
 /// module doc states the ordering explicitly ("terminal status precedes the
 /// terminal event"), so the *rendered* row (which `TasksVm::apply` only
 /// updates once the `Completed` *event* has cleared the same runner-emit →
 /// pump-thread → shared-buffer hop) can still lag behind an
 /// already-Completed store row by more than the one frame a bare
-/// `harness.run()` + single assert affords under load — confirmed by
-/// instrumenting the exact same primitives (a `Mutex`-guarded flag plus an
-/// mpsc-channel-fed pump thread) in isolation: under this workspace's
-/// ambient contention a single unguarded check missed a just-sent event on
-/// the order of 1-9% of trials, vanishing once the check is retried across
-/// a few more drains. `min_count` lets a single helper serve both the
+/// `harness.run()` + single assert affords — a narrow, load-shape-dependent
+/// race that resisted deliberate reproduction (50 loaded trials, M9 Task 8)
+/// but follows directly from the ordering above. `min_count` lets a single helper serve both the
 /// existence checks below (`min_count: 1`) and the terminal row-render
 /// check (`min_count: 2`, guarding against the header's own "Date
 /// Completed" trivially satisfying a `min_count: 1` check regardless of the
