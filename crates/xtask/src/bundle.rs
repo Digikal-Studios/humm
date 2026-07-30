@@ -1,11 +1,15 @@
 //! Assembles `target/bundle/humm.app` (Task 10 brief, spec §1.3, assembly
-//! half only). **Scope note:** this module places binaries, resources, and
-//! `Info.plist` into the right layout. Dylib closure walk/rewrite, code
-//! signing, and DMG creation are Task 11 — an assembled-by-this-module app
-//! is deliberately unsigned and has its Homebrew dylib references
+//! half only). **Scope note:** this module only places binaries, resources,
+//! and `Info.plist` into the right layout — an app assembled by
+//! [`assemble`] alone is unsigned and has its Homebrew dylib references
 //! unresolved (`otool -L` would still show absolute `/opt/homebrew/...`
-//! paths); it runs the CLI binary fine (no OpenBLAS link) but the GUI
-//! binary is not launchable yet.
+//! paths). Dylib closure walk/rewrite ([`crate::dylib::bundle_closure`]),
+//! code signing ([`crate::dylib::sign_bundle`]), and DMG creation
+//! ([`crate::dmg::create`]) are Task 11's addition, orchestrated by
+//! `main.rs`'s `cmd_bundle` immediately after this function returns — not
+//! folded into `assemble` itself, so the pure "lay out these known files"
+//! step stays trivially testable with dummy binaries (see the test below),
+//! independent of any Apple CLI.
 
 use std::fs;
 use std::io;

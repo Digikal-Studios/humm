@@ -12,8 +12,18 @@ description = "Dev-only release tooling: assembles humm.app, renders Info.plist/
 # crate — subcommand dispatch in `main.rs` is a handful of `match` arms over
 # `std::env::args()`.
 [dependencies]
-png = "0.17"
+# 0.18, not 0.17: matches the version the workspace already resolves
+# transitively (via `image`, pulled in by egui/eframe's own dependency
+# tree) — one `png` in the lockfile instead of two (Task 11 review fix,
+# carried from Task 10).
+png = "0.18"
 serde_json = { workspace = true }
+# Binaries use `anyhow`, not `thiserror` (CLAUDE.md convention; matches
+# humm-cli) — `main.rs`'s subcommand dispatch and the `dylib`/`dmg`
+# exec-wrapper functions all return `anyhow::Result` so subprocess failures
+# get real context messages instead of hand-rolled `String` plumbing
+# (Task 11 review fix, carried from Task 10).
+anyhow = { workspace = true }
 
 # humm-core is a dev-dependency only, for the version_info round-trip test
 # against `humm_core::update::parse_version_info` — it must never leak into
