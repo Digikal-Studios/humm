@@ -237,27 +237,53 @@ fn wide_harness(services: Services) -> Harness<'static, HummApp> {
         .build_eframe(move |_cc| HummApp::new_for_test(services))
 }
 
-/// Polls `harness.run()` until a node whose label contains `needle` appears,
-/// or panics after a 10s deadline. The events driving this are produced on
-/// the queue's own runner thread and forwarded by the event-pump thread
-/// (`events.rs`), so — even past a [`GateControl::wait_entered`]
-/// rendezvous, which only proves the *runner* has emitted the event — a
-/// short real-wall-clock wait for the pump thread to move it onto the
-/// egui-visible buffer is expected, not a bug (same pattern as
-/// `kittest_actions.rs`'s `retry_on_a_failed_row_reaches_completion`).
-fn wait_for_label_contains(harness: &mut Harness<'static, HummApp>, needle: &str) {
+/// Polls `harness.run()` until at least `min_count` nodes whose label
+/// contains `needle` appear, or panics after a 10s deadline. The events
+/// driving this are produced on the queue's own runner thread and forwarded
+/// by the event-pump thread (`events.rs`), so — even past a
+/// [`GateControl::wait_entered`] rendezvous, which only proves the *runner*
+/// has emitted the event — a short real-wall-clock wait for the pump thread
+/// to move it onto the egui-visible buffer is expected, not a bug (same
+/// pattern as `kittest_actions.rs`'s `retry_on_a_failed_row_reaches_completion`).
+///
+/// This also covers the store-poll loop's own terminal check (Task 8,
+/// M9 flake fix): `store.get_task(..).status` going `Completed` proves only
+/// that the runner thread's `mark_completed` write landed — queue.rs's own
+/// module doc states the ordering explicitly ("terminal status precedes the
+/// terminal event"), so the *rendered* row (which `TasksVm::apply` only
+/// updates once the `Completed` *event* has cleared the same runner-emit →
+/// pump-thread → shared-buffer hop) can still lag behind an
+/// already-Completed store row by more than the one frame a bare
+/// `harness.run()` + single assert affords under load — confirmed by
+/// instrumenting the exact same primitives (a `Mutex`-guarded flag plus an
+/// mpsc-channel-fed pump thread) in isolation: under this workspace's
+/// ambient contention a single unguarded check missed a just-sent event on
+/// the order of 1-9% of trials, vanishing once the check is retried across
+/// a few more drains. `min_count` lets a single helper serve both the
+/// existence checks below (`min_count: 1`) and the terminal row-render
+/// check (`min_count: 2`, guarding against the header's own "Date
+/// Completed" trivially satisfying a `min_count: 1` check regardless of the
+/// row).
+fn wait_for_label_count(harness: &mut Harness<'static, HummApp>, needle: &str, min_count: usize) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         harness.run();
-        if harness.query_by_label_contains(needle).is_some() {
+        let found = harness.query_all_by_label_contains(needle).count();
+        if found >= min_count {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for a label containing {needle:?}"
+            "timed out waiting for {min_count} label(s) containing {needle:?} (found {found})"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// `min_count: 1` case of [`wait_for_label_count`] — kept as its own name at
+/// call sites that only care whether the label exists at all.
+fn wait_for_label_contains(harness: &mut Harness<'static, HummApp>, needle: &str) {
+    wait_for_label_count(harness, needle, 1);
 }
 
 #[test]
@@ -348,9 +374,9 @@ fn download_phases_render_media_then_model_then_complete() {
     // Light UI sanity check: the row's own status cell now contributes a
     // second "…Completed…" match beyond the "Date Completed" header (same
     // technique as `kittest_actions.rs`'s `retry_on_a_failed_row_reaches_completion`).
-    harness.run();
-    assert!(
-        harness.query_all_by_label_contains("Completed").count() >= 2,
-        "expected the row's own status cell to also render something containing \"Completed\""
-    );
+    // Bounded poll rather than a single `harness.run()` + assert (Task 8, M9
+    // flake fix) — see `wait_for_label_count`'s doc comment for why the
+    // store poll loop above having already observed `Completed` doesn't
+    // guarantee this render has caught up yet.
+    wait_for_label_count(&mut harness, "Completed", 2);
 }
