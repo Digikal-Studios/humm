@@ -1,0 +1,208 @@
+humm — Third-Party Notices
+===========================
+
+humm is licensed under the MIT License (see LICENSE). It links, bundles, or
+otherwise depends on the third-party software and models listed below. This
+file records, per component: name, version/pin (where meaningful), license,
+upstream URL, and any attribution text its license requires. Every claim
+below was verified in-task against the upstream source (vendored crate
+manifests/LICENSE files, the exact pinned git revision, the actual model
+card, or the OS package's own license metadata) — none is asserted from
+memory. See docs/THIRD_PARTY_LICENSES.md for the full generated crates.io
+dependency-license summary; this file covers the components the M9 spec
+(§1.6) calls out by name, plus the behavioral-parity acknowledgment for Buzz.
+
+For the exact verification URL/path behind each entry, see the humm M9
+Task 9 report (docs/superpowers/sdd/task-9-report.md) or the workspace's own
+commit history.
+
+
+1. Buzz (behavioral ground truth)
+----------------------------------
+Project:   chidiwilliams/buzz
+License:   MIT — Copyright (c) 2022 Chidi Williams
+Role:      humm is a from-scratch Rust reimplementation of Buzz aiming for
+           100% functional parity. Buzz's source is read as the sole ground
+           truth for behavior; no Buzz source code is compiled into or
+           distributed with humm. Several of humm's automated tests port
+           Buzz's own golden/fixture data (e.g. export-format snapshot
+           tests) to prove structural/format equivalence — this is an
+           acknowledgment of that ported-fixtures relationship, required
+           because MIT's notice-preservation term extends to substantial
+           portions of the licensed work, and Buzz's test fixtures are used
+           as such a portion.
+
+
+2. whisper.cpp / ggml (transcription engine, via whisper-rs FFI)
+------------------------------------------------------------------
+Project:   ggml-org/whisper.cpp (bundles ggml)
+License:   MIT — Copyright (c) 2023-2026 The ggml authors
+Role:      humm-whisper wraps whisper.cpp via the whisper-rs FFI crate
+           (ADR: whisper-rs is the only humm crate allowed `unsafe`).
+
+
+3. whisper-rs / whisper-rs-sys (FFI bindings)
+------------------------------------------------
+Crate:     whisper-rs 0.16.0, whisper-rs-sys 0.15.0 (crates.io)
+Project:   tazz4843/whisper-rs (https://codeberg.org/tazz4843/whisper-rs)
+License:   Unlicense (public-domain dedication) — no copyright asserted;
+           bundled LICENSE text confirms the standard Unlicense grant.
+
+
+4. speakrs (speaker diarization: segmentation + embedding + VBx clustering)
+------------------------------------------------------------------------------
+Crate:     speakrs 0.5.0 (crates.io, exact-pinned per ADR-024)
+Project:   avencera/speakrs (https://github.com/avencera/speakrs)
+License:   Apache License, Version 2.0
+Attribution (License §4): humm redistributes speakrs unmodified as a
+           compiled dependency (not as source). Per §4, this NOTICE and
+           docs/THIRD_PARTY_LICENSES.md preserve the required copyright,
+           patent, trademark, and attribution notices; no separate upstream
+           NOTICE file is bundled with the speakrs crate to additionally
+           reproduce (checked: none present in the vendored crate source).
+
+
+5. ort + ONNX Runtime (inference backend for speakrs's ONNX models)
+----------------------------------------------------------------------
+Crate:     ort 2.0.0-rc.12 (crates.io, exact-pinned per ADR-024 / Standing
+           Policy rule 5; declared directly in humm-diarize)
+Project:   pykeio/ort (https://github.com/pykeio/ort)
+License:   MIT OR Apache-2.0 (dual; humm elects MIT)
+---
+Component: ONNX Runtime (the native runtime binary `ort` downloads/binds to
+           at build time via its `download-binaries` feature)
+Project:   microsoft/onnxruntime (https://github.com/microsoft/onnxruntime)
+License:   MIT — Copyright (c) Microsoft Corporation
+
+
+6. deep_filter / DeepFilterNet (noise reduction, code)
+-----------------------------------------------------------
+Crate:     deep_filter 0.5.6, git-pinned to rev
+           978576aa8400552a4ce9730838c635aa30db5e61 (tag v0.5.6)
+Project:   Rikorose/DeepFilterNet (https://github.com/Rikorose/DeepFilterNet)
+License:   MIT OR Apache-2.0 (dual) — Copyright (c) 2021 Hendrik Schröter;
+           confirmed directly from the LICENSE-MIT/LICENSE-APACHE files at
+           the exact pinned git revision.
+
+
+7. DeepFilterNet3 model weights (embedded via `include_bytes!`)
+----------------------------------------------------------------------
+Artifact:  models/DeepFilterNet3_onnx.tar.gz, from the same
+           Rikorose/DeepFilterNet repository/revision as item 6, embedded
+           into the `humm-dfn` binary at compile time (`tract` feature,
+           no runtime download).
+License:   License unstated upstream as of 2026-07-28. The repository's
+           top-level LICENSE-MIT/LICENSE-APACHE files exist, and its
+           README's "License" section states "All code in this repository
+           is dual-licensed" under MIT OR Apache-2.0 — but that section's
+           own wording scopes the grant to "code," and no separate
+           LICENSE/model-card file exists inside the repo's `models/`
+           directory addressing the pretrained weights specifically. Absent
+           an explicit statement, humm does not assume the code license
+           extends to the weights; this entry exists so that determination
+           is not silently skipped.
+
+
+8. pyannote segmentation-3.0 (diarization segmentation model)
+--------------------------------------------------------------------
+Redistribution: avencera/speakrs-models on Hugging Face
+                (https://huggingface.co/avencera/speakrs-models) — converted
+                artifacts (ONNX/CoreML) of the upstream model, used by
+                `humm-diarize` via speakrs's `from_dir` loader.
+Origin model:   pyannote/segmentation-3.0
+                (https://huggingface.co/pyannote/segmentation-3.0), part of
+                the pyannote/speaker-diarization-community-1 pipeline.
+License:       MIT (per the origin model's Hugging Face model card).
+
+
+9. WeSpeaker speaker-embedding model (voxceleb-resnet34-LM)
+-------------------------------------------------------------------
+Redistribution: avencera/speakrs-models on Hugging Face (as above).
+Origin model:   pyannote/wespeaker-voxceleb-resnet34-LM
+                (https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM)
+License:       CC BY 4.0 (Creative Commons Attribution 4.0 International).
+               The model card states the pretrained model follows the
+               license of its training dataset (VoxCeleb), which is
+               CC BY 4.0 — attribution to the VoxCeleb dataset authors is
+               required for redistribution/use.
+Note:          avencera/speakrs-models' own model card states no
+               repository-wide license and explicitly defers to upstream:
+               "Upstream model access may require accepting upstream terms.
+               Users are responsible for complying with the licenses and
+               terms of the upstream models and datasets."
+
+
+10. Silero VAD (voice-activity detection model)
+--------------------------------------------------
+Project:   snakers4/silero-vad (https://github.com/snakers4/silero-vad)
+License:   MIT — Copyright (c) 2020-present Silero Team
+
+
+11. Noto Sans SC (bundled CJK fallback font)
+-------------------------------------------------
+Artifact:  crates/humm-gui/assets/fonts/NotoSansSC-Regular.otf, from
+           notofonts/noto-cjk release tag Sans2.004, path
+           Sans/SubsetOTF/SC/NotoSansSC-Regular.otf (see
+           crates/humm-gui/src/fonts.rs for the exact source URL and
+           SHA-256 recorded at fetch time).
+License:   SIL Open Font License, Version 1.1. The bundled
+           crates/humm-gui/assets/fonts/OFL.txt was cross-checked in-task
+           against the upstream repository's Sans/LICENSE file
+           (https://github.com/notofonts/noto-cjk/blob/main/Sans/LICENSE)
+           and the text matches.
+
+
+12. OpenBLAS (linear algebra backend for speakrs's `openblas-system` feature)
+---------------------------------------------------------------------------------
+System dependency: Homebrew `openblas` (installed: 0.3.34; macOS build AND
+                    runtime prerequisite per ADR-024 — humm links Homebrew's
+                    dylib by absolute path).
+Project:   OpenMathLib/OpenBLAS (https://github.com/OpenMathLib/OpenBLAS)
+License:   BSD 3-Clause (Homebrew's formula metadata records the fuller
+           SPDX expression "BSD-3-Clause AND BSD-2-Clause-Views AND
+           BSD-3-Clause-Open-MPI AND BSD-2-Clause" for the bundled
+           third-party kernels; the project's own top-level LICENSE is
+           BSD 3-Clause, "Copyright (c) 2011-2014, The OpenBLAS Project").
+
+
+13. libgfortran (GCC's Fortran runtime library, an OpenBLAS dependency)
+---------------------------------------------------------------------------
+System dependency: Homebrew `gcc` (installed: 16.1.0), which provides
+                    libgfortran.
+Project:   GCC (https://gcc.gnu.org/)
+License:   GPL-3.0-or-later WITH GCC Runtime Library Exception 3.1 (per
+           Homebrew's formula metadata and confirmed against
+           https://www.gnu.org/licenses/gcc-exception-3.1.html). The
+           Runtime Library Exception permits linking libgfortran into
+           non-GPL (including proprietary/closed-source) binaries produced
+           by an eligible compilation process, without subjecting the
+           resulting binary to the GPL — this is why humm may link it
+           despite being MIT-licensed.
+
+
+14. libomp (LLVM OpenMP runtime, an OpenBLAS/speakrs dependency)
+----------------------------------------------------------------------
+System dependency: Homebrew `libomp` (installed: 22.1.8).
+Project:   LLVM Project (https://openmp.llvm.org/,
+           https://github.com/llvm/llvm-project/tree/main/openmp)
+License:   Apache License 2.0 WITH LLVM Exceptions — confirmed directly
+           against the upstream openmp/LICENSE.TXT file, which states "The
+           LLVM Project is under the Apache License v2.0 with LLVM
+           Exceptions." (Note: Homebrew's own formula metadata labels this
+           formula "MIT" — a discrepancy from the upstream LICENSE.TXT this
+           NOTICE defers to as the more authoritative, primary source; see
+           the Task 9 report for detail.)
+
+
+15. egui / eframe (GUI framework)
+--------------------------------------
+Crate:     egui 0.35.0, eframe 0.35.0 (crates.io)
+Project:   emilk/egui (https://github.com/emilk/egui)
+License:   MIT OR Apache-2.0 (dual; humm elects MIT) — Copyright (c)
+           2018-2021 Emil Ernerfeldt.
+
+
+---
+All other crates.io dependencies in the workspace's dependency graph are
+enumerated with their individual licenses in docs/THIRD_PARTY_LICENSES.md,
+generated via `cargo license`.

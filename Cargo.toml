@@ -16,12 +16,13 @@ members = [
 exclude = ["validation/*"]
 
 [workspace.package]
+version = "1.0.0"
 edition = "2024"
 license = "MIT"
-repository = "https://repo.digikal.com/jawad/humm"
+repository = "https://github.com/digikal/humm"
 
 [workspace.dependencies]
-humm-core = { path = "crates/humm-core", version = "0.1.0" }
+humm-core = { path = "crates/humm-core", version = "1.0.0" }
 thiserror = "2"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

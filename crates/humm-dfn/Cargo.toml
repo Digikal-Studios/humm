@@ -1,13 +1,13 @@
 [package]
 name = "humm-dfn"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
 humm-core.workspace = true
-humm-media = { path = "../humm-media", version = "0.1.0" }
+humm-media = { path = "../humm-media", version = "1.0.0" }
 deep_filter.workspace = true
 ndarray.workspace = true
 

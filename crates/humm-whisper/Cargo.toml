@@ -1,6 +1,6 @@
 [package]
 name = "humm-whisper"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -21,7 +21,7 @@ whisper-rs = { workspace = true, features = ["metal", "coreml"] }
 pretty_assertions.workspace = true
 # Contract tests decode Buzz testdata through the real ffmpeg adapter and pull
 # the Silero VAD model via humm-core's downloader.
-humm-media = { path = "../humm-media", version = "0.1.0" }
+humm-media = { path = "../humm-media", version = "1.0.0" }
 tempfile.workspace = true
 criterion.workspace = true
 

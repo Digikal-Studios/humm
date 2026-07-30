@@ -14,9 +14,10 @@ use humm_core::update::UpdateInfo;
 
 use crate::i18n::tr;
 
-/// humm's releases page — the update dialog's "Open release page" button
-/// (notify-only, ADR-015: no installer download/launch in v1).
-pub const RELEASES_PAGE_URL: &str = "https://repo.digikal.com/jawad/humm/releases/latest";
+/// humm's releases page (M9: the public GitHub mirror, `digikal/humm`) — the
+/// update dialog's "Open release page" button (notify-only, ADR-015: no
+/// installer download/launch in v1).
+pub const RELEASES_PAGE_URL: &str = "https://github.com/digikal/humm/releases/latest";
 
 /// The toolbar chip + dialog's live state: `info` drives the chip's
 /// visibility (`Some` ⇒ shown) and the dialog's contents; `dialog_open` is
@@ -132,7 +133,7 @@ mod tests {
     fn releases_page_url_matches_the_binding_decision() {
         assert_eq!(
             RELEASES_PAGE_URL,
-            "https://repo.digikal.com/jawad/humm/releases/latest"
+            "https://github.com/digikal/humm/releases/latest"
         );
     }
 

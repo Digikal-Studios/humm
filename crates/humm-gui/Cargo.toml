@@ -1,6 +1,6 @@
 [package]
 name = "humm-gui"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -11,12 +11,12 @@ path = "src/main.rs"
 
 [dependencies]
 humm-core.workspace = true
-humm-media = { path = "../humm-media", version = "0.1.0" }
-humm-store = { path = "../humm-store", version = "0.1.0" }
-humm-whisper = { path = "../humm-whisper", version = "0.1.0" }
-humm-audio = { path = "../humm-audio", version = "0.1.0" }
-humm-dfn = { path = "../humm-dfn", version = "0.1.0" }
-humm-diarize = { path = "../humm-diarize", version = "0.1.0" }
+humm-media = { path = "../humm-media", version = "1.0.0" }
+humm-store = { path = "../humm-store", version = "1.0.0" }
+humm-whisper = { path = "../humm-whisper", version = "1.0.0" }
+humm-audio = { path = "../humm-audio", version = "1.0.0" }
+humm-dfn = { path = "../humm-dfn", version = "1.0.0" }
+humm-diarize = { path = "../humm-diarize", version = "1.0.0" }
 rtrb = { workspace = true }
 egui = { workspace = true }
 eframe = { workspace = true }

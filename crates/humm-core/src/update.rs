@@ -25,14 +25,17 @@ use serde::Deserialize;
 pub const CHECK_INTERVAL_DAYS: i64 = 7;
 
 /// humm's own update-manifest endpoint (Q-8: Buzz's `chidiwilliams/buzz`
-/// GitHub endpoint is not reused). humm's repo is hosted on Gitea
-/// (`repo.digikal.com`), which serves `releases/latest/download/<asset>`
-/// URLs the same way GitHub does. No release has been published yet, so this
-/// URL currently 404s — [`check_for_update`] surfaces that as
-/// [`UpdateError::Http`], which is harmless and expected until the first
-/// release exists (see ADR-015's endpoint note in `docs/design/DECISIONS.md`).
+/// GitHub endpoint is not reused, though as of M9 humm's own endpoint is
+/// also GitHub-hosted — a different repo, not a reversal of Q-8's decision).
+/// humm's canonical repo is private (Gitea, `repo.digikal.com`); releases
+/// are published to a public GitHub mirror (`digikal/humm`) so
+/// `releases/latest/download/<asset>` URLs are reachable without
+/// authentication. No release has been published yet, so this URL currently
+/// 404s — [`check_for_update`] surfaces that as [`UpdateError::Http`], which
+/// is harmless and expected until the first release exists (see ADR-015's
+/// endpoint note in `docs/design/DECISIONS.md`).
 pub const VERSION_INFO_URL: &str =
-    "https://repo.digikal.com/jawad/humm/releases/latest/download/version_info.json";
+    "https://github.com/digikal/humm/releases/latest/download/version_info.json";
 
 /// A parsed update manifest describing a version newer than the caller's
 /// current version (`update_checker.py`'s `UpdateInfo` dataclass,
@@ -252,6 +255,16 @@ pub fn check_for_update(
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    // --- VERSION_INFO_URL: M9 GitHub release-mirror endpoint (ADR-015) ---
+
+    #[test]
+    fn version_info_url_points_at_the_github_release_mirror() {
+        assert_eq!(
+            VERSION_INFO_URL,
+            "https://github.com/digikal/humm/releases/latest/download/version_info.json"
+        );
+    }
 
     // --- is_newer_version: update_checker.py:147-163 table ---
 
