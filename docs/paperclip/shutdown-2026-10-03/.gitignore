@@ -1,0 +1,4 @@
+# Archived Paperclip evidence: keep every file here even where the repository
+# ignores the pattern elsewhere (for example *.log or data/).
+!*
+!*/
