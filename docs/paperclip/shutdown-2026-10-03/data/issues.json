@@ -1,0 +1,787 @@
+{
+ "snapshot": "baseline export 2026-10-03T07:00Z",
+ "cutoff": "2026-10-03T06:12:00Z",
+ "repository": "humm",
+ "issues": [
+  {
+   "identifier": "DIG-1",
+   "id": "2cefd367-657a-4a47-925a-a03c05b175c6",
+   "title": "Paperclip onboarding",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "Onboarding",
+   "status_at_cutoff": "done",
+   "status_at_export": "done",
+   "priority": "medium",
+   "owner": "CEO",
+   "parent": null,
+   "blocked_by": [],
+   "blocks": [],
+   "created_at": "2026-09-25T10:37:12.315Z",
+   "updated_at": "2026-09-25T11:35:11.270Z",
+   "completed_at": "2026-09-25T11:35:11.193Z",
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "plan",
+     "title": "Plan",
+     "latest_revision": 1
+    }
+   ],
+   "comments": 7,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-1.md"
+  },
+  {
+   "identifier": "DIG-4",
+   "id": "3f9d9cad-81de-46af-bd1c-06a7e430900e",
+   "title": "Initial scan and status report per project",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "Onboarding",
+   "status_at_cutoff": "done",
+   "status_at_export": "done",
+   "priority": "medium",
+   "owner": "CEO",
+   "parent": "DIG-1",
+   "blocked_by": [],
+   "blocks": [
+    "DIG-8"
+   ],
+   "created_at": "2026-09-25T11:34:29.634Z",
+   "updated_at": "2026-09-25T14:14:16.556Z",
+   "completed_at": "2026-09-25T14:14:16.556Z",
+   "cancelled_at": null,
+   "documents": [],
+   "comments": 4,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-4.md"
+  },
+  {
+   "identifier": "DIG-5",
+   "id": "3daee88d-ea82-45a2-ab3f-1d5c530262c9",
+   "title": "Seed knowledge base project pages from scan reports",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "Onboarding",
+   "status_at_cutoff": "done",
+   "status_at_export": "done",
+   "priority": "medium",
+   "owner": "CEO",
+   "parent": "DIG-1",
+   "blocked_by": [
+    "DIG-63"
+   ],
+   "blocks": [
+    "DIG-38",
+    "DIG-74"
+   ],
+   "created_at": "2026-09-25T11:34:30.118Z",
+   "updated_at": "2026-09-26T03:38:25.305Z",
+   "completed_at": "2026-09-26T03:38:25.305Z",
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "design-page-input",
+     "title": "Design pages are written \u2014 do not stub them",
+     "latest_revision": 4
+    },
+    {
+     "key": "seeding-inputs",
+     "title": "DIG-5 seeding inputs \u2014 the eighteen scan reports",
+     "latest_revision": 1
+    }
+   ],
+   "comments": 13,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-5.md"
+  },
+  {
+   "identifier": "DIG-6",
+   "id": "59cad1bc-a1c5-43a2-8827-f1778f50de03",
+   "title": "Seed knowledge base domain foundations",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "Onboarding",
+   "status_at_cutoff": "done",
+   "status_at_export": "done",
+   "priority": "medium",
+   "owner": "CEO",
+   "parent": "DIG-1",
+   "blocked_by": [],
+   "blocks": [
+    "DIG-38"
+   ],
+   "created_at": "2026-09-25T11:34:30.504Z",
+   "updated_at": "2026-09-26T03:42:24.686Z",
+   "completed_at": "2026-09-26T03:42:24.686Z",
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "domain-software-engineering",
+     "title": "Publish-ready: knowledge/domains/software-engineering/README.md",
+     "latest_revision": 1
+    },
+    {
+     "key": "domain-systems-architecture",
+     "title": "Publish-ready: knowledge/domains/systems-architecture/README.md",
+     "latest_revision": 1
+    },
+    {
+     "key": "domain-tooling-pipeline",
+     "title": "Publish-ready: knowledge/domains/tooling-pipeline/README.md",
+     "latest_revision": 1
+    },
+    {
+     "key": "review",
+     "title": "Six domain hubs \u2014 review request",
+     "latest_revision": 3
+    },
+    {
+     "key": "ux-design-topic-page-owner",
+     "title": "The ux-design topic page is DIG-38's write",
+     "latest_revision": 1
+    }
+   ],
+   "comments": 12,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-6.md"
+  },
+  {
+   "identifier": "DIG-7",
+   "id": "71be5909-84f9-43f5-837a-2fd7c73d1ff0",
+   "title": "Design-side review of existing projects",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "Onboarding",
+   "status_at_cutoff": "done",
+   "status_at_export": "done",
+   "priority": "medium",
+   "owner": "CEO",
+   "parent": "DIG-1",
+   "blocked_by": [
+    "DIG-33",
+    "DIG-36"
+   ],
+   "blocks": [],
+   "created_at": "2026-09-25T11:34:30.866Z",
+   "updated_at": "2026-09-25T16:16:55.842Z",
+   "completed_at": "2026-09-25T16:12:16.357Z",
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "design-page-sample",
+     "title": "Design page sample (pointer to the filed sweeper page)",
+     "latest_revision": 7
+    },
+    {
+     "key": "design-pages",
+     "title": "Design pages for the knowledge base \u2014 accumulating handoff",
+     "latest_revision": 6
+    },
+    {
+     "key": "domain-error-messages",
+     "title": "domains/ux-design \u2014 the four-part error message",
+     "latest_revision": 1
+    }
+   ],
+   "comments": 26,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-7.md"
+  },
+  {
+   "identifier": "DIG-14",
+   "id": "dca0f1f2-2b88-4104-a5ec-619469e5158f",
+   "title": "Scan and report: humm",
+   "archive_role": "primary",
+   "primary_repository": "humm",
+   "paperclip_project": "humm",
+   "status_at_cutoff": "done",
+   "status_at_export": "done",
+   "priority": "medium",
+   "owner": "TechLead",
+   "parent": "DIG-4",
+   "blocked_by": [],
+   "blocks": [],
+   "created_at": "2026-09-25T13:52:12.464Z",
+   "updated_at": "2026-09-25T14:00:04.549Z",
+   "completed_at": "2026-09-25T14:00:04.381Z",
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "report",
+     "title": "humm \u2014 Status Report",
+     "latest_revision": 1
+    }
+   ],
+   "comments": 1,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-14.md"
+  },
+  {
+   "identifier": "DIG-26",
+   "id": "eb07af0b-add3-4790-a2fb-a1bff0994ee1",
+   "title": "Design review: humm",
+   "archive_role": "primary",
+   "primary_repository": "humm",
+   "paperclip_project": "humm",
+   "status_at_cutoff": "done",
+   "status_at_export": "done",
+   "priority": "high",
+   "owner": "GameExperienceDesigner",
+   "parent": "DIG-7",
+   "blocked_by": [],
+   "blocks": [],
+   "created_at": "2026-09-25T14:16:47.473Z",
+   "updated_at": "2026-09-25T14:27:46.809Z",
+   "completed_at": "2026-09-25T14:27:46.773Z",
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "review",
+     "title": "humm \u2014 Design Review (UX / UI / interaction)",
+     "latest_revision": 1
+    }
+   ],
+   "comments": 1,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-26.md"
+  },
+  {
+   "identifier": "DIG-33",
+   "id": "b905dd36-2472-4a38-a627-f2121dfaf47a",
+   "title": "Build remaining design pages and hand off to Knowledge Curator",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "Onboarding",
+   "status_at_cutoff": "done",
+   "status_at_export": "done",
+   "priority": "high",
+   "owner": "GameExperienceDesigner",
+   "parent": "DIG-7",
+   "blocked_by": [],
+   "blocks": [
+    "DIG-36",
+    "DIG-7"
+   ],
+   "created_at": "2026-09-25T14:40:19.162Z",
+   "updated_at": "2026-09-25T15:31:43.561Z",
+   "completed_at": "2026-09-25T15:26:12.734Z",
+   "cancelled_at": null,
+   "documents": [],
+   "comments": 8,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-33.md"
+  },
+  {
+   "identifier": "DIG-39",
+   "id": "db44b1e0-2464-469c-a9b8-ff0b80433c43",
+   "title": "Domain page: Software Engineering",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "Onboarding",
+   "status_at_cutoff": "done",
+   "status_at_export": "done",
+   "priority": "medium",
+   "owner": "TechLead",
+   "parent": "DIG-6",
+   "blocked_by": [],
+   "blocks": [],
+   "created_at": "2026-09-25T15:20:47.193Z",
+   "updated_at": "2026-09-25T15:32:59.730Z",
+   "completed_at": "2026-09-25T15:27:10.618Z",
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "content",
+     "title": "Software Engineering \u2014 domain page",
+     "latest_revision": 1
+    }
+   ],
+   "comments": 2,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-39.md"
+  },
+  {
+   "identifier": "DIG-40",
+   "id": "ac03e214-f8a4-4376-bf85-0086429abb0e",
+   "title": "Domain page: Systems Architecture",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "Onboarding",
+   "status_at_cutoff": "done",
+   "status_at_export": "done",
+   "priority": "medium",
+   "owner": "TechLead",
+   "parent": "DIG-6",
+   "blocked_by": [],
+   "blocks": [],
+   "created_at": "2026-09-25T15:20:47.484Z",
+   "updated_at": "2026-09-25T15:33:27.364Z",
+   "completed_at": "2026-09-25T15:26:03.675Z",
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "content",
+     "title": "Systems Architecture \u2014 domain page",
+     "latest_revision": 1
+    }
+   ],
+   "comments": 2,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-40.md"
+  },
+  {
+   "identifier": "DIG-41",
+   "id": "6bc38371-b141-470b-a13d-0c69904ac44c",
+   "title": "Domain page: Tooling and Pipeline",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "Onboarding",
+   "status_at_cutoff": "done",
+   "status_at_export": "done",
+   "priority": "medium",
+   "owner": "TechLead",
+   "parent": "DIG-6",
+   "blocked_by": [],
+   "blocks": [],
+   "created_at": "2026-09-25T15:20:47.763Z",
+   "updated_at": "2026-09-25T15:33:27.533Z",
+   "completed_at": "2026-09-25T15:27:42.706Z",
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "content",
+     "title": "Tooling and Pipeline \u2014 domain page",
+     "latest_revision": 1
+    }
+   ],
+   "comments": 2,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-41.md"
+  },
+  {
+   "identifier": "DIG-42",
+   "id": "b6a526af-b355-4322-8545-a7872ab81cae",
+   "title": "Reconcile \u00a79.6 with the twelve landed design pages \u2014 Source column and ID format",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "Onboarding",
+   "status_at_cutoff": "done",
+   "status_at_export": "done",
+   "priority": "high",
+   "owner": "KnowledgeCurator",
+   "parent": null,
+   "blocked_by": [],
+   "blocks": [],
+   "created_at": "2026-09-25T15:48:29.866Z",
+   "updated_at": "2026-09-25T16:03:57.092Z",
+   "completed_at": "2026-09-25T15:56:42.858Z",
+   "cancelled_at": null,
+   "documents": [],
+   "comments": 3,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-42.md"
+  },
+  {
+   "identifier": "DIG-70",
+   "id": "c4aa879a-2e6d-4579-b006-aa98501cbff7",
+   "title": "Domain page: UX Design",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "Onboarding",
+   "status_at_cutoff": "done",
+   "status_at_export": "done",
+   "priority": "medium",
+   "owner": "GameExperienceDesigner",
+   "parent": "DIG-6",
+   "blocked_by": [],
+   "blocks": [],
+   "created_at": "2026-09-25T18:16:34.600Z",
+   "updated_at": "2026-09-25T18:26:46.457Z",
+   "completed_at": "2026-09-25T18:26:46.457Z",
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "content",
+     "title": "knowledge/domains/ux-design/README.md",
+     "latest_revision": 1
+    }
+   ],
+   "comments": 1,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-70.md"
+  },
+  {
+   "identifier": "DIG-76",
+   "id": "b9137fcb-8ba2-4e6c-961a-3808c5006296",
+   "title": "Project decision logs: what binding decisions does each project carry?",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "Onboarding",
+   "status_at_cutoff": "done",
+   "status_at_export": "done",
+   "priority": "low",
+   "owner": "TechLead",
+   "parent": "DIG-5",
+   "blocked_by": [],
+   "blocks": [],
+   "created_at": "2026-09-25T18:30:11.021Z",
+   "updated_at": "2026-09-26T03:43:25.536Z",
+   "completed_at": "2026-09-26T03:43:25.536Z",
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "decisions",
+     "title": "Project decision logs \u2014 eight projects",
+     "latest_revision": 1
+    }
+   ],
+   "comments": 7,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-76.md"
+  },
+  {
+   "identifier": "DIG-250",
+   "id": "91e9a349-0be8-4796-bfb8-c1164c58ab39",
+   "title": "Assign adversarial reviews to DevGuru",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "(no project: company-wide)",
+   "status_at_cutoff": "done",
+   "status_at_export": "done",
+   "priority": "medium",
+   "owner": "CEO",
+   "parent": null,
+   "blocked_by": [],
+   "blocks": [],
+   "created_at": "2026-09-30T07:29:40.103Z",
+   "updated_at": "2026-09-30T07:36:14.687Z",
+   "completed_at": "2026-09-30T07:36:14.642Z",
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "review-policy",
+     "title": "Adversarial review policy for Digikal agents",
+     "latest_revision": 1
+    }
+   ],
+   "comments": 1,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-250.md"
+  },
+  {
+   "identifier": "DIG-261",
+   "id": "2cb48a40-fd05-48e8-a90b-ce60920e54f5",
+   "title": "Resolve blockers",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "(no project: company-wide)",
+   "status_at_cutoff": "done",
+   "status_at_export": "done",
+   "priority": "medium",
+   "owner": "CEO",
+   "parent": null,
+   "blocked_by": [
+    "DIG-262"
+   ],
+   "blocks": [],
+   "created_at": "2026-09-30T10:02:31.257Z",
+   "updated_at": "2026-09-30T10:27:13.170Z",
+   "completed_at": "2026-09-30T10:27:13.101Z",
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "decision-policy",
+     "title": "Delegated board decisions (DIG-261)",
+     "latest_revision": 1
+    }
+   ],
+   "comments": 2,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-261.md"
+  },
+  {
+   "identifier": "DIG-299",
+   "id": "3c007771-9776-4b2d-9107-48bb750930af",
+   "title": "honcho Gate 4: prove run-owned Python/SDK targets before database contact",
+   "archive_role": "cross-reference",
+   "primary_repository": "honcho",
+   "paperclip_project": "honcho",
+   "status_at_cutoff": "in_progress",
+   "status_at_export": "in_progress",
+   "priority": "high",
+   "owner": "QAEngineer",
+   "parent": "DIG-297",
+   "blocked_by": [],
+   "blocks": [
+    "DIG-297",
+    "DIG-320",
+    "DIG-306",
+    "DIG-319",
+    "DIG-302",
+    "DIG-300",
+    "DIG-303",
+    "DIG-321",
+    "DIG-301",
+    "DIG-304",
+    "DIG-307",
+    "DIG-309",
+    "DIG-310",
+    "DIG-313",
+    "DIG-312",
+    "DIG-315",
+    "DIG-314",
+    "DIG-308",
+    "DIG-311",
+    "DIG-260"
+   ],
+   "created_at": "2026-10-01T07:16:21.724Z",
+   "updated_at": "2026-10-01T07:17:51.891Z",
+   "completed_at": null,
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "plan",
+     "title": "Gate 4 execution plan and handoff",
+     "latest_revision": 1
+    }
+   ],
+   "comments": 2,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-299.md"
+  },
+  {
+   "identifier": "DIG-305",
+   "id": "017acaa5-4eea-4b10-8062-57c6146a29bd",
+   "title": "honcho Gate 4: correct adjacent readiness notices and local quickstart",
+   "archive_role": "cross-reference",
+   "primary_repository": "honcho",
+   "paperclip_project": "honcho",
+   "status_at_cutoff": "blocked",
+   "status_at_export": "blocked",
+   "priority": "high",
+   "owner": "DevGuru",
+   "parent": "DIG-297",
+   "blocked_by": [],
+   "blocks": [
+    "DIG-297",
+    "DIG-319"
+   ],
+   "created_at": "2026-10-01T07:16:29.040Z",
+   "updated_at": "2026-10-01T10:04:41.980Z",
+   "completed_at": null,
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "plan",
+     "title": "Plan",
+     "latest_revision": 1
+    },
+    {
+     "key": "validation",
+     "title": "Validation",
+     "latest_revision": 1
+    }
+   ],
+   "comments": 5,
+   "attachments": [
+    {
+     "file": "DIG-305-verification.log",
+     "bytes": 5453,
+     "sha256": "d7d79ab314989a6fab8cdd552f4dd1e52c06242cc96d429f09752e9a67b41102",
+     "repository": "honcho",
+     "path": "attachments/DIG-305/e38b2a8d-DIG-305-verification.log",
+     "branch": "main"
+    },
+    {
+     "file": "DIG-305-harness.sh",
+     "bytes": 1449,
+     "sha256": "eb3707302a4d3239522f125d66823b57850a52bb90d4561c01fec9347e814cb6",
+     "repository": "honcho",
+     "path": "attachments/DIG-305/64fca47d-DIG-305-harness.sh",
+     "branch": "main"
+    }
+   ],
+   "work_products": [
+    {
+     "type": "artifact",
+     "title": "DIG-305 exact-head verification log",
+     "url": null,
+     "branch": null,
+     "sha": null,
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "DIG-305 bounded documentation correction",
+     "url": "https://repo.digikal.com/jawad/honcho/pulls/22",
+     "branch": null,
+     "sha": null,
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "artifact",
+     "title": "DIG-305 exact-head verification harness",
+     "url": null,
+     "branch": null,
+     "sha": null,
+     "status": "ready_for_review",
+     "review_state": "none"
+    }
+   ],
+   "page": "issues/DIG-305.md"
+  },
+  {
+   "identifier": "DIG-327",
+   "id": "837b1cba-8d75-4cb4-9289-b7b0b884b872",
+   "title": "CEO: missing-disposition sweep",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "(no project: company-wide)",
+   "status_at_cutoff": "in_review",
+   "status_at_export": "in_review",
+   "priority": "high",
+   "owner": "CEO",
+   "parent": null,
+   "blocked_by": [],
+   "blocks": [],
+   "created_at": "2026-10-01T09:54:02.789Z",
+   "updated_at": "2026-10-03T06:04:03.774Z",
+   "completed_at": null,
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "sweep",
+     "title": "CEO recovery sweep: current board operations",
+     "latest_revision": 2
+    }
+   ],
+   "comments": 30,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-327.md"
+  },
+  {
+   "identifier": "DIG-332",
+   "id": "0746bcf6-1867-4d9b-8e02-0dcb90892214",
+   "title": "Paperclip shutdown preparation",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "(no project: company-wide)",
+   "status_at_cutoff": "in_progress",
+   "status_at_export": "in_progress",
+   "priority": "medium",
+   "owner": "CEO",
+   "parent": null,
+   "blocked_by": [],
+   "blocks": [],
+   "created_at": "2026-10-03T06:10:52.229Z",
+   "updated_at": "2026-10-03T06:16:45.429Z",
+   "completed_at": null,
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "shutdown-cutoff",
+     "title": "Shutdown cutoff and acceptance record",
+     "latest_revision": 1
+    }
+   ],
+   "comments": 1,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-332.md"
+  },
+  {
+   "identifier": "DIG-333",
+   "id": "43bcad5a-ff75-4377-a4c5-d7b4e987dd2c",
+   "title": "Shutdown: reconcile and finish already-started Honcho work",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "(no project: company-wide)",
+   "status_at_cutoff": null,
+   "status_at_export": "in_progress",
+   "priority": "high",
+   "owner": "DevGuru",
+   "parent": "DIG-332",
+   "blocked_by": [],
+   "blocks": [],
+   "created_at": "2026-10-03T06:16:44.783Z",
+   "updated_at": "2026-10-03T06:16:45.870Z",
+   "completed_at": null,
+   "cancelled_at": null,
+   "documents": [],
+   "comments": 0,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-333.md"
+  },
+  {
+   "identifier": "DIG-334",
+   "id": "4eb02c8f-9a2b-45d4-b3c8-f8a4be9c59ad",
+   "title": "Shutdown: preserve and verify source work across all repositories",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "(no project: company-wide)",
+   "status_at_cutoff": null,
+   "status_at_export": "in_progress",
+   "priority": "high",
+   "owner": "ReleaseEngineer",
+   "parent": "DIG-332",
+   "blocked_by": [],
+   "blocks": [],
+   "created_at": "2026-10-03T06:16:44.986Z",
+   "updated_at": "2026-10-03T06:16:45.849Z",
+   "completed_at": null,
+   "cancelled_at": null,
+   "documents": [],
+   "comments": 0,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-334.md"
+  },
+  {
+   "identifier": "DIG-335",
+   "id": "863a40cc-524f-4dc6-8712-ac208da733a2",
+   "title": "Shutdown: commit portable task history and resume guides to every repository",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "(no project: company-wide)",
+   "status_at_cutoff": null,
+   "status_at_export": "in_progress",
+   "priority": "high",
+   "owner": "KnowledgeCurator",
+   "parent": "DIG-332",
+   "blocked_by": [],
+   "blocks": [],
+   "created_at": "2026-10-03T06:16:45.182Z",
+   "updated_at": "2026-10-03T06:16:45.878Z",
+   "completed_at": null,
+   "cancelled_at": null,
+   "documents": [],
+   "comments": 0,
+   "attachments": [],
+   "work_products": [],
+   "page": "issues/DIG-335.md"
+  }
+ ]
+}

@@ -1,0 +1,11 @@
+{
+ "snapshot": "baseline export 2026-10-03T07:00Z",
+ "remote": "https://repo.digikal.com/jawad/humm.git",
+ "default_branch": "main",
+ "refs": {
+  "HEAD": "086426996bc81113fc4da920e199a9943bd33603",
+  "refs/heads/main": "086426996bc81113fc4da920e199a9943bd33603",
+  "refs/tags/v1.0.0": "dd54e609932f07b6b6bfcfdd21460393c1d9a1c9"
+ },
+ "pull_requests": []
+}
