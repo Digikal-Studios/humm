@@ -53,3 +53,54 @@ Full text: `docs/MISSION.md` (the governing mission prompt — phases, gates, St
 - Phase 0/1 docs are living: implementation discovering an analysis error fixes the doc in the same commit.
 - Benchmark regressions on the transcription path are failures to fix, not notes to log.
 - End each milestone with a report: matrix status, benchmark numbers, deviations (with ADR refs), analysis corrections.
+
+## Digikal knowledge base
+
+Digikal keeps studio-wide context in a private knowledge base,
+<https://repo.digikal.com/jawad/digikal-knowledge-base>. It has a page set for this project: the
+[overview](https://repo.digikal.com/jawad/digikal-knowledge-base/src/branch/main/knowledge/projects/humm/README.md), with `architecture.md`,
+`status.md`, `decisions.md`, `design.md` and `glossary.md` in the same folder.
+It also holds the domain guidance that applies across projects. Start at the
+[index](https://repo.digikal.com/jawad/digikal-knowledge-base/src/branch/main/knowledge/README.md). The knowledge base's
+[`AGENTS.md`](https://repo.digikal.com/jawad/digikal-knowledge-base/src/branch/main/AGENTS.md) is the short form of the rules below.
+
+**Scope.** This repository's own instructions and its verified source keep
+their authority here. A knowledge-base page is a summary. It does not override
+them, and where the two disagree, trust the verified source and report the
+difference.
+
+**Get it.** Read it in the Forgejo web view, or clone it next to this checkout:
+
+```sh
+git clone https://repo.digikal.com/jawad/digikal-knowledge-base.git
+```
+
+Use your own Forgejo account, or the Git credential helper you already use for
+`repo.digikal.com`. The repository is private. If you cannot read it, say so in
+your task, ask the repository owner on Forgejo for access, and work from this
+repository's own documentation meanwhile. Never put a token or password in a
+clone URL, a file, a commit or an issue, and do not rely on a host-local path
+to reach the knowledge base.
+
+**Before you work.** Read this project's overview, then the pages your task
+touches: `architecture.md` before changing code, `status.md` for current risks
+and blockers, `decisions.md` before reversing a choice, and `design.md` for
+player- or user-facing work. Read the
+[domain hubs](https://repo.digikal.com/jawad/digikal-knowledge-base/src/branch/main/knowledge/README.md#domains) that apply, and any studio
+decision (ADR) those pages link to.
+
+**Judge what you read.** Each page's front matter has `confidence`,
+`last_reviewed` and `sources`. Check an `assumed` claim before you rely on it.
+Check a `reported` claim too when your change depends on it. If a page cites an
+older commit of this repository and the code has moved on, the code wins.
+
+**After you work.** If your work produces a decision, a status change, or a
+discovery that contradicts a page, propose a sourced update in the knowledge
+base. Follow its [`CONTRIBUTING.md`](https://repo.digikal.com/jawad/digikal-knowledge-base/src/branch/main/CONTRIBUTING.md) and
+[page conventions](https://repo.digikal.com/jawad/digikal-knowledge-base/src/branch/main/knowledge/CONVENTIONS.md): use a branch in the
+knowledge-base repository, give a retrievable source for every changed claim,
+make sure `python3 tools/check_kb.py` passes, and open a pull request that is
+reviewed before it merges. Do not copy knowledge-base pages into this
+repository. If you cannot make the change yourself, record the page path, the
+claim, what you found and the source in your task handoff, so the page owner
+can make it.
