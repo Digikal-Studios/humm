@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (baseline export 2026-10-03T07:00Z) | done |
+| Status at export (baseline export 2026-10-03T06:17Z (issues) / 06:24Z (git refs)) | done |
 | Priority | medium |
 | Owner (assignee) | GameExperienceDesigner |
 | Created by | KnowledgeCurator |

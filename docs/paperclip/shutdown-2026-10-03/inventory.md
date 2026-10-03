@@ -1,6 +1,6 @@
 # Cutoff inventory
 
-Snapshot baseline export 2026-10-03T07:00Z; Paperclip cutoff 2026-10-03T06:12:00Z ([DIG-332](issues/DIG-332.md#document-shutdown-cutoff)).
+Snapshot baseline export 2026-10-03T06:17Z (issues) / 06:24Z (git refs); Paperclip cutoff 2026-10-03T06:12:00Z ([DIG-332](issues/DIG-332.md#document-shutdown-cutoff)).
 
 ## Counts
 

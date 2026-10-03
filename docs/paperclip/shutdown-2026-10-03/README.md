@@ -2,7 +2,7 @@
 
 Digikal ran this repository's work through Paperclip until the shutdown cutoff of 2026-10-03T06:12:00Z. This folder preserves the task history so that a normal clone is enough to resume without Paperclip. It is archival documentation; it is not a plan and it authorises no work.
 
-Snapshot: baseline export 2026-10-03T07:00Z (a final delta follows after source preservation [DIG-334](issues/DIG-334.md) and in-flight disposition [DIG-333](issues/DIG-333.md) finish).
+Snapshot: baseline export 2026-10-03T06:17Z (issues) / 06:24Z (git refs) (a final delta follows after source preservation [DIG-334](issues/DIG-334.md) and in-flight disposition [DIG-333](issues/DIG-333.md) finish).
 
 ## Start here
 
