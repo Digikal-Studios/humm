@@ -1,11 +1,11 @@
 # DIG-4: Initial scan and status report per project
 
-> Cross-reference copy. The primary archive for DIG-4 is in the `infrastructure` repository: https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-4.md. Attachments and earlier document revisions are stored there.
+> Cross-reference copy. The primary archive for DIG-4 is in the `infrastructure` repository: https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-4.md. Attachments and earlier document revisions are stored there.
 
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (baseline export 2026-10-03T06:17Z (issues) / 06:24Z (git refs)) | done |
+| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
 | Priority | medium |
 | Owner (assignee) | CEO |
 | Created by | CEO |
@@ -15,7 +15,7 @@
 | Created / updated | 2026-09-25T11:34:29.634Z / 2026-09-25T14:14:16.556Z |
 | Completed / cancelled | 2026-09-25T14:14:16.556Z / — |
 | Blocked by | — |
-| Blocks | [DIG-8](DIG-8.md) (done) |
+| Blocks | [DIG-8](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-8.md) (done) |
 | Paperclip id | `3f9d9cad-81de-46af-bd1c-06a7e430900e` |
 
 ## Description
@@ -38,6 +38,8 @@ Task "Connect Digikal repositories and working directories". You wake automatica
 Every connected codebase has a report document and the roll-up comment is posted. Set the task to in_review assigned to CEO.
 
 ## Issue-thread interactions
+
+<a id="interaction-aa358126-1a1f-4237-a17e-345a476c4398"></a>
 
 ### request_confirmation — accepted — 2026-09-25T14:12:56.279Z
 
@@ -71,9 +73,11 @@ From TechLead; resolved 2026-09-25T14:14:11.243Z by CEO.
 
 ### 2026-09-25T13:52:47.790Z — TechLead
 
+Comment id `0a778ee9-26fb-4ef7-8c9f-32100b1647cc`; written by run `b4a08a36-da99-4ac3-bfa6-7ca007337339`.
+
 ##### Unblocked by DIG-2 — fanned out to 12 per-repo scans
 
-[DIG-2](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-2.md) landed 12 connected codebases, so per this task's deliverables I split the scan one child per codebase.
+[DIG-2](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-2.md) landed 12 connected codebases, so per this task's deliverables I split the scan one child per codebase.
 
 **Access verified this heartbeat.** All 12 Forgejo repos are readable from the runner. I ran a blobless `git clone --filter=blob:none --no-checkout https://repo.digikal.com/jawad/<name>.git` for each into run scratch — all 12 exited 0 with no credential prompt. Nothing is blocked on access. Read-only throughout; no repo was modified and no managed checkout was touched.
 
@@ -81,34 +85,36 @@ From TechLead; resolved 2026-09-25T14:14:11.243Z by CEO.
 
 | Repo | Child | Last commit | Commits | Branches | First read |
 |---|---|---|---|---|---|
-| aletheia | [DIG-9](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-9.md) | 2026-09-17 | 563 | 58 | Rust workspace + `gdd.md`; largest and most active |
-| tvi | [DIG-10](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-10.md) | 2026-07-15 | 552 | 54 | Rust + `web/`; Tadawul value-investing tool, default branch `master` |
-| browser-native-rts-poc | [DIG-11](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-11.md) | 2026-09-17 | 196 | 4 | Rust workspace + JS/Playwright; browser RTS PoC |
-| nurikabe | [DIG-12](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-12.md) | 2026-09-05 | 198 | 6 | Rust puzzle game + separate `solver/` |
+| aletheia | [DIG-9](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-9.md) | 2026-09-17 | 563 | 58 | Rust workspace + `gdd.md`; largest and most active |
+| tvi | [DIG-10](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-10.md) | 2026-07-15 | 552 | 54 | Rust + `web/`; Tadawul value-investing tool, default branch `master` |
+| browser-native-rts-poc | [DIG-11](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-11.md) | 2026-09-17 | 196 | 4 | Rust workspace + JS/Playwright; browser RTS PoC |
+| nurikabe | [DIG-12](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-12.md) | 2026-09-05 | 198 | 6 | Rust puzzle game + separate `solver/` |
 | humm | [DIG-14](DIG-14.md) | 2026-07-28 | 244 | 2 | Rust workspace; sandbox config hints at a Python/HF boundary |
-| adp | [DIG-16](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-16.md) | 2026-08-03 | 98 | 2 | Shell + `STATE.json` doc-extraction pipeline, not a conventional app |
-| RustView | [DIG-15](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-15.md) | 2026-09-05 | 45 | 2 | Rust viewer/tool with Forgejo + GitHub CI |
-| infrastructure | [DIG-13](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-13.md) | 2026-09-25 | 33 | 2 | Ansible/compose/SOPS; the studio's hosting substrate |
-| ai-engineering-governance | [DIG-17](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-17.md) | 2026-08-09 | 16 | 2 | Policy repo other repos appear to pin against |
-| zimam | [DIG-20](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-20.md) | 2026-07-31 | 11 | 4 | Committed design-package zips + review workspaces, not source |
-| jsync | [DIG-19](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-19.md) | 2026-07-29 | 4 | 2 | Small shell tool with install/uninstall scripts |
-| sweeper | [DIG-18](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-18.md) | 2026-07-24 | 1 | 2 | Single-commit 3D baseline; dormant since day one |
+| adp | [DIG-16](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-16.md) | 2026-08-03 | 98 | 2 | Shell + `STATE.json` doc-extraction pipeline, not a conventional app |
+| RustView | [DIG-15](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-15.md) | 2026-09-05 | 45 | 2 | Rust viewer/tool with Forgejo + GitHub CI |
+| infrastructure | [DIG-13](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-13.md) | 2026-09-25 | 33 | 2 | Ansible/compose/SOPS; the studio's hosting substrate |
+| ai-engineering-governance | [DIG-17](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-17.md) | 2026-08-09 | 16 | 2 | Policy repo other repos appear to pin against |
+| zimam | [DIG-20](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-20.md) | 2026-07-31 | 11 | 4 | Committed design-package zips + review workspaces, not source |
+| jsync | [DIG-19](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-19.md) | 2026-07-29 | 4 | 2 | Small shell tool with install/uninstall scripts |
+| sweeper | [DIG-18](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-18.md) | 2026-07-24 | 1 | 2 | Single-commit 3D baseline; dormant since day one |
 
 Each child carries the repo URL, the exact branch to scan, this seed inventory, and the full report spec, so it is self-contained. Priority encodes scan order: the four game/product codebases first.
 
 **Three things I already flag as cross-cutting, for the children to confirm:**
 
-- **Agent branches as repo defaults.** `nurikabe` defaults to `codex/nurikabe-implementation` and `zimam` to `claude/resume-zimam-second-review-34a1a6`. A default branch that is an agent's working branch is a *source of truth* problem — it is unclear what the canonical state of those projects is. Already raised with the founder in [DIG-2](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-2.md); the children will report how far those branches diverge from `main`.
+- **Agent branches as repo defaults.** `nurikabe` defaults to `codex/nurikabe-implementation` and `zimam` to `claude/resume-zimam-second-review-34a1a6`. A default branch that is an agent's working branch is a *source of truth* problem — it is unclear what the canonical state of those projects is. Already raised with the founder in [DIG-2](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-2.md); the children will report how far those branches diverge from `main`.
 - **Branch sprawl.** aletheia (58) and tvi (54) carry ~110 remote branches between them, nearly all agent-named. That is a *change cost* signal, not just untidiness.
 - **Portfolio shape.** On first read only three of twelve repos are games (aletheia, browser-native-rts-poc, nurikabe; sweeper is a dormant baseline). The rest are tools, infrastructure, a finance product, and artifact archives. That materially affects which specialists Digikal should hire, and I will quantify it in the roll-up.
 
-**Status:** this task is now blocked on the 12 children and wakes on `issue_blockers_resolved`. On that wake I post the roll-up — one line per project with a link to its report, plus the evidence-backed specialist-expertise list — and set this to `in_review` for CEO. [DIG-5](DIG-5.md), [DIG-7](DIG-7.md), and [DIG-8](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-8.md) stay blocked behind that roll-up as designed.
+**Status:** this task is now blocked on the 12 children and wakes on `issue_blockers_resolved`. On that wake I post the roll-up — one line per project with a link to its report, plus the evidence-backed specialist-expertise list — and set this to `in_review` for CEO. [DIG-5](DIG-5.md), [DIG-7](DIG-7.md), and [DIG-8](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-8.md) stay blocked behind that roll-up as designed.
 
 **Next action:** mine — work the 12 children in priority order.
 
 <a id="comment-6e83439e-ffa8-4d63-8c5d-225f37c89496"></a>
 
 ### 2026-09-25T14:12:56.124Z — TechLead
+
+Comment id `6e83439e-ffa8-4d63-8c5d-225f37c89496`; written by run `ffb0a008-11d0-46e9-9ea5-98e20a0fd9d7`.
 
 ##### Roll-up — 12 of 12 codebases scanned, reports posted
 
@@ -120,18 +126,18 @@ All 12 children are `done` and each carries a `report` document meeting the spec
 
 | Project | Report | State |
 |---|---|---|
-| **aletheia** | [DIG-9](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-9.md#document-report) | **Active development** — the only repo with current momentum. Bevy 0.19 shoot-'em-up where graphical fidelity *is* the mechanic. Engine/tooling-led and content-starved: 3 of 19 missions, 9 of 12 weapons and the whole EL1–EL3 axis unbuilt, while the in-process level editor is elaborate and finished. |
-| **infrastructure** | [DIG-13](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-13.md#document-report) | **Active development** — production infrastructure still labelled a "disposable test server" in its own charter. One DigitalOcean droplet hosts Forgejo (all 12 repos), the Paperclip board, Supabase, PostHog, and the RTS playtest route. Unusually disciplined security posture; **no backups at all**. |
-| **browser-native-rts-poc** | [DIG-11](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-11.md#document-report) | **Complete and deployed, stalled on human release gates.** ~57k lines, 734 tests, deterministic 15 Hz lockstep, deployed at `rts.digikal.com` and proven at 800 concurrent peers. What's left is a checklist needing the founder specifically (Safari machine, PostHog key, 4+ playtesters) — not engineering. |
-| **nurikabe** | [DIG-12](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-12.md#document-report) | **Complete release candidate, stalled at the shipping line.** 40k LOC, four crates, a genuinely novel admission gate (no puzzle is playable until proved uniquely solvable *and* human-solvable within its difficulty ceiling). Never tagged, no `main` branch, never run on Windows, never signed. |
-| **RustView** | [DIG-15](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-15.md#document-report) | **Complete, unreleased v0.1.0 — paused, not abandoned.** Consumer desktop image/video viewer, ~7.5k LOC, statically-linked H.264+AAC so no system codecs are needed. Zero TODO markers; the last two commits are CI plumbing, not half-done features. |
+| **aletheia** | [DIG-9](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-9.md#document-report) | **Active development** — the only repo with current momentum. Bevy 0.19 shoot-'em-up where graphical fidelity *is* the mechanic. Engine/tooling-led and content-starved: 3 of 19 missions, 9 of 12 weapons and the whole EL1–EL3 axis unbuilt, while the in-process level editor is elaborate and finished. |
+| **infrastructure** | [DIG-13](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-13.md#document-report) | **Active development** — production infrastructure still labelled a "disposable test server" in its own charter. One DigitalOcean droplet hosts Forgejo (all 12 repos), the Paperclip board, Supabase, PostHog, and the RTS playtest route. Unusually disciplined security posture; **no backups at all**. |
+| **browser-native-rts-poc** | [DIG-11](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-11.md#document-report) | **Complete and deployed, stalled on human release gates.** ~57k lines, 734 tests, deterministic 15 Hz lockstep, deployed at `rts.digikal.com` and proven at 800 concurrent peers. What's left is a checklist needing the founder specifically (Safari machine, PostHog key, 4+ playtesters) — not engineering. |
+| **nurikabe** | [DIG-12](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-12.md#document-report) | **Complete release candidate, stalled at the shipping line.** 40k LOC, four crates, a genuinely novel admission gate (no puzzle is playable until proved uniquely solvable *and* human-solvable within its difficulty ceiling). Never tagged, no `main` branch, never run on Windows, never signed. |
+| **RustView** | [DIG-15](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-15.md#document-report) | **Complete, unreleased v0.1.0 — paused, not abandoned.** Consumer desktop image/video viewer, ~7.5k LOC, statically-linked H.264+AAC so no system codecs are needed. Zero TODO markers; the last two commits are CI plumbing, not half-done features. |
 | **humm** | [DIG-14](DIG-14.md#document-report) | **Dormant — completed and self-declared done.** macOS transcription app (Rust port of Buzz), 106k LOC built in an 8-day mission against a 50-row parity matrix that closed at 46 verified / 4 documented exceptions. Cannot launch off the dev machine. |
-| **tvi** | [DIG-10](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-10.md#document-report) | **Dormant, production-grade baseline.** Not a game: a Ratatui TUI for Saudi Tadawul value investing, ~112k LOC, ~1,231 inline tests, exact-money integer halalas, cache-first and offline-capable. Idle ~10 weeks; all 54 remote branches fully merged. The SAHMK taxonomy deprecation was assessed and does **not** break it. |
-| **ai-engineering-governance** | [DIG-17](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-17.md#document-report) | **Complete and dormant.** Not a product — a distributable agent skill that installs and audits engineering governance inside other repos. Its own 27-session experiment found heavyweight governance cost 3.0–4.4× with *zero* measured outcome gain, so v3.x deleted the ceremony. |
-| **adp** | [DIG-16](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-16.md#document-report) | **Artifact archive — stage 1 complete, stage 2 never executed.** A one-off LLM extraction of a commercially published book into 163 knowledge files. Ships with 169 unresolved `TODO(human)` markers and has never been verified against its source. |
-| **sweeper** | [DIG-18](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-18.md#document-report) | **Dormant baseline.** A real, unit-tested Minesweeper on raw `wgpu` — with **no rendered UI at all**; the OS title bar is the entire interface. Paired with a 2,175-line approved implementation plan, none of which has been started. |
-| **jsync** | [DIG-19](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-19.md#document-report) | **Dormant baseline — complete and unusually well-hardened.** 998-line Bash mirror of a dev directory to `repo.digikal.com`, deliberately keeping the state Git loses (unpushed commits, stashes, `.env`, agent state). ~60% of the code is safety machinery. |
-| **zimam** | [DIG-20](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-20.md#document-report) | **Design-and-review artifact archive — zero implementation code.** Design package for an engineering control plane. Eight design revisions, four completed independent reviews, **four HOLDs**, with High findings rising 15 → 23. Stalled mid-correction ~8 weeks. |
+| **tvi** | [DIG-10](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-10.md#document-report) | **Dormant, production-grade baseline.** Not a game: a Ratatui TUI for Saudi Tadawul value investing, ~112k LOC, ~1,231 inline tests, exact-money integer halalas, cache-first and offline-capable. Idle ~10 weeks; all 54 remote branches fully merged. The SAHMK taxonomy deprecation was assessed and does **not** break it. |
+| **ai-engineering-governance** | [DIG-17](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-17.md#document-report) | **Complete and dormant.** Not a product — a distributable agent skill that installs and audits engineering governance inside other repos. Its own 27-session experiment found heavyweight governance cost 3.0–4.4× with *zero* measured outcome gain, so v3.x deleted the ceremony. |
+| **adp** | [DIG-16](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-16.md#document-report) | **Artifact archive — stage 1 complete, stage 2 never executed.** A one-off LLM extraction of a commercially published book into 163 knowledge files. Ships with 169 unresolved `TODO(human)` markers and has never been verified against its source. |
+| **sweeper** | [DIG-18](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-18.md#document-report) | **Dormant baseline.** A real, unit-tested Minesweeper on raw `wgpu` — with **no rendered UI at all**; the OS title bar is the entire interface. Paired with a 2,175-line approved implementation plan, none of which has been started. |
+| **jsync** | [DIG-19](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-19.md#document-report) | **Dormant baseline — complete and unusually well-hardened.** 998-line Bash mirror of a dev directory to `repo.digikal.com`, deliberately keeping the state Git loses (unpushed commits, stashes, `.env`, agent state). ~60% of the code is safety machinery. |
+| **zimam** | [DIG-20](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-20.md#document-report) | **Design-and-review artifact archive — zero implementation code.** Design package for an engineering control plane. Eight design revisions, four completed independent reviews, **four HOLDs**, with High findings rising 15 → 23. Stalled mid-correction ~8 weeks. |
 
 ###### Specialist expertise the codebases actually need
 
@@ -176,27 +182,32 @@ Each report carries its own founder questions. Three need answering before any o
 2. **Which three projects are actually alive?** Nine are dormant and only three are games. A short answer — which to ship, which to shelve, which to archive — converts this scan into a roadmap and sizes the hiring list. Without it, "what should we staff?" has no correct answer.
 3. **`zimam`: implement, redesign, or stop?** Four independent reviews, four HOLDs, High findings rising 15 → 23 across eight revisions. On this evidence I do not recommend authorising implementation. A decision either way stops the review loop from consuming more time.
 
-Two mechanical ones already raised in [DIG-2](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-2.md) and now confirmed by the scans: `nurikabe` has **no `main` branch at all** (its CI triggers on a branch that does not exist), and `zimam`'s default is a stale agent branch that is not where the work is.
+Two mechanical ones already raised in [DIG-2](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-2.md) and now confirmed by the scans: `nurikabe` has **no `main` branch at all** (its CI triggers on a branch that does not exist), and `zimam`'s default is a stale agent branch that is not where the work is.
 
 ###### Disposition
 
-Moving to `in_review` for [CEO](/DIG/agents/ceo). [DIG-5](DIG-5.md) (knowledge base pages), [DIG-7](DIG-7.md) (design-side review) and [DIG-8](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-8.md) (team expansion proposal) unblock when this is accepted — the specialist list above is the input DIG-8 needs.
+Moving to `in_review` for CEO (historical link `/DIG/agents/ceo`). [DIG-5](DIG-5.md) (knowledge base pages), [DIG-7](DIG-7.md) (design-side review) and [DIG-8](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-8.md) (team expansion proposal) unblock when this is accepted — the specialist list above is the input DIG-8 needs.
+
 
 <a id="comment-4572730f-a880-4ae4-988e-e1bc94e324d4"></a>
 
 ### 2026-09-25T14:13:05.820Z — TechLead
 
-Handed to [CEO](/DIG/agents/ceo) for review. Waiting on the **Accept the 12-codebase scan** confirmation above; accepting it closes this and releases [DIG-5](DIG-5.md), [DIG-7](DIG-7.md) and [DIG-8](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-8.md).
+Comment id `4572730f-a880-4ae4-988e-e1bc94e324d4`; written by run `ffb0a008-11d0-46e9-9ea5-98e20a0fd9d7`.
+
+Handed to CEO (historical link `/DIG/agents/ceo`) for review. Waiting on the **Accept the 12-codebase scan** confirmation above; accepting it closes this and releases [DIG-5](DIG-5.md), [DIG-7](DIG-7.md) and [DIG-8](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-8.md).
 
 <a id="comment-edf3a76a-9ce1-4331-857e-0a89b2f73320"></a>
 
 ### 2026-09-25T14:14:11.380Z — CEO
 
+Comment id `edf3a76a-9ce1-4331-857e-0a89b2f73320`; written by run `578cdf5b-ac6b-4c87-95a8-1eb6631e6243`.
+
 ##### CEO review — accepted, closing
 
-Verified before accepting: all 12 children are `done`, each carries a `report` document with every required section (summary, stack and versions, architecture, evidence-cited Built / In progress / Planned, ranked risks, founder questions), and a spot-read of the nurikabe Built list confirmed claims cite file paths and line numbers rather than the README. The roll-up and the specialist-expertise list meet the spec. Good work, [TechLead](/DIG/agents/techlead).
+Verified before accepting: all 12 children are `done`, each carries a `report` document with every required section (summary, stack and versions, architecture, evidence-cited Built / In progress / Planned, ranked risks, founder questions), and a spot-read of the nurikabe Built list confirmed claims cite file paths and line numbers rather than the README. The roll-up and the specialist-expertise list meet the spec. Good work, TechLead (historical link `/DIG/agents/techlead`).
 
-**What this releases.** Closing DIG-4 unblocks [DIG-5](DIG-5.md) (KnowledgeCurator: knowledge base pages), [DIG-7](DIG-7.md) (GameExperienceDesigner: design-side review) and [DIG-8](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-8.md) (me: team expansion proposal).
+**What this releases.** Closing DIG-4 unblocks [DIG-5](DIG-5.md) (KnowledgeCurator: knowledge base pages), [DIG-7](DIG-7.md) (GameExperienceDesigner: design-side review) and [DIG-8](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-8.md) (me: team expansion proposal).
 
 **What I am carrying forward.** The three escalated founder questions go into DIG-8 as its opening decision card, since the hiring proposal cannot be sized without them:
 
@@ -204,4 +215,16 @@ Verified before accepting: all 12 children are `done`, each carries a `report` d
 2. Which projects are alive: ship, shelve, or archive across the nine dormant repos.
 3. `zimam`: implement, redesign, or stop.
 
-The two mechanical items (nurikabe has no `main` branch; zimam defaults to a stale agent branch) stay tracked on [DIG-2](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-2.md).
+The two mechanical items (nurikabe has no `main` branch; zimam defaults to a stale agent branch) stay tracked on [DIG-2](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-2.md).
+
+## Agent runs (5)
+
+Every Paperclip heartbeat run recorded against this issue. A run's results are the comments, documents, attachments and commits it wrote (comment headers above name the run). Raw run transcripts are not archived, except the runs listed with a transcript copy below; see [inventory.md](../inventory.md#exclusions).
+
+| Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
+|---|---|---|---|---|---|---|
+| `49bb092e-91c3-496d-b89b-418f8156efc9` | CEO | succeeded | 2026-09-25T11:30:39.084Z | 2026-09-25T11:35:40.055Z | 300406 | — |
+| `3d0c9573-5ae7-4949-8033-41ca46bfc9f9` | CEO | succeeded | 2026-09-25T13:47:59.737Z | 2026-09-25T13:50:42.992Z | 110421 | — |
+| `b4a08a36-da99-4ac3-bfa6-7ca007337339` | TechLead | succeeded | 2026-09-25T13:50:17.311Z | 2026-09-25T13:53:09.618Z | 161784 | — |
+| `ffb0a008-11d0-46e9-9ea5-98e20a0fd9d7` | TechLead | cancelled | 2026-09-25T14:10:24.908Z | 2026-09-25T14:13:05.610Z | 138118 | — |
+| `578cdf5b-ac6b-4c87-95a8-1eb6631e6243` | CEO | succeeded | 2026-09-25T14:13:05.970Z | 2026-09-25T14:14:40.200Z | 96811 | — |

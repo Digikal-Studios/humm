@@ -1,18 +1,18 @@
 # Cutoff inventory
 
-Snapshot baseline export 2026-10-03T06:17Z (issues) / 06:24Z (git refs); Paperclip cutoff 2026-10-03T06:12:00Z ([DIG-332](issues/DIG-332.md#document-shutdown-cutoff)).
+Snapshot 2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z): Paperclip records exported from 2026-10-03T16:42:39Z, Git refs read at 2026-10-03T16:46:28Z. Original Paperclip cutoff 2026-10-03T06:12:00Z ([DIG-332](issues/DIG-332.md#document-shutdown-cutoff)); every shutdown-era record created after it, up to the export, is included.
 
 ## Counts
 
 | Measure | Primary issues | All issues in this archive |
 |---|---|---|
-| issues | 2 | 23 |
-| comments | 2 | 130 |
-| documents | 2 | 25 |
-| document revisions | 2 | 42 |
-| attachments | 0 | 2 |
-| interactions | 0 | 11 |
-| work products | 0 | 3 |
+| issues | 2 | 27 |
+| comments | 2 | 369 |
+| documents | 2 | 61 |
+| document revisions | 2 | 173 |
+| attachments | 0 | 15 |
+| interactions | 0 | 22 |
+| work products | 0 | 73 |
 | deleted comments excluded | 0 | 0 |
 
 Status at cutoff (primary): done 2.
@@ -26,16 +26,21 @@ No attachment exceeds the large-file threshold.
 ## How issues were mapped here
 
 - **Primary**: the issue's Paperclip project is linked to this repository.
-- **Cross-reference copy**: the issue is a parent, blocker, blocked issue or textual reference of a primary issue, refers to one, or is a company-wide policy/shutdown record (DIG-250, DIG-261, DIG-299, DIG-305, DIG-327, DIG-332, DIG-333, DIG-334, DIG-335).
+- **Cross-reference copy**: the issue is a parent, blocker, blocked issue or textual reference of a primary issue, refers to one, or is a company-wide policy/shutdown record (DIG-250, DIG-261, DIG-299, DIG-305, DIG-327, DIG-332, DIG-333, DIG-334, DIG-335, DIG-337, DIG-338, DIG-339, DIG-340).
 
-## Exclusions
+<a id="exclusions"></a>
 
-- Secret values: none exported. Redactions applied in this archive: openai_key ×1.
+## Exclusions and redactions
+
+- Secret values: none exported. Redactions applied in this archive: assigned_secret ×1, openai_key ×1. The repository token pasted into a DIG-2 answer stays redacted under the founder's decision to keep it unchanged for now (infrastructure `credential-decision-2026-10-03.md`).
 - Deleted comments are excluded (count above).
-- Paperclip runtime state is excluded: run ids, execution locks, adapter overrides, workspace settings, agent configuration and heartbeat logs. Agent configuration is restored from Paperclip itself, not from this archive.
-- Cross-reference copies do not duplicate attachments or earlier document revisions; they link to the primary repository's copy.
-- Links of the form `/DIG/...` that are not issue or attachment links (agent, run and approval pages) still point at Paperclip and work only while Paperclip runs. Agent mentions are kept as plain names.
-- Relative links inside archived descriptions, comments and documents are kept verbatim. They resolve against the location the author wrote them for (usually the repository root or the company knowledge base), not against this folder.
+- Agent runs: every run recorded against an issue is listed on that issue's page (4 for primary issues here). Raw run transcripts are excluded as runtime output whose results are already recorded as comments, documents, attachments and commits, and which carry host environment detail. The exception is the shelved Honcho work that stopped mid-run (DIG-343, DIG-344 and post-cutoff DIG-299 runs): 25 transcripts are kept, redacted, on branch `archive/paperclip-shutdown-2026-10-03-large-attachments` of the issue's primary repository; 2 runs in that set never wrote a log on the host.
+- Paperclip runtime state is excluded: execution locks, leases, adapter overrides, workspace runtime settings, agent memory and sessions. Agent role instructions are archived once, in the infrastructure archive under `agents/`.
+- Cross-reference copies do not duplicate attachments or earlier document revisions; they link to the primary repository's copy on its docs branch.
+- Links: Paperclip issue, document, comment, interaction and attachment links are rewritten to files in this folder (or the infrastructure archive). Links to other Paperclip pages (agents, approvals, runs) and authored relative links that do not resolve here are shown as inert text with the original target in code, kept as provenance. Counts for the issue pages in this folder: agent mention kept as name 27, attachment link 23, historical link made inert 47, issue link 1602, issue link with anchor 776.
+- Source code, task branches, stashes and uncommitted work are not in this folder; they are on Git refs listed in [refs.md](refs.md) from ReleaseEngineer's manifest.
+
+
 
 ## Primary issues
 
@@ -62,10 +67,14 @@ No attachment exceeds the large-file threshold.
 | [DIG-76](issues/DIG-76.md) | done | done | TechLead | Project decision logs: what binding decisions does each project carry? |
 | [DIG-250](issues/DIG-250.md) | done | done | CEO | Assign adversarial reviews to DevGuru |
 | [DIG-261](issues/DIG-261.md) | done | done | CEO | Resolve blockers |
-| [DIG-299](issues/DIG-299.md) | in_progress | in_progress | QAEngineer | honcho Gate 4: prove run-owned Python/SDK targets before database contact |
-| [DIG-305](issues/DIG-305.md) | blocked | blocked | DevGuru | honcho Gate 4: correct adjacent readiness notices and local quickstart |
-| [DIG-327](issues/DIG-327.md) | in_review | in_review | CEO | CEO: missing-disposition sweep |
-| [DIG-332](issues/DIG-332.md) | in_progress | in_progress | CEO | Paperclip shutdown preparation |
-| [DIG-333](issues/DIG-333.md) | created after cutoff | in_progress | DevGuru | Shutdown: reconcile and finish already-started Honcho work |
-| [DIG-334](issues/DIG-334.md) | created after cutoff | in_progress | ReleaseEngineer | Shutdown: preserve and verify source work across all repositories |
-| [DIG-335](issues/DIG-335.md) | created after cutoff | in_progress | KnowledgeCurator | Shutdown: commit portable task history and resume guides to every repository |
+| [DIG-299](issues/DIG-299.md) | in_progress | cancelled | QAEngineer | honcho Gate 4: prove run-owned Python/SDK targets before database contact |
+| [DIG-305](issues/DIG-305.md) | blocked | done | TechLead | honcho Gate 4: correct adjacent readiness notices and local quickstart |
+| [DIG-327](issues/DIG-327.md) | in_review | blocked | CEO | CEO: missing-disposition sweep |
+| [DIG-332](issues/DIG-332.md) | in_progress | blocked | CEO | Paperclip shutdown preparation |
+| [DIG-333](issues/DIG-333.md) | created after cutoff | done | CEO | Shutdown: record Honcho shelving and preservation disposition |
+| [DIG-334](issues/DIG-334.md) | created after cutoff | done | ReleaseEngineer | Shutdown: preserve and verify source work across all repositories |
+| [DIG-335](issues/DIG-335.md) | created after cutoff | blocked | KnowledgeCurator | Shutdown: commit portable task history and resume guides to every repository |
+| [DIG-337](issues/DIG-337.md) | created after cutoff | in_progress | KnowledgeCurator | Shutdown archive: final delta after source preservation and in-flight disposition (DIG-335 continuation) |
+| [DIG-338](issues/DIG-338.md) | created after cutoff | done | ReleaseEngineer | Shutdown: final source-preservation delta before documentation export |
+| [DIG-339](issues/DIG-339.md) | created after cutoff | done | KnowledgeCurator | Populate the canonical digikal-knowledge-base repository |
+| [DIG-340](issues/DIG-340.md) | created after cutoff | done | unassigned | Link all 18 project repositories to the canonical knowledge base |

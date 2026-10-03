@@ -1,5 +1,5 @@
 {
- "snapshot": "baseline export 2026-10-03T06:17Z (issues) / 06:24Z (git refs)",
+ "snapshot": "2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)",
  "cutoff": "2026-10-03T06:12:00Z",
  "repository": "humm",
  "issues": [
@@ -525,47 +525,162 @@
    "primary_repository": "honcho",
    "paperclip_project": "honcho",
    "status_at_cutoff": "in_progress",
-   "status_at_export": "in_progress",
+   "status_at_export": "cancelled",
    "priority": "high",
    "owner": "QAEngineer",
    "parent": "DIG-297",
    "blocked_by": [],
    "blocks": [
-    "DIG-297",
-    "DIG-320",
-    "DIG-306",
-    "DIG-319",
-    "DIG-302",
-    "DIG-300",
-    "DIG-303",
-    "DIG-321",
-    "DIG-301",
-    "DIG-304",
-    "DIG-307",
-    "DIG-309",
-    "DIG-310",
-    "DIG-313",
-    "DIG-312",
-    "DIG-315",
-    "DIG-314",
-    "DIG-308",
-    "DIG-311",
-    "DIG-260"
+    "DIG-327",
+    "DIG-297"
    ],
    "created_at": "2026-10-01T07:16:21.724Z",
-   "updated_at": "2026-10-01T07:17:51.891Z",
+   "updated_at": "2026-10-03T14:35:09.886Z",
    "completed_at": null,
-   "cancelled_at": null,
+   "cancelled_at": "2026-10-03T14:35:07.876Z",
    "documents": [
+    {
+     "key": "ceo-escalation",
+     "title": "CEO escalation disposition \u2014 changes requested after round 3",
+     "latest_revision": 1
+    },
     {
      "key": "plan",
      "title": "Gate 4 execution plan and handoff",
      "latest_revision": 1
+    },
+    {
+     "key": "review",
+     "title": "DevGuru review: reject a3bcce0 (round 3; CEO escalation)",
+     "latest_revision": 3
+    },
+    {
+     "key": "rework-routing",
+     "title": "CEO-directed design, implementation and review handoff",
+     "latest_revision": 2
+    },
+    {
+     "key": "validation",
+     "title": "Validation and author handoff, round 3 (a3bcce0)",
+     "latest_revision": 3
     }
    ],
-   "comments": 2,
-   "attachments": [],
-   "work_products": [],
+   "comments": 24,
+   "attachments": [
+    {
+     "file": "dig-299-review-r3-a3bcce0.tar.gz",
+     "bytes": 4277,
+     "sha256": "bd604c7519d1b8ec13a824fd456a2b113767fac5ddd39fe48402aec8a58fdd47",
+     "repository": "honcho",
+     "path": "attachments/DIG-299/8e2d6fbc-dig-299-review-r3-a3bcce0.tar.gz",
+     "branch": "main"
+    },
+    {
+     "file": "dig-299-evidence-a3bcce0.tar.gz",
+     "bytes": 290060,
+     "sha256": "fa1abd32f2a2a7e562c5706660f3c0217237d0f3b6068b97e268f22a260e10fa",
+     "repository": "honcho",
+     "path": "attachments/DIG-299/953a269c-dig-299-evidence-a3bcce0.tar.gz",
+     "branch": "main"
+    },
+    {
+     "file": "dig-299-review-r2-63ed457.tar.gz",
+     "bytes": 4944,
+     "sha256": "af714fa3daa6e3b80342b6276f0cbe7afad3896171d5cb8ec37b095cb9440419",
+     "repository": "honcho",
+     "path": "attachments/DIG-299/120fe47d-dig-299-review-r2-63ed457.tar.gz",
+     "branch": "main"
+    },
+    {
+     "file": "dig-299-evidence-63ed457.tar.gz",
+     "bytes": 18677,
+     "sha256": "7b6f77c1ea134114086cad090fd21542b512bd7bc227ccff5ccbc41adb609412",
+     "repository": "honcho",
+     "path": "attachments/DIG-299/8e04f6b0-dig-299-evidence-63ed457.tar.gz",
+     "branch": "main"
+    },
+    {
+     "file": "dig-299-review-b4f169c.tar.gz",
+     "bytes": 5393,
+     "sha256": "6364eb24f05d86f9cabf273589a79dd17e88445de40987e5c0f93016eb0d49de",
+     "repository": "honcho",
+     "path": "attachments/DIG-299/5564d22b-dig-299-review-b4f169c.tar.gz",
+     "branch": "main"
+    },
+    {
+     "file": "dig-299-evidence-b4f169c.tar.gz",
+     "bytes": 3075,
+     "sha256": "6a3d172e51957c27524315f39a5b4cfa8f62e58d3e3e658632f7630a0c3f032d",
+     "repository": "honcho",
+     "path": "attachments/DIG-299/2c44b004-dig-299-evidence-b4f169c.tar.gz",
+     "branch": "main"
+    }
+   ],
+   "work_products": [
+    {
+     "type": "artifact",
+     "title": "DIG-299 round-3 independent review evidence",
+     "url": null,
+     "branch": null,
+     "sha": null,
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "PR #29: require run-owned Rust/SDK targets (DIG-299)",
+     "url": "https://repo.digikal.com/jawad/honcho/pulls/29",
+     "branch": null,
+     "sha": null,
+     "status": "ready_for_review",
+     "review_state": "needs_board_review"
+    },
+    {
+     "type": "artifact",
+     "title": "DIG-299 round-2 independent review evidence at 63ed457",
+     "url": null,
+     "branch": null,
+     "sha": null,
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "artifact",
+     "title": "DIG-299 round-3 exact-head evidence (a3bcce0)",
+     "url": null,
+     "branch": null,
+     "sha": null,
+     "status": "ready_for_review",
+     "review_state": "needs_board_review"
+    },
+    {
+     "type": "artifact",
+     "title": "DIG-299 exact-head verification evidence (b4f169c)",
+     "url": null,
+     "branch": null,
+     "sha": null,
+     "status": "ready_for_review",
+     "review_state": "needs_board_review"
+    },
+    {
+     "type": "artifact",
+     "title": "DIG-299 round-2 exact-head evidence (63ed457)",
+     "url": null,
+     "branch": null,
+     "sha": null,
+     "status": "ready_for_review",
+     "review_state": "needs_board_review"
+    },
+    {
+     "type": "artifact",
+     "title": "DIG-299 independent review evidence at b4f169c",
+     "url": null,
+     "branch": null,
+     "sha": null,
+     "status": "ready_for_review",
+     "review_state": "none"
+    }
+   ],
    "page": "issues/DIG-299.md"
   },
   {
@@ -576,33 +691,90 @@
    "primary_repository": "honcho",
    "paperclip_project": "honcho",
    "status_at_cutoff": "blocked",
-   "status_at_export": "blocked",
+   "status_at_export": "done",
    "priority": "high",
-   "owner": "DevGuru",
+   "owner": "TechLead",
    "parent": "DIG-297",
    "blocked_by": [],
    "blocks": [
-    "DIG-297",
-    "DIG-319"
+    "DIG-297"
    ],
    "created_at": "2026-10-01T07:16:29.040Z",
-   "updated_at": "2026-10-01T10:04:41.980Z",
-   "completed_at": null,
+   "updated_at": "2026-10-03T09:33:51.912Z",
+   "completed_at": "2026-10-03T09:33:51.875Z",
    "cancelled_at": null,
    "documents": [
+    {
+     "key": "merge-receipt",
+     "title": "merge-receipt",
+     "latest_revision": 1
+    },
     {
      "key": "plan",
      "title": "Plan",
      "latest_revision": 1
     },
     {
+     "key": "review",
+     "title": "Final review \u2014 approved at b1555b7",
+     "latest_revision": 3
+    },
+    {
      "key": "validation",
-     "title": "Validation",
-     "latest_revision": 1
+     "title": "validation",
+     "latest_revision": 3
     }
    ],
-   "comments": 5,
+   "comments": 19,
    "attachments": [
+    {
+     "file": "round3-independent.log",
+     "bytes": 331,
+     "sha256": "c63c069a4b4c5391d1aea4a07af8014124020e6a084c1a2467ba320d5d081968",
+     "repository": "honcho",
+     "path": "attachments/DIG-305/cfb80a99-round3-independent.log",
+     "branch": "main"
+    },
+    {
+     "file": "harness-r1-run.log",
+     "bytes": 460,
+     "sha256": "a991625255fbee0fbe643cb8de60e6ad717c20b770fcb3855b5a8d3c89c6ddc7",
+     "repository": "honcho",
+     "path": "attachments/DIG-305/2bdc9fcd-harness-r1-run.log",
+     "branch": "main"
+    },
+    {
+     "file": "harness-r1.sh",
+     "bytes": 1472,
+     "sha256": "a6a3f2e50b66934fe80d6f27b1b06ba8b3efc525b2aa7b7d8cde97dde4c62a80",
+     "repository": "honcho",
+     "path": "attachments/DIG-305/eaccc012-harness-r1.sh",
+     "branch": "main"
+    },
+    {
+     "file": "old-harness-on-new-head.log",
+     "bytes": 751,
+     "sha256": "6f05f8fbaba96329147f01c90b354bdcb274962a6d12fe5cc2a4b1f383a6c64c",
+     "repository": "honcho",
+     "path": "attachments/DIG-305/ee26df32-old-harness-on-new-head.log",
+     "branch": "main"
+    },
+    {
+     "file": "r1-validation.log",
+     "bytes": 4649,
+     "sha256": "f008ba3539448fd564595c9b1e54baa3b5c63ba91dc806085664396c4ad61658",
+     "repository": "honcho",
+     "path": "attachments/DIG-305/7cb14d0c-r1-validation.log",
+     "branch": "main"
+    },
+    {
+     "file": "DIG-305-independent-review-evidence.txt",
+     "bytes": 11960,
+     "sha256": "ed1e16b5195552a8b16e6eff6ec76ab8b18ac8f2b1606052b6391d86f89de1da",
+     "repository": "honcho",
+     "path": "attachments/DIG-305/698bf995-DIG-305-independent-review-evidence.txt",
+     "branch": "main"
+    },
     {
      "file": "DIG-305-verification.log",
      "bytes": 5453,
@@ -623,6 +795,24 @@
    "work_products": [
     {
      "type": "artifact",
+     "title": "DIG-305 final independent harness run",
+     "url": null,
+     "branch": null,
+     "sha": null,
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "artifact",
+     "title": "DIG-305 round 2: stale harness reproduction",
+     "url": null,
+     "branch": null,
+     "sha": null,
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "artifact",
      "title": "DIG-305 exact-head verification log",
      "url": null,
      "branch": null,
@@ -631,9 +821,27 @@
      "review_state": "none"
     },
     {
-     "type": "pull_request",
-     "title": "DIG-305 bounded documentation correction",
-     "url": "https://repo.digikal.com/jawad/honcho/pulls/22",
+     "type": "artifact",
+     "title": "harness-r1-run.log",
+     "url": null,
+     "branch": null,
+     "sha": null,
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "artifact",
+     "title": "r1-validation.log",
+     "url": null,
+     "branch": null,
+     "sha": null,
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "artifact",
+     "title": "DIG-305 independent review evidence",
+     "url": null,
      "branch": null,
      "sha": null,
      "status": "ready_for_review",
@@ -643,6 +851,24 @@
      "type": "artifact",
      "title": "DIG-305 exact-head verification harness",
      "url": null,
+     "branch": null,
+     "sha": null,
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "artifact",
+     "title": "harness-r1.sh",
+     "url": null,
+     "branch": null,
+     "sha": null,
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "DIG-305 bounded documentation correction",
+     "url": "https://repo.digikal.com/jawad/honcho/pulls/22",
      "branch": null,
      "sha": null,
      "status": "ready_for_review",
@@ -659,25 +885,43 @@
    "primary_repository": "infrastructure",
    "paperclip_project": "(no project: company-wide)",
    "status_at_cutoff": "in_review",
-   "status_at_export": "in_review",
+   "status_at_export": "blocked",
    "priority": "high",
    "owner": "CEO",
    "parent": null,
-   "blocked_by": [],
-   "blocks": [],
+   "blocked_by": [
+    "DIG-299"
+   ],
+   "blocks": [
+    "DIG-332"
+   ],
    "created_at": "2026-10-01T09:54:02.789Z",
-   "updated_at": "2026-10-03T06:04:03.774Z",
+   "updated_at": "2026-10-03T14:23:06.193Z",
    "completed_at": null,
    "cancelled_at": null,
    "documents": [
     {
+     "key": "recovery-dig-306",
+     "title": "DIG-306: confirmed execution hold and evidence gap",
+     "latest_revision": 4
+    },
+    {
      "key": "sweep",
-     "title": "CEO recovery sweep: current board operations",
-     "latest_revision": 2
+     "title": "Recovery verified: two resumed, one hold remains",
+     "latest_revision": 5
     }
    ],
-   "comments": 30,
-   "attachments": [],
+   "comments": 40,
+   "attachments": [
+    {
+     "file": "image.png",
+     "bytes": 251643,
+     "sha256": "39752e02a9ee68c22b8948983fcc4cca258c8435721fbeeb9571de1b29d3ca47",
+     "repository": "infrastructure",
+     "path": "attachments/DIG-327/e0dd4d8b-image.png",
+     "branch": "main"
+    }
+   ],
    "work_products": [],
    "page": "issues/DIG-327.md"
   },
@@ -689,48 +933,145 @@
    "primary_repository": "infrastructure",
    "paperclip_project": "(no project: company-wide)",
    "status_at_cutoff": "in_progress",
-   "status_at_export": "in_progress",
+   "status_at_export": "blocked",
    "priority": "medium",
    "owner": "CEO",
    "parent": null,
-   "blocked_by": [],
+   "blocked_by": [
+    "DIG-327",
+    "DIG-340",
+    "DIG-339",
+    "DIG-335",
+    "DIG-334",
+    "DIG-333"
+   ],
    "blocks": [],
    "created_at": "2026-10-03T06:10:52.229Z",
-   "updated_at": "2026-10-03T06:16:45.429Z",
+   "updated_at": "2026-10-03T15:53:54.190Z",
    "completed_at": null,
    "cancelled_at": null,
    "documents": [
     {
+     "key": "credential-decision",
+     "title": "Founder decision: keep onboarding token unchanged for now",
+     "latest_revision": 2
+    },
+    {
+     "key": "credential-rotation",
+     "title": "Guided revocation: old jawad onboarding token",
+     "latest_revision": 2
+    },
+    {
+     "key": "honcho-shelving",
+     "title": "Honcho shelving decision, cancellation inventory and preservation requirements",
+     "latest_revision": 3
+    },
+    {
+     "key": "kb-repository-rollout",
+     "title": "Canonical KB repository migration and project adoption",
+     "latest_revision": 1
+    },
+    {
+     "key": "knowledge-storage",
+     "title": "KnowledgeCurator: storage locations and verified repository copy",
+     "latest_revision": 2
+    },
+    {
+     "key": "portable-preservation",
+     "title": "Required: complete repository handover without Paperclip",
+     "latest_revision": 1
+    },
+    {
+     "key": "shutdown-control-state",
+     "title": "Shutdown control state and continuation paths",
+     "latest_revision": 2
+    },
+    {
      "key": "shutdown-cutoff",
      "title": "Shutdown cutoff and acceptance record",
-     "latest_revision": 1
+     "latest_revision": 5
+    },
+    {
+     "key": "shutdown-progress",
+     "title": "Shutdown progress and credential decision",
+     "latest_revision": 4
     }
    ],
-   "comments": 1,
+   "comments": 35,
    "attachments": [],
-   "work_products": [],
+   "work_products": [
+    {
+     "type": "pull_request",
+     "title": "Founder token deferral decision \u2014 infrastructure PR #3",
+     "url": "https://repo.digikal.com/jawad/infrastructure/pulls/3",
+     "branch": null,
+     "sha": null,
+     "status": "ready_for_review",
+     "review_state": "none"
+    }
+   ],
    "page": "issues/DIG-332.md"
   },
   {
    "identifier": "DIG-333",
    "id": "43bcad5a-ff75-4377-a4c5-d7b4e987dd2c",
-   "title": "Shutdown: reconcile and finish already-started Honcho work",
+   "title": "Shutdown: record Honcho shelving and preservation disposition",
    "archive_role": "cross-reference",
    "primary_repository": "infrastructure",
    "paperclip_project": "(no project: company-wide)",
    "status_at_cutoff": null,
-   "status_at_export": "in_progress",
+   "status_at_export": "done",
    "priority": "high",
-   "owner": "DevGuru",
+   "owner": "CEO",
    "parent": "DIG-332",
    "blocked_by": [],
-   "blocks": [],
+   "blocks": [
+    "DIG-332",
+    "DIG-337",
+    "DIG-338"
+   ],
    "created_at": "2026-10-03T06:16:44.783Z",
-   "updated_at": "2026-10-03T06:16:45.870Z",
-   "completed_at": null,
+   "updated_at": "2026-10-03T16:04:47.096Z",
+   "completed_at": "2026-10-03T16:04:47.025Z",
    "cancelled_at": null,
-   "documents": [],
-   "comments": 0,
+   "documents": [
+    {
+     "key": "archive-handoff",
+     "title": "Honcho archive handoff without publication",
+     "latest_revision": 1
+    },
+    {
+     "key": "ceo-review",
+     "title": "CEO review: Honcho shelving disposition approved",
+     "latest_revision": 3
+    },
+    {
+     "key": "completion-boundary",
+     "title": "Shutdown completion boundaries and source reuse",
+     "latest_revision": 5
+    },
+    {
+     "key": "decisions",
+     "title": "Shutdown decisions and applied receipts",
+     "latest_revision": 10
+    },
+    {
+     "key": "shelving-disposition",
+     "title": "Honcho shelving: cancellation, PR posture and preservation inputs",
+     "latest_revision": 5
+    },
+    {
+     "key": "shelving-verification",
+     "title": "Final independent Honcho shelving verification",
+     "latest_revision": 1
+    },
+    {
+     "key": "shutdown-disposition",
+     "title": "Shutdown disposition and completion boundaries",
+     "latest_revision": 9
+    }
+   ],
+   "comments": 26,
    "attachments": [],
    "work_products": [],
    "page": "issues/DIG-333.md"
@@ -743,20 +1084,172 @@
    "primary_repository": "infrastructure",
    "paperclip_project": "(no project: company-wide)",
    "status_at_cutoff": null,
-   "status_at_export": "in_progress",
+   "status_at_export": "done",
    "priority": "high",
    "owner": "ReleaseEngineer",
    "parent": "DIG-332",
    "blocked_by": [],
-   "blocks": [],
+   "blocks": [
+    "DIG-332",
+    "DIG-337",
+    "DIG-338"
+   ],
    "created_at": "2026-10-03T06:16:44.986Z",
-   "updated_at": "2026-10-03T06:16:45.849Z",
-   "completed_at": null,
+   "updated_at": "2026-10-03T07:48:43.619Z",
+   "completed_at": "2026-10-03T07:47:59.812Z",
    "cancelled_at": null,
-   "documents": [],
-   "comments": 0,
+   "documents": [
+    {
+     "key": "ceo-disposition",
+     "title": "CEO disposition \u2014 third-review escalation",
+     "latest_revision": 1
+    },
+    {
+     "key": "decisions",
+     "title": "Final source delta dependency decision",
+     "latest_revision": 3
+    },
+    {
+     "key": "review",
+     "title": "DevGuru adversarial review \u2014 approved baseline",
+     "latest_revision": 5
+    },
+    {
+     "key": "source-preservation",
+     "title": "Source preservation manifest \u2014 shutdown 2026-10-03 (rev 4)",
+     "latest_revision": 5
+    }
+   ],
+   "comments": 27,
    "attachments": [],
-   "work_products": [],
+   "work_products": [
+    {
+     "type": "commit",
+     "title": "infrastructure: source-preservation manifest rev 4 (2fa1e5f1)",
+     "url": "https://repo.digikal.com/jawad/infrastructure/commit/2fa1e5f1ea56c73f5d84f2da110e271917f10ed8",
+     "branch": "archive/shutdown-2026-10-03/source-preservation-manifest",
+     "sha": "2fa1e5f1ea56c73f5d84f2da110e271917f10ed8",
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "commit",
+     "title": "infrastructure: source-preservation manifest rev 3 (0a6102fc)",
+     "url": "https://repo.digikal.com/jawad/infrastructure/commit/0a6102fcbee8a966ac21490b9eba06ebffebba3f",
+     "branch": "archive/shutdown-2026-10-03/source-preservation-manifest",
+     "sha": "0a6102fcbee8a966ac21490b9eba06ebffebba3f",
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "branch",
+     "title": "infrastructure: archive/shutdown-2026-10-03/source-preservation-manifest",
+     "url": "https://repo.digikal.com/jawad/infrastructure/src/branch/archive/shutdown-2026-10-03/source-preservation-manifest",
+     "branch": "archive/shutdown-2026-10-03/source-preservation-manifest",
+     "sha": "51333a7ee291b2935b32c551d7f4ebea55467dd5",
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "branch",
+     "title": "honcho: archive/shutdown-2026-10-03/off-repo/honcho-dig-97-logs",
+     "url": "https://repo.digikal.com/jawad/honcho/src/branch/archive/shutdown-2026-10-03/off-repo/honcho-dig-97-logs",
+     "branch": "archive/shutdown-2026-10-03/off-repo/honcho-dig-97-logs",
+     "sha": "ed24d780016b9bf08ba7e09db1337992fc34c95d",
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "branch",
+     "title": "nurikabe: archive/shutdown-2026-10-03/off-repo/nurikabe-playtest-dig46-tools",
+     "url": "https://repo.digikal.com/jawad/nurikabe/src/branch/archive/shutdown-2026-10-03/off-repo/nurikabe-playtest-dig46-tools",
+     "branch": "archive/shutdown-2026-10-03/off-repo/nurikabe-playtest-dig46-tools",
+     "sha": "c576211a04bd7b0283b9a55aa50a5cfaf90e9ae0",
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "branch",
+     "title": "infrastructure: archive/shutdown-2026-10-03/off-repo/company-knowledge-and-ceo-notes",
+     "url": "https://repo.digikal.com/jawad/infrastructure/src/branch/archive/shutdown-2026-10-03/off-repo/company-knowledge-and-ceo-notes",
+     "branch": "archive/shutdown-2026-10-03/off-repo/company-knowledge-and-ceo-notes",
+     "sha": "792a34a14f0cdb70218b63664fb422c7f2e14a69",
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "branch",
+     "title": "production-ready-engineering-skill: archive/shutdown-2026-10-03/off-repo/dig-59-report",
+     "url": "https://repo.digikal.com/jawad/production-ready-engineering-skill/src/branch/archive/shutdown-2026-10-03/off-repo/dig-59-report",
+     "branch": "archive/shutdown-2026-10-03/off-repo/dig-59-report",
+     "sha": "6bca41840f4c5ee29c646258e17d6a4207deaf59",
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "branch",
+     "title": "honcho: archive/shutdown-2026-10-03/unfinished/honcho-project-clone-wip",
+     "url": "https://repo.digikal.com/jawad/honcho/src/branch/archive/shutdown-2026-10-03/unfinished/honcho-project-clone-wip",
+     "branch": "archive/shutdown-2026-10-03/unfinished/honcho-project-clone-wip",
+     "sha": "694b5a84e4b2109ad5b79ac196c639181b1894c0",
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "branch",
+     "title": "nurikabe: archive/shutdown-2026-10-03/unfinished/nurikabe-project-clone-wip",
+     "url": "https://repo.digikal.com/jawad/nurikabe/src/branch/archive/shutdown-2026-10-03/unfinished/nurikabe-project-clone-wip",
+     "branch": "archive/shutdown-2026-10-03/unfinished/nurikabe-project-clone-wip",
+     "sha": "ce0a8246dae2f8e0c90f09f225c2bf7c4b47e6c1",
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "branch",
+     "title": "nurikabe: archive/shutdown-2026-10-03/superseded/nurikabe-dig-130-desk-720x560",
+     "url": "https://repo.digikal.com/jawad/nurikabe/src/branch/archive/shutdown-2026-10-03/superseded/nurikabe-dig-130-desk-720x560",
+     "branch": "archive/shutdown-2026-10-03/superseded/nurikabe-dig-130-desk-720x560",
+     "sha": "25c04432a68306e24b76595a691b3da2ac52b87d",
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "branch",
+     "title": "nurikabe: archive/shutdown-2026-10-03/off-repo/gameplay-workspace-scripts",
+     "url": "https://repo.digikal.com/jawad/nurikabe/src/branch/archive/shutdown-2026-10-03/off-repo/gameplay-workspace-scripts",
+     "branch": "archive/shutdown-2026-10-03/off-repo/gameplay-workspace-scripts",
+     "sha": "9db8b4807a2dd293fb81a73a89538992946bd115",
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "branch",
+     "title": "sweeper: archive/shutdown-2026-10-03/unfinished/sweeper-stash-0-dig-111",
+     "url": "https://repo.digikal.com/jawad/sweeper/src/branch/archive/shutdown-2026-10-03/unfinished/sweeper-stash-0-dig-111",
+     "branch": "archive/shutdown-2026-10-03/unfinished/sweeper-stash-0-dig-111",
+     "sha": "0f6e30d3d292b55a0908940eb4e4ad52b8e1859b",
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "branch",
+     "title": "sweeper: archive/shutdown-2026-10-03/unfinished/sweeper-project-clone-wip",
+     "url": "https://repo.digikal.com/jawad/sweeper/src/branch/archive/shutdown-2026-10-03/unfinished/sweeper-project-clone-wip",
+     "branch": "archive/shutdown-2026-10-03/unfinished/sweeper-project-clone-wip",
+     "sha": "41c69e42988605019c10365cb0bd9cd7bc15eef2",
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "branch",
+     "title": "sweeper: archive/shutdown-2026-10-03/off-repo/dig-44-palette",
+     "url": "https://repo.digikal.com/jawad/sweeper/src/branch/archive/shutdown-2026-10-03/off-repo/dig-44-palette",
+     "branch": "archive/shutdown-2026-10-03/off-repo/dig-44-palette",
+     "sha": "ce67691ef45b337c5df0b52cc0d5b443f6db20ed",
+     "status": "ready_for_review",
+     "review_state": "none"
+    }
+   ],
    "page": "issues/DIG-334.md"
   },
   {
@@ -767,21 +1260,585 @@
    "primary_repository": "infrastructure",
    "paperclip_project": "(no project: company-wide)",
    "status_at_cutoff": null,
-   "status_at_export": "in_progress",
+   "status_at_export": "blocked",
    "priority": "high",
    "owner": "KnowledgeCurator",
    "parent": "DIG-332",
-   "blocked_by": [],
-   "blocks": [],
+   "blocked_by": [
+    "DIG-337"
+   ],
+   "blocks": [
+    "DIG-332"
+   ],
    "created_at": "2026-10-03T06:16:45.182Z",
-   "updated_at": "2026-10-03T06:16:45.878Z",
+   "updated_at": "2026-10-03T07:41:10.970Z",
+   "completed_at": null,
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "preservation-index",
+     "title": "Preservation index",
+     "latest_revision": 4
+    }
+   ],
+   "comments": 14,
+   "attachments": [],
+   "work_products": [
+    {
+     "type": "branch",
+     "title": "nurikabe: large Paperclip attachments archive branch",
+     "url": "https://repo.digikal.com/jawad/nurikabe/src/branch/archive/paperclip-shutdown-2026-10-03-large-attachments",
+     "branch": "archive/paperclip-shutdown-2026-10-03-large-attachments",
+     "sha": "432525e9a4a4f024a9cde4d095d5afdf6bbe1ad6",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "production-ready-engineering-skill: shutdown archive PR #1 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/production-ready-engineering-skill/pulls/1",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "13695eac8d547dceca8750be8895b2816855f013",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "n8n: shutdown archive PR #1 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/n8n/pulls/1",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "8082a8d0f058b3ecde89210aa07cf62d349bab3f",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "j-bot: shutdown archive PR #1 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/j-bot/pulls/1",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "e027b27428f81099f317db5f984a7dcec2605217",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "honcho: shutdown archive PR #26 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/honcho/pulls/26",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "ba63b8073750f2f4424d99fc37b9c2e44b9b37d3",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "clear-technical-communication: shutdown archive PR #1 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/clear-technical-communication/pulls/1",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "ccdd33b4c1e8f2f142f2a6f275b5bd7dd6b579ef",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "SkillOpt: shutdown archive PR #1 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/SkillOpt/pulls/1",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "2d934d1fa012148570321e9aa2e43e51de9cc043",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "tvi: shutdown archive PR #10 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/tvi/pulls/10",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "da2fd0a2e88c5ca43eabfe251d4b8f27954d6f81",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "sweeper: shutdown archive PR #8 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/sweeper/pulls/8",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "9f5a6bc5dfd984f30e583fa6ce08c74f0c59b10d",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "jsync: shutdown archive PR #1 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/jsync/pulls/1",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "fe8aa8246e910dc79031973d6b40510282da3598",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "zimam: shutdown archive PR #1 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/zimam/pulls/1",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "548ed01f7095630fe14fec2142211bc37f9f269c",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "adp: shutdown archive PR #1 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/adp/pulls/1",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "00e5fb45225018f80de28e47c7a0d9c506a36a2c",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "ai-engineering-governance: shutdown archive PR #1 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/ai-engineering-governance/pulls/1",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "013c62f0c10e63fd247534350ee74229d6c5bb2f",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "humm: shutdown archive PR #1 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/humm/pulls/1",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "fe80e6a778e38b8a9cb10d8891b4157b1ed1f5fa",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "RustView: shutdown archive PR #1 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/RustView/pulls/1",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "02aa95a2a98e01d21e1bb15add6808e5168b4887",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "nurikabe: shutdown archive PR #87 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/nurikabe/pulls/87",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "f2d783b46de9ce3f2d8c967f1888073897e5d938",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "browser-native-rts-poc: shutdown archive PR #1 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/browser-native-rts-poc/pulls/1",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "c8a84ff713f23f9d24bd2b41ce398dbb7dda3648",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "aletheia: shutdown archive PR #1 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/aletheia/pulls/1",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "3e0a57272df65d39095df1ad95169abfc9a0b22e",
+     "status": "active",
+     "review_state": "none"
+    },
+    {
+     "type": "pull_request",
+     "title": "infrastructure: shutdown archive PR #2 (WIP baseline)",
+     "url": "https://repo.digikal.com/jawad/infrastructure/pulls/2",
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "sha": "a2ad00ddee28e4ed6ad6db7561ed60ae81a9b192",
+     "status": "active",
+     "review_state": "none"
+    }
+   ],
+   "page": "issues/DIG-335.md"
+  },
+  {
+   "identifier": "DIG-337",
+   "id": "699eac41-2456-42b0-9355-337a5deef858",
+   "title": "Shutdown archive: final delta after source preservation and in-flight disposition (DIG-335 continuation)",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "(no project: company-wide)",
+   "status_at_cutoff": null,
+   "status_at_export": "in_progress",
+   "priority": "high",
+   "owner": "KnowledgeCurator",
+   "parent": "DIG-335",
+   "blocked_by": [
+    "DIG-340",
+    "DIG-339",
+    "DIG-338",
+    "DIG-334",
+    "DIG-333"
+   ],
+   "blocks": [
+    "DIG-335"
+   ],
+   "created_at": "2026-10-03T06:37:03.492Z",
+   "updated_at": "2026-10-03T16:42:24.125Z",
    "completed_at": null,
    "cancelled_at": null,
    "documents": [],
-   "comments": 0,
+   "comments": 20,
    "attachments": [],
    "work_products": [],
-   "page": "issues/DIG-335.md"
+   "page": "issues/DIG-337.md"
+  },
+  {
+   "identifier": "DIG-338",
+   "id": "7257f146-87de-42eb-a809-22eaf685f1c6",
+   "title": "Shutdown: final source-preservation delta before documentation export",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "(no project: company-wide)",
+   "status_at_cutoff": null,
+   "status_at_export": "done",
+   "priority": "high",
+   "owner": "ReleaseEngineer",
+   "parent": "DIG-332",
+   "blocked_by": [
+    "DIG-340",
+    "DIG-339",
+    "DIG-334",
+    "DIG-333"
+   ],
+   "blocks": [
+    "DIG-337"
+   ],
+   "created_at": "2026-10-03T07:01:09.074Z",
+   "updated_at": "2026-10-03T16:41:36.669Z",
+   "completed_at": "2026-10-03T16:41:36.614Z",
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "review",
+     "title": "DevGuru adversarial review \u2014 approved final preservation delta",
+     "latest_revision": 3
+    },
+    {
+     "key": "review-brief",
+     "title": "Review brief \u2014 DIG-338 final delta (round 2)",
+     "latest_revision": 3
+    },
+    {
+     "key": "source-preservation",
+     "title": "Source preservation \u2014 final delta (DIG-338)",
+     "latest_revision": 3
+    }
+   ],
+   "comments": 26,
+   "attachments": [],
+   "work_products": [
+    {
+     "type": "commit",
+     "title": "infrastructure: final source-preservation manifest (50db32f3) \u2014 DIG-337 consumes this",
+     "url": "https://repo.digikal.com/jawad/infrastructure/commit/50db32f32fa7856c4a1699de1b3534f7a56cc573",
+     "branch": "archive/shutdown-2026-10-03/source-preservation-manifest",
+     "sha": "50db32f32fa7856c4a1699de1b3534f7a56cc573",
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "branch",
+     "title": "nurikabe: archive/shutdown-2026-10-03/unfinished/final-nurikabe (host-only QA evidence)",
+     "url": "https://repo.digikal.com/jawad/nurikabe/src/branch/archive/shutdown-2026-10-03/unfinished/final-nurikabe",
+     "branch": "archive/shutdown-2026-10-03/unfinished/final-nurikabe",
+     "sha": "1cde3346714845ac38a31ad18419d4c76ec5f42d",
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "commit",
+     "title": "infrastructure: manifest round-1 submission (5779d2e1), superseded by 50db32f3 (R1 fix)",
+     "url": "https://repo.digikal.com/jawad/infrastructure/commit/5779d2e17c8d70ca2c1de9cb642342f6f59a823e",
+     "branch": "archive/shutdown-2026-10-03/source-preservation-manifest",
+     "sha": "5779d2e17c8d70ca2c1de9cb642342f6f59a823e",
+     "status": "ready_for_review",
+     "review_state": "none"
+    },
+    {
+     "type": "commit",
+     "title": "infrastructure: final delta data commit (feabc9fd), superseded as head by 5779d2e1",
+     "url": "https://repo.digikal.com/jawad/infrastructure/commit/feabc9fd68fb0f2a0b9cdbfc7196e0e3ac0901bd",
+     "branch": "archive/shutdown-2026-10-03/source-preservation-manifest",
+     "sha": "feabc9fd68fb0f2a0b9cdbfc7196e0e3ac0901bd",
+     "status": "ready_for_review",
+     "review_state": "none"
+    }
+   ],
+   "page": "issues/DIG-338.md"
+  },
+  {
+   "identifier": "DIG-339",
+   "id": "76d56b0e-bfe1-456e-a5ec-c17bec293b65",
+   "title": "Populate the canonical digikal-knowledge-base repository",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "digikal-knowledge-base",
+   "status_at_cutoff": null,
+   "status_at_export": "done",
+   "priority": "high",
+   "owner": "KnowledgeCurator",
+   "parent": "DIG-332",
+   "blocked_by": [
+    "DIG-342"
+   ],
+   "blocks": [
+    "DIG-340",
+    "DIG-332",
+    "DIG-337",
+    "DIG-338"
+   ],
+   "created_at": "2026-10-03T07:30:41.746Z",
+   "updated_at": "2026-10-03T10:58:35.117Z",
+   "completed_at": "2026-10-03T10:58:35.056Z",
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "migration",
+     "title": "DIG-339 migration record",
+     "latest_revision": 9
+    },
+    {
+     "key": "plan",
+     "title": "KB migration and Paperclip-independent evidence correction",
+     "latest_revision": 2
+    },
+    {
+     "key": "review",
+     "title": "DIG-339 adversarial review \u2014 portability round 2",
+     "latest_revision": 6
+    }
+   ],
+   "comments": 31,
+   "attachments": [],
+   "work_products": [
+    {
+     "type": "pull_request",
+     "title": "digikal-knowledge-base PR #1: import the knowledge base (DIG-339)",
+     "url": "https://repo.digikal.com/jawad/digikal-knowledge-base/pulls/1",
+     "branch": null,
+     "sha": null,
+     "status": "ready_for_review",
+     "review_state": "none"
+    }
+   ],
+   "page": "issues/DIG-339.md"
+  },
+  {
+   "identifier": "DIG-340",
+   "id": "6702f203-5022-4551-bdd0-3d3a383d77bb",
+   "title": "Link all 18 project repositories to the canonical knowledge base",
+   "archive_role": "cross-reference",
+   "primary_repository": "infrastructure",
+   "paperclip_project": "digikal-knowledge-base",
+   "status_at_cutoff": null,
+   "status_at_export": "done",
+   "priority": "high",
+   "owner": "unassigned",
+   "parent": "DIG-332",
+   "blocked_by": [
+    "DIG-339"
+   ],
+   "blocks": [
+    "DIG-332",
+    "DIG-337",
+    "DIG-338"
+   ],
+   "created_at": "2026-10-03T07:30:41.994Z",
+   "updated_at": "2026-10-03T11:14:43.848Z",
+   "completed_at": "2026-10-03T11:14:43.805Z",
+   "cancelled_at": null,
+   "documents": [
+    {
+     "key": "plan",
+     "title": "Plan",
+     "latest_revision": 2
+    },
+    {
+     "key": "project-adoption",
+     "title": "Project adoption matrix",
+     "latest_revision": 5
+    },
+    {
+     "key": "review",
+     "title": "DevGuru review \u2014 final portable adoption approval",
+     "latest_revision": 3
+    }
+   ],
+   "comments": 15,
+   "attachments": [],
+   "work_products": [
+    {
+     "type": "pull_request",
+     "title": "RustView PR #2: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/RustView/pulls/2",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    },
+    {
+     "type": "pull_request",
+     "title": "SkillOpt PR #2: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/SkillOpt/pulls/2",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    },
+    {
+     "type": "pull_request",
+     "title": "adp PR #2: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/adp/pulls/2",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    },
+    {
+     "type": "pull_request",
+     "title": "ai-engineering-governance PR #2: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/ai-engineering-governance/pulls/2",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    },
+    {
+     "type": "pull_request",
+     "title": "aletheia PR #2: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/aletheia/pulls/2",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    },
+    {
+     "type": "pull_request",
+     "title": "browser-native-rts-poc PR #2: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/browser-native-rts-poc/pulls/2",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    },
+    {
+     "type": "pull_request",
+     "title": "clear-technical-communication PR #2: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/clear-technical-communication/pulls/2",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    },
+    {
+     "type": "pull_request",
+     "title": "honcho PR #28: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/honcho/pulls/28",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    },
+    {
+     "type": "pull_request",
+     "title": "humm PR #2: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/humm/pulls/2",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    },
+    {
+     "type": "pull_request",
+     "title": "infrastructure PR #4: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/infrastructure/pulls/4",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    },
+    {
+     "type": "pull_request",
+     "title": "j-bot PR #2: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/j-bot/pulls/2",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    },
+    {
+     "type": "pull_request",
+     "title": "jsync PR #2: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/jsync/pulls/2",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    },
+    {
+     "type": "pull_request",
+     "title": "n8n PR #2: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/n8n/pulls/2",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    },
+    {
+     "type": "pull_request",
+     "title": "nurikabe PR #88: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/nurikabe/pulls/88",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    },
+    {
+     "type": "pull_request",
+     "title": "production-ready-engineering-skill PR #2: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/production-ready-engineering-skill/pulls/2",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    },
+    {
+     "type": "pull_request",
+     "title": "sweeper PR #9: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/sweeper/pulls/9",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    },
+    {
+     "type": "pull_request",
+     "title": "tvi PR #11: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/tvi/pulls/11",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    },
+    {
+     "type": "pull_request",
+     "title": "zimam PR #2: link the Digikal knowledge base",
+     "url": "https://repo.digikal.com/jawad/zimam/pulls/2",
+     "branch": null,
+     "sha": null,
+     "status": "merged",
+     "review_state": "approved"
+    }
+   ],
+   "page": "issues/DIG-340.md"
   }
  ]
 }

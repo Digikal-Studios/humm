@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (baseline export 2026-10-03T06:17Z (issues) / 06:24Z (git refs)) | done |
+| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
 | Priority | medium |
 | Owner (assignee) | TechLead |
 | Created by | TechLead |
@@ -57,13 +57,14 @@ The `report` document exists and the summary comment is posted. Then set this is
 ##### Not your call here
 Game design, UI, and UX judgments belong to the Game & Experience Designer ([DIG-7](DIG-7.md)). Note them as observations; do not adjudicate them.
 
+
 ## Documents (latest revision)
 
 <a id="document-report"></a>
 
 ### Document `report`: humm — Status Report
 
-Revision 1, updated 2026-09-25T13:59:39.052Z by TechLead.
+Revision 1 (id `50b99136-adcc-4860-b62d-edd9dc4b27df`), updated 2026-09-25T13:59:39.052Z by TechLead.
 
 #### humm — Status Report
 
@@ -242,11 +243,14 @@ Ranked, with evidence, for [DIG-4](DIG-4.md)'s roll-up:
 
 **Cross-cutting note for [DIG-4](DIG-4.md):** humm is the strongest engineering-process artifact in the portfolio scanned so far — the parity matrix, ADR log, per-milestone benchmark records, and honest deviations ledgers are a template worth reusing. It is also, in stack terms, an outlier: a Rust desktop/ML application inside a game-development studio. Whether it is a product, a tooling investment, or a finished experiment is a founder call (open question #1), and it materially changes whether hires #1 and #2 above are worth making.
 
+
 ## Comments (1)
 
 <a id="comment-38b745ed-6df9-449b-9d1c-dc0193070e2e"></a>
 
 ### 2026-09-25T14:00:04.515Z — TechLead
+
+Comment id `38b745ed-6df9-449b-9d1c-dc0193070e2e`; written by run `f191bad4-a625-4caa-bb87-d79ca092c80e`.
 
 ##### Scan complete — report posted
 
@@ -280,3 +284,13 @@ Benchmarked against a from-source Buzz on identical model weights: **6.19× fast
 8 open questions for the founder are at the end of the report; #4 is free money — pointing `HUMM_LLM_TEST_BASE` at any OpenAI-compatible chat endpoint flips two rows and takes the matrix to 48/50 with zero code work.
 
 Read-only throughout: cloned checkout only, nothing built, run, or modified. Marking done — [DIG-4](DIG-4.md) is blocked on this.
+
+
+## Agent runs (2)
+
+Every Paperclip heartbeat run recorded against this issue. A run's results are the comments, documents, attachments and commits it wrote (comment headers above name the run). Raw run transcripts are not archived, except the runs listed with a transcript copy below; see [inventory.md](../inventory.md#exclusions).
+
+| Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
+|---|---|---|---|---|---|---|
+| `b4a08a36-da99-4ac3-bfa6-7ca007337339` | TechLead | succeeded | 2026-09-25T13:50:17.311Z | 2026-09-25T13:53:09.618Z | 161784 | — |
+| `f191bad4-a625-4caa-bb87-d79ca092c80e` | TechLead | succeeded | 2026-09-25T13:52:12.743Z | 2026-09-25T14:00:18.660Z | 158025 | — |

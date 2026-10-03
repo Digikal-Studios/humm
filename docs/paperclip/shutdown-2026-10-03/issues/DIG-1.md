@@ -1,11 +1,11 @@
 # DIG-1: Paperclip onboarding
 
-> Cross-reference copy. The primary archive for DIG-1 is in the `infrastructure` repository: https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-1.md. Attachments and earlier document revisions are stored there.
+> Cross-reference copy. The primary archive for DIG-1 is in the `infrastructure` repository: https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-1.md. Attachments and earlier document revisions are stored there.
 
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (baseline export 2026-10-03T06:17Z (issues) / 06:24Z (git refs)) | done |
+| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
 | Priority | medium |
 | Owner (assignee) | CEO |
 | Created by | Board user (founder) |
@@ -48,7 +48,7 @@ Work in this order.
 
 ### Document `plan`: Plan
 
-Revision 1, updated 2026-09-25T11:14:35.957Z by CEO.
+Revision 1 (id `414554df-5e27-46bd-86c5-4ebf25435166`), updated 2026-09-25T11:14:35.957Z by CEO.
 
 #### Plan: Digikal project discovery, knowledge base, and expert team
 
@@ -94,7 +94,10 @@ All three run on the same Claude adapter as me, with managed instructions and a 
 - Knowledge base skeleton in place with rules for adding and reviewing pages, and initial project and domain pages filled.
 - A concrete specialist hiring proposal based on the scan.
 
+
 ## Issue-thread interactions
+
+<a id="interaction-0f67f48d-9498-413f-ba22-99b98c0fd776"></a>
 
 ### ask_user_questions — answered — 2026-09-25T10:37:12.484Z
 
@@ -145,6 +148,8 @@ From CEO; resolved 2026-09-25T10:39:08.245Z by Board user (founder).
  }
 }
 ```
+
+<a id="interaction-657582fd-d059-4ae5-95a3-0c95d77cb66e"></a>
 
 ### ask_user_questions — answered — 2026-09-25T11:05:55.959Z
 
@@ -256,6 +261,8 @@ From CEO; resolved 2026-09-25T11:13:23.899Z by Board user (founder).
  }
 }
 ```
+
+<a id="interaction-b26446ad-7ff1-432b-8639-7191c6fe09c3"></a>
 
 ### request_checkbox_confirmation — accepted — 2026-09-25T11:14:54.543Z
 
@@ -379,11 +386,15 @@ From CEO; resolved 2026-09-25T11:30:38.751Z by Board user (founder).
 
 ### 2026-09-25T10:37:12.440Z — CEO
 
+Comment id `fe924ace-426a-48eb-b6c4-39cb65e85d4e`.
+
 Welcome to Paperclip! I'm CEO, your first agent teammate. Pick how you'd like to start and I'll take it from there.
 
 <a id="comment-39b2edc8-bfb0-43e3-893e-af267966da86"></a>
 
 ### 2026-09-25T10:39:12.979Z — CEO
+
+Comment id `39b2edc8-bfb0-43e3-893e-af267966da86`; written by run `e4fb6029-6915-4174-98eb-c649ab510270`.
 
 ACP agent reported a terminal access failure.
 
@@ -391,11 +402,15 @@ ACP agent reported a terminal access failure.
 
 ### 2026-09-25T10:40:10.502Z — CEO
 
+Comment id `dc15f6e3-46c5-40a9-8b48-c3eb5ece3c54`; written by run `86152ab2-5c4b-4dca-bc80-54b16477f0e3`.
+
 ACP agent reported a terminal access failure.
 
 <a id="comment-a1e87af2-29a9-46a2-bbfa-06e9bb152ef2"></a>
 
 ### 2026-09-25T10:41:06.038Z — CEO
+
+Comment id `a1e87af2-29a9-46a2-bbfa-06e9bb152ef2`; written by run `7b6affa5-3219-4d9c-9745-4438527e2419`.
 
 ACP agent reported a terminal access failure.
 
@@ -403,11 +418,15 @@ ACP agent reported a terminal access failure.
 
 ### 2026-09-25T11:06:00.912Z — CEO
 
+Comment id `36a97ec6-9c0c-414b-b3c5-de62c47c3923`; written by run `5ce5ff19-fa8a-477b-929b-ce4f97518b16`.
+
 Waiting for your answers in the interview card above. Once you reply, I will draft a plan and propose a team for your approval.
 
 <a id="comment-8cf824bd-833f-45f8-83f4-3cd036f4778d"></a>
 
 ### 2026-09-25T11:14:59.304Z — CEO
+
+Comment id `8cf824bd-833f-45f8-83f4-3cd036f4778d`; written by run `dbef75a0-848b-4d0d-9d50-f141438e310a`.
 
 Plan is in the right sidebar. Approve it (or uncheck items) in the card above and I will hire the checked agents and create the checked tasks. Nothing is hired or created until you accept.
 
@@ -415,12 +434,14 @@ Plan is in the right sidebar. Approve it (or uncheck items) in the card above an
 
 ### 2026-09-25T11:35:11.257Z — CEO
 
+Comment id `d8cec90d-544d-48ef-a744-5d0006842593`; written by run `49bb092e-91c3-496d-b89b-418f8156efc9`.
+
 ##### Plan approved and executed
 
 **Hired (all active, reporting to CEO, $50/month cap each, no timer heartbeats):**
-- [TechLead](/DIG/agents/c76ac668-7eaa-4eab-84ee-de25fd9242f5) — engineer. Codebase scans, status reports, engineering and architecture knowledge. Instruction source: generic baseline guide with a focused engineering lens set (Coder template was too implementation-centric for a read-only discovery role).
-- [KnowledgeCurator](/DIG/agents/45dcbfc4-d7cc-4b67-ac88-f1ce7a9c83f0) — general. Knowledge base structure, conventions, curation, freshness. Instruction source: generic baseline guide.
-- [GameExperienceDesigner](/DIG/agents/d511c851-1685-47e9-818b-73e49bd651fe) — general. Game design, UI, UX reviews and knowledge. Instruction source: adapted from the UX Designer template: charter rewritten for games, game-design lens group added, design-system and visual-truth sections replaced with a review output bar.
+- TechLead (historical link `/DIG/agents/c76ac668-7eaa-4eab-84ee-de25fd9242f5`) — engineer. Codebase scans, status reports, engineering and architecture knowledge. Instruction source: generic baseline guide with a focused engineering lens set (Coder template was too implementation-centric for a read-only discovery role).
+- KnowledgeCurator (historical link `/DIG/agents/45dcbfc4-d7cc-4b67-ac88-f1ce7a9c83f0`) — general. Knowledge base structure, conventions, curation, freshness. Instruction source: generic baseline guide.
+- GameExperienceDesigner (historical link `/DIG/agents/d511c851-1685-47e9-818b-73e49bd651fe`) — general. Game design, UI, UX reviews and knowledge. Instruction source: adapted from the UX Designer template: charter rewritten for games, game-design lens group added, design-system and visual-truth sections replaced with a review output bar.
 
 No permission-expanding skills or adapter settings were granted. All three are read-only on repositories by instruction.
 
@@ -434,3 +455,16 @@ No permission-expanding skills or adapter settings were granted. All three are r
 - DIG-8 Team expansion proposal — CEO, blocked by DIG-4.
 
 **Your next action:** answer the codebase list card on DIG-2. That is the only gate on the scan.
+
+## Agent runs (6)
+
+Every Paperclip heartbeat run recorded against this issue. A run's results are the comments, documents, attachments and commits it wrote (comment headers above name the run). Raw run transcripts are not archived, except the runs listed with a transcript copy below; see [inventory.md](../inventory.md#exclusions).
+
+| Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
+|---|---|---|---|---|---|---|
+| `e4fb6029-6915-4174-98eb-c649ab510270` | CEO | failed | 2026-09-25T10:39:08.413Z | 2026-09-25T10:39:12.904Z | 2234 | — |
+| `86152ab2-5c4b-4dca-bc80-54b16477f0e3` | CEO | failed | 2026-09-25T10:40:03.182Z | 2026-09-25T10:40:10.311Z | 2576 | — |
+| `7b6affa5-3219-4d9c-9745-4438527e2419` | CEO | failed | 2026-09-25T10:41:02.564Z | 2026-09-25T10:41:05.966Z | 2576 | — |
+| `5ce5ff19-fa8a-477b-929b-ce4f97518b16` | CEO | succeeded | 2026-09-25T11:05:29.575Z | 2026-09-25T11:06:05.622Z | 42187 | — |
+| `dbef75a0-848b-4d0d-9d50-f141438e310a` | CEO | succeeded | 2026-09-25T11:13:24.066Z | 2026-09-25T11:15:07.488Z | 103123 | — |
+| `49bb092e-91c3-496d-b89b-418f8156efc9` | CEO | succeeded | 2026-09-25T11:30:39.084Z | 2026-09-25T11:35:40.055Z | 300406 | — |

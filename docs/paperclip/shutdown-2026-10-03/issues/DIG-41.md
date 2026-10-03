@@ -1,11 +1,11 @@
 # DIG-41: Domain page: Tooling and Pipeline
 
-> Cross-reference copy. The primary archive for DIG-41 is in the `infrastructure` repository: https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-41.md. Attachments and earlier document revisions are stored there.
+> Cross-reference copy. The primary archive for DIG-41 is in the `infrastructure` repository: https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-41.md. Attachments and earlier document revisions are stored there.
 
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (baseline export 2026-10-03T06:17Z (issues) / 06:24Z (git refs)) | done |
+| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
 | Priority | medium |
 | Owner (assignee) | TechLead |
 | Created by | KnowledgeCurator |
@@ -76,12 +76,13 @@ every one of them is cancelled — so write "Astra is a two-toolchain repo" rath
 - **Honest gaps are the deliverable too.** Where the studio has no convention, say so and put the choice in Open questions with an owner. Do not invent a standard to fill the section.
 
 ##### What I do with it
-I curate for structure, consistency, front matter, and links, and I publish it under `knowledge/domains/<slug>/README.md` once the founder approves the structure ([DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md), one pending decision). **That approval gates publishing, not this work** — write the content in a `content` document on this issue and mark it `done`; I will not need you again to publish it.
+I curate for structure, consistency, front matter, and links, and I publish it under `knowledge/domains/<slug>/README.md` once the founder approves the structure ([DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md), one pending decision). **That approval gates publishing, not this work** — write the content in a `content` document on this issue and mark it `done`; I will not need you again to publish it.
 
 If a claim needs someone else's answer, put it in Open questions with their name rather than guessing.
 
 ##### Done when
 The `content` document on this issue holds the finished page, front matter complete, sources filled, no unattributed claims. Then set this issue to `done` — post your findings here rather than on the parent; I collect them.
+
 
 ## Documents (latest revision)
 
@@ -89,7 +90,7 @@ The `content` document on this issue holds the finished page, front matter compl
 
 ### Document `content`: Tooling and Pipeline — domain page
 
-Revision 1, updated 2026-09-25T15:27:13.254Z by TechLead.
+Revision 1 (id `1dbf3f4b-4e8d-472d-ab52-de46548580bc`), updated 2026-09-25T15:27:13.254Z by TechLead.
 
 ---
 title: Tooling and Pipeline
@@ -118,8 +119,8 @@ pipelines, packaging, signing, release and distribution. It is the studio's prac
 *across* projects.
 
 It does **not** cover how systems are designed or decomposed — that is
-[Systems Architecture](../systems-architecture/README.md) — nor how we write, review and
-govern code, which is [Software Engineering](../software-engineering/README.md).
+Systems Architecture (historical link `../systems-architecture/README.md`) — nor how we write, review and
+govern code, which is Software Engineering (historical link `../software-engineering/README.md`).
 Per-project build commands live on each project's own architecture page; this page
 records only what is true across more than one project.
 
@@ -299,7 +300,7 @@ Examples only. This page stays true if every project below is cancelled.
 
 Listed in the front matter. Every claim above traces to one of: a named file and line in a
 repository at the SHA recorded there, one of my twelve scan reports
-([DIG-9](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-9.md) … [DIG-20](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-20.md)), or TechLead judgement labelled
+([DIG-9](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-9.md) … [DIG-20](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-20.md)), or TechLead judgement labelled
 as such inline.
 
 **Confidence note.** Nearly every claim here was re-checked this session against the primary
@@ -308,9 +309,10 @@ artifact — the repository files at the SHAs listed — so it is `verified`. Th
 *on the live host*. I verified the studio's written policy, the committed
 `config/forgejo/app.ini`, and the fact that `scripts/final-validation.sh:121` asserts the
 setting against `/etc/forgejo/app.ini` — but I did not run that validator, and per
-[DIG-13](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-13.md) it currently fails on unrelated checks. Page confidence is its
+[DIG-13](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-13.md) it currently fails on unrelated checks. Page confidence is its
 weakest claim, and no decision should rest on the live-host state until Open questions row 1
 is closed.
+
 
 ## Comments (2)
 
@@ -318,11 +320,13 @@ is closed.
 
 ### 2026-09-25T15:27:42.734Z — TechLead
 
+Comment id `78b50328-6b7a-4662-99cc-49ecaa6d5524`; written by run `611b787f-c364-4feb-938d-e43c17f9a8b6`.
+
 ##### Done — `content` document holds the finished page
 
 Page written to [`content`](DIG-41.md#document-content) (~14.9 KB). Front matter complete, sources filled, no unattributed claims.
 
-**I did not write this from the scan reports alone.** All twelve checkouts were still on disk, so I re-verified every load-bearing claim read-only against the repositories at pinned SHAs (recorded in `sources`) rather than restating [DIG-9](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-9.md)…[DIG-20](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-20.md). That changed three things, one of them the headline.
+**I did not write this from the scan reports alone.** All twelve checkouts were still on disk, so I re-verified every load-bearing claim read-only against the repositories at pinned SHAs (recorded in `sources`) rather than restating [DIG-9](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-9.md)…[DIG-20](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-20.md). That changed three things, one of them the headline.
 
 ###### Findings
 
@@ -330,28 +334,30 @@ Page written to [`content`](DIG-41.md#document-content) (~14.9 KB). Front matter
 - **No packaging convention exists.** Exactly **one** repo of twelve (`nurikabe`) has any desktop packaging metadata. Nine have none at all. Verified both items the task flagged: `RustView` has no icon (no `with_icon`, `assets/` holds only `screenshot.png`), no bundle, no `.desktop`, no `Info.plist`, no signing — and its release job is guarded to `github.com` while its only remote is Forgejo; `ai-engineering-governance`'s install command is still the literal `https://github.com/<owner>/<repository>/tree/<commit>/…` template. I stated the gap plainly instead of describing a CI pipeline, per your scope note.
 - **Two corrections to my own earlier reports**, which is why the re-check was worth it:
   1. Tags: **three** exist studio-wide (`jsync` v0.1.0, `tvi` v0.1.0 annotated; `humm` **v1.0.0** lightweight) — my [DIG-14](DIG-14.md) report implied `humm` was never versioned.
-  2. [DIG-12](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-12.md) said `nurikabe` CI "triggers on a `main` that does not exist". Half right: it triggers on `main` **and** `codex/**`, which does match the live branch. Fixed in the page.
+  2. [DIG-12](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-12.md) said `nurikabe` CI "triggers on a `main` that does not exist". Half right: it triggers on `main` **and** `codex/**`, which does match the live branch. Fixed in the page.
 - **Four real cross-project standards** do exist and I recorded them as such: the gate is a committed script invoked by one command (6 repos); vendor/bundle native deps rather than requiring system packages (which is *why* clean-machine builds work here); commit `Cargo.lock` (7/7 Rust repos with code); pin deps and audit supply chain where warranted. Toolchain pinning (2/12), packaging (1/12), signing (0/12) and CI (0/12 executing) are explicitly listed as **not** standards.
 
 ###### Page confidence: `reported`, deliberately
 
-Nearly every claim is `verified` against the primary artifact. The page is `reported` because of one load-bearing claim that is not: that Actions is disabled *on the live host*. I verified the policy, the committed config, and the assertion in the validator — but I did not run that validator, and per [DIG-13](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-13.md) it currently fails on unrelated checks. Weakest claim sets the page.
+Nearly every claim is `verified` against the primary artifact. The page is `reported` because of one load-bearing claim that is not: that Actions is disabled *on the live host*. I verified the policy, the committed config, and the assertion in the validator — but I did not run that validator, and per [DIG-13](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-13.md) it currently fails on unrelated checks. Weakest claim sets the page.
 
 ###### Open questions — owners assigned, two are mine
 
-Six rows. I kept the ones an agent can close: reconciling `nurikabe/docs/IMPLEMENTATION_STATUS.md:163-174` (which describes two *live* runners, contradicting the policy above) and deciding whether the six inert CI configs get ported to `.forgejo/` or deleted. Four are genuine founder calls for [CEO](/DIG/agents/ceo) — whether public distribution is a goal at all, Apple/Windows signing credentials (spend), whether the no-runner policy is permanent, and which `nurikabe` Windows artifact is canonical.
+Six rows. I kept the ones an agent can close: reconciling `nurikabe/docs/IMPLEMENTATION_STATUS.md:163-174` (which describes two *live* runners, contradicting the policy above) and deciding whether the six inert CI configs get ported to `.forgejo/` or deleted. Four are genuine founder calls for CEO (historical link `/DIG/agents/ceo`) — whether public distribution is a goal at all, Apple/Windows signing credentials (spend), whether the no-runner policy is permanent, and which `nurikabe` Windows artifact is canonical.
 
-No follow-up needed from me to publish — the page is self-contained under your template and the structure approval on [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) gates publishing, not this work.
+No follow-up needed from me to publish — the page is self-contained under your template and the structure approval on [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) gates publishing, not this work.
 
 <a id="comment-8ad4f55c-2aa0-44e1-88f8-db28fec6518c"></a>
 
 ### 2026-09-25T15:33:27.526Z — KnowledgeCurator
 
+Comment id `8ad4f55c-2aa0-44e1-88f8-db28fec6518c`; written by run `2e7d0364-58d1-4ee6-a464-5a7500523e10`.
+
 ##### Curated and staged — Tooling & Pipeline domain page
 
 Picked this up alongside [DIG-39](DIG-39.md) so all three domain pages are staged together. It passes curation with the lightest touch of the three — you were the only one who linked your sibling domains without being asked.
 
-**Conformance ([DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) `design`, revision 4 corrected):** five required front-matter fields ✅, single H1 identical to `title:` ✅, seven H3 sub-sections — allowed, §4 bans H4 and deeper, not H3 ✅, all six §9.7 sections in template order ✅, boundary links already relative and correctly pointed ✅.
+**Conformance ([DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) `design`, revision 4 corrected):** five required front-matter fields ✅, single H1 identical to `title:` ✅, seven H3 sub-sections — allowed, §4 bans H4 and deeper, not H3 ✅, all six §9.7 sections in template order ✅, boundary links already relative and correctly pointed ✅.
 
 **Two curator edits (§6, Curator-alone, both reversible)**
 
@@ -362,4 +368,15 @@ Picked this up alongside [DIG-39](DIG-39.md) so all three domain pages are stage
 
 **Single source of truth (§5.3).** Diffed against [DIG-39](DIG-39.md) and [DIG-40](DIG-40.md). One touchpoint: `./scripts/check.sh` appears on Software Engineering inside aletheia's definition of done, and here as the committed-single-command-gate claim. This page owns the mechanism; I resolved it with the boundary link rather than by cutting it there, since the gate is load-bearing for that page's argument. No other claim is duplicated.
 
-**Staged, not published.** Publishing waits on the founder confirming the structure — [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) has a pending `request_confirmation`. The file is held at [DIG-6 → `domain-tooling-pipeline`](DIG-6.md#document-domain-tooling-pipeline), ready to write to `knowledge/domains/tooling-pipeline/README.md` unchanged. Nothing is waiting on you.
+**Staged, not published.** Publishing waits on the founder confirming the structure — [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) has a pending `request_confirmation`. The file is held at [DIG-6 → `domain-tooling-pipeline`](DIG-6.md#document-domain-tooling-pipeline), ready to write to `knowledge/domains/tooling-pipeline/README.md` unchanged. Nothing is waiting on you.
+
+
+## Agent runs (3)
+
+Every Paperclip heartbeat run recorded against this issue. A run's results are the comments, documents, attachments and commits it wrote (comment headers above name the run). Raw run transcripts are not archived, except the runs listed with a transcript copy below; see [inventory.md](../inventory.md#exclusions).
+
+| Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
+|---|---|---|---|---|---|---|
+| `6fc692b5-592b-4e4b-9a86-b7753e333e17` | KnowledgeCurator | succeeded | 2026-09-25T15:19:06.209Z | 2026-09-25T15:22:49.678Z | 175279 | — |
+| `611b787f-c364-4feb-938d-e43c17f9a8b6` | TechLead | succeeded | 2026-09-25T15:20:48.136Z | 2026-09-25T15:32:58.037Z | 242964 | — |
+| `2e7d0364-58d1-4ee6-a464-5a7500523e10` | KnowledgeCurator | succeeded | 2026-09-25T15:27:49.098Z | 2026-09-25T15:34:30.398Z | 259883 | — |

@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (baseline export 2026-10-03T06:17Z (issues) / 06:24Z (git refs)) | done |
+| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
 | Priority | high |
 | Owner (assignee) | GameExperienceDesigner |
 | Created by | GameExperienceDesigner |
@@ -46,13 +46,14 @@ Cite design lenses by name where they drive a judgment (core loop, MDA, flow cha
 ##### Done when
 The `review` document exists, every risk has evidence and an alternative, open questions are listed. Then set this issue to `done` and post a short comment pointing at the document. The roll-up happens on [DIG-7](DIG-7.md); do not post findings there.
 
+
 ## Documents (latest revision)
 
 <a id="document-review"></a>
 
 ### Document `review`: humm — Design Review (UX / UI / interaction)
 
-Revision 1, updated 2026-09-25T14:27:31.775Z by GameExperienceDesigner.
+Revision 1 (id `d80fe676-77fa-41cc-999f-880ada828b15`), updated 2026-09-25T14:27:31.775Z by GameExperienceDesigner.
 
 #### humm — Design Review (UX / UI / interaction)
 
@@ -891,11 +892,14 @@ Tech Lead's report records that the GUI cannot currently launch off the original
 project's own windowed acceptance record, and I have flagged the one place where I am
 reasoning from source rather than observation (the AccessKit note in §4).
 
+
 ## Comments (1)
 
 <a id="comment-934b2a40-e3ec-4a20-bb39-b4c91fbeb20d"></a>
 
 ### 2026-09-25T14:27:46.802Z — GameExperienceDesigner
+
+Comment id `934b2a40-e3ec-4a20-bb39-b4c91fbeb20d`; written by run `d1155f20-4fad-4d90-b17f-9e3973d7ad8a`.
 
 Design review of **humm** complete — see the `review` document on this issue.
 
@@ -914,3 +918,13 @@ Also covered: accessibility (two measured contrast failures, text-resize breakag
 Seven open questions for the founder are at the end of the document; the most load-bearing is #1 (who the intended user is), since most copy and onboarding findings resolve differently depending on the answer.
 
 Per the task, findings are **not** posted to [DIG-7](DIG-7.md) — the roll-up happens there. No review needed on this issue, so marking `done`.
+
+
+## Agent runs (2)
+
+Every Paperclip heartbeat run recorded against this issue. A run's results are the comments, documents, attachments and commits it wrote (comment headers above name the run). Raw run transcripts are not archived, except the runs listed with a transcript copy below; see [inventory.md](../inventory.md#exclusions).
+
+| Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
+|---|---|---|---|---|---|---|
+| `fa793dbc-dcfa-408c-8192-383ccfd8ef83` | GameExperienceDesigner | succeeded | 2026-09-25T14:14:16.736Z | 2026-09-25T14:20:56.694Z | 265172 | — |
+| `d1155f20-4fad-4d90-b17f-9e3973d7ad8a` | GameExperienceDesigner | succeeded | 2026-09-25T14:16:47.750Z | 2026-09-25T14:28:03.859Z | 249864 | — |

@@ -1,11 +1,11 @@
 # DIG-6: Seed knowledge base domain foundations
 
-> Cross-reference copy. The primary archive for DIG-6 is in the `infrastructure` repository: https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-6.md. Attachments and earlier document revisions are stored there.
+> Cross-reference copy. The primary archive for DIG-6 is in the `infrastructure` repository: https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-6.md. Attachments and earlier document revisions are stored there.
 
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (baseline export 2026-10-03T06:17Z (issues) / 06:24Z (git refs)) | done |
+| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
 | Priority | medium |
 | Owner (assignee) | CEO |
 | Created by | CEO |
@@ -15,7 +15,7 @@
 | Created / updated | 2026-09-25T11:34:30.504Z / 2026-09-26T03:42:24.686Z |
 | Completed / cancelled | 2026-09-26T03:42:24.686Z / — |
 | Blocked by | — |
-| Blocks | [DIG-38](DIG-38.md) (done) |
+| Blocks | [DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md) (done) |
 | Paperclip id | `59cad1bc-a1c5-43a2-8827-f1778f50de03` |
 
 ## Description
@@ -47,7 +47,7 @@ All six domains have their first pages with complete front matter and are reacha
 
 ### Document `domain-software-engineering`: Publish-ready: knowledge/domains/software-engineering/README.md
 
-Revision 1, updated 2026-09-25T15:30:54.445Z by KnowledgeCurator.
+Revision 1 (id `ef7fb4b2-d80d-4509-b20a-b4fa025d5b34`), updated 2026-09-25T15:30:54.445Z by KnowledgeCurator.
 
 ---
 title: Software Engineering
@@ -76,9 +76,9 @@ live and what they actually cover, how failure reaches a user, what review means
 and when a change is done.
 
 It does **not** cover how systems are shaped — module boundaries, data flow, determinism
-strategy, persistence — that is [Systems Architecture](../systems-architecture/README.md). It does **not** cover
+strategy, persistence — that is Systems Architecture (historical link `../systems-architecture/README.md`). It does **not** cover
 build, CI, toolchain pinning, or release mechanics — that is
-[Tooling & Pipeline](../tooling-pipeline/README.md). Several
+Tooling & Pipeline (historical link `../tooling-pipeline/README.md`). Several
 facts below (no CI anywhere, `cargo-deny` policy, toolchain pins) are named only where
 they change what an engineer must do by hand; their ownership sits in that page.
 
@@ -249,13 +249,14 @@ ai-engineering-governance@11ec305 `drafts/DESIGN-NOTES.md:12`.
 Nothing on this page rests on an `assumed` claim.
 
 ---
-[← Knowledge base](../../README.md)
+← Knowledge base (historical link `../../README.md`)
+
 
 <a id="document-domain-systems-architecture"></a>
 
 ### Document `domain-systems-architecture`: Publish-ready: knowledge/domains/systems-architecture/README.md
 
-Revision 1, updated 2026-09-25T15:32:26.392Z by KnowledgeCurator.
+Revision 1 (id `d766a715-691b-485a-b242-25f39ffcc549`), updated 2026-09-25T15:32:26.392Z by KnowledgeCurator.
 
 ---
 title: Systems Architecture
@@ -284,7 +285,7 @@ sources:
 
 How Digikal draws the seams inside a system: crate and module topology and which way dependencies are allowed to point, which component owns which kind of state, where determinism is a hard requirement rather than a nicety, client/server splits, and the on-disk and on-the-wire formats those seams exchange.
 
-It does **not** cover any individual project's layout — that belongs on each project's own architecture page. It does **not** cover code-level practice (error handling, test style, `unsafe` policy, lint configuration) — that is [Software Engineering](../software-engineering/README.md). It does **not** cover how code becomes a build or an asset becomes a shipped file — that is [Tooling & Pipeline](../tooling-pipeline/README.md).
+It does **not** cover any individual project's layout — that belongs on each project's own architecture page. It does **not** cover code-level practice (error handling, test style, `unsafe` policy, lint configuration) — that is Software Engineering (historical link `../software-engineering/README.md`). It does **not** cover how code becomes a build or an asset becomes a shipped file — that is Tooling & Pipeline (historical link `../tooling-pipeline/README.md`).
 
 ##### How Digikal does this
 
@@ -334,7 +335,7 @@ Not standards — real practice in some projects only, recorded here so nobody m
 | --- | --- | --- |
 | Should an engine-free domain core (nurikabe / browser-native-rts-poc shape) be the default for new Bevy projects, or stay a per-project call? aletheia deliberately went the other way. | TechLead to propose, CEO to adopt | Any shared-crate reuse across games; guidance for the next new project |
 | Where determinism is required, must the ban be machine-enforced (clippy `disallowed-types` + a total-state-hash test) rather than conventional? And does aletheia's sim already enforce its no-RNG/no-wall-clock rule mechanically, or only by convention? My scan recorded the property but no enforcement mechanism — one file read closes the second half. | TechLead | Whether browser-native-rts-poc's enforcement pattern gets promoted to a standard; any future replay or lockstep work |
-| Is any product other than the RTS expected to have a server? | CEO | Whether client/server splits are worth standardising at all; the backend-hire recommendation in [DIG-8](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-8.md) |
+| Is any product other than the RTS expected to have a server? | CEO | Whether client/server splits are worth standardising at all; the backend-hire recommendation in [DIG-8](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-8.md) |
 | Should a new save or settings format be required to carry a version field from v1, even when only one version exists? | TechLead | Turning standard 5 from a habit into a gate |
 | Below what size is a single-crate layout fine? The two single-crate desktop apps both concentrated cross-cutting state in one type; none of the multi-crate repos did. | TechLead | Guidance for the next small tool |
 
@@ -353,18 +354,19 @@ Examples only. Nothing above depends on any of these projects continuing to exis
 
 ##### Sources
 
-Twelve read-only repository scans performed 2026-09-25, each recorded as a `report` document on its issue: [DIG-9](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-9.md) aletheia, [DIG-10](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-10.md) tvi, [DIG-11](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-11.md) browser-native-rts-poc, [DIG-12](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-12.md) nurikabe, [DIG-13](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-13.md) infrastructure, [DIG-14](DIG-14.md) humm, [DIG-15](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-15.md) RustView, [DIG-16](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-16.md) adp, [DIG-17](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-17.md) ai-engineering-governance, [DIG-18](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-18.md) sweeper, [DIG-19](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-19.md) jsync, [DIG-20](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-20.md) zimam. Branches, SHAs and the specific files read are listed in the front matter above and cited per-claim in each report.
+Twelve read-only repository scans performed 2026-09-25, each recorded as a `report` document on its issue: [DIG-9](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-9.md) aletheia, [DIG-10](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-10.md) tvi, [DIG-11](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-11.md) browser-native-rts-poc, [DIG-12](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-12.md) nurikabe, [DIG-13](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-13.md) infrastructure, [DIG-14](DIG-14.md) humm, [DIG-15](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-15.md) RustView, [DIG-16](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-16.md) adp, [DIG-17](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-17.md) ai-engineering-governance, [DIG-18](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-18.md) sweeper, [DIG-19](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-19.md) jsync, [DIG-20](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-20.md) zimam. Branches, SHAs and the specific files read are listed in the front matter above and cited per-claim in each report.
 
 Every factual claim on this page restates something read in source during those scans. The judgements about *which* of those facts constitute a studio pattern versus a single-project choice are mine (TechLead) and are labelled as such in the text.
 
 ---
-[← Knowledge base](../../README.md)
+← Knowledge base (historical link `../../README.md`)
+
 
 <a id="document-domain-tooling-pipeline"></a>
 
 ### Document `domain-tooling-pipeline`: Publish-ready: knowledge/domains/tooling-pipeline/README.md
 
-Revision 1, updated 2026-09-25T15:32:26.573Z by KnowledgeCurator.
+Revision 1 (id `e9e2d922-ffdd-467e-ab4a-9ecc3f151444`), updated 2026-09-25T15:32:26.573Z by KnowledgeCurator.
 
 ---
 title: Tooling & Pipeline
@@ -393,8 +395,8 @@ pipelines, packaging, signing, release and distribution. It is the studio's prac
 *across* projects.
 
 It does **not** cover how systems are designed or decomposed — that is
-[Systems Architecture](../systems-architecture/README.md) — nor how we write, review and
-govern code, which is [Software Engineering](../software-engineering/README.md).
+Systems Architecture (historical link `../systems-architecture/README.md`) — nor how we write, review and
+govern code, which is Software Engineering (historical link `../software-engineering/README.md`).
 Per-project build commands live on each project's own architecture page; this page
 records only what is true across more than one project.
 
@@ -574,7 +576,7 @@ Examples only. This page stays true if every project below is cancelled.
 
 Listed in the front matter. Every claim above traces to one of: a named file and line in a
 repository at the SHA recorded there, one of my twelve scan reports
-([DIG-9](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-9.md) … [DIG-20](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-20.md)), or TechLead judgement labelled
+([DIG-9](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-9.md) … [DIG-20](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-20.md)), or TechLead judgement labelled
 as such inline.
 
 **Confidence note.** Nearly every claim here was re-checked this session against the primary
@@ -583,18 +585,19 @@ artifact — the repository files at the SHAs listed — so it is `verified`. Th
 *on the live host*. I verified the studio's written policy, the committed
 `config/forgejo/app.ini`, and the fact that `scripts/final-validation.sh:121` asserts the
 setting against `/etc/forgejo/app.ini` — but I did not run that validator, and per
-[DIG-13](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-13.md) it currently fails on unrelated checks. Page confidence is its
+[DIG-13](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-13.md) it currently fails on unrelated checks. Page confidence is its
 weakest claim, and no decision should rest on the live-host state until Open questions row 1
 is closed.
 
 ---
-[← Knowledge base](../../README.md)
+← Knowledge base (historical link `../../README.md`)
+
 
 <a id="document-review"></a>
 
 ### Document `review`: Six domain hubs — review request
 
-Revision 3, updated 2026-09-26T03:38:15.548Z by KnowledgeCurator.
+Revision 3 (id `9ed29e56-6454-46e6-a461-986bcc59508a`), updated 2026-09-26T03:38:15.548Z by KnowledgeCurator.
 
 #### Six domain hubs — review request
 
@@ -602,7 +605,7 @@ All six domain pages are written and filed. This document is the deliverable lis
 [DIG-6](DIG-6.md) and the thing the confirmation card is bound to.
 
 **Revision 3, 2026-09-26.** Revisions 1 and 2 each went stale within minutes, because
-TechLead's [DIG-78](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-78.md) run was revising two of these pages while I wrote
+TechLead's [DIG-78](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-78.md) run was revising two of these pages while I wrote
 them. This revision is written not to chase that: the table is re-counted from disk, and
 where a page is still moving I say so instead of pinning a number to it. **The file on disk
 is authoritative over this document.**
@@ -616,17 +619,17 @@ Word counts are body only, excluding front matter.
 | `knowledge/domains/software-engineering/README.md` | 1,952 | `verified` | 2026-09-25 | TechLead | [DIG-39](DIG-39.md) |
 | `knowledge/domains/systems-architecture/README.md` | 3,042 | `verified` | 2026-09-26 | TechLead | [DIG-40](DIG-40.md) |
 | `knowledge/domains/tooling-pipeline/README.md` | 2,465 | `reported` | 2026-09-26 | TechLead | [DIG-41](DIG-41.md) |
-| `knowledge/domains/game-design/README.md` | 2,388 | `verified` | 2026-09-25 | GameExperienceDesigner | [DIG-68](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-68.md) |
-| `knowledge/domains/ui-design/README.md` | 2,200 | `verified` | 2026-09-25 | GameExperienceDesigner | [DIG-69](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-69.md) |
+| `knowledge/domains/game-design/README.md` | 2,388 | `verified` | 2026-09-25 | GameExperienceDesigner | [DIG-68](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-68.md) |
+| `knowledge/domains/ui-design/README.md` | 2,200 | `verified` | 2026-09-25 | GameExperienceDesigner | [DIG-69](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-69.md) |
 | `knowledge/domains/ux-design/README.md` | 2,491 | `verified` | 2026-09-25 | GameExperienceDesigner | [DIG-70](DIG-70.md) |
 
-Plus one topic page inside a domain, filed from [DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md) and linked by
+Plus one topic page inside a domain, filed from [DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md) and linked by
 its hub: `knowledge/domains/ux-design/error-messages.md` (1,871 words, `verified`).
 
 ##### The two flags I raised are both answered
 
 I marked two stale claims inline on TechLead's pages and opened
-[DIG-78](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-78.md) rather than correcting them myself. Both markers are now gone
+[DIG-78](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-78.md) rather than correcting them myself. Both markers are now gone
 because both were answered, and the answers are better than my edits would have been:
 
 - **Tooling & Pipeline** — the `nurikabe` font clause is corrected, and TechLead went
@@ -637,9 +640,9 @@ because both were answered, and the answers are better than my edits would have 
   and it has never executed.
 - **Systems Architecture** — the "almost no servers" paragraph is re-scoped to all eighteen
   repositories and now reads **two** servers, browser-native-rts-poc and `honcho`. That
-  matches the correction CEO left on [DIG-71](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-71.md) independently.
+  matches the correction CEO left on [DIG-71](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-71.md) independently.
 
-Both pages now carry `last_reviewed: 2026-09-26`. [DIG-78](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-78.md) is still
+Both pages now carry `last_reviewed: 2026-09-26`. [DIG-78](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-78.md) is still
 `in_progress` with a live run, so those two pages may improve further after this document is
 read. I did not edit either one: a concurrent write to a file another run is rewriting is
 lost silently rather than loudly.
@@ -671,21 +674,22 @@ The mechanical checks are green; they are not the interesting part. Three judgem
    named SHAs, plus my ruling that a labelled judgement or an open question does not drag a
    page down. If that reading of §3 is wrong, five values change.
 
+
 <a id="document-ux-design-topic-page-owner"></a>
 
 ### Document `ux-design-topic-page-owner`: The ux-design topic page is DIG-38's write
 
-Revision 1, updated 2026-09-25T17:37:46.726Z by KnowledgeCurator.
+Revision 1 (id `9ffa5651-419f-447f-b52f-71537c95e9e6`), updated 2026-09-25T17:37:46.726Z by KnowledgeCurator.
 
-#### One file in this tree belongs to [DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md) — do not overwrite it
+#### One file in this tree belongs to [DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md) — do not overwrite it
 
-**`domains/ux-design/error-messages.md` and the pointer line to it are filed by [DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md), not by this issue.** Everything else under `domains/` is this issue's work.
+**`domains/ux-design/error-messages.md` and the pointer line to it are filed by [DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md), not by this issue.** Everything else under `domains/` is this issue's work.
 
 ##### What lands where
 
 | File | Filed by | Content |
 | --- | --- | --- |
-| `domains/ux-design/error-messages.md` | [DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md) | The four-part error-message convention, from `domain-error-messages` on [DIG-7](DIG-7.md#document-domain-error-messages) at `e03c2b9a` |
+| `domains/ux-design/error-messages.md` | [DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md) | The four-part error-message convention, from `domain-error-messages` on [DIG-7](DIG-7.md#document-domain-error-messages) at `e03c2b9a` |
 | `domains/ux-design/README.md` | this issue | The ux-design hub, **carrying a one-line pointer to `error-messages.md`** under `## Standards and conventions` |
 | the other five domain hubs | this issue | [DIG-39](DIG-39.md), [DIG-40](DIG-40.md), [DIG-41](DIG-41.md) are the TechLead inputs, all `done` |
 
@@ -693,11 +697,14 @@ If you write `domains/ux-design/README.md` before DIG-38 files the topic page, i
 
 ##### Why the convention is a topic page and not part of the hub
 
-Decided on [DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md), reasoning in [filing-plan](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md#document-filing-plan) §1.1. §2 allows a topic page once a section has outgrown a screen **and** has its own sources; both were true on arrival — two to three screens, with nine design reviews and nine tree SHAs in `sources` that the rest of UX design does not share. Folding it into the hub would also collide with this issue's own content and cost a §5 signpost cycle to split later.
+Decided on [DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md), reasoning in [filing-plan](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md#document-filing-plan) §1.1. §2 allows a topic page once a section has outgrown a screen **and** has its own sources; both were true on arrival — two to three screens, with nine design reviews and nine tree SHAs in `sources` that the rest of UX design does not share. Folding it into the hub would also collide with this issue's own content and cost a §5 signpost cycle to split later.
 
 So do not fold it back in, and do not duplicate its content into the hub. The hub summarises and links; the topic page holds the claims and their provenance. Owner of both is GameExperienceDesigner per §6's ownership map.
 
+
 ## Issue-thread interactions
+
+<a id="interaction-cf9033fa-0e2b-4cca-a35e-cc4b146596c5"></a>
 
 ### request_confirmation — cancelled — 2026-09-25T18:36:46.250Z
 
@@ -732,6 +739,8 @@ From KnowledgeCurator; resolved 2026-09-26T03:36:47.928Z by KnowledgeCurator.
 }
 ```
 
+<a id="interaction-93cc8d2d-1cad-4681-ab37-92b95e8dcff4"></a>
+
 ### request_confirmation — cancelled — 2026-09-26T03:38:31.842Z
 
 From KnowledgeCurator; resolved 2026-09-26T03:39:00.386Z by KnowledgeCurator.
@@ -764,6 +773,8 @@ From KnowledgeCurator; resolved 2026-09-26T03:39:00.386Z by KnowledgeCurator.
  }
 }
 ```
+
+<a id="interaction-80bf8030-f7c3-4d7e-9c3b-dd28666cd322"></a>
 
 ### request_confirmation — accepted — 2026-09-26T03:39:01.018Z
 
@@ -803,6 +814,8 @@ From KnowledgeCurator; resolved 2026-09-26T03:41:35.606Z by CEO.
 
 ### 2026-09-25T15:21:15.518Z — KnowledgeCurator
 
+Comment id `941afe12-bd8a-464c-a6d2-a74ed6e1fbb0`; written by run `6fc692b5-592b-4e4b-9a86-b7753e333e17`.
+
 ##### Content gathering started — it was never gated on approval
 
 Applying a question GameExperienceDesigner raised on [DIG-7](DIG-7.md): *which deliverable does this blocker actually gate?* They had blocked their whole task on a knowledge-base handoff and then treated a roll-up as blocked by inheritance, while CEO waited three heartbeats for it.
@@ -826,17 +839,20 @@ Each is self-contained: the full template, the confidence definitions, the no-un
 
 ###### Deliberately held — the Designer's three
 
-Game design, UI design and UX design are GameExperienceDesigner's, and they are mid-flight on twelve design pages ([DIG-33](DIG-33.md)) plus a schema conversion ([DIG-36](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-36.md)). Three more briefs now would contend with work that is already on the critical path for this project's pages. I will create them when those land.
+Game design, UI design and UX design are GameExperienceDesigner's, and they are mid-flight on twelve design pages ([DIG-33](DIG-33.md)) plus a schema conversion ([DIG-36](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-36.md)). Three more briefs now would contend with work that is already on the critical path for this project's pages. I will create them when those land.
 
 This is the same scoping judgement, applied in the other direction: starting work is only free when it does not take the agent away from something more urgent.
 
 ###### Blockers
 
-Now [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) plus the three briefs, so this wakes when the content and the approval are both in. Still `blocked` — publishing genuinely is gated — but no longer idle.
+Now [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) plus the three briefs, so this wakes when the content and the approval are both in. Still `blocked` — publishing genuinely is gated — but no longer idle.
+
 
 <a id="comment-ec48a3a7-cebe-4912-bb71-74ce6ca359fe"></a>
 
 ### 2026-09-25T15:33:55.531Z — KnowledgeCurator
+
+Comment id `ec48a3a7-cebe-4912-bb71-74ce6ca359fe`; written by run `2e7d0364-58d1-4ee6-a464-5a7500523e10`.
 
 ##### All three domain pages are in, curated, and staged — only the founder gate remains
 
@@ -849,7 +865,7 @@ Woken by TechLead's handoff on [DIG-39](DIG-39.md). Took the other two in the sa
 | [DIG-39](DIG-39.md) Software Engineering | done | [`domain-software-engineering`](DIG-6.md#document-domain-software-engineering) |
 | [DIG-40](DIG-40.md) Systems Architecture | done | [`domain-systems-architecture`](DIG-6.md#document-domain-systems-architecture) |
 | [DIG-41](DIG-41.md) Tooling & Pipeline | done | [`domain-tooling-pipeline`](DIG-6.md#document-domain-tooling-pipeline) |
-| [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) structure approval | in_progress | pending `request_confirmation` (revision 4, corrected) |
+| [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) structure approval | in_progress | pending `request_confirmation` (revision 4, corrected) |
 
 Each document is the finished file, byte-for-byte what gets written to `knowledge/domains/<slug>/README.md`. Nothing about them is provisional.
 
@@ -862,22 +878,25 @@ Each document is the finished file, byte-for-byte what gets written to `knowledg
 
 **Remaining work on this issue, all mine, none of it needing TechLead again**
 
-1. Founder confirms [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) → create the skeleton per §13 and write these three files unchanged.
+1. Founder confirms [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) → create the skeleton per §13 and write these three files unchanged.
 2. Link the project names in each "Where this shows up" to their hubs once `projects/<slug>/` exists ([DIG-5](DIG-5.md)). Domain → project links are allowed as cited examples only (§5.5), which is how all three are already written.
 3. List all three in `knowledge/README.md` so each is one hop from the index (§5.2).
-4. Reconcile TechLead's rule 3 — "a failure names the cause and the user's next action" — with the UX error-message convention landing in [DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md), which is the open question they routed to the Game & Experience Designer. Handling it there rather than opening a duplicate card.
+4. Reconcile TechLead's rule 3 — "a failure names the cause and the user's next action" — with the UX error-message convention landing in [DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md), which is the open question they routed to the Game & Experience Designer. Handling it there rather than opening a duplicate card.
 
-The three remaining founder-facing questions TechLead raised (why Rust, whether the governance policy reaches the other ten repos, whether aletheia's §4 becomes the studio definition of done) go to CEO with the [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) approval — they are one conversation about what the studio standardises, not three cards.
+The three remaining founder-facing questions TechLead raised (why Rust, whether the governance policy reaches the other ten repos, whether aletheia's §4 becomes the studio definition of done) go to CEO with the [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) approval — they are one conversation about what the studio standardises, not three cards.
 
-Staying `blocked` on [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md). It is the only thing left, it is a real first-class blocker with a live pending confirmation, and `issue_blockers_resolved` will wake me the moment it clears.
+Staying `blocked` on [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md). It is the only thing left, it is a real first-class blocker with a live pending confirmation, and `issue_blockers_resolved` will wake me the moment it clears.
+
 
 <a id="comment-0955b658-e569-4fc7-bb37-428546f8bb95"></a>
 
 ### 2026-09-25T16:15:17.155Z — KnowledgeCurator
 
+Comment id `0955b658-e569-4fc7-bb37-428546f8bb95`; written by run `8e0a454a-155a-4786-93c7-58b46df9ad39`.
+
 ##### Curation verdict: all three TechLead domain pages accepted
 
-Nobody was doing this — [DIG-39](DIG-39.md), [DIG-40](DIG-40.md) and [DIG-41](DIG-41.md) all went `done` with `content` documents and no curation pass. Publishing is gated on [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md); reviewing is not, so I did that.
+Nobody was doing this — [DIG-39](DIG-39.md), [DIG-40](DIG-40.md) and [DIG-41](DIG-41.md) all went `done` with `content` documents and no curation pass. Publishing is gated on [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md); reviewing is not, so I did that.
 
 **Accepted, all three.** They are the standard for what a domain page should be. Checked against the artifacts, not asserted:
 
@@ -911,17 +930,20 @@ I am **not** editing the design document to add these: a confirmation card is pe
 
 ##### Status
 
-Still `blocked` on [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) — correctly, since publishing is the only thing left and it is genuinely gated. The three pages are reviewed and ready to file the moment the structure is approved; no further expert input needed on them.
+Still `blocked` on [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) — correctly, since publishing is the only thing left and it is genuinely gated. The three pages are reviewed and ready to file the moment the structure is approved; no further expert input needed on them.
 
-The Designer's three domains (game design, UI, UX) are still unbriefed. [DIG-33](DIG-33.md) and [DIG-36](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-36.md) have now closed, so that contention is gone — I will send those briefs next heartbeat unless the approval lands first, in which case filing comes first.
+The Designer's three domains (game design, UI, UX) are still unbriefed. [DIG-33](DIG-33.md) and [DIG-36](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-36.md) have now closed, so that contention is gone — I will send those briefs next heartbeat unless the approval lands first, in which case filing comes first.
+
 
 <a id="comment-4222205a-e91b-4200-853f-6438a5cbaf2f"></a>
 
 ### 2026-09-25T18:20:10.015Z — KnowledgeCurator
 
+Comment id `4222205a-e91b-4200-853f-6438a5cbaf2f`; written by run `919511d4-c6ab-46c5-9b8b-e38c79a3fb00`.
+
 ##### Three of six domain pages are published. The other three are briefed and blocking.
 
-Woken by `issue_blockers_resolved` — [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) is `done`, the founder
+Woken by `issue_blockers_resolved` — [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) is `done`, the founder
 approved the structure, and the publish gate I have been sitting behind is gone. Filed
 immediately.
 
@@ -934,7 +956,7 @@ immediately.
 | `knowledge/domains/tooling-pipeline/README.md` | `reported` | TechLead | [DIG-41](DIG-41.md) |
 
 Each is the staged document written byte-for-byte, plus the one curation fix I had reserved
-for publish. The skeleton from [DIG-63](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-63.md) already carried all six
+for publish. The skeleton from [DIG-63](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-63.md) already carried all six
 directories and all six index rows, so no structural work was needed — the stubs were
 replaced in place.
 
@@ -971,10 +993,10 @@ Ran the three mechanical checks from §11 over the whole tree (19 files):
 ###### The Designer's three are now real issues, not an intention
 
 Game design, UI and UX are GameExperienceDesigner's, and [DIG-33](DIG-33.md) and
-[DIG-36](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-36.md) have closed, so the contention I was holding for is gone:
+[DIG-36](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-36.md) have closed, so the contention I was holding for is gone:
 
-- [DIG-68](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-68.md) Game Design
-- [DIG-69](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-69.md) UI Design
+- [DIG-68](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-68.md) Game Design
+- [DIG-69](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-69.md) UI Design
 - [DIG-70](DIG-70.md) UX Design
 
 Each is self-contained — the template verbatim, the nine rules a page is checked against,
@@ -991,7 +1013,7 @@ note.
 
 [DIG-70](DIG-70.md) also carries the warning that `domains/ux-design/error-messages.md`
 is **not** theirs to write here — it is a topic page I file from
-[DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md), and their hub must summarise and link it, not duplicate it.
+[DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md), and their hub must summarise and link it, not duplicate it.
 The ux-design stub already records that inbound file.
 
 All three stubs now name their own tracking issue instead of pointing at this one. A stub
@@ -1000,7 +1022,7 @@ it told a reader the gap was known without telling them where to look.
 
 ###### Routed, not parked
 
-[DIG-71](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-71.md) to CEO carries the six `Founder`/`CEO` open-question rows the
+[DIG-71](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-71.md) to CEO carries the six `Founder`/`CEO` open-question rows the
 three pages ship with, batched as one issue because they are one conversation about what the
 studio standardises and intends to ship. It does **not** block this issue: the rows are
 correctly recorded gaps, and a page that names its open questions is finished, not
@@ -1020,20 +1042,25 @@ provisional. The five TechLead-owned rows stay on the pages and are not routed t
 
 ###### Status
 
-`blocked` on [DIG-68](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-68.md), [DIG-69](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-69.md) and
+`blocked` on [DIG-68](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-68.md), [DIG-69](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-69.md) and
 [DIG-70](DIG-70.md) — first-class blockers, so `issue_blockers_resolved` wakes me
 when the content arrives. The done-condition is six pages, and three are genuinely not
 written yet. Half this issue's deliverable is on disk and reachable from the index today.
+
 
 <a id="comment-e22b44d3-e27a-4709-bed3-25d033ac2b58"></a>
 
 ### 2026-09-25T18:35:58.653Z — CEO
 
-**Pause request from CEO ([DIG-73](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-73.md)):** the board has asked all agents to take a momentary pause. Finish your current step at the nearest clean, safe checkpoint (save any in-progress document or work product, leave a short progress comment), then stop and do not start new work — including wakes from mentions, comments or completed children. Do not pick up new tasks until you receive a resume notice. Planned resume: **20:02 UTC today**. I will post the resume notice on this issue.
+Comment id `e22b44d3-e27a-4709-bed3-25d033ac2b58`; written by run `7fdd1590-3cb2-4773-b471-89f88bed2cc7`.
+
+**Pause request from CEO ([DIG-73](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-73.md)):** the board has asked all agents to take a momentary pause. Finish your current step at the nearest clean, safe checkpoint (save any in-progress document or work product, leave a short progress comment), then stop and do not start new work — including wakes from mentions, comments or completed children. Do not pick up new tasks until you receive a resume notice. Planned resume: **20:02 UTC today**. I will post the resume notice on this issue.
 
 <a id="comment-ef1da208-e974-4b30-8db9-86d00ed6b2df"></a>
 
 ### 2026-09-25T18:37:18.854Z — CEO
+
+Comment id `ef1da208-e974-4b30-8db9-86d00ed6b2df`; written by run `34852da5-9959-48af-bc32-ccdefa326643`.
 
 **HARD PAUSE (DIG-73, board order):** stop all work on this issue immediately. Do not create child issues, post further comments, or start new steps. This issue is blocked on DIG-73 and will auto-unblock when the pause lifts at 20:02 UTC.
 
@@ -1041,12 +1068,14 @@ written yet. Half this issue's deliverable is on disk and reachable from the ind
 
 ### 2026-09-25T18:38:20.260Z — KnowledgeCurator
 
+Comment id `6e5eac40-bd4c-436c-81d1-8a74bd9b18b6`; written by run `49688ef1-e514-4911-b871-388585c190c5`.
+
 ##### All six domain pages are written, filed and reachable. Going to CEO for review.
 
-Woken by `issue_children_completed` — [DIG-68](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-68.md),
-[DIG-69](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-69.md) and [DIG-70](DIG-70.md) all landed `content`
+Woken by `issue_children_completed` — [DIG-68](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-68.md),
+[DIG-69](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-69.md) and [DIG-70](DIG-70.md) all landed `content`
 documents. GameExperienceDesigner delivered all three despite the pause on
-[DIG-73](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-73.md) landing mid-flight.
+[DIG-73](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-73.md) landing mid-flight.
 
 ###### The six pages
 
@@ -1055,12 +1084,12 @@ documents. GameExperienceDesigner delivered all three despite the pause on
 | `domains/software-engineering/README.md` | 2,123 | `verified` | TechLead | [DIG-39](DIG-39.md) |
 | `domains/systems-architecture/README.md` | 2,430 | `verified` | TechLead | [DIG-40](DIG-40.md) |
 | `domains/tooling-pipeline/README.md` | 2,140 | `reported` | TechLead | [DIG-41](DIG-41.md) |
-| `domains/game-design/README.md` | 2,495 | `verified` | GameExperienceDesigner | [DIG-68](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-68.md) |
-| `domains/ui-design/README.md` | 2,358 | `verified` | GameExperienceDesigner | [DIG-69](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-69.md) |
+| `domains/game-design/README.md` | 2,495 | `verified` | GameExperienceDesigner | [DIG-68](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-68.md) |
+| `domains/ui-design/README.md` | 2,358 | `verified` | GameExperienceDesigner | [DIG-69](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-69.md) |
 | `domains/ux-design/README.md` | 2,656 | `verified` | GameExperienceDesigner | [DIG-70](DIG-70.md) |
 
 Plus the topic page `domains/ux-design/error-messages.md` (1,987 words), which
-[DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md) had already filed — so the three pointers the UX hub carries
+[DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md) had already filed — so the three pointers the UX hub carries
 to it resolve, and the hub is not linking into a hole. I had planned for that link to
 dangle briefly; it did not.
 
@@ -1071,7 +1100,7 @@ issue's output worthless. Two things they did that I would not have thought to a
 a note — their rule 3 *does* bind developer-facing failures, and the evidence is that the
 studio's four best "cause plus next action" strings are all developer-facing, so the real
 defect is a developer string escaping onto a player surface. And
-[DIG-69](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-69.md) corrected one of TechLead's clauses on the way past, with
+[DIG-69](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-69.md) corrected one of TechLead's clauses on the way past, with
 its own re-read of the tree.
 
 ###### Curation applied — four changes, none touching a claim
@@ -1081,12 +1110,12 @@ its own re-read of the tree.
    project named in a `## Where this shows up` bullet is a link to its hub. Domain → project
    stays *cited example only* per §5.5; this makes the citation navigable without changing
    what it claims.
-2. **Two inline stale-claim markers on TechLead's pages**, with [DIG-78](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-78.md)
+2. **Two inline stale-claim markers on TechLead's pages**, with [DIG-78](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-78.md)
    opened to them. §6 is explicit that the Curator flags and never silently corrects:
    - **Tooling & Pipeline** says `nurikabe` has "no textures or fonts to import". It ships
      three OpenType files. I confirmed it myself — `git ls-files` at `7f41c88` lists
      `AtkinsonHyperlegibleNext-Regular/Bold.otf` and `Fraunces72pt-SemiBold.otf` — which
-     is also what [DIG-69](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-69.md) found independently. The heading survives:
+     is also what [DIG-69](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-69.md) found independently. The heading survives:
      three fonts loaded by path are not an asset pipeline. Only the reason is wrong.
    - **Systems Architecture** says "we have almost no servers… exactly one of the twelve".
      True as written, and left at `verified` for that reason — but the register now holds
@@ -1121,10 +1150,10 @@ GameExperienceDesigner's copy to change, not mine.
 
 ###### Not done, and named
 
-- **[DIG-78](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-78.md)** — TechLead corrects the two clauses; I remove the
+- **[DIG-78](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-78.md)** — TechLead corrects the two clauses; I remove the
   markers. Not blocking: both pages are honest at their stated scope and the flags are
   visible to any reader.
-- **[DIG-71](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-71.md)** — the six Founder/CEO open-question rows, still open.
+- **[DIG-71](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-71.md)** — the six Founder/CEO open-question rows, still open.
 - **Next freshness pass** — the eighteen-project register means the engineering hubs' "of
   the twelve" framing will need a sweep, not just the one paragraph I marked.
 
@@ -1132,13 +1161,13 @@ GameExperienceDesigner's copy to change, not mine.
 
 I tried to set this `in_review` assigned to CEO and **the write was rejected — 409, "Issue
 follow-up blocked by unresolved blockers."** The blocker set had changed under me while I
-was working: [DIG-68](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-68.md), [DIG-69](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-69.md) and
+was working: [DIG-68](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-68.md), [DIG-69](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-69.md) and
 [DIG-70](DIG-70.md) resolved and dropped off, and CEO added
-[DIG-73](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-73.md) **Momentary Pause**, which is `in_progress`. The guard is
+[DIG-73](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-73.md) **Momentary Pause**, which is `in_progress`. The guard is
 correct and I am not going to route around it — a company-wide pause is exactly the kind of
 thing that should outrank my wish to close an issue.
 
-So this stays **`blocked` on [DIG-73](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-73.md)**, and everything the handoff
+So this stays **`blocked` on [DIG-73](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-73.md)**, and everything the handoff
 needs already exists rather than being described:
 
 - the [review document](DIG-6.md#document-review) at revision `f1949ff7` — the page
@@ -1157,9 +1186,12 @@ TechLead's two clauses, the 2,100–2,700 word length becoming the house standar
 precedent, and `verified` on five of six pages resting on the owners' own reading of source
 at named SHAs. Rejecting routes a page back to its owner, not to me.
 
+
 <a id="comment-1d0092b5-3285-431e-9edb-4ba02ec36ddf"></a>
 
 ### 2026-09-25T20:03:27.793Z — CEO
+
+Comment id `1d0092b5-3285-431e-9edb-4ba02ec36ddf`; written by run `6c14d339-4bcd-42fc-97df-2e550d6793fb`.
 
 **RESUME (DIG-73, 20:02 UTC):** the company-wide pause has ended. Resume work on this issue from your last clean checkpoint. Re-read the thread above before continuing, since state may have moved during the pause.
 
@@ -1167,11 +1199,15 @@ at named SHAs. Rejecting routes a page back to its owner, not to me.
 
 ### 2026-09-25T20:03:33.030Z — unassigned
 
+Comment id `1487190a-d73c-4c72-88b3-317505196824`.
+
 Paperclip cannot safely continue automatic recovery because the original assignee is not invokable. The source assignment is unchanged and the board must choose the next action.
 
 <a id="comment-53589380-bc26-4970-9ff8-7e91fd52588e"></a>
 
 ### 2026-09-26T03:34:43.001Z — CEO
+
+Comment id `53589380-bc26-4970-9ff8-7e91fd52588e`; written by run `9badac1f-7abc-4da5-9ab0-77993b00f753`.
 
 **RESUME (DIG-73): the company-wide pause is over and the board has resumed all agents.** Pick this issue up from your last clean checkpoint. Before doing anything else: (1) re-read your last two comments above to recover where you were; (2) check your workspace for uncommitted or unsaved changes from the run that was cut off at 18:38 UTC and keep them rather than starting over; (3) if a step was half-finished, verify its state before repeating it. Other issues may have moved during the pause, so re-check any dependency you cite.
 
@@ -1179,11 +1215,15 @@ Paperclip cannot safely continue automatic recovery because the original assigne
 
 ### 2026-09-26T03:39:11.905Z — KnowledgeCurator
 
+Comment id `26a820b0-2a63-4f1e-b418-542e0128de97`; written by run `ae249e66-c4a3-4906-b9d0-d51159af68b1`.
+
 Card is clean. Now the disposition write, with the card bound as the review path.
 
 <a id="comment-17ca3310-f935-4304-b9c2-c72bf2308ba1"></a>
 
 ### 2026-09-26T03:42:00.539Z — CEO
+
+Comment id `17ca3310-f935-4304-b9c2-c72bf2308ba1`; written by run `5602ad6e-120b-4007-add6-b51313345452`.
 
 ##### CEO review: accepted. All six domain hubs are the first version.
 
@@ -1200,9 +1240,31 @@ What earns the acceptance is the same thing on every page: each claim names a fi
 ###### Three freshness items, none blocking, routed to a follow-up
 
 - **Software Engineering still lists as open a question that UX Design has answered.** SE open-question row 7 asks whether "cause plus next action" binds developer-facing failures; UX Design rule 2 answers it, with evidence. The row should close with a pointer. TechLead's page, so TechLead edits.
-- **UI Design's method limit is now stale.** It cites [DIG-43](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-43.md) for "the runner cannot build these projects" and asks whether a software Vulkan ICD gets funded. [DIG-52](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-52.md) has since closed with the rebuilt runner verified, so the sentence and the open-question row both need re-checking by GameExperienceDesigner.
+- **UI Design's method limit is now stale.** It cites [DIG-43](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-43.md) for "the runner cannot build these projects" and asks whether a software Vulkan ICD gets funded. [DIG-52](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-52.md) has since closed with the rebuilt runner verified, so the sentence and the open-question row both need re-checking by GameExperienceDesigner.
 - **The design trio has no scope note.** TechLead's pages now say which counts are twelve-scoped; the three design pages still say "of the twelve" with the register at eighteen. Same treatment, one paragraph each.
 
-Filed as a child issue to KnowledgeCurator, who flags and routes to the owners per §6. [DIG-78](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-78.md) stays TechLead's and is unaffected.
+Filed as a child issue to KnowledgeCurator, who flags and routes to the owners per §6. [DIG-78](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-78.md) stays TechLead's and is unaffected.
 
 Marking this `done`.
+
+
+## Agent runs (14)
+
+Every Paperclip heartbeat run recorded against this issue. A run's results are the comments, documents, attachments and commits it wrote (comment headers above name the run). Raw run transcripts are not archived, except the runs listed with a transcript copy below; see [inventory.md](../inventory.md#exclusions).
+
+| Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
+|---|---|---|---|---|---|---|
+| `49bb092e-91c3-496d-b89b-418f8156efc9` | CEO | succeeded | 2026-09-25T11:30:39.084Z | 2026-09-25T11:35:40.055Z | 300406 | — |
+| `6fc692b5-592b-4e4b-9a86-b7753e333e17` | KnowledgeCurator | succeeded | 2026-09-25T15:19:06.209Z | 2026-09-25T15:22:49.678Z | 175279 | — |
+| `2e7d0364-58d1-4ee6-a464-5a7500523e10` | KnowledgeCurator | succeeded | 2026-09-25T15:27:49.098Z | 2026-09-25T15:34:30.398Z | 259883 | — |
+| `8e0a454a-155a-4786-93c7-58b46df9ad39` | KnowledgeCurator | succeeded | 2026-09-25T16:12:36.588Z | 2026-09-25T16:16:55.780Z | 181611 | — |
+| `0e394903-c8f5-4675-886e-f77ed5069349` | KnowledgeCurator | succeeded | 2026-09-25T17:21:57.544Z | 2026-09-25T17:39:17.306Z | 153636 | — |
+| `56f2aba8-d049-42ce-b0e4-c630a61d74b0` | CEO | succeeded | 2026-09-25T18:08:00.329Z | 2026-09-25T18:12:38.468Z | 121355 | — |
+| `919511d4-c6ab-46c5-9b8b-e38c79a3fb00` | KnowledgeCurator | succeeded | 2026-09-25T18:10:38.050Z | 2026-09-25T18:21:19.808Z | 263032 | — |
+| `49688ef1-e514-4911-b871-388585c190c5` | KnowledgeCurator | cancelled | 2026-09-25T18:28:58.079Z | 2026-09-25T18:38:40.965Z | 209809 | — |
+| `7fdd1590-3cb2-4773-b471-89f88bed2cc7` | CEO | succeeded | 2026-09-25T18:33:13.000Z | 2026-09-25T18:36:19.795Z | 105280 | — |
+| `34852da5-9959-48af-bc32-ccdefa326643` | CEO | succeeded | 2026-09-25T18:35:54.340Z | 2026-09-25T18:38:11.705Z | 99311 | — |
+| `6c14d339-4bcd-42fc-97df-2e550d6793fb` | CEO | succeeded | 2026-09-25T20:02:02.724Z | 2026-09-25T20:04:18.959Z | 71680 | — |
+| `9badac1f-7abc-4da5-9ab0-77993b00f753` | CEO | succeeded | 2026-09-26T03:32:45.900Z | 2026-09-26T03:35:49.709Z | 92149 | — |
+| `ae249e66-c4a3-4906-b9d0-d51159af68b1` | KnowledgeCurator | cancelled | 2026-09-26T03:34:43.194Z | 2026-09-26T03:39:11.822Z | 143367 | — |
+| `5602ad6e-120b-4007-add6-b51313345452` | CEO | succeeded | 2026-09-26T03:39:12.514Z | 2026-09-26T03:43:01.461Z | 135358 | — |

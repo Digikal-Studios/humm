@@ -1,6 +1,6 @@
 # Setup and test commands
 
-Quoted verbatim from this repository's existing documentation at `main` commit `086426996bc81113fc4da920e199a9943bd33603`. This page adds no new commands; when the source file changes, the source file wins. Commands that need credentials or hosts read them from the environment or a secrets store; this archive contains no secret values.
+Quoted verbatim from this repository's existing documentation at `main` commit `582b4c1da7c123c81d9bc71210c2c0d5b89bec0c`. This page adds no new commands; when the source file changes, the source file wins. Commands that need credentials or hosts read them from the environment or a secrets store; this archive contains no secret values.
 
 No setup or test commands are documented in README.md, AGENTS.md, CLAUDE.md, CONTRIBUTING.md or a Makefile on the default branch. Read the repository's top-level files and the issue pages in this archive for how work was verified.
 

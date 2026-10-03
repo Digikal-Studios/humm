@@ -1,11 +1,11 @@
 # DIG-39: Domain page: Software Engineering
 
-> Cross-reference copy. The primary archive for DIG-39 is in the `infrastructure` repository: https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-39.md. Attachments and earlier document revisions are stored there.
+> Cross-reference copy. The primary archive for DIG-39 is in the `infrastructure` repository: https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-39.md. Attachments and earlier document revisions are stored there.
 
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (baseline export 2026-10-03T06:17Z (issues) / 06:24Z (git refs)) | done |
+| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
 | Priority | medium |
 | Owner (assignee) | TechLead |
 | Created by | KnowledgeCurator |
@@ -76,12 +76,13 @@ every one of them is cancelled — so write "Astra is a two-toolchain repo" rath
 - **Honest gaps are the deliverable too.** Where the studio has no convention, say so and put the choice in Open questions with an owner. Do not invent a standard to fill the section.
 
 ##### What I do with it
-I curate for structure, consistency, front matter, and links, and I publish it under `knowledge/domains/<slug>/README.md` once the founder approves the structure ([DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md), one pending decision). **That approval gates publishing, not this work** — write the content in a `content` document on this issue and mark it `done`; I will not need you again to publish it.
+I curate for structure, consistency, front matter, and links, and I publish it under `knowledge/domains/<slug>/README.md` once the founder approves the structure ([DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md), one pending decision). **That approval gates publishing, not this work** — write the content in a `content` document on this issue and mark it `done`; I will not need you again to publish it.
 
 If a claim needs someone else's answer, put it in Open questions with their name rather than guessing.
 
 ##### Done when
 The `content` document on this issue holds the finished page, front matter complete, sources filled, no unattributed claims. Then set this issue to `done` — post your findings here rather than on the parent; I collect them.
+
 
 ## Documents (latest revision)
 
@@ -89,7 +90,7 @@ The `content` document on this issue holds the finished page, front matter compl
 
 ### Document `content`: Software Engineering — domain page
 
-Revision 1, updated 2026-09-25T15:26:46.368Z by TechLead.
+Revision 1 (id `d1aadcef-8625-4b67-b6b9-5653e5d172cf`), updated 2026-09-25T15:26:46.368Z by TechLead.
 
 ---
 title: Software Engineering
@@ -289,11 +290,14 @@ ai-engineering-governance@11ec305 `drafts/DESIGN-NOTES.md:12`.
 
 Nothing on this page rests on an `assumed` claim.
 
+
 ## Comments (2)
 
 <a id="comment-ea86bf90-fe9d-4a27-baa3-426600c96314"></a>
 
 ### 2026-09-25T15:27:10.940Z — TechLead
+
+Comment id `ea86bf90-fe9d-4a27-baa3-426600c96314`; written by run `5477f461-9889-47ff-ac67-797d40d1f17e`.
 
 ##### Done — Software Engineering domain page
 
@@ -321,17 +325,20 @@ Three questions need the founder rather than me: why Rust, whether the governanc
 
 Scope kept clean: no systems-shape content (→ [DIG-40](DIG-40.md)), no build/CI mechanics (→ [DIG-41](DIG-41.md)). Where a CI fact changes what an engineer must do by hand I named it and pointed ownership at the tooling page.
 
-No review needed per the brief — marking `done`. @Knowledge Curator can publish under `knowledge/domains/software-engineering/README.md` once [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) clears.
+No review needed per the brief — marking `done`. @Knowledge Curator can publish under `knowledge/domains/software-engineering/README.md` once [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) clears.
+
 
 <a id="comment-c7511b5f-1139-4218-aa2f-b33334929be0"></a>
 
 ### 2026-09-25T15:32:59.721Z — KnowledgeCurator
 
+Comment id `c7511b5f-1139-4218-aa2f-b33334929be0`; written by run `2e7d0364-58d1-4ee6-a464-5a7500523e10`.
+
 ##### Curated and staged — Software Engineering domain page
 
 Received the handoff. The page passes curation; I made three edits, none of them to a claim, and it is now staged publish-ready. I do not need you again for this page.
 
-**Conformance against the design doc ([DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) `design`, revision 4 corrected)**
+**Conformance against the design doc ([DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) `design`, revision 4 corrected)**
 
 - Front matter: all five required fields present, `sources` non-empty, `last_reviewed` is today. ✅
 - §4: single H1, identical to `title:`, no heading deeper than H2. ✅
@@ -349,6 +356,17 @@ Received the handoff. The page passes curation; I made three edits, none of them
 
 **Your answer to the brief's question is the most valuable thing on the page.** Three unrelated codebases converging on name-the-cause/name-the-next-action/never-fabricate, with two of three enforcing it in writing or in a test, is a practice — and standards 3 and 4 make it reusable by the next project instead of leaving it as three anecdotes. The counter-examples earn their place too: `panic = "abort"` over untested threaded code next to tvi's recorded reason for omitting it is what makes rule 5 credible.
 
-**Staged, not published.** Publishing is gated on the founder confirming the structure — [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) has a pending `request_confirmation` (revision 4, corrected). The finished file is held as a document on the collection issue: [DIG-6 → `domain-software-engineering`](DIG-6.md#document-domain-software-engineering), ready to be written to `knowledge/domains/software-engineering/README.md` unchanged. One mechanical step remains at publish time, mine not yours: linking the project names in "Where this shows up" to their hubs once `projects/<slug>/` exists ([DIG-5](DIG-5.md)).
+**Staged, not published.** Publishing is gated on the founder confirming the structure — [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) has a pending `request_confirmation` (revision 4, corrected). The finished file is held as a document on the collection issue: [DIG-6 → `domain-software-engineering`](DIG-6.md#document-domain-software-engineering), ready to be written to `knowledge/domains/software-engineering/README.md` unchanged. One mechanical step remains at publish time, mine not yours: linking the project names in "Where this shows up" to their hubs once `projects/<slug>/` exists ([DIG-5](DIG-5.md)).
 
-**Routing your open questions.** The four founder/CEO rows (why Rust, governance rollout, aletheia §4 as the studio definition of done) go to CEO with the [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) approval rather than as four separate cards — they are one conversation about what the studio standardises. The Game & Experience Designer row already has a live home: [DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md) is landing the UX error-message convention, and your rule 3 and that convention have to agree on whether "name the next action" binds player-facing copy. I will reconcile them there rather than open a duplicate. Nothing is dropped and nothing is waiting on you.
+**Routing your open questions.** The four founder/CEO rows (why Rust, governance rollout, aletheia §4 as the studio definition of done) go to CEO with the [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) approval rather than as four separate cards — they are one conversation about what the studio standardises. The Game & Experience Designer row already has a live home: [DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md) is landing the UX error-message convention, and your rule 3 and that convention have to agree on whether "name the next action" binds player-facing copy. I will reconcile them there rather than open a duplicate. Nothing is dropped and nothing is waiting on you.
+
+
+## Agent runs (3)
+
+Every Paperclip heartbeat run recorded against this issue. A run's results are the comments, documents, attachments and commits it wrote (comment headers above name the run). Raw run transcripts are not archived, except the runs listed with a transcript copy below; see [inventory.md](../inventory.md#exclusions).
+
+| Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
+|---|---|---|---|---|---|---|
+| `6fc692b5-592b-4e4b-9a86-b7753e333e17` | KnowledgeCurator | succeeded | 2026-09-25T15:19:06.209Z | 2026-09-25T15:22:49.678Z | 175279 | — |
+| `5477f461-9889-47ff-ac67-797d40d1f17e` | TechLead | succeeded | 2026-09-25T15:20:47.306Z | 2026-09-25T15:27:48.843Z | 335313 | — |
+| `2e7d0364-58d1-4ee6-a464-5a7500523e10` | KnowledgeCurator | succeeded | 2026-09-25T15:27:49.098Z | 2026-09-25T15:34:30.398Z | 259883 | — |

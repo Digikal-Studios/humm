@@ -1,11 +1,11 @@
 # DIG-70: Domain page: UX Design
 
-> Cross-reference copy. The primary archive for DIG-70 is in the `infrastructure` repository: https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-70.md. Attachments and earlier document revisions are stored there.
+> Cross-reference copy. The primary archive for DIG-70 is in the `infrastructure` repository: https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-70.md. Attachments and earlier document revisions are stored there.
 
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (baseline export 2026-10-03T06:17Z (issues) / 06:24Z (git refs)) | done |
+| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
 | Priority | medium |
 | Owner (assignee) | GameExperienceDesigner |
 | Created by | KnowledgeCurator |
@@ -28,7 +28,7 @@ ownership map in the approved structure: game design, UI design and UX design ar
 
 This is one of three briefs I am sending you in this pass (Game Design, UI Design, UX Design — the other two are their own issues). They are
 independent — do them in any order, or in one sitting if that is cheaper. The structure
-approval ([DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md)) has landed, so these pages publish as soon as they
+approval ([DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md)) has landed, so these pages publish as soon as they
 arrive.
 
 A domain page answers *how Digikal does this kind of work, across projects*. It stays
@@ -40,8 +40,8 @@ twelve `design.md` pages you already wrote.
 **Read this first — one file in your own domain directory is not yours to write in
 this issue.** `domains/ux-design/error-messages.md` is the four-part error-message
 convention from your `domain-error-messages` document; I file it from
-[DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md) as a **topic page**, per the placement decision in
-[filing-plan](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md#document-filing-plan) §1.1 — it had outgrown a screen and
+[DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md) as a **topic page**, per the placement decision in
+[filing-plan](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md#document-filing-plan) §1.1 — it had outgrown a screen and
 carried nine design reviews and nine tree SHAs in `sources` that the rest of UX design does
 not share.
 
@@ -52,9 +52,9 @@ their provenance. You own both.
 
 Other material:
 
-- **Your twelve design reviews** (`design-pages` on [DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md), schema
-  from [DIG-36](https://repo.digikal.com/jawad/infrastructure/src/branch/main/docs/paperclip/shutdown-2026-10-03/issues/DIG-36.md) / [DIG-42](DIG-42.md)).
-- **TechLead's [Software Engineering](../software-engineering/README.md) hub**, filed
+- **Your twelve design reviews** (`design-pages` on [DIG-38](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-38.md), schema
+  from [DIG-36](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-36.md) / [DIG-42](DIG-42.md)).
+- **TechLead's Software Engineering (historical link `../software-engineering/README.md`) hub**, filed
   today, which lands on the same seam from the other side and leaves you one explicit open
   question. Its rule 3 is *"a user-facing failure names the cause and the user's next
   action, and never renders a fabricated value"*, evidenced by jsync's four-step SSH
@@ -79,11 +79,11 @@ reach**:
 ##### Boundaries — what belongs on the sibling pages, not this one
 
 - Screens, controls, colour, typography, contrast →
-  [UI Design](../ui-design/README.md) (your other brief).
-- Rules, systems, difficulty, progression → [Game Design](../game-design/README.md)
+  UI Design (historical link `../ui-design/README.md`) (your other brief).
+- Rules, systems, difficulty, progression → Game Design (historical link `../game-design/README.md`)
   (your other brief).
 - Developer-facing error *handling mechanics* — typed errors, where copy is produced,
-  `panic` policy → [Software Engineering](../software-engineering/README.md) (TechLead,
+  `panic` policy → Software Engineering (historical link `../software-engineering/README.md`) (TechLead,
   filed). The wording the user reads is yours; the machinery is theirs.
 - Any one project's flows → that project's `design.md`.
 
@@ -190,13 +190,14 @@ The three TechLead hubs are filed and are the standard to match — same workspa
 The rules above in one screen: `knowledge/CONVENTIONS.md`. Your template:
 `knowledge/_templates/domain.md`.
 
+
 ## Documents (latest revision)
 
 <a id="document-content"></a>
 
 ### Document `content`: knowledge/domains/ux-design/README.md
 
-Revision 1, updated 2026-09-25T18:26:10.496Z by GameExperienceDesigner.
+Revision 1 (id `740b7732-7419-4faa-a122-5bfa60b2d653`), updated 2026-09-25T18:26:10.496Z by GameExperienceDesigner.
 
 ---
 title: UX Design
@@ -227,13 +228,13 @@ and the sequence they move through, on every surface we ship — desktop GUI, br
 game, terminal UI, CLI and runbook.
 
 It does **not** cover screens, controls, colour, typography or contrast measurement,
-which is [UI Design](../ui-design/README.md); or rules, systems, difficulty and
-progression, which is [Game Design](../game-design/README.md). It does not cover how a
+which is UI Design (historical link `../ui-design/README.md`); or rules, systems, difficulty and
+progression, which is Game Design (historical link `../game-design/README.md`). It does not cover how a
 failure is *detected* or where copy is produced — typed errors, presentation
 boundaries and `panic` policy belong to
-[Software Engineering](../software-engineering/README.md). The wording the user reads
+Software Engineering (historical link `../software-engineering/README.md`). The wording the user reads
 is ours; the machinery is theirs. The shape of a blocking error message has its own
-page here: [Error Messages](error-messages.md). Any one product's flows belong on that
+page here: Error Messages (historical link `error-messages.md`). Any one product's flows belong on that
 project's `design.md`.
 
 ##### How Digikal does this
@@ -303,7 +304,7 @@ do not have."** tvi is the reference: missing provider data becomes the verdict
 journaling a call on absent evidence is premature (`detail_verdict.rs:85-87`). zimam
 refuses to render a clean review when the reviewer merely said nothing ("Coverage, not
 silence", `PDS:1190`). But that rule as written in
-[Software Engineering](../software-engineering/README.md) catches only one of three
+Software Engineering (historical link `../software-engineering/README.md`) catches only one of three
 failure shapes, and the other two are live in the tree — rule 3 below.
 
 **Accessibility has three independent instances and no checklist.** nurikabe computes
@@ -321,12 +322,12 @@ what a generic list would contain.
 1. **A blocking message has four parts** — name the problem in the user's terms with
    the deciding value, number the fix, end with a command that proves it worked, and
    foreclose the dangerous workaround by name. The claims, evidence and anti-patterns
-   are on [Error Messages](error-messages.md); that page is the authority and this line
+   are on Error Messages (historical link `error-messages.md`); that page is the authority and this line
    is only the pointer.
 
 2. **The register belongs to the surface the string lands on, not to the layer that
    produced it.** This answers the question
-   [Software Engineering](../software-engineering/README.md) routes here: their rule 3
+   Software Engineering (historical link `../software-engineering/README.md`) routes here: their rule 3
    applies to developer-facing failures too, unchanged. The studio's four best
    instances of "cause plus next action" are all developer- or operator-facing —
    jsync's SSH remediation (`bin/jsync:484-518`), infrastructure's
@@ -403,7 +404,7 @@ what a generic list would contain.
 | Does Digikal claim accessibility, and at what level? Nine of twelve products have no accessibility artifact; three have good, uncoordinated ones. The honest options are a studio floor (rule 7 on anything with a user), per-product claims, or an explicit "not a goal" so reviews stop raising it. Half-claiming is the worst of the three. | Founder | Whether a project may ship a partial keyboard path; the accessibility section of every `design.md` |
 | Is a first-run path in scope while the author is the only user of each product? Every product fails here and the fix is cheap in each — but it is only worth funding if someone other than the author is expected to open these. | Founder | aletheia ALE-01, browser-native-rts-poc RTS-02, humm HUM-06, sweeper SWP-10, nurikabe NUR-10 |
 | Should rule 4 be a written studio standard with a named owner, or stay one project's policy? Promoting it means someone maintains it and three projects gain rows on their pages. | CEO, with TechLead on where a shared copy convention would live | Whether a `design.md` can cite a missing progress phase as a defect rather than a note |
-| One studio voice, or a voice per product? nurikabe's blame-free whisper register, tvi's dense cockpit and jsync's `jsync: warning:` prefix are three deliberate, incompatible registers. My view is that voice is per-product while the rules on this page are studio-wide — but that is a founder call and it decides whether a copy pass is ever shared. | Founder | Any cross-product copy work; the reading-level question open on [Error Messages](error-messages.md) |
+| One studio voice, or a voice per product? nurikabe's blame-free whisper register, tvi's dense cockpit and jsync's `jsync: warning:` prefix are three deliberate, incompatible registers. My view is that voice is per-product while the rules on this page are studio-wide — but that is a founder call and it decides whether a copy pass is ever shared. | Founder | Any cross-product copy work; the reading-level question open on Error Messages (historical link `error-messages.md`) |
 
 ##### Where this shows up
 
@@ -446,13 +447,16 @@ labelled inline.
 > is the largest limitation on this page.
 
 ---
-[← Knowledge base](../../README.md)
+← Knowledge base (historical link `../../README.md`)
+
 
 ## Comments (1)
 
 <a id="comment-b11622b8-ee45-474f-a8c6-226d67acbe0b"></a>
 
 ### 2026-09-25T18:26:42.773Z — GameExperienceDesigner
+
+Comment id `b11622b8-ee45-474f-a8c6-226d67acbe0b`; written by run `db11841e-8a5e-4e5e-a1d2-0f3eec4309e7`.
 
 **Done — page delivered as document `content` on this issue, byte-for-byte what to write to `knowledge/domains/ux-design/README.md`.** Verified from a GET, not the PUT echo (revision `740b7732`, 18,680 bytes, SHA matches local).
 
@@ -474,3 +478,12 @@ labelled inline.
 No section outgrew a screen with its own distinct sources, so nothing here wants to be a second topic page.
 
 **Still open on my side:** DIG-68 (Game Design) and DIG-69 (UI Design) from the same pass — untouched this heartbeat, which was scoped to this issue.
+
+## Agent runs (2)
+
+Every Paperclip heartbeat run recorded against this issue. A run's results are the comments, documents, attachments and commits it wrote (comment headers above name the run). Raw run transcripts are not archived, except the runs listed with a transcript copy below; see [inventory.md](../inventory.md#exclusions).
+
+| Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
+|---|---|---|---|---|---|---|
+| `919511d4-c6ab-46c5-9b8b-e38c79a3fb00` | KnowledgeCurator | succeeded | 2026-09-25T18:10:38.050Z | 2026-09-25T18:21:19.808Z | 263032 | — |
+| `db11841e-8a5e-4e5e-a1d2-0f3eec4309e7` | GameExperienceDesigner | succeeded | 2026-09-25T18:16:34.879Z | 2026-09-25T18:27:22.718Z | 240787 | — |
