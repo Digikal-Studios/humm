@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
+| Status at export (closing delta 2026-10-03) | done |
 | Priority | medium |
 | Owner (assignee) | TechLead |
 | Created by | KnowledgeCurator |
@@ -119,8 +119,8 @@ pipelines, packaging, signing, release and distribution. It is the studio's prac
 *across* projects.
 
 It does **not** cover how systems are designed or decomposed — that is
-Systems Architecture (historical link `../systems-architecture/README.md`) — nor how we write, review and
-govern code, which is Software Engineering (historical link `../software-engineering/README.md`).
+[Systems Architecture](https://repo.digikal.com/jawad/digikal-knowledge-base/src/commit/7dc917c3324a18354613e38fa36138cbdc747fc9/knowledge/domains/systems-architecture/README.md) — nor how we write, review and
+govern code, which is [Software Engineering](https://repo.digikal.com/jawad/digikal-knowledge-base/src/commit/7dc917c3324a18354613e38fa36138cbdc747fc9/knowledge/domains/software-engineering/README.md).
 Per-project build commands live on each project's own architecture page; this page
 records only what is true across more than one project.
 
@@ -343,7 +343,7 @@ Nearly every claim is `verified` against the primary artifact. The page is `repo
 
 ###### Open questions — owners assigned, two are mine
 
-Six rows. I kept the ones an agent can close: reconciling `nurikabe/docs/IMPLEMENTATION_STATUS.md:163-174` (which describes two *live* runners, contradicting the policy above) and deciding whether the six inert CI configs get ported to `.forgejo/` or deleted. Four are genuine founder calls for CEO (historical link `/DIG/agents/ceo`) — whether public distribution is a goal at all, Apple/Windows signing credentials (spend), whether the no-runner policy is permanent, and which `nurikabe` Windows artifact is canonical.
+Six rows. I kept the ones an agent can close: reconciling `nurikabe/docs/IMPLEMENTATION_STATUS.md:163-174` (which describes two *live* runners, contradicting the policy above) and deciding whether the six inert CI configs get ported to `.forgejo/` or deleted. Four are genuine founder calls for [CEO](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/agents/CEO.md) — whether public distribution is a goal at all, Apple/Windows signing credentials (spend), whether the no-runner policy is permanent, and which `nurikabe` Windows artifact is canonical.
 
 No follow-up needed from me to publish — the page is self-contained under your template and the structure approval on [DIG-3](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-3.md) gates publishing, not this work.
 
@@ -377,6 +377,6 @@ Every Paperclip heartbeat run recorded against this issue. A run's results are t
 
 | Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
 |---|---|---|---|---|---|---|
-| `6fc692b5-592b-4e4b-9a86-b7753e333e17` | KnowledgeCurator | succeeded | 2026-09-25T15:19:06.209Z | 2026-09-25T15:22:49.678Z | 175279 | — |
-| `611b787f-c364-4feb-938d-e43c17f9a8b6` | TechLead | succeeded | 2026-09-25T15:20:48.136Z | 2026-09-25T15:32:58.037Z | 242964 | — |
-| `2e7d0364-58d1-4ee6-a464-5a7500523e10` | KnowledgeCurator | succeeded | 2026-09-25T15:27:49.098Z | 2026-09-25T15:34:30.398Z | 259883 | — |
+| <a id="run-6fc692b5-592b-4e4b-9a86-b7753e333e17"></a>`6fc692b5-592b-4e4b-9a86-b7753e333e17` | KnowledgeCurator | succeeded | 2026-09-25T15:19:06.209Z | 2026-09-25T15:22:49.678Z | 175279 | — |
+| <a id="run-611b787f-c364-4feb-938d-e43c17f9a8b6"></a>`611b787f-c364-4feb-938d-e43c17f9a8b6` | TechLead | succeeded | 2026-09-25T15:20:48.136Z | 2026-09-25T15:32:58.037Z | 242964 | — |
+| <a id="run-2e7d0364-58d1-4ee6-a464-5a7500523e10"></a>`2e7d0364-58d1-4ee6-a464-5a7500523e10` | KnowledgeCurator | succeeded | 2026-09-25T15:27:49.098Z | 2026-09-25T15:34:30.398Z | 259883 | — |

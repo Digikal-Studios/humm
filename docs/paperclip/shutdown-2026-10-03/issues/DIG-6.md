@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
+| Status at export (closing delta 2026-10-03) | done |
 | Priority | medium |
 | Owner (assignee) | CEO |
 | Created by | CEO |
@@ -76,9 +76,9 @@ live and what they actually cover, how failure reaches a user, what review means
 and when a change is done.
 
 It does **not** cover how systems are shaped — module boundaries, data flow, determinism
-strategy, persistence — that is Systems Architecture (historical link `../systems-architecture/README.md`). It does **not** cover
+strategy, persistence — that is [Systems Architecture](https://repo.digikal.com/jawad/digikal-knowledge-base/src/commit/7dc917c3324a18354613e38fa36138cbdc747fc9/knowledge/domains/systems-architecture/README.md). It does **not** cover
 build, CI, toolchain pinning, or release mechanics — that is
-Tooling & Pipeline (historical link `../tooling-pipeline/README.md`). Several
+[Tooling & Pipeline](https://repo.digikal.com/jawad/digikal-knowledge-base/src/commit/7dc917c3324a18354613e38fa36138cbdc747fc9/knowledge/domains/tooling-pipeline/README.md). Several
 facts below (no CI anywhere, `cargo-deny` policy, toolchain pins) are named only where
 they change what an engineer must do by hand; their ownership sits in that page.
 
@@ -249,7 +249,7 @@ ai-engineering-governance@11ec305 `drafts/DESIGN-NOTES.md:12`.
 Nothing on this page rests on an `assumed` claim.
 
 ---
-← Knowledge base (historical link `../../README.md`)
+[← Knowledge base](https://repo.digikal.com/jawad/infrastructure/src/commit/375380865bd9ba0f43e71e86654134362c50174e/README.md)
 
 
 <a id="document-domain-systems-architecture"></a>
@@ -285,7 +285,7 @@ sources:
 
 How Digikal draws the seams inside a system: crate and module topology and which way dependencies are allowed to point, which component owns which kind of state, where determinism is a hard requirement rather than a nicety, client/server splits, and the on-disk and on-the-wire formats those seams exchange.
 
-It does **not** cover any individual project's layout — that belongs on each project's own architecture page. It does **not** cover code-level practice (error handling, test style, `unsafe` policy, lint configuration) — that is Software Engineering (historical link `../software-engineering/README.md`). It does **not** cover how code becomes a build or an asset becomes a shipped file — that is Tooling & Pipeline (historical link `../tooling-pipeline/README.md`).
+It does **not** cover any individual project's layout — that belongs on each project's own architecture page. It does **not** cover code-level practice (error handling, test style, `unsafe` policy, lint configuration) — that is [Software Engineering](https://repo.digikal.com/jawad/digikal-knowledge-base/src/commit/7dc917c3324a18354613e38fa36138cbdc747fc9/knowledge/domains/software-engineering/README.md). It does **not** cover how code becomes a build or an asset becomes a shipped file — that is [Tooling & Pipeline](https://repo.digikal.com/jawad/digikal-knowledge-base/src/commit/7dc917c3324a18354613e38fa36138cbdc747fc9/knowledge/domains/tooling-pipeline/README.md).
 
 ##### How Digikal does this
 
@@ -359,7 +359,7 @@ Twelve read-only repository scans performed 2026-09-25, each recorded as a `repo
 Every factual claim on this page restates something read in source during those scans. The judgements about *which* of those facts constitute a studio pattern versus a single-project choice are mine (TechLead) and are labelled as such in the text.
 
 ---
-← Knowledge base (historical link `../../README.md`)
+[← Knowledge base](https://repo.digikal.com/jawad/infrastructure/src/commit/375380865bd9ba0f43e71e86654134362c50174e/README.md)
 
 
 <a id="document-domain-tooling-pipeline"></a>
@@ -395,8 +395,8 @@ pipelines, packaging, signing, release and distribution. It is the studio's prac
 *across* projects.
 
 It does **not** cover how systems are designed or decomposed — that is
-Systems Architecture (historical link `../systems-architecture/README.md`) — nor how we write, review and
-govern code, which is Software Engineering (historical link `../software-engineering/README.md`).
+[Systems Architecture](https://repo.digikal.com/jawad/digikal-knowledge-base/src/commit/7dc917c3324a18354613e38fa36138cbdc747fc9/knowledge/domains/systems-architecture/README.md) — nor how we write, review and
+govern code, which is [Software Engineering](https://repo.digikal.com/jawad/digikal-knowledge-base/src/commit/7dc917c3324a18354613e38fa36138cbdc747fc9/knowledge/domains/software-engineering/README.md).
 Per-project build commands live on each project's own architecture page; this page
 records only what is true across more than one project.
 
@@ -590,7 +590,7 @@ weakest claim, and no decision should rest on the live-host state until Open que
 is closed.
 
 ---
-← Knowledge base (historical link `../../README.md`)
+[← Knowledge base](https://repo.digikal.com/jawad/infrastructure/src/commit/375380865bd9ba0f43e71e86654134362c50174e/README.md)
 
 
 <a id="document-review"></a>
@@ -1254,17 +1254,17 @@ Every Paperclip heartbeat run recorded against this issue. A run's results are t
 
 | Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
 |---|---|---|---|---|---|---|
-| `49bb092e-91c3-496d-b89b-418f8156efc9` | CEO | succeeded | 2026-09-25T11:30:39.084Z | 2026-09-25T11:35:40.055Z | 300406 | — |
-| `6fc692b5-592b-4e4b-9a86-b7753e333e17` | KnowledgeCurator | succeeded | 2026-09-25T15:19:06.209Z | 2026-09-25T15:22:49.678Z | 175279 | — |
-| `2e7d0364-58d1-4ee6-a464-5a7500523e10` | KnowledgeCurator | succeeded | 2026-09-25T15:27:49.098Z | 2026-09-25T15:34:30.398Z | 259883 | — |
-| `8e0a454a-155a-4786-93c7-58b46df9ad39` | KnowledgeCurator | succeeded | 2026-09-25T16:12:36.588Z | 2026-09-25T16:16:55.780Z | 181611 | — |
-| `0e394903-c8f5-4675-886e-f77ed5069349` | KnowledgeCurator | succeeded | 2026-09-25T17:21:57.544Z | 2026-09-25T17:39:17.306Z | 153636 | — |
-| `56f2aba8-d049-42ce-b0e4-c630a61d74b0` | CEO | succeeded | 2026-09-25T18:08:00.329Z | 2026-09-25T18:12:38.468Z | 121355 | — |
-| `919511d4-c6ab-46c5-9b8b-e38c79a3fb00` | KnowledgeCurator | succeeded | 2026-09-25T18:10:38.050Z | 2026-09-25T18:21:19.808Z | 263032 | — |
-| `49688ef1-e514-4911-b871-388585c190c5` | KnowledgeCurator | cancelled | 2026-09-25T18:28:58.079Z | 2026-09-25T18:38:40.965Z | 209809 | — |
-| `7fdd1590-3cb2-4773-b471-89f88bed2cc7` | CEO | succeeded | 2026-09-25T18:33:13.000Z | 2026-09-25T18:36:19.795Z | 105280 | — |
-| `34852da5-9959-48af-bc32-ccdefa326643` | CEO | succeeded | 2026-09-25T18:35:54.340Z | 2026-09-25T18:38:11.705Z | 99311 | — |
-| `6c14d339-4bcd-42fc-97df-2e550d6793fb` | CEO | succeeded | 2026-09-25T20:02:02.724Z | 2026-09-25T20:04:18.959Z | 71680 | — |
-| `9badac1f-7abc-4da5-9ab0-77993b00f753` | CEO | succeeded | 2026-09-26T03:32:45.900Z | 2026-09-26T03:35:49.709Z | 92149 | — |
-| `ae249e66-c4a3-4906-b9d0-d51159af68b1` | KnowledgeCurator | cancelled | 2026-09-26T03:34:43.194Z | 2026-09-26T03:39:11.822Z | 143367 | — |
-| `5602ad6e-120b-4007-add6-b51313345452` | CEO | succeeded | 2026-09-26T03:39:12.514Z | 2026-09-26T03:43:01.461Z | 135358 | — |
+| <a id="run-49bb092e-91c3-496d-b89b-418f8156efc9"></a>`49bb092e-91c3-496d-b89b-418f8156efc9` | CEO | succeeded | 2026-09-25T11:30:39.084Z | 2026-09-25T11:35:40.055Z | 300406 | — |
+| <a id="run-6fc692b5-592b-4e4b-9a86-b7753e333e17"></a>`6fc692b5-592b-4e4b-9a86-b7753e333e17` | KnowledgeCurator | succeeded | 2026-09-25T15:19:06.209Z | 2026-09-25T15:22:49.678Z | 175279 | — |
+| <a id="run-2e7d0364-58d1-4ee6-a464-5a7500523e10"></a>`2e7d0364-58d1-4ee6-a464-5a7500523e10` | KnowledgeCurator | succeeded | 2026-09-25T15:27:49.098Z | 2026-09-25T15:34:30.398Z | 259883 | — |
+| <a id="run-8e0a454a-155a-4786-93c7-58b46df9ad39"></a>`8e0a454a-155a-4786-93c7-58b46df9ad39` | KnowledgeCurator | succeeded | 2026-09-25T16:12:36.588Z | 2026-09-25T16:16:55.780Z | 181611 | — |
+| <a id="run-0e394903-c8f5-4675-886e-f77ed5069349"></a>`0e394903-c8f5-4675-886e-f77ed5069349` | KnowledgeCurator | succeeded | 2026-09-25T17:21:57.544Z | 2026-09-25T17:39:17.306Z | 153636 | — |
+| <a id="run-56f2aba8-d049-42ce-b0e4-c630a61d74b0"></a>`56f2aba8-d049-42ce-b0e4-c630a61d74b0` | CEO | succeeded | 2026-09-25T18:08:00.329Z | 2026-09-25T18:12:38.468Z | 121355 | — |
+| <a id="run-919511d4-c6ab-46c5-9b8b-e38c79a3fb00"></a>`919511d4-c6ab-46c5-9b8b-e38c79a3fb00` | KnowledgeCurator | succeeded | 2026-09-25T18:10:38.050Z | 2026-09-25T18:21:19.808Z | 263032 | — |
+| <a id="run-49688ef1-e514-4911-b871-388585c190c5"></a>`49688ef1-e514-4911-b871-388585c190c5` | KnowledgeCurator | cancelled | 2026-09-25T18:28:58.079Z | 2026-09-25T18:38:40.965Z | 209809 | — |
+| <a id="run-7fdd1590-3cb2-4773-b471-89f88bed2cc7"></a>`7fdd1590-3cb2-4773-b471-89f88bed2cc7` | CEO | succeeded | 2026-09-25T18:33:13.000Z | 2026-09-25T18:36:19.795Z | 105280 | — |
+| <a id="run-34852da5-9959-48af-bc32-ccdefa326643"></a>`34852da5-9959-48af-bc32-ccdefa326643` | CEO | succeeded | 2026-09-25T18:35:54.340Z | 2026-09-25T18:38:11.705Z | 99311 | — |
+| <a id="run-6c14d339-4bcd-42fc-97df-2e550d6793fb"></a>`6c14d339-4bcd-42fc-97df-2e550d6793fb` | CEO | succeeded | 2026-09-25T20:02:02.724Z | 2026-09-25T20:04:18.959Z | 71680 | — |
+| <a id="run-9badac1f-7abc-4da5-9ab0-77993b00f753"></a>`9badac1f-7abc-4da5-9ab0-77993b00f753` | CEO | succeeded | 2026-09-26T03:32:45.900Z | 2026-09-26T03:35:49.709Z | 92149 | — |
+| <a id="run-ae249e66-c4a3-4906-b9d0-d51159af68b1"></a>`ae249e66-c4a3-4906-b9d0-d51159af68b1` | KnowledgeCurator | cancelled | 2026-09-26T03:34:43.194Z | 2026-09-26T03:39:11.822Z | 143367 | — |
+| <a id="run-5602ad6e-120b-4007-add6-b51313345452"></a>`5602ad6e-120b-4007-add6-b51313345452` | CEO | succeeded | 2026-09-26T03:39:12.514Z | 2026-09-26T03:43:01.461Z | 135358 | — |

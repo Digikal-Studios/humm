@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
+| Status at export (closing delta 2026-10-03) | done |
 | Priority | low |
 | Owner (assignee) | TechLead |
 | Created by | KnowledgeCurator |
@@ -494,10 +494,10 @@ Every Paperclip heartbeat run recorded against this issue. A run's results are t
 
 | Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
 |---|---|---|---|---|---|---|
-| `078de1b6-3db9-48ce-b559-c92bd4fac6c5` | KnowledgeCurator | cancelled | 2026-09-25T18:12:39.108Z | 2026-09-25T18:33:11.709Z | 487988 | — |
-| `8a3c99a2-54c2-4657-8542-5db870c35c38` | TechLead | cancelled | 2026-09-25T18:30:13.212Z | 2026-09-25T18:38:46.007Z | 158067 | — |
-| `7fdd1590-3cb2-4773-b471-89f88bed2cc7` | CEO | succeeded | 2026-09-25T18:33:13.000Z | 2026-09-25T18:36:19.795Z | 105280 | — |
-| `34852da5-9959-48af-bc32-ccdefa326643` | CEO | succeeded | 2026-09-25T18:35:54.340Z | 2026-09-25T18:38:11.705Z | 99311 | — |
-| `6c14d339-4bcd-42fc-97df-2e550d6793fb` | CEO | succeeded | 2026-09-25T20:02:02.724Z | 2026-09-25T20:04:18.959Z | 71680 | — |
-| `9badac1f-7abc-4da5-9ab0-77993b00f753` | CEO | succeeded | 2026-09-26T03:32:45.900Z | 2026-09-26T03:35:49.709Z | 92149 | — |
-| `5a24a5a5-6529-4d19-8d5a-3f198639dc51` | TechLead | succeeded | 2026-09-26T03:34:45.143Z | 2026-09-26T03:44:14.844Z | 247384 | — |
+| <a id="run-078de1b6-3db9-48ce-b559-c92bd4fac6c5"></a>`078de1b6-3db9-48ce-b559-c92bd4fac6c5` | KnowledgeCurator | cancelled | 2026-09-25T18:12:39.108Z | 2026-09-25T18:33:11.709Z | 487988 | — |
+| <a id="run-8a3c99a2-54c2-4657-8542-5db870c35c38"></a>`8a3c99a2-54c2-4657-8542-5db870c35c38` | TechLead | cancelled | 2026-09-25T18:30:13.212Z | 2026-09-25T18:38:46.007Z | 158067 | — |
+| <a id="run-7fdd1590-3cb2-4773-b471-89f88bed2cc7"></a>`7fdd1590-3cb2-4773-b471-89f88bed2cc7` | CEO | succeeded | 2026-09-25T18:33:13.000Z | 2026-09-25T18:36:19.795Z | 105280 | — |
+| <a id="run-34852da5-9959-48af-bc32-ccdefa326643"></a>`34852da5-9959-48af-bc32-ccdefa326643` | CEO | succeeded | 2026-09-25T18:35:54.340Z | 2026-09-25T18:38:11.705Z | 99311 | — |
+| <a id="run-6c14d339-4bcd-42fc-97df-2e550d6793fb"></a>`6c14d339-4bcd-42fc-97df-2e550d6793fb` | CEO | succeeded | 2026-09-25T20:02:02.724Z | 2026-09-25T20:04:18.959Z | 71680 | — |
+| <a id="run-9badac1f-7abc-4da5-9ab0-77993b00f753"></a>`9badac1f-7abc-4da5-9ab0-77993b00f753` | CEO | succeeded | 2026-09-26T03:32:45.900Z | 2026-09-26T03:35:49.709Z | 92149 | — |
+| <a id="run-5a24a5a5-6529-4d19-8d5a-3f198639dc51"></a>`5a24a5a5-6529-4d19-8d5a-3f198639dc51` | TechLead | succeeded | 2026-09-26T03:34:45.143Z | 2026-09-26T03:44:14.844Z | 247384 | — |

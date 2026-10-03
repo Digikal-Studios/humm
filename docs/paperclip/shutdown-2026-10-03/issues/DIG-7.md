@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
+| Status at export (closing delta 2026-10-03) | done |
 | Priority | medium |
 | Owner (assignee) | CEO |
 | Created by | CEO |
@@ -177,7 +177,7 @@ One ethics-adjacent defect, an honesty rather than a manipulation problem: the g
 > **Method note.** Nothing in this project was built, run, or played. Every `verified` row is a structural fact read from the cited source, worded as what was actually measured — per §3, the label attaches to the claim as written, so a contrast ratio is `verified` while "a player cannot read it" would not be. Every `reported` row is an experiential claim — feel, timing, discoverability, or platform display behaviour — inferred from the cited code path rather than observed — per-platform title truncation (SWP-05) and perceived latency under reduced motion (SWP-07) in particular would be sharpened by a playtest pass on all three platforms.
 
 ---
-← Sweeper (historical link `README.md`)
+[← Sweeper](https://repo.digikal.com/jawad/infrastructure/src/commit/375380865bd9ba0f43e71e86654134362c50174e/README.md)
 
 ---
 
@@ -295,7 +295,7 @@ Assessed against WCAG POUR. This is the area with the most genuine investment an
 > **Method note.** The game was not built, run, or played. Every `verified` row is a structural fact read from the cited source — an absence in an enum, a label resolved from the wrong resource, a value in `rules.ron`. Every `reported` row is an experiential claim inferred from those facts rather than observed: whether four minutes of building *feels* like waiting (RTS-01) and whether an 11 px dashed ring is actually distinguishable at 4v4 zoom (RTS-11) are both settled by playing, not by reading. The AI-never-fields-exclusives finding is taken from `docs/designer-tooling-results.md` and was not independently re-derived.
 
 ---
-← Browser-Native RTS PoC (historical link `README.md`)
+[← Browser-Native RTS PoC](https://repo.digikal.com/jawad/infrastructure/src/commit/375380865bd9ba0f43e71e86654134362c50174e/README.md)
 
 ---
 
@@ -398,7 +398,7 @@ The one recommendation here is to write the ethics stance into `gdd.md` as a sta
 > **Method note.** The game was not built, run, or played. Every `verified` row is a structural fact read from the cited source, including the arithmetic rows — boss HP, dps, corridor durations and heal costs are derived from shipped content values and are reproducible from the cited file. The `reported` rows are experiential: whether the default font actually renders a missing-glyph box is platform display behaviour (ALE-02), and whether a competent player ever drops a weapon tier in the shipped corridors or can stand safely beside the Warden are difficulty claims (ALE-06 and ALE-07) that a playtest settles and a read cannot. FL look verdicts remain the owner's per `CLAUDE.md`; this page judges legibility and structure only.
 
 ---
-← Aletheia (historical link `README.md`)
+[← Aletheia](https://repo.digikal.com/jawad/infrastructure/src/commit/375380865bd9ba0f43e71e86654134362c50174e/README.md)
 
 ---
 
@@ -517,7 +517,7 @@ One thing worth naming that is not a dark pattern but is pointed the wrong way: 
 > **Method note.** The game was not built, run, or played. Every `verified` row is a structural fact read from the cited source — a shader condition, a comparison against `game.solution`, a field the switch does not own, a contrast pair computed from theme values. The single `reported` row is experiential: the generation latencies in NUR-03 are taken from the project's own release soak on the author's machine and were not re-measured, and how a multi-second indeterminate wait actually feels on a player's slower machine is settled by running it. Note also that the accessibility assessment is verified by construction rather than by a session on real assistive technology, which has never been run.
 
 ---
-← Nurikabe (historical link `README.md`)
+[← Nurikabe](https://repo.digikal.com/jawad/infrastructure/src/commit/375380865bd9ba0f43e71e86654134362c50174e/README.md)
 
 ---
 
@@ -626,7 +626,7 @@ Two adjacent things worth naming so they do not drift into becoming ethics probl
 > **Method note.** Nothing in this repository was built, run, or modified — no binary exists to exercise. Every `verified` row is a structural fact read from the cited source: a constant's value, a branch on the wrong field, a key gated on `is_video`, a packaging artefact that is absent from the tree. The `reported` row is RUV-06, where the claim that `accesskit` is compiled out rests on eframe 0.31's default-feature set rather than on a build, and TechLead should confirm the feature name and that nothing re-enables it transitively — the design consequence stands either way, since nothing in `src/` sets accessibility labels, roles or live regions. Feasibility referred to TechLead and not decided here: packaging and signing cost (RUV-01), phase-vocoder scope (RUV-03), moving `VideoPlayer::open` off the UI thread (RUV-11), `trash`-crate restore support for undo (RUV-10), the `accesskit` feature question (RUV-06), and the `FileNavigator` model change for multi-file drops (RUV-14).
 
 ---
-← RustView (historical link `README.md`)
+[← RustView](https://repo.digikal.com/jawad/infrastructure/src/commit/375380865bd9ba0f43e71e86654134362c50174e/README.md)
 
 ---
 
@@ -731,7 +731,7 @@ Two disclosure gaps, neither a dark pattern, both worth fixing. **Telemetry is o
 > **Method note.** The application was not built, run, or used. Every `verified` row is a structural fact read from the cited source or shipped copy — an absent undo stack, a selection mutated only in pointer handlers, a hardcoded row height, a summary that never reads `state.backend`, a contrast ratio computed from a literal colour value. The single `reported` row is HUM-11, where the Preferences-strip overflow at 24 pt is taken from the project's own windowed acceptance record rather than re-observed. The accessibility assessment is likewise source-level rather than measured: VoiceOver was never run, because [DIG-14](DIG-14.md#document-report) records that the GUI cannot currently launch off the original dev machine. Engineering feasibility, implementation cost, architecture and packaging were deliberately not assessed; where an alternative points at an existing pattern in the codebase, that is to help TechLead cost it quickly, not a cost judgement.
 
 ---
-← humm (historical link `README.md`)
+[← humm](https://repo.digikal.com/jawad/infrastructure/src/commit/375380865bd9ba0f43e71e86654134362c50174e/README.md)
 
 ---
 
@@ -833,7 +833,7 @@ The one ethical risk to raise is **TVI-01, reframed**: a discipline instrument w
 > **Method note.** The application was not built, run, or used. Every `verified` row is a structural fact read from the cited source or from the 40 committed render snapshots, which are the app's real rendered frames rather than a description of them. The single `reported` row is TVI-14, where the severity turns on how long a full market scan actually runs — never observed. Two caveats on the evidence itself: snapshot fixtures are synthetic, so a value combination visible in one (a confident verdict beside `0/5 core sources`, say) may be a deliberate degradation test rather than a reachable state — `src/finance/conviction.rs:576` was checked before writing TVI-10, and that row was downgraded to a presentational finding accordingly. And the contrast figures in Accessibility are computed from the RGB constants in `src/ui/theme.rs`; a terminal that remaps truecolor will differ.
 
 ---
-← tvi (historical link `README.md`)
+[← tvi](https://repo.digikal.com/jawad/infrastructure/src/commit/375380865bd9ba0f43e71e86654134362c50174e/README.md)
 
 ---
 
@@ -935,7 +935,7 @@ Two things to watch, neither currently a dark pattern. **The approval expiry cou
 > **Method note.** Nothing in this repository was created, modified, extracted, built, or executed — and there is no implementation to run: zimam is a design package, so `verified` on this page means **verified against the design specification** (a line that exists, a catalogue that omits an event type, a screen inventory with no expired state), never verified against a build. The one `reported` row is experiential: whether the approval countdown reads as information or as pressure depends on the window length, which the package never states, and on watching a real person read a real diff. No accessibility evidence exists anywhere in the package — SPK-3's accessibility deliverable is a 210-byte placeholder — so the entire Accessibility section assesses a commitment, not a measured result.
 
 ---
-← Zimam (historical link `README.md`)
+[← Zimam](https://repo.digikal.com/jawad/infrastructure/src/commit/375380865bd9ba0f43e71e86654134362c50174e/README.md)
 
 ---
 
@@ -1040,7 +1040,7 @@ One watch item, not a dark pattern today: `apply` embeds an MIT copyright paragr
 > **Method note.** Nothing in this project was built, installed, run, or modified; the only writes during the review went to a scratch directory outside the repository. Every `verified` row is a structural fact read from the cited source — a placeholder in a URL, a subcommand absent from a parser, a measured sentence length. The one `reported` item is experiential: how a silent `status --deep` traversal actually feels on a large monorepo depends on running it. No player-facing surface, UI, art, or game mechanic exists here, so the game-design lenses have no subject and were not stretched to manufacture findings.
 
 ---
-← AI Engineering Governance (historical link `README.md`)
+[← AI Engineering Governance](https://repo.digikal.com/jawad/infrastructure/src/commit/375380865bd9ba0f43e71e86654134362c50174e/README.md)
 
 ---
 
@@ -1139,7 +1139,7 @@ Two adjacent notes, neither an ethics finding: TechLead's JSY-01, that the only 
 > **Method note.** Nothing in this project was built, installed, run, or modified. Every `verified` row is a structural fact read from the cited source — a line that exists, a constant's value, a flag that is absent from `usage()`. The single `reported` row is an experiential claim: how long the silent preflight actually takes on a large tree over a slow link (JSY-03) is settled by running it, not by reading it.
 
 ---
-← jsync (historical link `README.md`)
+[← jsync](https://repo.digikal.com/jawad/infrastructure/src/commit/375380865bd9ba0f43e71e86654134362c50174e/README.md)
 
 ---
 
@@ -1233,7 +1233,7 @@ Assessed against WCAG POUR. The honest headline: **plain Markdown with no colour
 > **Method note.** Nothing in this project was built, run, or modified, and the review was LIGHT depth: ten KB files were read in full plus the index structure and both scripts' output strings, while stated totals were computed across the whole tree. Every `verified` row is a structural fact read from the cited source — a grep that returns zero, a word count, two files declaring the same slug. The single `reported` row is experiential: per [DIG-16](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-16.md#document-report) the review pipeline has never been executed, so nobody has yet met the failure messages in ADP-08 or waited out the silent image extraction. Engine and tooling feasibility, the cost of any mechanical pass above, and the legal status of the derivative work were deliberately not assessed — they belong to TechLead and the founder respectively.
 
 ---
-← adp (historical link `README.md`)
+[← adp](https://repo.digikal.com/jawad/infrastructure/src/commit/375380865bd9ba0f43e71e86654134362c50174e/README.md)
 
 ---
 
@@ -1324,7 +1324,7 @@ Because ethics here is about honesty toward the operator rather than monetizatio
 > **Method note.** Nothing in this project was built, run, or modified. Every `verified` row is a structural fact read from the cited source — a warning block that exists in five files, an assertion in a script against a documented intentional-stop, a discarded stderr stream, an absent index heading. No row on this page rests on observed operator behaviour; where a judgement depends on how a second reader or a stressed operator actually behaves, it is raised as an open question rather than asserted as a finding.
 
 ---
-← Infrastructure (historical link `README.md`)
+[← Infrastructure](https://repo.digikal.com/jawad/infrastructure/src/commit/375380865bd9ba0f43e71e86654134362c50174e/README.md)
 
 
 <a id="document-domain-error-messages"></a>
@@ -1434,7 +1434,7 @@ Examples only — this page stays true if every project below is cancelled.
 > **Method note.** No product was built, run, or played, and the `confidence: verified` label attaches to the **evidence**, not to the prescription. What is verified is structural and re-checkable at the cited line: that a given message exists and in what shape, that an error type has no remediation parameter, that a stderr stream is discarded, that a bypass command is emitted pre-filled. The four-part rule itself is **proposed studio practice inferred from that evidence** — it is a recommendation, not a measurement, and no claim here rests on observing a person read one of these messages. Where a structural row carries an outcome, the outcome is marked `*Consequence:*` per §3. The convention is descriptive of code we have already shipped rather than imported from outside; where a project is named as a counterexample, that is the same evidence read the other way.
 
 ---
-← Knowledge base (historical link `../../README.md`)
+[← Knowledge base](https://repo.digikal.com/jawad/infrastructure/src/commit/375380865bd9ba0f43e71e86654134362c50174e/README.md)
 
 
 ## Issue-thread interactions
@@ -2713,34 +2713,34 @@ Every Paperclip heartbeat run recorded against this issue. A run's results are t
 
 | Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
 |---|---|---|---|---|---|---|
-| `49bb092e-91c3-496d-b89b-418f8156efc9` | CEO | succeeded | 2026-09-25T11:30:39.084Z | 2026-09-25T11:35:40.055Z | 300406 | — |
-| `578cdf5b-ac6b-4c87-95a8-1eb6631e6243` | CEO | succeeded | 2026-09-25T14:13:05.970Z | 2026-09-25T14:14:40.200Z | 96811 | — |
-| `fa793dbc-dcfa-408c-8192-383ccfd8ef83` | GameExperienceDesigner | succeeded | 2026-09-25T14:14:16.736Z | 2026-09-25T14:20:56.694Z | 265172 | — |
-| `04b51f93-5801-470b-bbfe-ccbb461d640c` | KnowledgeCurator | succeeded | 2026-09-25T14:20:56.844Z | 2026-09-25T14:25:28.596Z | 221764 | — |
-| `d2a3b4a6-ed7a-427e-b119-b63085a29b77` | GameExperienceDesigner | succeeded | 2026-09-25T14:25:28.728Z | 2026-09-25T14:29:55.392Z | 142708 | — |
-| `8c1deb86-993b-4b88-ac7d-7d3c740ebe38` | KnowledgeCurator | succeeded | 2026-09-25T14:29:55.519Z | 2026-09-25T14:34:23.503Z | 187822 | — |
-| `c24fcbc9-d97d-42ed-8beb-1ed515312c60` | GameExperienceDesigner | succeeded | 2026-09-25T14:34:23.660Z | 2026-09-25T14:40:54.975Z | 235021 | — |
-| `3453d282-22a2-4be4-b7b2-aa442f46d5bb` | GameExperienceDesigner | succeeded | 2026-09-25T14:40:19.436Z | 2026-09-25T15:19:37.913Z | 360234 | — |
-| `83937666-03e8-4826-a987-495b08bcf74f` | KnowledgeCurator | succeeded | 2026-09-25T14:40:55.129Z | 2026-09-25T14:44:59.384Z | 246761 | — |
-| `052b118f-82ff-4fc2-81c5-3e8a53c90316` | GameExperienceDesigner | succeeded | 2026-09-25T14:44:59.527Z | 2026-09-25T14:47:20.223Z | 142525 | — |
-| `60641adf-b086-49e4-bcdb-30d7cdfca01b` | KnowledgeCurator | succeeded | 2026-09-25T14:47:20.421Z | 2026-09-25T14:50:55.593Z | 178183 | — |
-| `cedce67c-4805-4ac9-9215-30286bd2e4dc` | GameExperienceDesigner | succeeded | 2026-09-25T14:50:55.756Z | 2026-09-25T14:53:17.947Z | 150199 | — |
-| `f1ab5c56-b216-413e-9fcb-2721bee75d93` | KnowledgeCurator | succeeded | 2026-09-25T14:53:18.147Z | 2026-09-25T14:56:11.086Z | 147653 | — |
-| `caf61a1c-b066-4491-93b4-f3dbc3839913` | GameExperienceDesigner | succeeded | 2026-09-25T14:56:12.207Z | 2026-09-25T14:58:56.044Z | 150345 | — |
-| `87710384-bf77-434a-be22-3c2da16f1397` | KnowledgeCurator | succeeded | 2026-09-25T14:58:56.196Z | 2026-09-25T15:02:52.835Z | 197136 | — |
-| `471f4115-054b-4230-91ef-6f6c4ba82317` | GameExperienceDesigner | succeeded | 2026-09-25T15:02:52.979Z | 2026-09-25T15:05:56.847Z | 131913 | — |
-| `539952fe-be7d-4ced-ab9a-95e430337b27` | KnowledgeCurator | succeeded | 2026-09-25T15:05:57.014Z | 2026-09-25T15:10:31.320Z | 294210 | — |
-| `bbca0ae9-9952-43f6-b9c2-04d13a3deda6` | GameExperienceDesigner | succeeded | 2026-09-25T15:10:31.458Z | 2026-09-25T15:12:43.536Z | 115830 | — |
-| `8b368b68-24f5-46ac-b4a8-4fdb5307c01f` | KnowledgeCurator | succeeded | 2026-09-25T15:12:43.715Z | 2026-09-25T15:15:09.334Z | 128531 | — |
-| `28a95809-7224-478e-adea-5f159b8d74bd` | GameExperienceDesigner | succeeded | 2026-09-25T15:15:10.994Z | 2026-09-25T15:19:05.988Z | 195253 | — |
-| `6fc692b5-592b-4e4b-9a86-b7753e333e17` | KnowledgeCurator | succeeded | 2026-09-25T15:19:06.209Z | 2026-09-25T15:22:49.678Z | 175279 | — |
-| `e4d5014c-3bf9-4309-abb6-37aac7e8aa8a` | GameExperienceDesigner | succeeded | 2026-09-25T15:22:32.840Z | 2026-09-25T15:27:25.304Z | 128997 | — |
-| `328b4894-36e3-400f-8aa4-fb01b6f67dc3` | GameExperienceDesigner | failed | 2026-09-25T15:22:49.869Z | 2026-09-25T15:22:51.003Z | 1489 | — |
-| `76b4994f-460e-445a-b5f4-59e2bc38becb` | GameExperienceDesigner | succeeded | 2026-09-25T15:26:12.956Z | 2026-09-25T16:07:40.423Z | 379442 | — |
-| `aa2322f8-397d-4fb7-8647-94d7bf70a1cb` | GameExperienceDesigner | cancelled | 2026-09-25T16:06:46.003Z | 2026-09-25T16:09:32.605Z | 136517 | — |
-| `79fbe42c-ae54-4fd1-a735-2fa1a46fd187` | CEO | succeeded | 2026-09-25T16:09:33.252Z | 2026-09-25T16:12:36.417Z | 127623 | — |
-| `8e0a454a-155a-4786-93c7-58b46df9ad39` | KnowledgeCurator | succeeded | 2026-09-25T16:12:36.588Z | 2026-09-25T16:16:55.780Z | 181611 | — |
-| `90596c3b-b6d8-4763-9332-350ae82aa9d1` | GameExperienceDesigner | succeeded | 2026-09-25T16:12:36.846Z | 2026-09-25T16:13:40.875Z | 53018 | — |
-| `c993c6b9-ac4e-495c-84ae-3a15bc257c41` | CEO | succeeded | 2026-09-25T16:57:26.233Z | 2026-09-25T16:58:46.299Z | 81445 | — |
-| `813ba1f1-a454-43be-b186-407b0e2dd67e` | CEO | succeeded | 2026-09-26T03:49:46.320Z | 2026-09-26T03:55:38.767Z | 166648 | — |
-| `929b8761-d332-47ec-8750-8df1f4dc72e1` | CEO | succeeded | 2026-09-26T03:51:18.735Z | 2026-09-26T03:53:39.085Z | 94383 | — |
+| <a id="run-49bb092e-91c3-496d-b89b-418f8156efc9"></a>`49bb092e-91c3-496d-b89b-418f8156efc9` | CEO | succeeded | 2026-09-25T11:30:39.084Z | 2026-09-25T11:35:40.055Z | 300406 | — |
+| <a id="run-578cdf5b-ac6b-4c87-95a8-1eb6631e6243"></a>`578cdf5b-ac6b-4c87-95a8-1eb6631e6243` | CEO | succeeded | 2026-09-25T14:13:05.970Z | 2026-09-25T14:14:40.200Z | 96811 | — |
+| <a id="run-fa793dbc-dcfa-408c-8192-383ccfd8ef83"></a>`fa793dbc-dcfa-408c-8192-383ccfd8ef83` | GameExperienceDesigner | succeeded | 2026-09-25T14:14:16.736Z | 2026-09-25T14:20:56.694Z | 265172 | — |
+| <a id="run-04b51f93-5801-470b-bbfe-ccbb461d640c"></a>`04b51f93-5801-470b-bbfe-ccbb461d640c` | KnowledgeCurator | succeeded | 2026-09-25T14:20:56.844Z | 2026-09-25T14:25:28.596Z | 221764 | — |
+| <a id="run-d2a3b4a6-ed7a-427e-b119-b63085a29b77"></a>`d2a3b4a6-ed7a-427e-b119-b63085a29b77` | GameExperienceDesigner | succeeded | 2026-09-25T14:25:28.728Z | 2026-09-25T14:29:55.392Z | 142708 | — |
+| <a id="run-8c1deb86-993b-4b88-ac7d-7d3c740ebe38"></a>`8c1deb86-993b-4b88-ac7d-7d3c740ebe38` | KnowledgeCurator | succeeded | 2026-09-25T14:29:55.519Z | 2026-09-25T14:34:23.503Z | 187822 | — |
+| <a id="run-c24fcbc9-d97d-42ed-8beb-1ed515312c60"></a>`c24fcbc9-d97d-42ed-8beb-1ed515312c60` | GameExperienceDesigner | succeeded | 2026-09-25T14:34:23.660Z | 2026-09-25T14:40:54.975Z | 235021 | — |
+| <a id="run-3453d282-22a2-4be4-b7b2-aa442f46d5bb"></a>`3453d282-22a2-4be4-b7b2-aa442f46d5bb` | GameExperienceDesigner | succeeded | 2026-09-25T14:40:19.436Z | 2026-09-25T15:19:37.913Z | 360234 | — |
+| <a id="run-83937666-03e8-4826-a987-495b08bcf74f"></a>`83937666-03e8-4826-a987-495b08bcf74f` | KnowledgeCurator | succeeded | 2026-09-25T14:40:55.129Z | 2026-09-25T14:44:59.384Z | 246761 | — |
+| <a id="run-052b118f-82ff-4fc2-81c5-3e8a53c90316"></a>`052b118f-82ff-4fc2-81c5-3e8a53c90316` | GameExperienceDesigner | succeeded | 2026-09-25T14:44:59.527Z | 2026-09-25T14:47:20.223Z | 142525 | — |
+| <a id="run-60641adf-b086-49e4-bcdb-30d7cdfca01b"></a>`60641adf-b086-49e4-bcdb-30d7cdfca01b` | KnowledgeCurator | succeeded | 2026-09-25T14:47:20.421Z | 2026-09-25T14:50:55.593Z | 178183 | — |
+| <a id="run-cedce67c-4805-4ac9-9215-30286bd2e4dc"></a>`cedce67c-4805-4ac9-9215-30286bd2e4dc` | GameExperienceDesigner | succeeded | 2026-09-25T14:50:55.756Z | 2026-09-25T14:53:17.947Z | 150199 | — |
+| <a id="run-f1ab5c56-b216-413e-9fcb-2721bee75d93"></a>`f1ab5c56-b216-413e-9fcb-2721bee75d93` | KnowledgeCurator | succeeded | 2026-09-25T14:53:18.147Z | 2026-09-25T14:56:11.086Z | 147653 | — |
+| <a id="run-caf61a1c-b066-4491-93b4-f3dbc3839913"></a>`caf61a1c-b066-4491-93b4-f3dbc3839913` | GameExperienceDesigner | succeeded | 2026-09-25T14:56:12.207Z | 2026-09-25T14:58:56.044Z | 150345 | — |
+| <a id="run-87710384-bf77-434a-be22-3c2da16f1397"></a>`87710384-bf77-434a-be22-3c2da16f1397` | KnowledgeCurator | succeeded | 2026-09-25T14:58:56.196Z | 2026-09-25T15:02:52.835Z | 197136 | — |
+| <a id="run-471f4115-054b-4230-91ef-6f6c4ba82317"></a>`471f4115-054b-4230-91ef-6f6c4ba82317` | GameExperienceDesigner | succeeded | 2026-09-25T15:02:52.979Z | 2026-09-25T15:05:56.847Z | 131913 | — |
+| <a id="run-539952fe-be7d-4ced-ab9a-95e430337b27"></a>`539952fe-be7d-4ced-ab9a-95e430337b27` | KnowledgeCurator | succeeded | 2026-09-25T15:05:57.014Z | 2026-09-25T15:10:31.320Z | 294210 | — |
+| <a id="run-bbca0ae9-9952-43f6-b9c2-04d13a3deda6"></a>`bbca0ae9-9952-43f6-b9c2-04d13a3deda6` | GameExperienceDesigner | succeeded | 2026-09-25T15:10:31.458Z | 2026-09-25T15:12:43.536Z | 115830 | — |
+| <a id="run-8b368b68-24f5-46ac-b4a8-4fdb5307c01f"></a>`8b368b68-24f5-46ac-b4a8-4fdb5307c01f` | KnowledgeCurator | succeeded | 2026-09-25T15:12:43.715Z | 2026-09-25T15:15:09.334Z | 128531 | — |
+| <a id="run-28a95809-7224-478e-adea-5f159b8d74bd"></a>`28a95809-7224-478e-adea-5f159b8d74bd` | GameExperienceDesigner | succeeded | 2026-09-25T15:15:10.994Z | 2026-09-25T15:19:05.988Z | 195253 | — |
+| <a id="run-6fc692b5-592b-4e4b-9a86-b7753e333e17"></a>`6fc692b5-592b-4e4b-9a86-b7753e333e17` | KnowledgeCurator | succeeded | 2026-09-25T15:19:06.209Z | 2026-09-25T15:22:49.678Z | 175279 | — |
+| <a id="run-e4d5014c-3bf9-4309-abb6-37aac7e8aa8a"></a>`e4d5014c-3bf9-4309-abb6-37aac7e8aa8a` | GameExperienceDesigner | succeeded | 2026-09-25T15:22:32.840Z | 2026-09-25T15:27:25.304Z | 128997 | — |
+| <a id="run-328b4894-36e3-400f-8aa4-fb01b6f67dc3"></a>`328b4894-36e3-400f-8aa4-fb01b6f67dc3` | GameExperienceDesigner | failed | 2026-09-25T15:22:49.869Z | 2026-09-25T15:22:51.003Z | 1489 | — |
+| <a id="run-76b4994f-460e-445a-b5f4-59e2bc38becb"></a>`76b4994f-460e-445a-b5f4-59e2bc38becb` | GameExperienceDesigner | succeeded | 2026-09-25T15:26:12.956Z | 2026-09-25T16:07:40.423Z | 379442 | — |
+| <a id="run-aa2322f8-397d-4fb7-8647-94d7bf70a1cb"></a>`aa2322f8-397d-4fb7-8647-94d7bf70a1cb` | GameExperienceDesigner | cancelled | 2026-09-25T16:06:46.003Z | 2026-09-25T16:09:32.605Z | 136517 | — |
+| <a id="run-79fbe42c-ae54-4fd1-a735-2fa1a46fd187"></a>`79fbe42c-ae54-4fd1-a735-2fa1a46fd187` | CEO | succeeded | 2026-09-25T16:09:33.252Z | 2026-09-25T16:12:36.417Z | 127623 | — |
+| <a id="run-8e0a454a-155a-4786-93c7-58b46df9ad39"></a>`8e0a454a-155a-4786-93c7-58b46df9ad39` | KnowledgeCurator | succeeded | 2026-09-25T16:12:36.588Z | 2026-09-25T16:16:55.780Z | 181611 | — |
+| <a id="run-90596c3b-b6d8-4763-9332-350ae82aa9d1"></a>`90596c3b-b6d8-4763-9332-350ae82aa9d1` | GameExperienceDesigner | succeeded | 2026-09-25T16:12:36.846Z | 2026-09-25T16:13:40.875Z | 53018 | — |
+| <a id="run-c993c6b9-ac4e-495c-84ae-3a15bc257c41"></a>`c993c6b9-ac4e-495c-84ae-3a15bc257c41` | CEO | succeeded | 2026-09-25T16:57:26.233Z | 2026-09-25T16:58:46.299Z | 81445 | — |
+| <a id="run-813ba1f1-a454-43be-b186-407b0e2dd67e"></a>`813ba1f1-a454-43be-b186-407b0e2dd67e` | CEO | succeeded | 2026-09-26T03:49:46.320Z | 2026-09-26T03:55:38.767Z | 166648 | — |
+| <a id="run-929b8761-d332-47ec-8750-8df1f4dc72e1"></a>`929b8761-d332-47ec-8750-8df1f4dc72e1` | CEO | succeeded | 2026-09-26T03:51:18.735Z | 2026-09-26T03:53:39.085Z | 94383 | — |

@@ -1,6 +1,6 @@
 # Branch and commit inventory
 
-Remote `https://repo.digikal.com/jawad/humm.git`; default branch `main` at `582b4c1da7c123c81d9bc71210c2c0d5b89bec0c` (refs read 2026-10-03T16:46:28Z). Paperclip's configured ref for this project: `main`.
+Remote `https://repo.digikal.com/jawad/humm.git`; default branch `main` at `582b4c1da7c123c81d9bc71210c2c0d5b89bec0c` (refs read 2026-10-03T17:41:58Z). Paperclip's configured ref for this project: `main`.
 
 A branch or commit listed here is preserved source, not accepted work. Acceptance is recorded only by the review documents on the issue pages.
 
@@ -113,16 +113,16 @@ git cat-file -e <sha>^{commit} && echo present   # check a SHA from an issue pag
 | PR | State | Head branch | Head SHA | Base | Title |
 |---|---|---|---|---|---|
 | [#2](https://repo.digikal.com/jawad/humm/pulls/2) | merged | `paperclip/DIG-340` | `705ff5c4ba50377026c0149441ed51417d3b8018` | `main` | Link the Digikal knowledge base (DIG-340) |
-| [#1](https://repo.digikal.com/jawad/humm/pulls/1) | open | `docs/paperclip-shutdown-2026-10-03` | `298404f2bebcf056e5e09a65a5bb190407cdb562` | `main` | WIP: docs(paperclip): shutdown resume guide and task history archive (DIG-335) |
+| [#1](https://repo.digikal.com/jawad/humm/pulls/1) | open | `docs/paperclip-shutdown-2026-10-03` | `d7c60c287f0735240f772ca5a5ecf727ba49bcf1` | `main` | docs(paperclip): shutdown resume guide and task history archive (DIG-335) |
 
 ## Remote refs (7)
 
 | Ref | SHA |
 |---|---|
 | `HEAD` | `582b4c1da7c123c81d9bc71210c2c0d5b89bec0c` |
-| `refs/heads/docs/paperclip-shutdown-2026-10-03` | `298404f2bebcf056e5e09a65a5bb190407cdb562` |
+| `refs/heads/docs/paperclip-shutdown-2026-10-03` | `d7c60c287f0735240f772ca5a5ecf727ba49bcf1` |
 | `refs/heads/main` | `582b4c1da7c123c81d9bc71210c2c0d5b89bec0c` |
 | `refs/heads/paperclip/DIG-340` | `705ff5c4ba50377026c0149441ed51417d3b8018` |
-| `refs/pull/1/head` | `298404f2bebcf056e5e09a65a5bb190407cdb562` |
+| `refs/pull/1/head` | `d7c60c287f0735240f772ca5a5ecf727ba49bcf1` |
 | `refs/pull/2/head` | `705ff5c4ba50377026c0149441ed51417d3b8018` |
 | `refs/tags/v1.0.0` | `dd54e609932f07b6b6bfcfdd21460393c1d9a1c9` |

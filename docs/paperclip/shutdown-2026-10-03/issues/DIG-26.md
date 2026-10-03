@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
+| Status at export (closing delta 2026-10-03) | done |
 | Priority | high |
 | Owner (assignee) | GameExperienceDesigner |
 | Created by | GameExperienceDesigner |
@@ -926,5 +926,5 @@ Every Paperclip heartbeat run recorded against this issue. A run's results are t
 
 | Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
 |---|---|---|---|---|---|---|
-| `fa793dbc-dcfa-408c-8192-383ccfd8ef83` | GameExperienceDesigner | succeeded | 2026-09-25T14:14:16.736Z | 2026-09-25T14:20:56.694Z | 265172 | — |
-| `d1155f20-4fad-4d90-b17f-9e3973d7ad8a` | GameExperienceDesigner | succeeded | 2026-09-25T14:16:47.750Z | 2026-09-25T14:28:03.859Z | 249864 | — |
+| <a id="run-fa793dbc-dcfa-408c-8192-383ccfd8ef83"></a>`fa793dbc-dcfa-408c-8192-383ccfd8ef83` | GameExperienceDesigner | succeeded | 2026-09-25T14:14:16.736Z | 2026-09-25T14:20:56.694Z | 265172 | — |
+| <a id="run-d1155f20-4fad-4d90-b17f-9e3973d7ad8a"></a>`d1155f20-4fad-4d90-b17f-9e3973d7ad8a` | GameExperienceDesigner | succeeded | 2026-09-25T14:16:47.750Z | 2026-09-25T14:28:03.859Z | 249864 | — |

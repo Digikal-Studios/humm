@@ -1,7 +1,8 @@
 {
- "snapshot": "2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)",
+ "snapshot": "closing delta 2026-10-03",
  "cutoff": "2026-10-03T06:12:00Z",
  "repository": "humm",
+ "attachment_location": "repository/branch/folder/path: attachment bytes are at <folder>/<path> on <branch> of <repository>; docs/paperclip-shutdown-2026-10-03 for small files, archive/paperclip-shutdown-2026-10-03-large-attachments for files over 1 MB. SHA-256 is the Paperclip upload hash.",
  "issues": [
   {
    "identifier": "DIG-1",
@@ -572,48 +573,54 @@
      "bytes": 4277,
      "sha256": "bd604c7519d1b8ec13a824fd456a2b113767fac5ddd39fe48402aec8a58fdd47",
      "repository": "honcho",
-     "path": "attachments/DIG-299/8e2d6fbc-dig-299-review-r3-a3bcce0.tar.gz",
-     "branch": "main"
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "folder": "docs/paperclip/shutdown-2026-10-03",
+     "path": "attachments/DIG-299/8e2d6fbc-dig-299-review-r3-a3bcce0.tar.gz"
     },
     {
      "file": "dig-299-evidence-a3bcce0.tar.gz",
      "bytes": 290060,
      "sha256": "fa1abd32f2a2a7e562c5706660f3c0217237d0f3b6068b97e268f22a260e10fa",
      "repository": "honcho",
-     "path": "attachments/DIG-299/953a269c-dig-299-evidence-a3bcce0.tar.gz",
-     "branch": "main"
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "folder": "docs/paperclip/shutdown-2026-10-03",
+     "path": "attachments/DIG-299/953a269c-dig-299-evidence-a3bcce0.tar.gz"
     },
     {
      "file": "dig-299-review-r2-63ed457.tar.gz",
      "bytes": 4944,
      "sha256": "af714fa3daa6e3b80342b6276f0cbe7afad3896171d5cb8ec37b095cb9440419",
      "repository": "honcho",
-     "path": "attachments/DIG-299/120fe47d-dig-299-review-r2-63ed457.tar.gz",
-     "branch": "main"
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "folder": "docs/paperclip/shutdown-2026-10-03",
+     "path": "attachments/DIG-299/120fe47d-dig-299-review-r2-63ed457.tar.gz"
     },
     {
      "file": "dig-299-evidence-63ed457.tar.gz",
      "bytes": 18677,
      "sha256": "7b6f77c1ea134114086cad090fd21542b512bd7bc227ccff5ccbc41adb609412",
      "repository": "honcho",
-     "path": "attachments/DIG-299/8e04f6b0-dig-299-evidence-63ed457.tar.gz",
-     "branch": "main"
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "folder": "docs/paperclip/shutdown-2026-10-03",
+     "path": "attachments/DIG-299/8e04f6b0-dig-299-evidence-63ed457.tar.gz"
     },
     {
      "file": "dig-299-review-b4f169c.tar.gz",
      "bytes": 5393,
      "sha256": "6364eb24f05d86f9cabf273589a79dd17e88445de40987e5c0f93016eb0d49de",
      "repository": "honcho",
-     "path": "attachments/DIG-299/5564d22b-dig-299-review-b4f169c.tar.gz",
-     "branch": "main"
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "folder": "docs/paperclip/shutdown-2026-10-03",
+     "path": "attachments/DIG-299/5564d22b-dig-299-review-b4f169c.tar.gz"
     },
     {
      "file": "dig-299-evidence-b4f169c.tar.gz",
      "bytes": 3075,
      "sha256": "6a3d172e51957c27524315f39a5b4cfa8f62e58d3e3e658632f7630a0c3f032d",
      "repository": "honcho",
-     "path": "attachments/DIG-299/2c44b004-dig-299-evidence-b4f169c.tar.gz",
-     "branch": "main"
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "folder": "docs/paperclip/shutdown-2026-10-03",
+     "path": "attachments/DIG-299/2c44b004-dig-299-evidence-b4f169c.tar.gz"
     }
    ],
    "work_products": [
@@ -732,64 +739,72 @@
      "bytes": 331,
      "sha256": "c63c069a4b4c5391d1aea4a07af8014124020e6a084c1a2467ba320d5d081968",
      "repository": "honcho",
-     "path": "attachments/DIG-305/cfb80a99-round3-independent.log",
-     "branch": "main"
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "folder": "docs/paperclip/shutdown-2026-10-03",
+     "path": "attachments/DIG-305/cfb80a99-round3-independent.log"
     },
     {
      "file": "harness-r1-run.log",
      "bytes": 460,
      "sha256": "a991625255fbee0fbe643cb8de60e6ad717c20b770fcb3855b5a8d3c89c6ddc7",
      "repository": "honcho",
-     "path": "attachments/DIG-305/2bdc9fcd-harness-r1-run.log",
-     "branch": "main"
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "folder": "docs/paperclip/shutdown-2026-10-03",
+     "path": "attachments/DIG-305/2bdc9fcd-harness-r1-run.log"
     },
     {
      "file": "harness-r1.sh",
      "bytes": 1472,
      "sha256": "a6a3f2e50b66934fe80d6f27b1b06ba8b3efc525b2aa7b7d8cde97dde4c62a80",
      "repository": "honcho",
-     "path": "attachments/DIG-305/eaccc012-harness-r1.sh",
-     "branch": "main"
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "folder": "docs/paperclip/shutdown-2026-10-03",
+     "path": "attachments/DIG-305/eaccc012-harness-r1.sh"
     },
     {
      "file": "old-harness-on-new-head.log",
      "bytes": 751,
      "sha256": "6f05f8fbaba96329147f01c90b354bdcb274962a6d12fe5cc2a4b1f383a6c64c",
      "repository": "honcho",
-     "path": "attachments/DIG-305/ee26df32-old-harness-on-new-head.log",
-     "branch": "main"
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "folder": "docs/paperclip/shutdown-2026-10-03",
+     "path": "attachments/DIG-305/ee26df32-old-harness-on-new-head.log"
     },
     {
      "file": "r1-validation.log",
      "bytes": 4649,
      "sha256": "f008ba3539448fd564595c9b1e54baa3b5c63ba91dc806085664396c4ad61658",
      "repository": "honcho",
-     "path": "attachments/DIG-305/7cb14d0c-r1-validation.log",
-     "branch": "main"
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "folder": "docs/paperclip/shutdown-2026-10-03",
+     "path": "attachments/DIG-305/7cb14d0c-r1-validation.log"
     },
     {
      "file": "DIG-305-independent-review-evidence.txt",
      "bytes": 11960,
      "sha256": "ed1e16b5195552a8b16e6eff6ec76ab8b18ac8f2b1606052b6391d86f89de1da",
      "repository": "honcho",
-     "path": "attachments/DIG-305/698bf995-DIG-305-independent-review-evidence.txt",
-     "branch": "main"
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "folder": "docs/paperclip/shutdown-2026-10-03",
+     "path": "attachments/DIG-305/698bf995-DIG-305-independent-review-evidence.txt"
     },
     {
      "file": "DIG-305-verification.log",
      "bytes": 5453,
      "sha256": "d7d79ab314989a6fab8cdd552f4dd1e52c06242cc96d429f09752e9a67b41102",
      "repository": "honcho",
-     "path": "attachments/DIG-305/e38b2a8d-DIG-305-verification.log",
-     "branch": "main"
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "folder": "docs/paperclip/shutdown-2026-10-03",
+     "path": "attachments/DIG-305/e38b2a8d-DIG-305-verification.log"
     },
     {
      "file": "DIG-305-harness.sh",
      "bytes": 1449,
      "sha256": "eb3707302a4d3239522f125d66823b57850a52bb90d4561c01fec9347e814cb6",
      "repository": "honcho",
-     "path": "attachments/DIG-305/64fca47d-DIG-305-harness.sh",
-     "branch": "main"
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "folder": "docs/paperclip/shutdown-2026-10-03",
+     "path": "attachments/DIG-305/64fca47d-DIG-305-harness.sh"
     }
    ],
    "work_products": [
@@ -918,8 +933,9 @@
      "bytes": 251643,
      "sha256": "39752e02a9ee68c22b8948983fcc4cca258c8435721fbeeb9571de1b29d3ca47",
      "repository": "infrastructure",
-     "path": "attachments/DIG-327/e0dd4d8b-image.png",
-     "branch": "main"
+     "branch": "docs/paperclip-shutdown-2026-10-03",
+     "folder": "docs/paperclip/shutdown-2026-10-03",
+     "path": "attachments/DIG-327/e0dd4d8b-image.png"
     }
    ],
    "work_products": [],
@@ -1260,28 +1276,31 @@
    "primary_repository": "infrastructure",
    "paperclip_project": "(no project: company-wide)",
    "status_at_cutoff": null,
-   "status_at_export": "blocked",
+   "status_at_export": "in_progress",
    "priority": "high",
    "owner": "KnowledgeCurator",
    "parent": "DIG-332",
-   "blocked_by": [
-    "DIG-337"
-   ],
+   "blocked_by": [],
    "blocks": [
     "DIG-332"
    ],
    "created_at": "2026-10-03T06:16:45.182Z",
-   "updated_at": "2026-10-03T07:41:10.970Z",
+   "updated_at": "2026-10-03T17:38:52.162Z",
    "completed_at": null,
    "cancelled_at": null,
    "documents": [
     {
      "key": "preservation-index",
      "title": "Preservation index",
-     "latest_revision": 4
+     "latest_revision": 5
+    },
+    {
+     "key": "review",
+     "title": "DevGuru adversarial review \u2014 round 1 (required changes)",
+     "latest_revision": 1
     }
    ],
-   "comments": 14,
+   "comments": 20,
    "attachments": [],
    "work_products": [
     {
@@ -1466,7 +1485,7 @@
    "primary_repository": "infrastructure",
    "paperclip_project": "(no project: company-wide)",
    "status_at_cutoff": null,
-   "status_at_export": "in_progress",
+   "status_at_export": "done",
    "priority": "high",
    "owner": "KnowledgeCurator",
    "parent": "DIG-335",
@@ -1477,12 +1496,10 @@
     "DIG-334",
     "DIG-333"
    ],
-   "blocks": [
-    "DIG-335"
-   ],
+   "blocks": [],
    "created_at": "2026-10-03T06:37:03.492Z",
-   "updated_at": "2026-10-03T16:42:24.125Z",
-   "completed_at": null,
+   "updated_at": "2026-10-03T17:18:23.483Z",
+   "completed_at": "2026-10-03T17:18:23.483Z",
    "cancelled_at": null,
    "documents": [],
    "comments": 20,

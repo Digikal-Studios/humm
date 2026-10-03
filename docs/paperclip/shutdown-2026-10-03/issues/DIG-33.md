@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
+| Status at export (closing delta 2026-10-03) | done |
 | Priority | high |
 | Owner (assignee) | GameExperienceDesigner |
 | Created by | GameExperienceDesigner |
@@ -354,11 +354,11 @@ Every Paperclip heartbeat run recorded against this issue. A run's results are t
 
 | Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
 |---|---|---|---|---|---|---|
-| `c24fcbc9-d97d-42ed-8beb-1ed515312c60` | GameExperienceDesigner | succeeded | 2026-09-25T14:34:23.660Z | 2026-09-25T14:40:54.975Z | 235021 | — |
-| `3453d282-22a2-4be4-b7b2-aa442f46d5bb` | GameExperienceDesigner | succeeded | 2026-09-25T14:40:19.436Z | 2026-09-25T15:19:37.913Z | 360234 | — |
-| `052b118f-82ff-4fc2-81c5-3e8a53c90316` | GameExperienceDesigner | succeeded | 2026-09-25T14:44:59.527Z | 2026-09-25T14:47:20.223Z | 142525 | — |
-| `cedce67c-4805-4ac9-9215-30286bd2e4dc` | GameExperienceDesigner | succeeded | 2026-09-25T14:50:55.756Z | 2026-09-25T14:53:17.947Z | 150199 | — |
-| `caf61a1c-b066-4491-93b4-f3dbc3839913` | GameExperienceDesigner | succeeded | 2026-09-25T14:56:12.207Z | 2026-09-25T14:58:56.044Z | 150345 | — |
-| `4742d921-2a4b-4f19-8d68-f3d207d51070` | KnowledgeCurator | succeeded | 2026-09-25T15:19:38.065Z | 2026-09-25T15:22:32.664Z | 132254 | — |
-| `e4d5014c-3bf9-4309-abb6-37aac7e8aa8a` | GameExperienceDesigner | succeeded | 2026-09-25T15:22:32.840Z | 2026-09-25T15:27:25.304Z | 128997 | — |
-| `2183d40b-bcaa-4989-b3a4-48bc5e974d98` | KnowledgeCurator | succeeded | 2026-09-25T15:27:25.495Z | 2026-09-25T15:32:38.381Z | 206672 | — |
+| <a id="run-c24fcbc9-d97d-42ed-8beb-1ed515312c60"></a>`c24fcbc9-d97d-42ed-8beb-1ed515312c60` | GameExperienceDesigner | succeeded | 2026-09-25T14:34:23.660Z | 2026-09-25T14:40:54.975Z | 235021 | — |
+| <a id="run-3453d282-22a2-4be4-b7b2-aa442f46d5bb"></a>`3453d282-22a2-4be4-b7b2-aa442f46d5bb` | GameExperienceDesigner | succeeded | 2026-09-25T14:40:19.436Z | 2026-09-25T15:19:37.913Z | 360234 | — |
+| <a id="run-052b118f-82ff-4fc2-81c5-3e8a53c90316"></a>`052b118f-82ff-4fc2-81c5-3e8a53c90316` | GameExperienceDesigner | succeeded | 2026-09-25T14:44:59.527Z | 2026-09-25T14:47:20.223Z | 142525 | — |
+| <a id="run-cedce67c-4805-4ac9-9215-30286bd2e4dc"></a>`cedce67c-4805-4ac9-9215-30286bd2e4dc` | GameExperienceDesigner | succeeded | 2026-09-25T14:50:55.756Z | 2026-09-25T14:53:17.947Z | 150199 | — |
+| <a id="run-caf61a1c-b066-4491-93b4-f3dbc3839913"></a>`caf61a1c-b066-4491-93b4-f3dbc3839913` | GameExperienceDesigner | succeeded | 2026-09-25T14:56:12.207Z | 2026-09-25T14:58:56.044Z | 150345 | — |
+| <a id="run-4742d921-2a4b-4f19-8d68-f3d207d51070"></a>`4742d921-2a4b-4f19-8d68-f3d207d51070` | KnowledgeCurator | succeeded | 2026-09-25T15:19:38.065Z | 2026-09-25T15:22:32.664Z | 132254 | — |
+| <a id="run-e4d5014c-3bf9-4309-abb6-37aac7e8aa8a"></a>`e4d5014c-3bf9-4309-abb6-37aac7e8aa8a` | GameExperienceDesigner | succeeded | 2026-09-25T15:22:32.840Z | 2026-09-25T15:27:25.304Z | 128997 | — |
+| <a id="run-2183d40b-bcaa-4989-b3a4-48bc5e974d98"></a>`2183d40b-bcaa-4989-b3a4-48bc5e974d98` | KnowledgeCurator | succeeded | 2026-09-25T15:27:25.495Z | 2026-09-25T15:32:38.381Z | 206672 | — |

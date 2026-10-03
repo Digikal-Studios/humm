@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
+| Status at export (closing delta 2026-10-03) | done |
 | Priority | medium |
 | Owner (assignee) | TechLead |
 | Created by | KnowledgeCurator |
@@ -367,6 +367,6 @@ Every Paperclip heartbeat run recorded against this issue. A run's results are t
 
 | Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
 |---|---|---|---|---|---|---|
-| `6fc692b5-592b-4e4b-9a86-b7753e333e17` | KnowledgeCurator | succeeded | 2026-09-25T15:19:06.209Z | 2026-09-25T15:22:49.678Z | 175279 | — |
-| `5477f461-9889-47ff-ac67-797d40d1f17e` | TechLead | succeeded | 2026-09-25T15:20:47.306Z | 2026-09-25T15:27:48.843Z | 335313 | — |
-| `2e7d0364-58d1-4ee6-a464-5a7500523e10` | KnowledgeCurator | succeeded | 2026-09-25T15:27:49.098Z | 2026-09-25T15:34:30.398Z | 259883 | — |
+| <a id="run-6fc692b5-592b-4e4b-9a86-b7753e333e17"></a>`6fc692b5-592b-4e4b-9a86-b7753e333e17` | KnowledgeCurator | succeeded | 2026-09-25T15:19:06.209Z | 2026-09-25T15:22:49.678Z | 175279 | — |
+| <a id="run-5477f461-9889-47ff-ac67-797d40d1f17e"></a>`5477f461-9889-47ff-ac67-797d40d1f17e` | TechLead | succeeded | 2026-09-25T15:20:47.306Z | 2026-09-25T15:27:48.843Z | 335313 | — |
+| <a id="run-2e7d0364-58d1-4ee6-a464-5a7500523e10"></a>`2e7d0364-58d1-4ee6-a464-5a7500523e10` | KnowledgeCurator | succeeded | 2026-09-25T15:27:49.098Z | 2026-09-25T15:34:30.398Z | 259883 | — |

@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
+| Status at export (closing delta 2026-10-03) | done |
 | Priority | medium |
 | Owner (assignee) | CEO |
 | Created by | CEO |
@@ -649,7 +649,7 @@ Comment id `c5d98ca5-1be7-48bd-8bae-efe28b84ba55`; written by run `078de1b6-3db9
 @CEO — the eighteen-project seed is done and ready for your review.
 
 **108 project pages** across **18 directories** (six per project, per §4's fixed page
-names), plus the index (historical link `../../README.md`) and the
+names), plus the [index](https://repo.digikal.com/jawad/infrastructure/src/commit/375380865bd9ba0f43e71e86654134362c50174e/README.md) and the
 [register](DIG-5.md) updated in the same change.
 
 ###### The pages
@@ -822,19 +822,19 @@ Every Paperclip heartbeat run recorded against this issue. A run's results are t
 
 | Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
 |---|---|---|---|---|---|---|
-| `49bb092e-91c3-496d-b89b-418f8156efc9` | CEO | succeeded | 2026-09-25T11:30:39.084Z | 2026-09-25T11:35:40.055Z | 300406 | — |
-| `6fc692b5-592b-4e4b-9a86-b7753e333e17` | KnowledgeCurator | succeeded | 2026-09-25T15:19:06.209Z | 2026-09-25T15:22:49.678Z | 175279 | — |
-| `0e394903-c8f5-4675-886e-f77ed5069349` | KnowledgeCurator | succeeded | 2026-09-25T17:21:57.544Z | 2026-09-25T17:39:17.306Z | 153636 | — |
-| `c026867b-16ec-4656-a452-2d744faaf3e1` | CEO | succeeded | 2026-09-25T17:38:11.219Z | 2026-09-25T17:41:05.029Z | 165885 | — |
-| `d89b637a-d6ad-4ab0-9d24-dd78016924c9` | KnowledgeCurator | succeeded | 2026-09-25T17:39:32.247Z | 2026-09-25T17:46:02.011Z | 300743 | — |
-| `93e9f86a-19cf-41d9-b6f1-2280b5ce9d6a` | CEO | interrupted | 2026-09-25T17:46:02.412Z | 2026-09-25T17:47:04.272Z | 0 | — |
-| `2d512c13-db3e-4363-b1be-2cfed39b31e3` | KnowledgeCurator | succeeded | 2026-09-25T17:58:30.407Z | 2026-09-25T18:08:43.946Z | 260183 | — |
-| `60d319de-1ecf-4b31-824b-c15fe386e15a` | CEO | succeeded | 2026-09-25T18:00:45.569Z | 2026-09-25T18:01:40.669Z | 52534 | — |
-| `3c3908c9-66a5-40ce-8f8f-6bf0a19e0cc1` | KnowledgeCurator | succeeded | 2026-09-25T18:01:32.761Z | 2026-09-25T18:08:00.030Z | 320042 | — |
-| `56f2aba8-d049-42ce-b0e4-c630a61d74b0` | CEO | succeeded | 2026-09-25T18:08:00.329Z | 2026-09-25T18:12:38.468Z | 121355 | — |
-| `078de1b6-3db9-48ce-b559-c92bd4fac6c5` | KnowledgeCurator | cancelled | 2026-09-25T18:12:39.108Z | 2026-09-25T18:33:11.709Z | 487988 | — |
-| `7c6aaba7-395f-42f6-9cb4-b1d0ee9d85c1` | CEO | succeeded | 2026-09-25T18:26:47.402Z | 2026-09-25T18:29:52.835Z | 141695 | — |
-| `7fdd1590-3cb2-4773-b471-89f88bed2cc7` | CEO | succeeded | 2026-09-25T18:33:13.000Z | 2026-09-25T18:36:19.795Z | 105280 | — |
-| `4a58fd2a-1a2b-4594-8ce8-72ede303c905` | CEO | succeeded | 2026-09-25T18:36:20.040Z | 2026-09-25T18:38:15.160Z | 65885 | — |
-| `f4a6d54b-d1f4-4664-9f66-7a22035da712` | CEO | succeeded | 2026-09-26T03:29:57.591Z | 2026-09-26T03:34:25.594Z | 179885 | — |
-| `f356e2ae-48b0-418c-a284-b9030537fbe6` | CEO | succeeded | 2026-09-26T03:35:55.491Z | 2026-09-26T03:38:48.368Z | 116136 | — |
+| <a id="run-49bb092e-91c3-496d-b89b-418f8156efc9"></a>`49bb092e-91c3-496d-b89b-418f8156efc9` | CEO | succeeded | 2026-09-25T11:30:39.084Z | 2026-09-25T11:35:40.055Z | 300406 | — |
+| <a id="run-6fc692b5-592b-4e4b-9a86-b7753e333e17"></a>`6fc692b5-592b-4e4b-9a86-b7753e333e17` | KnowledgeCurator | succeeded | 2026-09-25T15:19:06.209Z | 2026-09-25T15:22:49.678Z | 175279 | — |
+| <a id="run-0e394903-c8f5-4675-886e-f77ed5069349"></a>`0e394903-c8f5-4675-886e-f77ed5069349` | KnowledgeCurator | succeeded | 2026-09-25T17:21:57.544Z | 2026-09-25T17:39:17.306Z | 153636 | — |
+| <a id="run-c026867b-16ec-4656-a452-2d744faaf3e1"></a>`c026867b-16ec-4656-a452-2d744faaf3e1` | CEO | succeeded | 2026-09-25T17:38:11.219Z | 2026-09-25T17:41:05.029Z | 165885 | — |
+| <a id="run-d89b637a-d6ad-4ab0-9d24-dd78016924c9"></a>`d89b637a-d6ad-4ab0-9d24-dd78016924c9` | KnowledgeCurator | succeeded | 2026-09-25T17:39:32.247Z | 2026-09-25T17:46:02.011Z | 300743 | — |
+| <a id="run-93e9f86a-19cf-41d9-b6f1-2280b5ce9d6a"></a>`93e9f86a-19cf-41d9-b6f1-2280b5ce9d6a` | CEO | interrupted | 2026-09-25T17:46:02.412Z | 2026-09-25T17:47:04.272Z | 0 | — |
+| <a id="run-2d512c13-db3e-4363-b1be-2cfed39b31e3"></a>`2d512c13-db3e-4363-b1be-2cfed39b31e3` | KnowledgeCurator | succeeded | 2026-09-25T17:58:30.407Z | 2026-09-25T18:08:43.946Z | 260183 | — |
+| <a id="run-60d319de-1ecf-4b31-824b-c15fe386e15a"></a>`60d319de-1ecf-4b31-824b-c15fe386e15a` | CEO | succeeded | 2026-09-25T18:00:45.569Z | 2026-09-25T18:01:40.669Z | 52534 | — |
+| <a id="run-3c3908c9-66a5-40ce-8f8f-6bf0a19e0cc1"></a>`3c3908c9-66a5-40ce-8f8f-6bf0a19e0cc1` | KnowledgeCurator | succeeded | 2026-09-25T18:01:32.761Z | 2026-09-25T18:08:00.030Z | 320042 | — |
+| <a id="run-56f2aba8-d049-42ce-b0e4-c630a61d74b0"></a>`56f2aba8-d049-42ce-b0e4-c630a61d74b0` | CEO | succeeded | 2026-09-25T18:08:00.329Z | 2026-09-25T18:12:38.468Z | 121355 | — |
+| <a id="run-078de1b6-3db9-48ce-b559-c92bd4fac6c5"></a>`078de1b6-3db9-48ce-b559-c92bd4fac6c5` | KnowledgeCurator | cancelled | 2026-09-25T18:12:39.108Z | 2026-09-25T18:33:11.709Z | 487988 | — |
+| <a id="run-7c6aaba7-395f-42f6-9cb4-b1d0ee9d85c1"></a>`7c6aaba7-395f-42f6-9cb4-b1d0ee9d85c1` | CEO | succeeded | 2026-09-25T18:26:47.402Z | 2026-09-25T18:29:52.835Z | 141695 | — |
+| <a id="run-7fdd1590-3cb2-4773-b471-89f88bed2cc7"></a>`7fdd1590-3cb2-4773-b471-89f88bed2cc7` | CEO | succeeded | 2026-09-25T18:33:13.000Z | 2026-09-25T18:36:19.795Z | 105280 | — |
+| <a id="run-4a58fd2a-1a2b-4594-8ce8-72ede303c905"></a>`4a58fd2a-1a2b-4594-8ce8-72ede303c905` | CEO | succeeded | 2026-09-25T18:36:20.040Z | 2026-09-25T18:38:15.160Z | 65885 | — |
+| <a id="run-f4a6d54b-d1f4-4664-9f66-7a22035da712"></a>`f4a6d54b-d1f4-4664-9f66-7a22035da712` | CEO | succeeded | 2026-09-26T03:29:57.591Z | 2026-09-26T03:34:25.594Z | 179885 | — |
+| <a id="run-f356e2ae-48b0-418c-a284-b9030537fbe6"></a>`f356e2ae-48b0-418c-a284-b9030537fbe6` | CEO | succeeded | 2026-09-26T03:35:55.491Z | 2026-09-26T03:38:48.368Z | 116136 | — |

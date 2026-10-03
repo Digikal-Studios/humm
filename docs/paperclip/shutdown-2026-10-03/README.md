@@ -2,19 +2,20 @@
 
 Digikal ran this repository's work through Paperclip until the shutdown cutoff of 2026-10-03T06:12:00Z. This folder preserves the task history, plans, decisions, reviews and evidence so that a normal clone is enough to resume without Paperclip. It is archival documentation; it is not a plan and it authorises no work.
 
-Snapshot: Paperclip records exported from 2026-10-03T16:42:39Z (every shutdown-era record up to then, after the original cutoff); Git refs read at 2026-10-03T16:46:28Z; source rows from ReleaseEngineer's final manifest `50db32f32fa7856c4a1699de1b3534f7a56cc573`.
+Snapshot: Paperclip records exported from 2026-10-03T17:39:09Z (every shutdown-era record up to then, after the original cutoff); Git refs read at 2026-10-03T17:41:58Z; source rows from ReleaseEngineer's final manifest `50db32f32fa7856c4a1699de1b3534f7a56cc573`.
 
 ## Where this folder lives
 
 This folder is on branch `docs/paperclip-shutdown-2026-10-03` and reaches `main` when its pull request merges after review. Until then, or to read it exactly as archived:
 
 ```sh
-git clone -b docs/paperclip-shutdown-2026-10-03 https://repo.digikal.com/jawad/humm.git humm-archive
+git clone --single-branch -b docs/paperclip-shutdown-2026-10-03 https://repo.digikal.com/jawad/humm.git humm-archive
+git -C humm-archive rev-parse HEAD   # compare with the final head in the infrastructure coordination.md
 cd humm-archive/docs/paperclip/shutdown-2026-10-03
-git rev-parse HEAD   # compare with the final head recorded in the infrastructure coordination.md
-python3 tools/check_offline.py .   # every link and attachment resolves without Paperclip
-sha256sum -c data/attachments.sha256
+python3 tools/check_offline.py . --complete
 ```
+
+`--complete` fails unless every hash manifest in `data/` can be checked. Without `--complete` the checker reports skipped manifests and does not claim a complete check. The checker also fails on any erased record citation that is not listed with a reason in `data/unresolved-links.tsv`, and on any attachment location in `data/issues.json` that does not hold the recorded bytes. This archive has no attachments of its own, so there is no `sha256sum` step.
 
 ## Start here
 
@@ -50,7 +51,7 @@ sha256sum -c data/attachments.sha256
 
 ## Company knowledge base
 
-- Canonical repository: `https://repo.digikal.com/jawad/digikal-knowledge-base.git`, default branch `main` at `7dc917c3324a18354613e38fa36138cbdc747fc9` (verified with `git ls-remote` at 2026-10-03T16:46:28Z). Start at `knowledge/README.md`; this project's page is `knowledge/projects/humm/README.md`. Its `records/` tree holds the issue records the knowledge base cites, so it also reads without Paperclip.
+- Canonical repository: `https://repo.digikal.com/jawad/digikal-knowledge-base.git`, default branch `main` at `7dc917c3324a18354613e38fa36138cbdc747fc9` (verified with `git ls-remote` at 2026-10-03T17:41:58Z). Start at `knowledge/README.md`; this project's page is `knowledge/projects/humm/README.md`. Its `records/` tree holds the issue records the knowledge base cites, so it also reads without Paperclip.
 - Provenance snapshot: the 134-file knowledge base as it stood before the repository existed is on infrastructure branch `archive/shutdown-2026-10-03/off-repo/company-knowledge-and-ceo-notes` at `792a34a14f0cdb70218b63664fb422c7f2e14a69` under `onboarding/knowledge/`. CEO compared all 134 files with the live tree on 2026-10-03 and found none missing or different ([DIG-332 knowledge-storage](issues/DIG-332.md#document-knowledge-storage)). Use it only to check history.
 
 ```sh

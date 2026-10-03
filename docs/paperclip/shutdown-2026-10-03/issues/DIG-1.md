@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
+| Status at export (closing delta 2026-10-03) | done |
 | Priority | medium |
 | Owner (assignee) | CEO |
 | Created by | Board user (founder) |
@@ -439,9 +439,9 @@ Comment id `d8cec90d-544d-48ef-a744-5d0006842593`; written by run `49bb092e-91c3
 ##### Plan approved and executed
 
 **Hired (all active, reporting to CEO, $50/month cap each, no timer heartbeats):**
-- TechLead (historical link `/DIG/agents/c76ac668-7eaa-4eab-84ee-de25fd9242f5`) — engineer. Codebase scans, status reports, engineering and architecture knowledge. Instruction source: generic baseline guide with a focused engineering lens set (Coder template was too implementation-centric for a read-only discovery role).
-- KnowledgeCurator (historical link `/DIG/agents/45dcbfc4-d7cc-4b67-ac88-f1ce7a9c83f0`) — general. Knowledge base structure, conventions, curation, freshness. Instruction source: generic baseline guide.
-- GameExperienceDesigner (historical link `/DIG/agents/d511c851-1685-47e9-818b-73e49bd651fe`) — general. Game design, UI, UX reviews and knowledge. Instruction source: adapted from the UX Designer template: charter rewritten for games, game-design lens group added, design-system and visual-truth sections replaced with a review output bar.
+- [TechLead](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/agents/TechLead.md) — engineer. Codebase scans, status reports, engineering and architecture knowledge. Instruction source: generic baseline guide with a focused engineering lens set (Coder template was too implementation-centric for a read-only discovery role).
+- [KnowledgeCurator](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/agents/KnowledgeCurator.md) — general. Knowledge base structure, conventions, curation, freshness. Instruction source: generic baseline guide.
+- [GameExperienceDesigner](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/agents/GameExperienceDesigner.md) — general. Game design, UI, UX reviews and knowledge. Instruction source: adapted from the UX Designer template: charter rewritten for games, game-design lens group added, design-system and visual-truth sections replaced with a review output bar.
 
 No permission-expanding skills or adapter settings were granted. All three are read-only on repositories by instruction.
 
@@ -462,9 +462,9 @@ Every Paperclip heartbeat run recorded against this issue. A run's results are t
 
 | Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
 |---|---|---|---|---|---|---|
-| `e4fb6029-6915-4174-98eb-c649ab510270` | CEO | failed | 2026-09-25T10:39:08.413Z | 2026-09-25T10:39:12.904Z | 2234 | — |
-| `86152ab2-5c4b-4dca-bc80-54b16477f0e3` | CEO | failed | 2026-09-25T10:40:03.182Z | 2026-09-25T10:40:10.311Z | 2576 | — |
-| `7b6affa5-3219-4d9c-9745-4438527e2419` | CEO | failed | 2026-09-25T10:41:02.564Z | 2026-09-25T10:41:05.966Z | 2576 | — |
-| `5ce5ff19-fa8a-477b-929b-ce4f97518b16` | CEO | succeeded | 2026-09-25T11:05:29.575Z | 2026-09-25T11:06:05.622Z | 42187 | — |
-| `dbef75a0-848b-4d0d-9d50-f141438e310a` | CEO | succeeded | 2026-09-25T11:13:24.066Z | 2026-09-25T11:15:07.488Z | 103123 | — |
-| `49bb092e-91c3-496d-b89b-418f8156efc9` | CEO | succeeded | 2026-09-25T11:30:39.084Z | 2026-09-25T11:35:40.055Z | 300406 | — |
+| <a id="run-e4fb6029-6915-4174-98eb-c649ab510270"></a>`e4fb6029-6915-4174-98eb-c649ab510270` | CEO | failed | 2026-09-25T10:39:08.413Z | 2026-09-25T10:39:12.904Z | 2234 | — |
+| <a id="run-86152ab2-5c4b-4dca-bc80-54b16477f0e3"></a>`86152ab2-5c4b-4dca-bc80-54b16477f0e3` | CEO | failed | 2026-09-25T10:40:03.182Z | 2026-09-25T10:40:10.311Z | 2576 | — |
+| <a id="run-7b6affa5-3219-4d9c-9745-4438527e2419"></a>`7b6affa5-3219-4d9c-9745-4438527e2419` | CEO | failed | 2026-09-25T10:41:02.564Z | 2026-09-25T10:41:05.966Z | 2576 | — |
+| <a id="run-5ce5ff19-fa8a-477b-929b-ce4f97518b16"></a>`5ce5ff19-fa8a-477b-929b-ce4f97518b16` | CEO | succeeded | 2026-09-25T11:05:29.575Z | 2026-09-25T11:06:05.622Z | 42187 | — |
+| <a id="run-dbef75a0-848b-4d0d-9d50-f141438e310a"></a>`dbef75a0-848b-4d0d-9d50-f141438e310a` | CEO | succeeded | 2026-09-25T11:13:24.066Z | 2026-09-25T11:15:07.488Z | 103123 | — |
+| <a id="run-49bb092e-91c3-496d-b89b-418f8156efc9"></a>`49bb092e-91c3-496d-b89b-418f8156efc9` | CEO | succeeded | 2026-09-25T11:30:39.084Z | 2026-09-25T11:35:40.055Z | 300406 | — |

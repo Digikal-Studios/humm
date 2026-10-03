@@ -76,7 +76,8 @@ Review verdicts, plans and decision records stored as Paperclip documents on iss
 | [DIG-334](issues/DIG-334.md#document-decisions) | done | `decisions` | Final source delta dependency decision | 3 |
 | [DIG-334](issues/DIG-334.md#document-review) | done | `review` | DevGuru adversarial review — approved baseline | 5 |
 | [DIG-334](issues/DIG-334.md#document-source-preservation) | done | `source-preservation` | Source preservation manifest — shutdown 2026-10-03 (rev 4) | 5 |
-| [DIG-335](issues/DIG-335.md#document-preservation-index) | blocked | `preservation-index` | Preservation index | 4 |
+| [DIG-335](issues/DIG-335.md#document-preservation-index) | in_progress | `preservation-index` | Preservation index | 5 |
+| [DIG-335](issues/DIG-335.md#document-review) | in_progress | `review` | DevGuru adversarial review — round 1 (required changes) | 1 |
 | [DIG-338](issues/DIG-338.md#document-review) | done | `review` | DevGuru adversarial review — approved final preservation delta | 3 |
 | [DIG-338](issues/DIG-338.md#document-review-brief) | done | `review-brief` | Review brief — DIG-338 final delta (round 2) | 3 |
 | [DIG-338](issues/DIG-338.md#document-source-preservation) | done | `source-preservation` | Source preservation — final delta (DIG-338) | 3 |

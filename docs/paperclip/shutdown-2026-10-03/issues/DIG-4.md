@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
+| Status at export (closing delta 2026-10-03) | done |
 | Priority | medium |
 | Owner (assignee) | CEO |
 | Created by | CEO |
@@ -186,7 +186,7 @@ Two mechanical ones already raised in [DIG-2](https://repo.digikal.com/jawad/inf
 
 ###### Disposition
 
-Moving to `in_review` for CEO (historical link `/DIG/agents/ceo`). [DIG-5](DIG-5.md) (knowledge base pages), [DIG-7](DIG-7.md) (design-side review) and [DIG-8](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-8.md) (team expansion proposal) unblock when this is accepted — the specialist list above is the input DIG-8 needs.
+Moving to `in_review` for [CEO](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/agents/CEO.md). [DIG-5](DIG-5.md) (knowledge base pages), [DIG-7](DIG-7.md) (design-side review) and [DIG-8](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-8.md) (team expansion proposal) unblock when this is accepted — the specialist list above is the input DIG-8 needs.
 
 
 <a id="comment-4572730f-a880-4ae4-988e-e1bc94e324d4"></a>
@@ -195,7 +195,7 @@ Moving to `in_review` for CEO (historical link `/DIG/agents/ceo`). [DIG-5](DIG-5
 
 Comment id `4572730f-a880-4ae4-988e-e1bc94e324d4`; written by run `ffb0a008-11d0-46e9-9ea5-98e20a0fd9d7`.
 
-Handed to CEO (historical link `/DIG/agents/ceo`) for review. Waiting on the **Accept the 12-codebase scan** confirmation above; accepting it closes this and releases [DIG-5](DIG-5.md), [DIG-7](DIG-7.md) and [DIG-8](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-8.md).
+Handed to [CEO](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/agents/CEO.md) for review. Waiting on the **Accept the 12-codebase scan** confirmation above; accepting it closes this and releases [DIG-5](DIG-5.md), [DIG-7](DIG-7.md) and [DIG-8](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-8.md).
 
 <a id="comment-edf3a76a-9ce1-4331-857e-0a89b2f73320"></a>
 
@@ -205,7 +205,7 @@ Comment id `edf3a76a-9ce1-4331-857e-0a89b2f73320`; written by run `578cdf5b-ac6b
 
 ##### CEO review — accepted, closing
 
-Verified before accepting: all 12 children are `done`, each carries a `report` document with every required section (summary, stack and versions, architecture, evidence-cited Built / In progress / Planned, ranked risks, founder questions), and a spot-read of the nurikabe Built list confirmed claims cite file paths and line numbers rather than the README. The roll-up and the specialist-expertise list meet the spec. Good work, TechLead (historical link `/DIG/agents/techlead`).
+Verified before accepting: all 12 children are `done`, each carries a `report` document with every required section (summary, stack and versions, architecture, evidence-cited Built / In progress / Planned, ranked risks, founder questions), and a spot-read of the nurikabe Built list confirmed claims cite file paths and line numbers rather than the README. The roll-up and the specialist-expertise list meet the spec. Good work, [TechLead](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/agents/TechLead.md).
 
 **What this releases.** Closing DIG-4 unblocks [DIG-5](DIG-5.md) (KnowledgeCurator: knowledge base pages), [DIG-7](DIG-7.md) (GameExperienceDesigner: design-side review) and [DIG-8](https://repo.digikal.com/jawad/infrastructure/src/branch/docs/paperclip-shutdown-2026-10-03/docs/paperclip/shutdown-2026-10-03/issues/DIG-8.md) (me: team expansion proposal).
 
@@ -223,8 +223,8 @@ Every Paperclip heartbeat run recorded against this issue. A run's results are t
 
 | Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
 |---|---|---|---|---|---|---|
-| `49bb092e-91c3-496d-b89b-418f8156efc9` | CEO | succeeded | 2026-09-25T11:30:39.084Z | 2026-09-25T11:35:40.055Z | 300406 | — |
-| `3d0c9573-5ae7-4949-8033-41ca46bfc9f9` | CEO | succeeded | 2026-09-25T13:47:59.737Z | 2026-09-25T13:50:42.992Z | 110421 | — |
-| `b4a08a36-da99-4ac3-bfa6-7ca007337339` | TechLead | succeeded | 2026-09-25T13:50:17.311Z | 2026-09-25T13:53:09.618Z | 161784 | — |
-| `ffb0a008-11d0-46e9-9ea5-98e20a0fd9d7` | TechLead | cancelled | 2026-09-25T14:10:24.908Z | 2026-09-25T14:13:05.610Z | 138118 | — |
-| `578cdf5b-ac6b-4c87-95a8-1eb6631e6243` | CEO | succeeded | 2026-09-25T14:13:05.970Z | 2026-09-25T14:14:40.200Z | 96811 | — |
+| <a id="run-49bb092e-91c3-496d-b89b-418f8156efc9"></a>`49bb092e-91c3-496d-b89b-418f8156efc9` | CEO | succeeded | 2026-09-25T11:30:39.084Z | 2026-09-25T11:35:40.055Z | 300406 | — |
+| <a id="run-3d0c9573-5ae7-4949-8033-41ca46bfc9f9"></a>`3d0c9573-5ae7-4949-8033-41ca46bfc9f9` | CEO | succeeded | 2026-09-25T13:47:59.737Z | 2026-09-25T13:50:42.992Z | 110421 | — |
+| <a id="run-b4a08a36-da99-4ac3-bfa6-7ca007337339"></a>`b4a08a36-da99-4ac3-bfa6-7ca007337339` | TechLead | succeeded | 2026-09-25T13:50:17.311Z | 2026-09-25T13:53:09.618Z | 161784 | — |
+| <a id="run-ffb0a008-11d0-46e9-9ea5-98e20a0fd9d7"></a>`ffb0a008-11d0-46e9-9ea5-98e20a0fd9d7` | TechLead | cancelled | 2026-09-25T14:10:24.908Z | 2026-09-25T14:13:05.610Z | 138118 | — |
+| <a id="run-578cdf5b-ac6b-4c87-95a8-1eb6631e6243"></a>`578cdf5b-ac6b-4c87-95a8-1eb6631e6243` | CEO | succeeded | 2026-09-25T14:13:05.970Z | 2026-09-25T14:14:40.200Z | 96811 | — |

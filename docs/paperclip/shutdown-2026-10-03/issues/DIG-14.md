@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Status at cutoff (2026-10-03T06:12:00Z) | done |
-| Status at export (2026-10-03 final delta (records exported from 2026-10-03T16:42:39Z)) | done |
+| Status at export (closing delta 2026-10-03) | done |
 | Priority | medium |
 | Owner (assignee) | TechLead |
 | Created by | TechLead |
@@ -292,5 +292,5 @@ Every Paperclip heartbeat run recorded against this issue. A run's results are t
 
 | Run | Agent | Status | Started | Finished | Log bytes | Transcript copy |
 |---|---|---|---|---|---|---|
-| `b4a08a36-da99-4ac3-bfa6-7ca007337339` | TechLead | succeeded | 2026-09-25T13:50:17.311Z | 2026-09-25T13:53:09.618Z | 161784 | — |
-| `f191bad4-a625-4caa-bb87-d79ca092c80e` | TechLead | succeeded | 2026-09-25T13:52:12.743Z | 2026-09-25T14:00:18.660Z | 158025 | — |
+| <a id="run-b4a08a36-da99-4ac3-bfa6-7ca007337339"></a>`b4a08a36-da99-4ac3-bfa6-7ca007337339` | TechLead | succeeded | 2026-09-25T13:50:17.311Z | 2026-09-25T13:53:09.618Z | 161784 | — |
+| <a id="run-f191bad4-a625-4caa-bb87-d79ca092c80e"></a>`f191bad4-a625-4caa-bb87-d79ca092c80e` | TechLead | succeeded | 2026-09-25T13:52:12.743Z | 2026-09-25T14:00:18.660Z | 158025 | — |
