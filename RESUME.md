@@ -27,7 +27,7 @@ git clone https://repo.digikal.com/jawad/humm.git humm   # a full clone fetches 
 cd humm
 cd docs/paperclip/shutdown-2026-10-03
 python3 tools/check_offline.py . --complete
-sha256sum -c data/attachments.sha256   # the same hashes, checked by a second tool
+# data/attachments.sha256 is empty (no archived attachments), so there is no second hash check
 ```
 
 `--complete` fails unless every hash manifest in the archive can be checked.
