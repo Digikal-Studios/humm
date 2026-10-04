@@ -54,6 +54,10 @@ Full text: `docs/MISSION.md` (the governing mission prompt — phases, gates, St
 - Benchmark regressions on the transcription path are failures to fix, not notes to log.
 - End each milestone with a report: matrix status, benchmark numbers, deviations (with ADR refs), analysis corrections.
 
+## Paperclip shutdown: how to resume
+
+Paperclip stopped running this repository's work on 2026-10-03 and the project is frozen. Read [`RESUME.md`](RESUME.md) first. It gives the posture, how to recover source, WIP and plans from the [shutdown archive](docs/paperclip/shutdown-2026-10-03/README.md), which extra branches a full check needs, and where the canonical knowledge base lives.
+
 ## Digikal knowledge base
 
 Digikal keeps studio-wide context in a private knowledge base,
