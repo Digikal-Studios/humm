@@ -5,3 +5,7 @@
 /.cargo-home
 /.superpowers/
 __pycache__/
+
+# IDE settings and local tool caches
+.idea/
+.codegraph/
