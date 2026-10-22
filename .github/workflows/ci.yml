@@ -9,16 +9,26 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  # CI selects stable without changing the shared macOS user's Rust default.
+  RUSTUP_TOOLCHAIN: stable
+
 jobs:
   gates:
-    runs-on: macos-latest
+    runs-on:
+      group: apple-ci
+      labels: [self-hosted, macOS, ARM64, digikal-apple]
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check host dependencies and provision verified Buzz fixtures
+        run: python3 scripts/ci_prepare.py
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+        run: rustup toolchain install stable --profile minimal --no-self-update --component rustfmt --component clippy
 
       - name: Format check
         run: cargo fmt --check
@@ -26,8 +36,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Contract tests (crates/*/tests, #[ignore]) require ffmpeg/ffprobe/yt-dlp
-      # and local model files; they are not run in CI. Run them locally with
-      # `cargo test -p humm-media -- --ignored`.
+      # Ordinary CLI/GUI tests use ffmpeg/ffprobe and the verified Buzz stub/WAV.
+      # Existing #[ignore] contract/acceptance tests additionally need real models,
+      # yt-dlp, or explicitly configured services; their coverage is unchanged.
       - name: Test
         run: cargo test --workspace
