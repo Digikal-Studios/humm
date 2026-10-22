@@ -930,6 +930,7 @@ mod tests {
 
     #[test]
     fn load_falls_back_to_raw_columns_for_an_imported_row_with_null_options_json() {
+        let _locale_guard = crate::i18n::lock_locale_for_test();
         let store = SqliteStore::open_in_memory().expect("open");
         let dir = tempfile::tempdir().expect("tempdir");
         let fixture_path = dir.path().join("Buzz.sqlite");

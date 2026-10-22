@@ -658,6 +658,7 @@ mod tests {
 
     #[test]
     fn header_label_appends_no_arrow_for_a_non_sorted_column() {
+        let _locale_guard = crate::i18n::lock_locale_for_test();
         let label = header_label(ColumnId::Model, (ColumnId::DateAdded, true));
         assert_eq!(label, ColumnId::Model.label());
     }
