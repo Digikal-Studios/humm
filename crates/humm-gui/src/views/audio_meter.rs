@@ -249,12 +249,14 @@ mod tests {
 
     #[test]
     fn caption_has_four_decimal_places_and_two_spaces_between_fields() {
+        let _locale_guard = crate::i18n::lock_locale_for_test();
         let caption = meter_caption(0.123_456_7, 42);
         assert_eq!(caption, "Average volume: 0.1235  Queue: 42");
     }
 
     #[test]
     fn caption_zero_values() {
+        let _locale_guard = crate::i18n::lock_locale_for_test();
         assert_eq!(meter_caption(0.0, 0), "Average volume: 0.0000  Queue: 0");
     }
 }

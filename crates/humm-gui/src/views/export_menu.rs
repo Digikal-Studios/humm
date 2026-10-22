@@ -555,6 +555,7 @@ mod tests {
 
     #[test]
     fn entry_label_matches_buzz_format_upper_dash_label_shape() {
+        let _locale_guard = crate::i18n::lock_locale_for_test();
         assert_eq!(entry_label(OutputFormat::Srt, TextKey::Text), "SRT - Text");
         assert_eq!(entry_label(OutputFormat::Txt, TextKey::Text), "TXT - Text");
         assert_eq!(entry_label(OutputFormat::Vtt, TextKey::Text), "VTT - Text");

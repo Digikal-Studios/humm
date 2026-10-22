@@ -869,6 +869,7 @@ mod tests {
 
     #[test]
     fn speed_badge_text_formats_one_decimal() {
+        let _locale_guard = crate::i18n::lock_locale_for_test();
         // `.contains` rather than `assert_eq!`: Fluent's default
         // `use_isolating` wraps each interpolated placeable value in
         // invisible bidi-isolation marks (U+2068/U+2069), so the rendered
