@@ -725,6 +725,7 @@ mod tests {
 
     #[test]
     fn banner_shows_base_message_on_first_event() {
+        let _locale_guard = crate::i18n::lock_locale_for_test();
         let mut banner = StoreHealthBanner::default();
         banner.on_store_write_failed();
         assert!(banner.visible());
@@ -753,6 +754,7 @@ mod tests {
 
     #[test]
     fn dismissed_banner_reappears_fresh_on_next_event() {
+        let _locale_guard = crate::i18n::lock_locale_for_test();
         let mut banner = StoreHealthBanner::default();
         banner.on_store_write_failed();
         banner.on_store_write_failed();
@@ -769,6 +771,7 @@ mod tests {
 
     #[test]
     fn pill_label_watching_has_no_paused_suffix() {
+        let _locale_guard = crate::i18n::lock_locale_for_test();
         let state = FolderWatchPillState {
             folder_name: "my-clips".to_string(),
             paused: false,
@@ -781,6 +784,7 @@ mod tests {
 
     #[test]
     fn pill_label_paused_appends_the_paused_suffix() {
+        let _locale_guard = crate::i18n::lock_locale_for_test();
         let state = FolderWatchPillState {
             folder_name: "my-clips".to_string(),
             paused: true,

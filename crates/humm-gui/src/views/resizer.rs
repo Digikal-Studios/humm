@@ -775,6 +775,7 @@ mod tests {
         use egui_kittest::Harness;
         use egui_kittest::kittest::Queryable;
 
+        let _locale_guard = crate::i18n::lock_locale_for_test();
         let mut vm = vm_for_algo(true, true, true);
         vm.error = Some(format!(
             "{} {}",

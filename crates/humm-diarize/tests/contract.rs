@@ -71,8 +71,10 @@ fn read_fixture_pcm(path: &Path) -> Pcm {
         if chunk_id == b"data" {
             let body = &bytes[body_start..body_start + chunk_size];
             let samples: Vec<f32> = body
-                .chunks_exact(2)
-                .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&sample| i16::from_le_bytes(sample))
                 .map(|s| f32::from(s) / 32_768.0)
                 .collect();
             return Pcm::new(samples);
