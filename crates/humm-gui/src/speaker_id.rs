@@ -1162,6 +1162,7 @@ mod tests {
 
     #[test]
     fn cancel_acks_immediately_then_resolves_to_idle_on_poll() {
+        let _locale_guard = crate::i18n::lock_locale_for_test();
         let status = Arc::new(Mutex::new(RunStatus {
             label: "decoding".to_string(),
             fraction: None,
