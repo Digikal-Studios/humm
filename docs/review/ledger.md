@@ -63,7 +63,10 @@ Review `a329e4e` accepted P-001, P-002, P-004, P-005, P-009, and P-011. Second p
 - Implemented in `8e2244670c6a4692094f6584cb584e0a6a501628`. Lockfile: `rustls` 0.23.46, `rustls-webpki` 0.103.16, `webpki-roots` 1.0.10. `ureq` stayed 3.3.0. `webpki-root-certs` stayed 1.0.9.
 - `cargo tree -p humm-core -i rustls -i rustls-webpki -i webpki-roots` shows those versions on the reqwest path. `cargo test -p humm-core --lib update::` — 18 passed. `models::download::` — 43 passed. Those tests use plain HTTP and do not prove the emSign root is gone.
 
-### P-003 — second Ctrl-C: groups, temp files, and a non-blocking handler (revised, not implemented)
+### P-003 — second Ctrl-C: groups, temp files, and a non-blocking handler (implemented)
+
+- Implemented in `43ea48433baff21dcf4076e7e0cbdbc48a17f4bc`. `try_emergency_stop` SIGKILLs registered groups without waiting, deletes speech temps and the demucs scratch dir, and leaves a denoised file when `keep_denoised_file` is set. The user's source path is not registered. A busy registry lock returns without blocking. `cargo test -p humm-core --lib abort::` — 4 passed. `queue::tests::denoised_output_kept_when_keep_denoised_file_set` passed. `humm-media` `emergency_stop_kills_grandchild_and_respects_keep_denoised_file`, `isolate_kill_on_cancel_acks_promptly`, and `cancel_kills_grandchild_process_not_just_direct_child` passed.
+
 
 - Objective: a second SIGINT stops demucs, yt-dlp, and their grandchildren, and does not leave `_speech` / denoised temp files or the demucs scratch directory behind.
 - Findings: F-005
