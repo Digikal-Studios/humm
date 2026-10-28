@@ -1194,8 +1194,21 @@ fn apply_components(
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                if !pop_inside(root, current) {
-                    return Err(WalkError::Escape);
+                // A missing component is not a real directory. Popping it
+                // would cancel `..` lexically before a later zip entry can
+                // make that name a symlink (`a/b/link` → `missing/../../outside`
+                // while `missing` does not exist yet).
+                match std::fs::symlink_metadata(&*current) {
+                    Ok(meta) if meta.is_dir() => {
+                        if !pop_inside(root, current) {
+                            return Err(WalkError::Escape);
+                        }
+                    }
+                    Ok(_) => return Err(WalkError::Escape),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(WalkError::Escape);
+                    }
+                    Err(err) => return Err(WalkError::Io(err)),
                 }
             }
             Component::Normal(name) => {
@@ -1601,9 +1614,8 @@ mod tests {
         );
     }
 
-    /// `a/b/missing` → `..`, then `a/b/link` → `missing/../../outside`, then
-    /// file `a/b/link/pwned`. Lexical `..` cancellation keeps the second
-    /// target inside the extract directory. Following `missing` first does not.
+    /// `a/b/missing` → `..` first, then `a/b/link` → `missing/../../outside`,
+    /// then file `a/b/link/pwned`. `missing` exists before `link` is checked.
     fn build_symlink_chain_zip() -> Vec<u8> {
         let mut buf = Cursor::new(Vec::new());
         {
@@ -1644,6 +1656,69 @@ mod tests {
         assert!(
             std::fs::symlink_metadata(extract_dir.join("a/b/link")).is_err(),
             "the escaping link must not be created"
+        );
+    }
+
+    /// Same chain with `link` created before `missing` exists. A lexical
+    /// pop of the missing name would accept `missing/../../outside`.
+    fn build_swapped_symlink_chain_zip() -> Vec<u8> {
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buf);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            writer
+                .add_symlink("a/b/link", "missing/../../outside", options)
+                .expect("link before missing");
+            writer
+                .add_symlink("a/b/missing", "..", options)
+                .expect("missing symlink");
+            writer
+                .start_file("a/b/link/pwned", options)
+                .expect("file through the chain");
+            writer.write_all(b"owned").expect("payload");
+            writer.finish().expect("finish zip");
+        }
+        buf.into_inner()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_zip_archive_rejects_symlink_chain_when_dotdot_precedes_the_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).expect("outside dir");
+        let zip_path = dir.path().join("encoder.zip");
+        std::fs::write(&zip_path, build_swapped_symlink_chain_zip()).expect("write zip");
+
+        let extract_dir = dir.path().join("extracted");
+        std::fs::create_dir(&extract_dir).expect("mkdir");
+        let err = extract_zip_archive(&zip_path, &extract_dir).expect_err("swapped chain");
+        assert!(matches!(err, ModelError::Io(_)), "error was {err:?}");
+        assert!(
+            std::fs::symlink_metadata(extract_dir.join("a/b/link")).is_err(),
+            "link must not be created before missing exists"
+        );
+        assert!(
+            std::fs::read_dir(&outside)
+                .expect("read outside")
+                .next()
+                .is_none(),
+            "outside must stay empty"
+        );
+
+        let target_dir = dir.path().join("placed.mlmodelc");
+        let placed = place_coreml_contents(&extract_dir, &target_dir);
+        if placed.is_ok() {
+            assert!(
+                std::fs::symlink_metadata(target_dir.join("b/link")).is_err(),
+                "place must not install the escaping link"
+            );
+        }
+        assert!(
+            std::fs::read_dir(&outside)
+                .expect("read outside")
+                .next()
+                .is_none()
         );
     }
 
