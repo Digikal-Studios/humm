@@ -45,3 +45,50 @@ jobs:
       # yt-dlp, or explicitly configured services; their coverage is unchanged.
       - name: Test
         run: cargo test --workspace
+
+  # GitHub-hosted architectures the Apple self-hosted gate cannot run.
+  # Labels are the standard hosted runners documented at
+  # https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+  # (ubuntu-24.04-arm and windows-11-arm included; none of the requested
+  # targets were skipped).
+  #
+  # Scope stays on the three library crates. That does not build
+  # humm-diarize, so speakrs/coreml and ort are not required and no models
+  # are downloaded. `cargo test` does not pass `--ignored`, so ffmpeg/yt-dlp
+  # contract tests and model-download contracts stay skipped. ffmpeg is not
+  # installed. Linux still needs ALSA headers: cpal's alsa-sys links
+  # libasound via pkg-config, and that package is not on the runner image.
+  hosted-libraries:
+    name: libraries (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: Windows x64
+          - os: ubuntu-latest
+            name: Linux x64
+          - os: ubuntu-24.04-arm
+            name: Linux ARM64
+          - os: windows-11-arm
+            name: Windows ARM64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install ALSA headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test humm-core, humm-media, and humm-audio
+        run: cargo test --locked -p humm-core -p humm-media -p humm-audio
