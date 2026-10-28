@@ -76,3 +76,46 @@ There is no clap default. The field is `Option`, and `--speaker-diarizer` withou
 ### Nonblocking
 
 `speaker_flags_are_rejected_without_a_matching_engine` does not pass `--speaker-diarizer` into `validate_add_args`. The shared predicate covers it. The help text quotes a Buzz commit id at the user.
+
+## Follow-up
+
+The verdicts above stay on those SHAs. This pass is only the two commits that followed them.
+
+| SHA | Claim | Verdict |
+|---|---|---|
+| `561aa9b7a78baeb631d0b34481aae58d18882893` | Queued is emitted before the wait, and a canceled settle no longer blocks the next scan | REQUEST_CHANGES |
+| `95d980990f916b12129080b68e64d0139703e253` | Bare `--identify-speakers` runs `OrtDiarizer` after transcription | PASS |
+
+## `561aa9b` — REQUEST_CHANGES
+
+`QueueHandle::stage` does emit `Queued` without starting (`queue.rs` `Command::Stage`), and `has_blocking_task_for_file` ignores `canceled` (`store.rs`). `poll_settled` records `SeenSet` only on the settled arm, not on discard. `drop(seen)` is gone. On an idle runner the completion tests really wait out the 30s settle: `drop_creates_a_task_and_moves_the_source_to_the_mirrored_output_dir` finished in 30.26s, and `HUMM_BUZZ_TESTDATA=/tmp/audit-sources/buzz/testdata cargo +stable test -p humm-gui --test folder_watch_int` was 4 passed in 30.98s. `cargo +stable test -p humm-core --lib folderwatch::` was 22 passed, including `file_removed_during_settle_is_found_again`. The lead's 24 is not the count of that filter.
+
+A clean stop can be seen again. `discard_pending` sends `Abandon`, which `write_canceled`s the row, and the next process's `cancel_stale_tasks` flips any leftover `queued` row to `canceled` before the watch starts. `has_blocking_task_for_file` then does not match, and `SeenSet` is empty in the new process.
+
+That is not what happens when the file is sighted while the runner is already inside `run_task`.
+
+### Blocking
+
+`Runner::run` drains the command channel, then calls `run_task`, and does not drain again until that call returns (`queue.rs` `run`, and the drain at the start and tail of `run_task`). `stage` only sends `Command::Stage`. The row does not exist until the runner handles it.
+
+`poll_settled` (`folder_watch.rs` lines 836–850) does not wait for that. `SettleSet::poll` removes the path once 30s have passed. The watcher then reads `get_task`. If the row is missing, `still_queued` is false, `adopt` is not called, and `seen.record` runs anyway.
+
+Counterexample: a transcription is already running and will keep the runner inside `run_job` for more than 30s. A file appears in the watch folder. `stage` sits on the channel. At 30s the watcher records the path as seen and drops it from `SettleSet`. When the running task ends, `Stage` creates a `queued` row and emits `Queued`. Nothing adopts it. `has_blocking_task_for_file` is true for `queued`, and rule 5 of `scan` runs before the seen-set stamp, so a later size change does not create another task. The row stays queued for the rest of the session. The four integration tests do not hit this. Their runner is idle when the file is sighted, so `Stage` lands immediately, and the rebuild test holds the runner busy so the first row does not exist yet when the second watch scans.
+
+What has to be true: a path whose row is not in the store yet stays pending, and it is not recorded as seen. `adopt` runs only after that row is `queued`.
+
+### Nonblocking
+
+`file_removed_during_settle_is_found_again` passes `|_| false` as `known`. It shows a discard does not record `SeenSet`. It does not call `has_blocking_task_for_file`. The store test `canceled_file_does_not_block_folder_watch` covers that query. `seen_set_survives_a_rebuild_so_a_recently_enqueued_file_is_not_double_enqueued` stops the watch while the blocker is in progress, so the second scan runs before `Stage` has inserted the first row. The module comment at the top of `folder_watch_int.rs` still describes the old double-enqueue assertion.
+
+A user cancel during the wait only inserts the id into the runner's canceled set (`Command::Cancel`). The store stays `queued` until `adopt`, so the table keeps showing queued for the rest of the 30s. The task then ends canceled and is not transcribed.
+
+## `95d9809` — PASS
+
+No blocking issue. macOS was not stripped of `coreml`. `crates/humm-diarize/Cargo.toml` uses `speakrs.workspace = true` under `cfg(target_os = "macos")`, and the workspace dependency still enables `openblas-system` and `coreml` (`Cargo.toml`). `cargo +stable tree -p humm-diarize --target aarch64-apple-darwin -e features --invert speakrs` shows both features. The Linux build uses the `not(target_os = "macos")` dependency, `openblas-system` only, and the same tree on this host does not list `coreml`. `OrtDiarizer::diarize` still calls `ExecutionMode::Cpu`. That call was already CPU-only. This commit does not change it.
+
+Bare `--identify-speakers` is no longer rejected. `validate_add_args` returns `None` for that flag and still rejects `--speaker-count` and `--speaker-diarizer` (`run.rs`). `execute` builds `OrtDiarizer` after `ensure_diarization_models` and stores it on `RunnerDeps.diarizer`. Every added task copies `TranscriptionOptions { identify_speakers: args.identify_speakers }`. `Runner::run_job` passes that diarizer into `run_file_job`. When the flag is set, `run_file_job` calls `identify_with_diarizer` on the PCM from `decoder.decode` (`pipeline.rs`). That function calls `Diarizer::diarize`. `mark_completed` and the export both use the returned segments. `cargo +stable test -p humm-cli --bin humm` — 41 passed. `identify_with_diarizer_prefixes_the_pcm_speakers` passed.
+
+### Nonblocking
+
+A diarize error fails the task. Buzz `identify_speakers` returns the original segments when identification fails (`speaker_identifier.py`), so the transcript is still exported. `SegmentAdded` events are emitted during `transcribe`, before the labels exist. The stored row and the export files are the labeled segments. The CLI progress callback passed to `diarize` is empty.
