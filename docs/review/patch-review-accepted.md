@@ -6,6 +6,7 @@ Reviewed the commits below on `audit/architecture-review`. HEAD while this was w
 |---|---|---|
 | P-001 | `e6637e08483ff8c00669fa1874cc40f41b6bcb00` | REQUEST_CHANGES |
 | P-001 follow-up | `7d887ded7323356af790a33c323576327f55b4b1` | REQUEST_CHANGES |
+| P-001 revision | `1954ffc4305c5847f7da3fe0037459932e2c47cf` | PASS |
 | P-002 | `8e2244670c6a4692094f6584cb584e0a6a501628` | PASS |
 | P-004 | `423ec1fd2160dedc2579469c5fcee6f08fe74db9` | PASS |
 | P-005 | `4c1ac2b4d1670f9440d7d0683e7ff648061f3576` | PASS |
@@ -119,3 +120,19 @@ While `missing` is absent, `missing/../../outside` from `a/b` walks to `<dest>/a
 I ran that zip through `extract_zip_archive` and `place_coreml_contents` under `cargo +stable test` on Linux. The probe was not committed. The new test cannot see it: its zip writer adds `missing` before `link`.
 
 A `..` after a component that does not exist has to be an escape, not a pop. For the swapped archive, extract must not return success, `a/b/link` must be absent, and `outside` must stay empty. `place_coreml_contents` must not install that link. The committed test has to build this order, not only the order where `missing` already exists.
+
+The revision `1954ffc4305c5847f7da3fe0037459932e2c47cf` is a separate verdict below. This SHA stays REQUEST_CHANGES.
+
+## P-001 revision — PASS
+
+`1954ffc4305c5847f7da3fe0037459932e2c47cf`
+
+No material objection. `..` after a component that does not exist yet is now an escape. `apply_components` stats `current` before `pop_inside`. `NotFound`, or anything that is not a directory, returns escape instead of popping that name. zip stays 8.6.0. `ZipArchive::extract` is still not called.
+
+`extract_zip_archive_rejects_symlink_chain_when_dotdot_precedes_the_link` builds the swapped archive: `a/b/link` → `missing/../../outside`, then `a/b/missing` → `..`, then file `a/b/link/pwned`. It requires an error, `a/b/link` absent, `outside` empty, and `place_coreml_contents` not installing `b/link`. The earlier test still builds `missing` first. I ran both: pass.
+
+I also extracted these orders on Linux and looked for a symlink whose target is absolute outside the extract directory, a symlink that canonicalizes outside it, or a write through a symlink that lands outside it: `x/../outside` before and after `x` → `.`; `link` → `a/b` then `a` → `../..`; a real directory `foo` then `foo/../../../outside`; `a/up` → `..` then `up/../../outside`; an absolute `/tmp/...` target; `pivot/x` before `pivot` → `../../outside`; `missing/foo/../../../outside` before `missing` → `..`; shallow `../outside`; and `a/b/link` → `../../../outside` after real `a/b`. None of them created an outside write. The probe was not committed.
+
+A symlink whose target contains no `..` and no absolute path stays inside at creation, and a later entry cannot retarget it. A later entry that would point that name outside is rejected on its own target. That closes the ordering hole from `7d887ded`.
+
+Nonblocking: the same rule rejects `..` through a name that a later entry creates as a real directory, even when the resolved path would stay inside. Nothing in the tree shows a CoreML zip that needs that shape.
