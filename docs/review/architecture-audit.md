@@ -159,7 +159,7 @@ Google's Rust style guide was applied only where a pattern is harmful. Chromium/
 
 ### F-013 — host ffmpeg is inside two Ubuntu tracker entries
 
-- Category: demonstrated defect in the host tool, not in humm's sources
+- Category: investigation hypothesis. Not a demonstrated defect on ffmpeg `6.1.1-3ubuntu5`. The tracker lists the package; the 2024 summary names FFmpeg 7.0; neither bug was reproduced. P-011 stays a non-change.
 - Severity: medium. Confidence: medium
 - Installed tool: `ffmpeg` `7:6.1.1-3ubuntu5` (`ffmpeg version 6.1.1-3ubuntu5`). OSV query for ecosystem `Ubuntu:24.04:LTS` / package `ffmpeg` / that version returned:
   - `UBUNTU-CVE-2024-32228` — summary names a HEVC SEGV in FFmpeg 7.0. The Ubuntu 24.04 package is in the affected set with no fixed event in the payload. Whether 6.1.1 actually contains that bug was not reproduced
@@ -184,6 +184,10 @@ Google's Rust style guide was applied only where a pattern is harmful. Chromium/
 ## Evidence reconciled after the report
 
 Three read-only passes finished after the first commit. Their notes are in the project store, not in this worktree: `internal/audit/architecture-audit-evidence-2026-10-28.md` and `internal/architecture-audit-evidence-2026-10-28.md`. Incorporated above: temp-file leak on the second Ctrl-C (F-005) and the digest fail-open (F-014). Not promoted, because the code or an ADR already treats them as policy: ADR-018 reporting success when the history write failed; the ADR-017 lock-failure fallback; OpenAI cancel detaching the request thread (ADR-022); the untimed `Client::new()` fallback only after two timed builds fail; CLI `reducer` / `lang_detector` left `None` with an explicit comment and `HUMM_SURFACE` deviation; GUI binaries constructing adapters; English strings in kittest labels; folder-watch symlink files being eligible. None of those became a new proposal.
+
+## Proposal text after review `a329e4e`
+
+Accepted work is implemented on `audit/architecture-review` (P-001, P-002, P-004, P-005, P-009). P-011 has no code change. The revised designs for P-003, P-006, P-007, P-008, P-010, and P-012 are in `docs/review/ledger.md` and have not been re-reviewed. They were not implemented.
 
 ## Checked and not proposed
 

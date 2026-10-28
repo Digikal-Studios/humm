@@ -48,141 +48,101 @@ Confirmed gaps: #1595, #1602, #1614, #1651, #1660, #1674. Confirmed already alig
 | F-013 | demonstrated defect (host ffmpeg) | medium | medium | P-011 |
 | F-014 | demonstrated defect | medium | high | P-012 |
 
-## Proposals (design-unreviewed)
+## Proposals
 
-Implementation order after review: P-002, P-001, P-012, P-004, P-006, P-007, P-003, P-005, P-010. P-008 only with its own design. P-009 is a decision, not an engine. P-011 is an explicit non-change.
+Review `a329e4e` accepted P-001, P-002, P-004, P-005, P-009, and P-011. Those are implemented on this branch except P-011, which is a non-change. P-003, P-006, P-007, P-010, and P-012 are revised below and not implemented. P-008 stays deferred, with the review's constraint added. None of the revised text has been re-reviewed.
 
-### P-001 — bump direct `zip` to >= 9.0.0
+### P-001 — confine zip 8.6.0 symlink extraction (implemented)
 
-- Objective: stop `ZipArchive::extract` from creating symlinks that point outside the CoreML destination, and stop preserving SUID/SGID bits.
-- Findings: F-001
-- Design: change the workspace `zip` requirement to a 9.x release that contains the fixes. Keep `extract_zip_archive` if the method still exists; if 9 renamed it, call the safe equivalent and nothing else. Do not bump `zip` 6.0.0 / `ndarray-npy`.
-- Contracts: `ModelDownloader` CoreML placement. Benign encoder zips must still land in `target_dir` with the sentinel written last.
-- Alternatives: leave 8.6.0. Rejected for the symlink case.
-- Risks: zip 9 API break. Mitigation: the existing extract tests must pass before any other zip use changes.
-- Acceptance: lockfile `zip` used by `humm-core` is `>= 9.0.0`; a symlink entry targeting `../` outside dest does not create that link; a normal single-directory encoder zip still renames into place; `ndarray-npy` still resolves `zip` 6.x.
-- Verification: `cargo test -p humm-core --lib models::download`.
+- Implemented in `e6637e08483ff8c00669fa1874cc40f41b6bcb00`. zip stays 8.6.0. `extract_zip_archive` does not call `ZipArchive::extract`; an escaping symlink is not created, and archive unix modes are not applied. `place_coreml_contents` uses `symlink_metadata` and refuses a link whose target leaves the extract directory, including before `remove_dir_all` and the sentinel write.
+- Tests: `extract_zip_archive_does_not_create_an_escaping_symlink`, `place_coreml_contents_does_not_follow_an_escaping_symlink`. `cargo test -p humm-core --lib models::download::` — 43 passed.
 
-### P-002 — patch the rustls trust path
+### P-002 — patch the rustls trust path (implemented)
 
-- Objective: reject the distrusted emSign intermediates and take the other rustls fixes that ship in the same versions.
-- Findings: F-002, F-003, F-004
-- Design: `cargo update -p webpki-roots -p rustls-webpki -p rustls` only, staying inside reqwest 0.12's existing requirements. Targets: `webpki-roots >= 1.0.10`, `rustls-webpki >= 0.103.16`, `rustls >= 0.23.46`. If a parent requirement refuses one of those, stop and report the blocker rather than upgrading reqwest's major line or unrelated crates. Do not touch `ureq`, `tokio`, `quinn`, `rtrb`, or `tract`.
-- Contracts: TLS client behavior for model download, API calls, telemetry, and update check. URLs and payloads stay the same.
-- Alternatives: roots-only bump. Worse, because 0.23.46 is the same client and also covers F-003 and F-004.
-- Risks: a host that still uses the emSign chain will fail closed.
-- Acceptance: `cargo tree -p humm-core -i webpki-roots,rustls,rustls-webpki` shows those minimums; no feature or URL diff.
-- Verification: `cargo test -p humm-core --lib` for `models::download` and `update`.
+- Implemented in `8e2244670c6a4692094f6584cb584e0a6a501628`. Lockfile: `rustls` 0.23.46, `rustls-webpki` 0.103.16, `webpki-roots` 1.0.10. `ureq` stayed 3.3.0. `webpki-root-certs` stayed 1.0.9.
+- `cargo tree -p humm-core -i rustls -i rustls-webpki -i webpki-roots` shows those versions on the reqwest path. `cargo test -p humm-core --lib update::` — 18 passed. `models::download::` — 43 passed. Those tests use plain HTTP and do not prove the emSign root is gone.
 
-### P-003 — signal humm's process groups on the second Ctrl-C
+### P-003 — second Ctrl-C: groups, temp files, and a non-blocking handler (revised, not implemented)
 
-- Objective: the second SIGINT must not leave demucs, yt-dlp, or their ffmpeg grandchildren running.
+- Objective: a second SIGINT stops demucs, yt-dlp, and their grandchildren, and does not leave `_speech` / denoised temp files or the demucs scratch directory behind.
 - Findings: F-005
-- Design: remember each unix process group created by `spawn_own_process_group`. The second-signal path signals those groups, then exits 130. Do not join them and do not change the first-signal `cancel_all` path. Non-unix stays a direct exit.
+- Why the previous design is not enough: signaling the process group and then calling `std::process::exit(130)` still skips `Drop`. `TempAudioGuard` deletes those files only in `Drop`. `DemucsIsolator`'s `tempfile::TempDir` is the same class of leak. A test that only checks the grandchild is dead passes with the files still on disk.
+- Design for the next review: before `process::exit`, delete the temp paths this process still owns. Do that explicitly. Do not rely on `Drop` after `exit`. Record process-group ids in something the `ctrlc` thread can read without waiting (`Atomic` slots, or `try_lock` and exit 130 if the lock is busy). Do not take a mutex the worker holds across `spawn`; that turns the second Ctrl-C into a stuck handler, which is worse than today's exit. Signal only ids whose `Child` has not been `wait`ed. Do not join the children. The first signal stays `cancel_all`. `decode.rs`, `encode.rs`, and `video.rs` stay a direct `child.kill()`; those commands are a single ffmpeg, not a shell.
 - Contracts: CLI exit code 130. First Ctrl-C still cancels cooperatively.
-- Alternatives: leave ADR-023's debt. Recorded in F-005.
-- Risks: signaling a recycled pgid. Only ids this process created, and only while the child is unreaped, may be signaled.
-- Acceptance: a stub grandchild that ignores the parent's death is dead after the second SIGINT; first SIGINT behavior and exit codes stay as tested.
-- Verification: `humm-media` grandchild unit tests and a CLI test or a focused harness around `install_ctrlc`.
+- Alternatives: leave ADR-023's debt, including the temp files.
+- Risks: a recycled pgid, and deleting a path that is no longer the job's temp file. Only paths this process created, and only groups it has not reaped.
+- Acceptance: a stub grandchild is dead after the second SIGINT; the `_speech` and denoised paths and the demucs scratch dir are gone; a handler that cannot take the registry lock still exits 130 instead of blocking.
+- Verification: `humm-media` grandchild unit tests, a temp-file assertion around the exit path, and a test that the handler does not wait on the worker's mutex.
 
-### P-004 — parse timestamp fractions as Buzz main does
+### P-004 — parse timestamp fractions as Buzz main does (implemented)
 
-- Objective: a 1- or 2-digit fraction is a decimal, padded or truncated to milliseconds.
-- Findings: F-006
-- Design: in `parse_timestamp`, take `fraction[:3]` and right-pad with zeros to length 3 before parsing, matching `transcription_segments_editor_widget.py` lines 88–89. Do not change colon splitting or the extra-dot rule beyond what that formula implies (`1.2.3` uses fraction `2` → 200 ms).
-- Contracts: viewer start/end cell parsing. Display formatting stays `to_timestamp`.
-- Alternatives: keep the v1.4.5 integer parse. Rejected; the tests are freezing the bug.
-- Risks: edited times change for short fractions. That is the fix.
-- Acceptance: `1.2` → 1200, `1.45` → 1450, `1.4567` → 1456, `01:02:03.456` unchanged, garbage still `None`.
-- Verification: `cargo test -p humm-core --lib viewer::timestamp`.
+- Implemented in `423ec1fd2160dedc2579469c5fcee6f08fe74db9`. `1.2` is 1200 ms, `1.2.3` is 1200 ms (fraction `2` padded to 200, plus one second), `1.` is 1000 ms. `to_timestamp` is unchanged.
+- `cargo test -p humm-core --lib viewer::timestamp` — 8 passed.
 
-### P-005 — allow m4b, aac, and m4v
+### P-005 — allow m4b, aac, and m4v (implemented)
 
-- Objective: folder watch and import accept the extensions Buzz `main` lists.
-- Findings: F-007
-- Design: add `m4b` and `aac` to the audio list and `m4v` to the video list, in Buzz's order, and keep the derived `SUPPORTED_EXTENSIONS` consistent.
-- Contracts: `folderwatch` allowlist and any GUI filter that copies it.
-- Alternatives: leave the 13-name list.
-- Risks: decode failure on a thin ffmpeg build. Existing error path.
-- Acceptance: the three suffixes pass the extension predicate; an unknown suffix still fails.
-- Verification: `cargo test -p humm-core --lib folderwatch`.
+- Implemented in `4c1ac2b4d1670f9440d7d0683e7ff648061f3576`. All three handwritten arrays in `folderwatch.rs` gained the suffixes, in Buzz's order. `SUPPORTED_EXTENSIONS` is still handwritten, not derived. `humm-gui` `import.rs` `supported_extensions_match_buzz_main_lowercase_no_dot` asserts all three. `viewer.rs` `is_video` was not given a fourth list.
+- `cargo test -p humm-core --lib folderwatch::` — 18 passed, including `m4b_aac_and_m4v_are_supported`. `cargo test -p humm-gui --lib import::tests::supported_extensions_match_buzz_main_lowercase_no_dot` did not run: `speakrs` 0.5.0 `coreml` does not compile on Linux. `coreml` was not disabled.
 
-### P-006 — download URL media to a fixed file name
+### P-006 — URL download name, GUI label, and export stem (revised, not implemented)
 
-- Objective: the on-disk download name is not the media title.
+- Objective: the on-disk download name is not the media title, and the title still reaches the GUI label and the export stem the way Buzz uses `display_name`.
 - Findings: F-008
-- Design: pass yt-dlp an output template equivalent to `source.%(ext)s` under the destination directory. Persist the title as the task display name using a machine-readable yt-dlp print field, not stderr scraping. Keep `--no-playlist`, cookies, and group kill as they are.
-- Contracts: `MediaFetcher::fetch` return path; task label in CLI and GUI. If the title cannot be returned without a signature change, extend the trait in core and both binaries together.
-- Alternatives: keep `%(title)s` and document Windows as unsupported for trailing dots.
-- Risks: tests that assert the title appears in the file name.
-- Acceptance: a title ending in `.` or ` ` does not create that path; the UI/CLI label still shows the title; cancel still kills the process group.
-- Verification: `humm-media` fetch unit tests with a stub binary.
+- Why the previous design is not enough: `source.%(ext)s` is the right template, and `media_dir/<id>/` already keeps tasks from colliding. humm does not have Buzz's `display_name`. `create_task` inserts URL rows with `name` NULL. `display_name_for` is `name`, else the file basename, else the URL, so after `update_file` the GUI label is the downloaded filename. Changing only the template makes that label `source.<ext>` and makes `{{ input_file_name }}` export as `source`, because `output_file_path` uses `job.input`'s stem. The CLI label is `Input::display_name`, which for a URL is the URL string, not the title. Keeping the CLI label is not a title regression. `fetch` treats the last non-progress stdout line as the path. A second `--print` of the title overwrites that path unless the parser changes.
+- Design for the next review: one machine-readable yt-dlp record carries path and title. Do not add a second `--print` that shares the path line. Store the title with `set_task_name` (or equivalent) so the GUI label is the title. For a URL task, `{{ input_file_name }}` uses that title, matching Buzz `get_output_file_path`'s `display_name or basename(file_path)`. Keep `--no-playlist`, cookies, and the process-group kill.
+- Contracts: `MediaFetcher::fetch`, task `name`, GUI `display_name_for`, CLI URL label (stays the URL unless a separate change says otherwise), `output_file_path` for URL jobs.
+- Alternatives: keep `%(title)s.%(ext)s` and accept the Windows trailing-dot failure.
+- Risks: export names of existing URL tasks change only for new downloads. Tests that expect the title inside the downloaded filename must move that expectation to the task name and the export stem.
+- Acceptance: a title ending in `.` or ` ` does not create that path; the GUI label and the export stem are the title; the CLI progress label remains the URL; stdout still yields exactly one path line; cancel still kills the process group.
+- Verification: `humm-media` fetch unit tests with a stub that prints one path line, plus a queue or pipeline test that the export stem is the title.
 
-### P-007 — keep the valid prefix of a bad word-level UTF-8 buffer
+### P-007 — final-flush UTF-8 prefix only (revised, not implemented)
 
-- Objective: match Buzz `main`'s fallback when a word buffer is not valid UTF-8.
+- Objective: when a word-level segment ends on an incomplete UTF-8 sequence, keep the valid prefix the way Buzz `main` does on that one call.
 - Findings: F-009
-- Design: if `from_utf8` fails, lossy-decode, strip `U+FFFD`, trim, and emit when the result is non-empty. Leave `flush_complete_chars` and valid UTF-8 words alone.
-- Contracts: `group_words` / `append_word` output for word timestamps.
-- Alternatives: keep dropping the word.
-- Risks: a test that expected silence for an incomplete sequence.
-- Acceptance: a buffer of valid UTF-8 plus one incomplete trailing byte emits the valid text and no replacement character; a fully valid buffer is unchanged.
-- Verification: `cargo test -p humm-whisper --lib words`.
+- Why the previous design is wrong: Buzz's `rstrip("\ufffd")` is only the final flush (`whisper_cpp.py` around line 391). It removes a trailing run. It does not remove `U+FFFD` at the start or in the middle. The calls that flush because the next token starts with a space ignore `_append_word`'s `False` and drop the word. Doing a full strip inside every `append_word` would keep those words and would turn `b"\xffhello"` into `hello`.
+- Design for the next review: apply the fallback only on the final flush. Lossy-decode, `trim_end_matches('\u{FFFD}')`, then `trim`, and emit only if that is non-empty. Leave `flush_complete_chars` and the mid-loop drop alone.
+- Contracts: `group_words` output for a segment that ends on an incomplete sequence.
+- Alternatives: keep dropping the whole final word.
+- Risks: a test that expected the final word to disappear.
+- Acceptance: a final buffer of valid UTF-8 plus one trailing incomplete byte emits the valid text and no replacement character. `b"\xffhello"` on that final flush stays `"\u{FFFD}hello"` (leading replacement is not stripped). A bad buffer flushed because the next token starts with `b" "` is still dropped. A fully valid buffer is unchanged.
+- Verification: `cargo test -p humm-whisper --lib words`, with those three cases in one test so a global strip cannot pass it.
 
-### P-008 — more than one custom ggml model
+### P-008 — more than one custom ggml model (deferred, not implemented)
 
-- Objective: parity with Buzz's custom-model registry, without a new inference backend.
-- Findings: F-010
-- Design: a small persisted list of `{id, name, path}` plus the existing `ggml-custom.bin` as the legacy entry, selected by id from the model control. Do not invent a second file format if TOML settings can hold the list. Re-read `whisper_cpp_custom_models.py` before coding; this proposal is not that design.
-- Contracts: `ModelSize::Custom`, settings, GUI model combo, CLI custom-model flags.
-- Alternatives: named exception, keep one slot.
-- Risks: migrating an existing cache file. The legacy file must keep working.
-- Acceptance: two distinct local files can be chosen across runs; the old single file still loads; no network fetch is added.
-- Verification: registry unit tests and one GUI or CLI selection test. Do not start this in the same change as P-001/P-002.
+- Still deferred. Buzz `whisper_cpp_custom_models.py` is a JSON list plus legacy id `legacy-custom` and filename `ggml-model-whisper-custom.bin`. humm's slot is `ggml-custom.bin`, which is this project's file, not that legacy name. Do not rename the cache file to Buzz's name; that orphans existing downloads. A later design has to re-read the Python module. The `{id, name, path}` sketch dropped `source_url`. ADR-008 still describes one custom URL slot. Not part of the CVE or extension edits.
 
-### P-009 — decide FunASR; do not port it here
+### P-009 — FunASR named exception (implemented)
 
-- Objective: make the scope cut explicit against Buzz `main`.
-- Findings: F-011
-- Design: no engine, no Python, no `transformers` dependency. After review, either record a named parity exception next to ADR-008 / Q-2, or open a separate design for a non-Python FunASR path. This proposal's only acceptable implementation is the written decision.
-- Contracts: ADR-008, Q-2, Hugging Face repo resolution.
-- Alternatives: start a candle/ort FunASR port now. Not justified, and it would mix a new backend into the CVE fixes.
-- Risks: the exception drifts and the next audit files FunASR again. The decision text has to cite `298dbf0`.
-- Acceptance: one reviewed doc update states in or out of scope. No new crate.
-- Verification: the doc cites `transformers_whisper.py` FunASR entry points and ADR-008.
+- Implemented in `66613c07a5516e0cc0209176e45b62ca58eed29d`. `docs/OPEN_QUESTIONS.md` Q-2 and ADR-008 name FunASR as out of scope against Buzz `main` `298dbf003505cf945bdfd1eb8e705348b59a5b34` (`is_funasr_model`, commit `851c8b3593`). No engine, crate, or dependency was added.
 
-### P-010 — point behavior docs at Buzz main
+### P-010 — say what the behavior pin is, without restamping the inventory (revised, not implemented)
 
-- Objective: stop describing v1.4.5 as the behavior ground truth.
+- Objective: a reader can tell that Buzz `main` is the behavior target and that the inventory was not re-read against it.
 - Findings: F-012
-- Design: update the ground-truth sentences in `docs/analysis/FEATURE_INVENTORY.md` and `docs/analysis/EXTERNAL_SURFACE.md`, and any spec header that says behavior was verified only against v1.4.5, to cite `298dbf003505cf945bdfd1eb8e705348b59a5b34`. Leave `scripts/ci_prepare.py` `BUZZ_COMMIT` and the two blob hashes alone unless a later check shows those blobs moved. Do not edit `CLAUDE.md`, `RESUME.md`, or `.github/workflows/ci.yml` for this.
+- Why the previous design is wrong: replacing the v1.4.5 ground-truth headers with `298dbf0` would claim `FEATURE_INVENTORY.md` and `EXTERNAL_SURFACE.md` were checked against that commit. They were not. F-020 still lists the old 13 extensions. Spec headers that say a claim was verified against v1.4.5 would become false if only the commit id changed.
+- Design for the next review: one sentence, not a header swap. Behavior target is Buzz `298dbf003505cf945bdfd1eb8e705348b59a5b34`. This inventory was written against v1.4.5 `aaf98634`. Known gaps live in this ledger. Update a feature row only when that row is actually re-read. Do not restamp "verified against v1.4.5" lines. Keep `scripts/ci_prepare.py` `BUZZ_COMMIT` and the two blob hashes; those blobs match `298dbf0`.
 - Contracts: none at runtime.
-- Alternatives: leave the analysis docs stale.
-- Risks: a wholesale doc rewrite. Only the ground-truth sentences. Do not restamp every historical ADR.
-- Acceptance: those two analysis files name `298dbf0` as the behavior tree and still mention that the CI fixtures match both commits. `git diff` for `scripts/ci_prepare.py` is empty.
-- Verification: the blob SHA check already done in this ledger, repeated if `BUZZ_COMMIT` is ever moved.
+- Alternatives: leave the analysis docs exactly as they are and rely on this ledger alone.
+- Risks: the one sentence is still easy to over-read as a full re-audit. It has to say the bodies were not re-read.
+- Acceptance: the new sentence is present, feature rows are unchanged, and `git diff` for `scripts/ci_prepare.py` is empty.
+- Verification: diff review. No test.
 
-### P-011 — do not change humm to clear host ffmpeg CVEs
+### P-011 — do not change humm to clear host ffmpeg CVEs (accepted, no code)
 
-- Objective: record the host advisories without a decode-behavior change.
-- Findings: F-013
-- Design: no argv change, no vendored ffmpeg, no demuxer allowlist. The fix is an updated OS ffmpeg when the distributor publishes one. humm keeps ADR-003.
-- Contracts: `AudioDecoder` / playback / video still call system ffmpeg.
-- Alternatives: `-protocol_whitelist` or a codec allowlist. Rejected; it drops files Buzz and humm currently open, and it was not shown to fix these two CVEs.
-- Risks: crafted media can still hit a vulnerable system ffmpeg.
-- Acceptance: no diff under `crates/humm-media` for this proposal. The ledger keeps the two Ubuntu CVE ids.
-- Verification: `git diff -- crates/humm-media` empty for the CVE pass.
+- No `crates/humm-media` diff. `UBUNTU-CVE-2024-32228` and `UBUNTU-CVE-2025-59734` stay recorded as unconfirmed host advisories for ffmpeg `6.1.1-3ubuntu5`. The 2024 summary names FFmpeg 7.0. Neither bug was reproduced. F-013 is not a demonstrated defect on this build. An argv or codec allowlist is still rejected.
 
-### P-012 — fail closed when a model digest lookup errors
+### P-012 — fail closed on a digest lookup error, without a re-download loop (revised, not implemented)
 
-- Objective: do not promote a downloaded model when the digest request fails. Keep promoting when the publisher has no digest.
+- Objective: do not promote a model file when its digest lookup fails, and do not delete a complete partial and download it again on the next attempt.
 - Findings: F-014
-- Design: in `verify_or_warn`, leave `Ok(None)` as skip-and-warn. Return the `Err` from `expected_sha256` instead of logging and returning `Ok(())`. Callers already treat `ModelError` as a failed ensure, and the partial file remains for resume.
-- Contracts: `ModelDownloader::ensure_artifact` for repos that publish `lfs.oid`. Custom URLs with `sha_repo: None` stay unverified, as ADR-008 says.
-- Alternatives: keep warn-and-accept so a digest outage cannot block a download.
-- Risks: transient tree-API failures fail the download. Resume plus retry is the existing recovery.
-- Acceptance: HTTP 500 or a connection error on the tree URL leaves the partial unpromoted and returns an error that names the file. A tree JSON with no matching `lfs.oid` still promotes. A mismatched digest still deletes the partial.
-- Verification: `cargo test -p humm-core --lib models::download`.
+- Why the previous design is not enough: `verify_or_warn` turns both `Ok(None)` and `Err` into success, then `download_body` renames the partial. The M1 plan documented the skip: "If the API call fails, log a warning and skip verification" (`docs/superpowers/plans/2026-07-20-m1-headless-core-path.md`). Reversing that is a deliberate change and has to be named as one. `verify_partial_is_complete` maps `Err` to `Ok(None)`, and `on_range_not_satisfiable` treats `None` as `RestartFresh` (delete the partial, download again). After a fail-closed first attempt the partial is still there, the next `ensure_artifact` sends `Range: bytes=<len>-`, a 416 comes back, the lookup fails again, and the whole file is fetched again. A test that only checks the first 500 does not catch that. `find_sha256` uses `serde_json::from_str(...).ok()?`, so HTTP 200 with a non-JSON body is `Ok(None)` and would still promote. `coreml_failure_action` maps every `ModelError::Http` to degrade: a tree-API 500 on the encoder zip does not fail `resolve_model`. ggml and VAD do fail the ensure. A diarization sidecar with no `lfs.oid` must still promote. Custom URLs pass `sha_repo: None` and never enter `verify_or_warn`.
+- Design for the next review: lookup `Err` fails that ensure and does not delete a complete partial. `verify_partial_is_complete` must not treat that same `Err` as "restart fresh". `Ok(None)` after a parsed tree that lacks `lfs.oid` still promotes. A 200 body that does not parse is `Err`, not `Ok(None)`. Say explicitly that CoreML HTTP errors still degrade and that this does not fail the ggml ensure. Record the reversal of the M1 skip.
+- Contracts: `ensure_artifact`, the 416 recovery arm, `find_sha256`, `coreml_failure_action`.
+- Alternatives: keep warn-and-accept, matching the M1 plan, so a digest outage never blocks or re-downloads.
+- Risks: a tree-API blip fails the ggml or VAD ensure until the lookup works. The partial must still be reusable.
+- Acceptance: two `ensure_artifact` calls with the tree route left at 500 perform a single file GET, leave the partial in place, and do not rename it. A parsed tree with no `lfs.oid` still promotes. Malformed JSON on HTTP 200 does not promote. A CoreML encoder digest failure still degrades rather than failing the ggml model. A mismatched digest still deletes the partial.
+- Verification: `cargo test -p humm-core --lib models::download`, including the double-call 500 case and the existing 416 test.
 
 ## Evidence reconciled
 
