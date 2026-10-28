@@ -1069,7 +1069,7 @@ fn extract_zip_archive(zip_path: &Path, dest: &Path) -> Result<(), ModelError> {
             return Err(zip_path_error("CoreML zip entry path escapes the archive"));
         };
         let outpath = dest.join(relative);
-        if ancestor_symlink_escapes(&outpath, dest)? {
+        if path_escapes(dest, &outpath)? {
             return Err(zip_path_error(
                 "CoreML zip entry is reached through a symlink that leaves the extract directory",
             ));
@@ -1109,8 +1109,12 @@ fn zip_path_error(detail: &str) -> ModelError {
     ModelError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, detail))
 }
 
-/// `true` when `link` is a symlink whose target is not inside `root`.
-/// A missing path is not an escaping link.
+/// How many symlink hops one resolution may follow before it is treated as
+/// an escape. A cycle must not hang extraction.
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// `true` when `link` is a symlink whose target, after following links that
+/// already exist, is not inside `root`. A missing path is not an escaping link.
 fn symlink_target_escapes(link: &Path, root: &Path) -> Result<bool, ModelError> {
     let meta = match std::fs::symlink_metadata(link) {
         Ok(meta) => meta,
@@ -1124,44 +1128,117 @@ fn symlink_target_escapes(link: &Path, root: &Path) -> Result<bool, ModelError> 
     Ok(proposed_symlink_escapes(link, &target, root))
 }
 
-/// Whether creating `link` → `target` would point outside `root`.
-/// The check is lexical (`..` and `.` only). It does not follow the target,
-/// so a not-yet-created outside directory still counts as an escape.
+/// Whether creating `link` → `target` would leave `root` once existing
+/// symlinks are followed. `..` is applied to the resolved directory, not
+/// cancelled against a symlink component lexically. A target whose final
+/// component does not exist yet still counts as an escape when that
+/// location is outside `root`.
 fn proposed_symlink_escapes(link: &Path, target: &Path, root: &Path) -> bool {
-    let combined = if target.is_absolute() {
-        target.to_path_buf()
-    } else {
-        link.parent().unwrap_or(root).join(target)
+    let Some(parent) = link.parent() else {
+        return true;
     };
-    !lexical_normalize(&combined).starts_with(lexical_normalize(root))
+    match resolve_within(root, parent, target) {
+        Ok(_) => false,
+        Err(WalkError::Escape) => true,
+        Err(WalkError::Io(_)) => true,
+    }
 }
 
-fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
+/// `true` when `path` is outside `root` or reaches outside by following a
+/// symlink that already exists.
+fn path_escapes(root: &Path, path: &Path) -> Result<bool, ModelError> {
+    if path.is_absolute() && !path.starts_with(root) {
+        return Ok(true);
+    }
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    match resolve_within(root, root, relative) {
+        Ok(_) => Ok(false),
+        Err(WalkError::Escape) => Ok(true),
+        Err(WalkError::Io(err)) => Err(err.into()),
+    }
+}
+
+enum WalkError {
+    Escape,
+    Io(std::io::Error),
+}
+
+/// Walk `extra` starting from `start`, following symlinks that exist.
+/// The result stays inside `root` or the walk returns [`WalkError::Escape`].
+fn resolve_within(root: &Path, start: &Path, extra: &Path) -> Result<PathBuf, WalkError> {
+    let mut hops = 0;
+    let mut current = if extra.is_absolute() {
+        PathBuf::new()
+    } else if start == root {
+        root.to_path_buf()
+    } else {
+        let relative = start.strip_prefix(root).map_err(|_| WalkError::Escape)?;
+        let mut base = root.to_path_buf();
+        apply_components(root, &mut base, relative, &mut hops)?;
+        base
+    };
+    apply_components(root, &mut current, extra, &mut hops)?;
+    if !is_inside(root, &current) {
+        return Err(WalkError::Escape);
+    }
+    Ok(current)
+}
+
+fn apply_components(
+    root: &Path,
+    current: &mut PathBuf,
+    path: &Path,
+    hops: &mut usize,
+) -> Result<(), WalkError> {
     for component in path.components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                normalized.pop();
+                if !pop_inside(root, current) {
+                    return Err(WalkError::Escape);
+                }
             }
-            other => normalized.push(other.as_os_str()),
+            Component::Normal(name) => {
+                let next = current.join(name);
+                match std::fs::symlink_metadata(&next) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        *hops += 1;
+                        if *hops > MAX_SYMLINK_HOPS {
+                            return Err(WalkError::Escape);
+                        }
+                        let target = std::fs::read_link(&next).map_err(WalkError::Io)?;
+                        if target.is_absolute() {
+                            *current = PathBuf::new();
+                        }
+                        apply_components(root, current, &target, hops)?;
+                    }
+                    Ok(_) => *current = next,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => *current = next,
+                    Err(err) => return Err(WalkError::Io(err)),
+                }
+                if !is_inside(root, current) {
+                    return Err(WalkError::Escape);
+                }
+            }
+            Component::RootDir => *current = PathBuf::from("/"),
+            Component::Prefix(prefix) => *current = PathBuf::from(prefix.as_os_str()),
         }
     }
-    normalized
+    Ok(())
 }
 
-fn ancestor_symlink_escapes(path: &Path, root: &Path) -> Result<bool, ModelError> {
-    let mut ancestor = path.parent();
-    while let Some(dir) = ancestor {
-        if dir == root || !dir.starts_with(root) {
-            break;
-        }
-        if symlink_target_escapes(dir, root)? {
-            return Ok(true);
-        }
-        ancestor = dir.parent();
+fn is_inside(root: &Path, path: &Path) -> bool {
+    path == root || path.starts_with(root)
+}
+
+/// `..` from `root` leaves the extract directory. Pop only while `current`
+/// is a strict descendant of `root`.
+fn pop_inside(root: &Path, current: &mut PathBuf) -> bool {
+    if *current == root || !current.starts_with(root) {
+        return false;
     }
-    Ok(false)
+    current.pop();
+    *current == root || current.starts_with(root)
 }
 
 fn create_contained_symlink(target: &Path, outpath: &Path) -> Result<(), ModelError> {
@@ -1521,6 +1598,52 @@ mod tests {
                 .next()
                 .is_none(),
             "nothing may be written outside the extract directory"
+        );
+    }
+
+    /// `a/b/missing` → `..`, then `a/b/link` → `missing/../../outside`, then
+    /// file `a/b/link/pwned`. Lexical `..` cancellation keeps the second
+    /// target inside the extract directory. Following `missing` first does not.
+    fn build_symlink_chain_zip() -> Vec<u8> {
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buf);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            writer
+                .add_symlink("a/b/missing", "..", options)
+                .expect("missing symlink");
+            writer
+                .add_symlink("a/b/link", "missing/../../outside", options)
+                .expect("chain symlink");
+            writer
+                .start_file("a/b/link/pwned", options)
+                .expect("file through the chain");
+            writer.write_all(b"owned").expect("payload");
+            writer.finish().expect("finish zip");
+        }
+        buf.into_inner()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_zip_archive_rejects_symlink_chain_that_escapes_via_dotdot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).expect("outside dir");
+        let zip_path = dir.path().join("encoder.zip");
+        std::fs::write(&zip_path, build_symlink_chain_zip()).expect("write zip");
+
+        let extract_dir = dir.path().join("extracted");
+        std::fs::create_dir(&extract_dir).expect("mkdir");
+        let err = extract_zip_archive(&zip_path, &extract_dir).expect_err("escaping chain");
+        assert!(matches!(err, ModelError::Io(_)), "error was {err:?}");
+        assert!(
+            !outside.join("pwned").exists(),
+            "the chained symlink must not write outside the extract directory"
+        );
+        assert!(
+            std::fs::symlink_metadata(extract_dir.join("a/b/link")).is_err(),
+            "the escaping link must not be created"
         );
     }
 
