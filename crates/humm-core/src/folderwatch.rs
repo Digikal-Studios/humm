@@ -11,24 +11,27 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// Buzz's folder-watch/import supported extensions
-/// (`transcription_task_folder_watcher.py:15-18`), lowercase and without a
-/// leading dot: 6 audio + 7 video = 13. Shared by [`scan`]'s extension rule
+/// Buzz's folder-watch/import supported extensions, lowercase and without a
+/// leading dot. Audio then video, in the order of Buzz `main`
+/// `buzz/transcriber/transcriber.py` `SUPPORTED_AUDIO_EXTENSIONS` /
+/// `SUPPORTED_VIDEO_EXTENSIONS` (8 + 8). Shared by [`scan`]'s extension rule
 /// and `humm_gui::import`'s folder-import scan / file-dialog filters, which
-/// re-export this rather than duplicating it.
-pub const SUPPORTED_EXTENSIONS: [&str; 13] = [
-    "mp3", "wav", "m4a", "ogg", "opus", "flac", "mp4", "webm", "ogm", "mov", "mkv", "avi", "wmv",
+/// re-export this rather than duplicating it. The viewer playback classifier
+/// is a separate list and already includes `m4v`.
+pub const SUPPORTED_EXTENSIONS: [&str; 16] = [
+    "mp3", "wav", "m4a", "m4b", "aac", "ogg", "opus", "flac", "mp4", "m4v", "webm", "ogm", "mov",
+    "mkv", "avi", "wmv",
 ];
 
-/// The "Audio files" file-dialog filter group (`transcriber.py:222-225`) —
-/// the audio-only subset of [`SUPPORTED_EXTENSIONS`], same order. Lives here
-/// (rather than only in `humm-gui`) so `humm_gui::import`'s re-export has a
-/// single source of truth for every extension grouping.
-pub const AUDIO_EXTENSIONS: [&str; 6] = ["mp3", "wav", "m4a", "ogg", "opus", "flac"];
+/// The "Audio files" file-dialog filter group — the audio-only subset of
+/// [`SUPPORTED_EXTENSIONS`], same order. Lives here (rather than only in
+/// `humm-gui`) so `humm_gui::import`'s re-export has a single source of truth
+/// for every extension grouping.
+pub const AUDIO_EXTENSIONS: [&str; 8] = ["mp3", "wav", "m4a", "m4b", "aac", "ogg", "opus", "flac"];
 
-/// The "Video files" file-dialog filter group (`transcriber.py:222-225`) —
-/// the video-only subset of [`SUPPORTED_EXTENSIONS`], same order.
-pub const VIDEO_EXTENSIONS: [&str; 7] = ["mp4", "webm", "ogm", "mov", "mkv", "avi", "wmv"];
+/// The "Video files" file-dialog filter group — the video-only subset of
+/// [`SUPPORTED_EXTENSIONS`], same order.
+pub const VIDEO_EXTENSIONS: [&str; 8] = ["mp4", "m4v", "webm", "ogm", "mov", "mkv", "avi", "wmv"];
 
 /// Whether `path`'s extension (case-insensitive) is one of
 /// [`SUPPORTED_EXTENSIONS`] — Buzz's
@@ -426,6 +429,28 @@ mod tests {
         let candidates = scan(dir.path(), &SeenSet::new(), &never_known);
 
         assert_eq!(candidates, Vec::new());
+    }
+
+    #[test]
+    fn m4b_aac_and_m4v_are_supported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        touch(&dir.path().join("book.m4b"), b"audio");
+        touch(&dir.path().join("clip.aac"), b"audio");
+        touch(&dir.path().join("film.m4v"), b"video");
+
+        let mut names: Vec<_> = scan(dir.path(), &SeenSet::new(), &never_known)
+            .into_iter()
+            .map(|candidate| {
+                candidate
+                    .path
+                    .file_name()
+                    .expect("fixture file name")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, ["book.m4b", "clip.aac", "film.m4v"]);
     }
 
     #[test]
