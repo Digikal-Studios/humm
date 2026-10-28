@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::cancel::CancelToken;
@@ -1052,11 +1052,131 @@ fn find_sha256(tree_json: &str, file_name: &str) -> Option<String> {
 }
 
 /// Extracts the zip archive at `zip_path` into `dest` (must exist).
+///
+/// Does not call [`zip::ZipArchive::extract`]. zip 8.6.0 creates a symlink
+/// with the archive's target bytes and does not require that target to stay
+/// inside `dest` (`RUSTSEC-2026-0368`). A later entry, or
+/// [`place_coreml_contents`], can then write through that link. Symlink
+/// entries whose target leaves `dest` are refused and not created. File
+/// modes from the archive are not applied, so a zip cannot mark an extracted
+/// file setuid.
 fn extract_zip_archive(zip_path: &Path, dest: &Path) -> Result<(), ModelError> {
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file).map_err(zip_error_to_model_error)?;
-    archive.extract(dest).map_err(zip_error_to_model_error)?;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(zip_error_to_model_error)?;
+        let Some(relative) = entry.enclosed_name() else {
+            return Err(zip_path_error("CoreML zip entry path escapes the archive"));
+        };
+        let outpath = dest.join(relative);
+        if ancestor_symlink_escapes(&outpath, dest)? {
+            return Err(zip_path_error(
+                "CoreML zip entry is reached through a symlink that leaves the extract directory",
+            ));
+        }
+        if entry.is_symlink() {
+            let mut target_bytes = Vec::new();
+            entry
+                .read_to_end(&mut target_bytes)
+                .map_err(ModelError::Io)?;
+            let target = String::from_utf8(target_bytes)
+                .map_err(|_| zip_path_error("CoreML zip symlink target is not UTF-8"))?;
+            if proposed_symlink_escapes(&outpath, Path::new(&target), dest) {
+                return Err(zip_path_error(
+                    "CoreML zip symlink target leaves the extract directory",
+                ));
+            }
+            if let Some(parent) = outpath.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            create_contained_symlink(Path::new(&target), &outpath)?;
+            continue;
+        }
+        if entry.is_dir() {
+            std::fs::create_dir_all(&outpath)?;
+            continue;
+        }
+        if let Some(parent) = outpath.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut outfile = std::fs::File::create(&outpath)?;
+        std::io::copy(&mut entry, &mut outfile)?;
+    }
     Ok(())
+}
+
+fn zip_path_error(detail: &str) -> ModelError {
+    ModelError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, detail))
+}
+
+/// `true` when `link` is a symlink whose target is not inside `root`.
+/// A missing path is not an escaping link.
+fn symlink_target_escapes(link: &Path, root: &Path) -> Result<bool, ModelError> {
+    let meta = match std::fs::symlink_metadata(link) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err.into()),
+    };
+    if !meta.file_type().is_symlink() {
+        return Ok(false);
+    }
+    let target = std::fs::read_link(link)?;
+    Ok(proposed_symlink_escapes(link, &target, root))
+}
+
+/// Whether creating `link` → `target` would point outside `root`.
+/// The check is lexical (`..` and `.` only). It does not follow the target,
+/// so a not-yet-created outside directory still counts as an escape.
+fn proposed_symlink_escapes(link: &Path, target: &Path, root: &Path) -> bool {
+    let combined = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        link.parent().unwrap_or(root).join(target)
+    };
+    !lexical_normalize(&combined).starts_with(lexical_normalize(root))
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn ancestor_symlink_escapes(path: &Path, root: &Path) -> Result<bool, ModelError> {
+    let mut ancestor = path.parent();
+    while let Some(dir) = ancestor {
+        if dir == root || !dir.starts_with(root) {
+            break;
+        }
+        if symlink_target_escapes(dir, root)? {
+            return Ok(true);
+        }
+        ancestor = dir.parent();
+    }
+    Ok(false)
+}
+
+fn create_contained_symlink(target: &Path, outpath: &Path) -> Result<(), ModelError> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, outpath)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (target, outpath);
+        Err(zip_path_error(
+            "CoreML zip symlinks are not extracted on this platform",
+        ))
+    }
 }
 
 fn zip_error_to_model_error(err: zip::result::ZipError) -> ModelError {
@@ -1075,20 +1195,49 @@ fn zip_error_to_model_error(err: zip::result::ZipError) -> ModelError {
 /// completeness sentinel last.
 fn place_coreml_contents(extracted: &Path, target_dir: &Path) -> Result<(), ModelError> {
     let macosx = extracted.join("__MACOSX");
-    if macosx.exists() {
-        std::fs::remove_dir_all(&macosx)?;
+    // `remove_dir_all` and `exists` follow symlinks. An entry named
+    // `__MACOSX` that points outside `extracted` must be unlinked, not traversed.
+    if symlink_target_escapes(&macosx, extracted)? {
+        return Err(zip_path_error(
+            "CoreML zip symlink target leaves the extract directory",
+        ));
+    }
+    match std::fs::symlink_metadata(&macosx) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::remove_file(&macosx)?,
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&macosx)?,
+        Ok(_) => std::fs::remove_file(&macosx)?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
     }
 
     let entries: Vec<PathBuf> = std::fs::read_dir(extracted)?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .collect();
+    for entry in &entries {
+        if symlink_target_escapes(entry, extracted)? {
+            return Err(zip_path_error(
+                "CoreML zip symlink target leaves the extract directory",
+            ));
+        }
+    }
 
-    if target_dir.exists() {
-        std::fs::remove_dir_all(target_dir)?;
+    // Same rule for a pre-existing `target_dir`: never `remove_dir_all` or
+    // write the sentinel through a link that leaves `extracted`.
+    if symlink_target_escapes(target_dir, extracted)? {
+        return Err(zip_path_error(
+            "CoreML zip symlink target leaves the extract directory",
+        ));
+    }
+    match std::fs::symlink_metadata(target_dir) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::remove_file(target_dir)?,
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(target_dir)?,
+        Ok(_) => std::fs::remove_file(target_dir)?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
     }
 
     let single_dir = match entries.as_slice() {
-        [only] if only.is_dir() => Some(only.clone()),
+        [only] if !is_symlink(only)? && only.is_dir() => Some(only.clone()),
         _ => None,
     };
 
@@ -1107,8 +1256,17 @@ fn place_coreml_contents(extracted: &Path, target_dir: &Path) -> Result<(), Mode
         }
     }
 
+    if symlink_target_escapes(target_dir, extracted)? {
+        return Err(zip_path_error(
+            "CoreML zip symlink target leaves the extract directory",
+        ));
+    }
     std::fs::write(target_dir.join(registry::SENTINEL_SUFFIX), b"")?;
     Ok(())
+}
+
+fn is_symlink(path: &Path) -> Result<bool, ModelError> {
+    Ok(std::fs::symlink_metadata(path)?.file_type().is_symlink())
 }
 
 #[cfg(test)]
@@ -1319,6 +1477,77 @@ mod tests {
                 .join("model.mil")
                 .is_file()
         );
+    }
+
+    /// A symlink entry whose target is outside the extract directory, followed
+    /// by a file that would be written through that link.
+    fn build_escaping_symlink_zip() -> Vec<u8> {
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buf);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            writer
+                .add_symlink("encoder", "../outside", options)
+                .expect("symlink entry");
+            writer
+                .start_file("encoder/pwned", options)
+                .expect("file through the link");
+            writer.write_all(b"owned").expect("payload");
+            writer.finish().expect("finish zip");
+        }
+        buf.into_inner()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_zip_archive_does_not_create_an_escaping_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).expect("outside dir");
+        let zip_path = dir.path().join("encoder.zip");
+        std::fs::write(&zip_path, build_escaping_symlink_zip()).expect("write zip");
+
+        let extract_dir = dir.path().join("extracted");
+        std::fs::create_dir(&extract_dir).expect("mkdir");
+        let err = extract_zip_archive(&zip_path, &extract_dir).expect_err("escaping symlink");
+        assert!(matches!(err, ModelError::Io(_)), "error was {err:?}");
+        assert!(
+            std::fs::symlink_metadata(extract_dir.join("encoder")).is_err(),
+            "the escaping symlink must not be created"
+        );
+        assert!(
+            std::fs::read_dir(&outside)
+                .expect("read outside")
+                .next()
+                .is_none(),
+            "nothing may be written outside the extract directory"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn place_coreml_contents_does_not_follow_an_escaping_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).expect("outside dir");
+        let extracted = dir.path().join("extracted");
+        std::fs::create_dir(&extracted).expect("mkdir");
+        std::os::unix::fs::symlink("../outside", extracted.join("encoder")).expect("symlink");
+
+        let target_dir = dir.path().join("placed.mlmodelc");
+        let err = place_coreml_contents(&extracted, &target_dir).expect_err("escaping symlink");
+        assert!(matches!(err, ModelError::Io(_)), "error was {err:?}");
+        assert!(
+            !outside.join(registry::SENTINEL_SUFFIX).exists(),
+            "sentinel must not be written through the symlink"
+        );
+        assert!(
+            std::fs::read_dir(&outside)
+                .expect("read outside")
+                .next()
+                .is_none()
+        );
+        assert!(!target_dir.join(registry::SENTINEL_SUFFIX).exists());
     }
 
     #[test]
