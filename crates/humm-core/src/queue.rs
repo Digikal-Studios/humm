@@ -427,6 +427,19 @@ enum Command {
         /// Where the task came from.
         source: Source,
     },
+    /// Insert a `queued` row and emit [`TaskEventKind::Queued`] without
+    /// starting the task. Folder watch does this on first sight.
+    Stage {
+        /// The task's id.
+        id: TranscriptionId,
+        /// The task specification.
+        spec: Box<TaskSpec>,
+        /// Where the task came from.
+        source: Source,
+    },
+    /// Cancel a staged task that never started. Emits
+    /// [`TaskEventKind::Canceled`]. Does not record the path as seen.
+    Abandon(TranscriptionId),
     /// Run a task whose row was already inserted as `queued`. Folder watch
     /// creates the row when the file is first seen and only then hands it
     /// to the runner, after the file's size and mtime have been stable.
@@ -491,6 +504,20 @@ impl QueueHandle {
             spec: Box::new(spec),
             source,
         });
+    }
+
+    /// Persists a queued row and emits `Queued`. Does not start the task.
+    pub fn stage(&self, id: TranscriptionId, spec: TaskSpec, source: Source) {
+        let _ = self.commands.send(Command::Stage {
+            id,
+            spec: Box::new(spec),
+            source,
+        });
+    }
+
+    /// Cancels a staged task that was never adopted. Emits `Canceled`.
+    pub fn abandon(&self, id: TranscriptionId) {
+        let _ = self.commands.send(Command::Abandon(id));
     }
 
     /// Starts a task that is already a `queued` row. Does not call
@@ -1079,6 +1106,30 @@ impl Runner {
     /// Applies one command to the runner's state.
     fn handle_command(&mut self, command: Command) {
         match command {
+            Command::Stage { id, spec, source } => {
+                match self.store.create_task(&id, &spec, source) {
+                    Ok(()) => {
+                        self.emit(TaskEvent {
+                            task_id: id,
+                            kind: TaskEventKind::Queued,
+                        });
+                    }
+                    Err(err) => {
+                        let message = CoreError::from(err).to_string();
+                        log::error!("create_task failed for task {id}: {message}");
+                        if let Err(err2) = self.store.mark_failed(&id, &message) {
+                            self.store_write_failed(id, "mark_failed", &err2);
+                        }
+                        self.emit(TaskEvent {
+                            task_id: id,
+                            kind: TaskEventKind::Failed { message },
+                        });
+                    }
+                }
+            }
+            Command::Abandon(id) => {
+                self.write_canceled(id);
+            }
             Command::Adopt { id, spec } => {
                 self.pending.push_back(PendingTask { id, spec });
             }
@@ -3341,6 +3392,44 @@ mod tests {
             calls
                 .iter()
                 .any(|call| matches!(call, StoreCall::Started(x) if *x == id))
+        );
+    }
+
+    #[test]
+    fn stage_emits_queued_without_starting_and_abandon_cancels() {
+        let (q, h) = build(Cfg::default());
+        let rx = q.subscribe();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = dir.path().join("clip.wav");
+        std::fs::write(&input, b"bytes").expect("write");
+        let id = TranscriptionId::new();
+        q.stage(id, path_task(input), Source::FolderWatch);
+        let queued = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("queued event");
+        assert!(matches!(queued.kind, TaskEventKind::Queued));
+        assert_eq!(queued.task_id, id);
+        q.abandon(id);
+        let canceled = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("canceled event");
+        assert!(matches!(canceled.kind, TaskEventKind::Canceled));
+        q.finish().expect("finish");
+        let calls = h.store_calls();
+        assert!(
+            calls
+                .iter()
+                .any(|call| matches!(call, StoreCall::Create(x) if *x == id))
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| matches!(call, StoreCall::Canceled(x) if *x == id))
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|call| matches!(call, StoreCall::Started(_)))
         );
     }
 

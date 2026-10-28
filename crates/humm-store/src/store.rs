@@ -713,6 +713,20 @@ impl SqliteStore {
         .map_err(query_error)
     }
 
+    /// Whether a task for `path` should keep folder watch from creating
+    /// another. A `canceled` row does not: Buzz leaves `paths_emitted` unset
+    /// when a file disappears or the watch stops during settle, and the next
+    /// scan creates a new task. Completed, queued, and failed rows still do.
+    pub fn has_blocking_task_for_file(&self, path: &Path) -> Result<bool, StoreError> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM transcription WHERE file = ?1 AND status != ?2)",
+            params![path.display().to_string(), Status::Canceled.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(query_error)
+    }
+
     /// Sets a task's user-assigned display name. Ported from Buzz's
     /// `TranscriptionDAO.update_transcription_name`
     /// (`transcription_dao.py:269-284`), which raises when the row doesn't
@@ -2100,6 +2114,33 @@ mod tests {
             store
                 .has_task_for_file(Path::new("/dir/a/x.mp3"))
                 .expect("still matches after status change")
+        );
+    }
+
+    #[test]
+    fn canceled_file_does_not_block_folder_watch() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut spec = sample_task_spec();
+        spec.input = Input::Path(PathBuf::from("/watch/clip.wav"));
+        let id = TranscriptionId::new();
+        store
+            .create_task(&id, &spec, Source::FolderWatch)
+            .expect("create");
+        assert!(
+            store
+                .has_blocking_task_for_file(Path::new("/watch/clip.wav"))
+                .expect("queued blocks")
+        );
+        store.mark_canceled(&id).expect("cancel");
+        assert!(
+            store
+                .has_task_for_file(Path::new("/watch/clip.wav"))
+                .expect("file column remains")
+        );
+        assert!(
+            !store
+                .has_blocking_task_for_file(Path::new("/watch/clip.wav"))
+                .expect("canceled does not block")
         );
     }
 

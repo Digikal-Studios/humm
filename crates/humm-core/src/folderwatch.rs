@@ -844,4 +844,41 @@ mod tests {
         assert!(polled.settled.is_empty());
         assert_eq!(polled.discarded, vec![(path, 7)]);
     }
+
+    /// A file that vanishes during the 30s wait is not recorded as seen, so
+    /// putting it back makes `scan` return it again. A canceled row must not
+    /// count as known — that is the watcher's `has_blocking_task_for_file`.
+    #[test]
+    fn file_removed_during_settle_is_found_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("clip.wav");
+        touch(&file, b"partial");
+        let seen = SeenSet::new();
+        let mut settle: SettleSet<()> = SettleSet::new();
+        let first = scan(dir.path(), &seen, &|_| false);
+        assert_eq!(first.len(), 1);
+        let (size, mtime) = metadata_of(&file);
+        assert!(settle.insert(file.clone(), FileStamp { size, mtime }, Duration::ZERO, ()));
+
+        std::fs::remove_file(&file).expect("remove");
+        let polled = settle.poll(Duration::from_secs(5), FOLDER_WATCH_SETTLE, |path| {
+            let metadata = std::fs::metadata(path).ok()?;
+            let mtime = metadata.modified().ok()?;
+            Some(FileStamp {
+                size: metadata.len(),
+                mtime,
+            })
+        });
+        assert!(polled.settled.is_empty());
+        assert_eq!(polled.discarded.len(), 1);
+        assert!(
+            !seen.matches(&file, size, mtime),
+            "a discard must not record the path as seen"
+        );
+
+        touch(&file, b"replaced");
+        let again = scan(dir.path(), &seen, &|_| false);
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].path, file);
+    }
 }

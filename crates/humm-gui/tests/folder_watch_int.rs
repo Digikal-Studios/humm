@@ -300,7 +300,8 @@ fn wait_for_status(store: &SqliteStore, id: TranscriptionId, status: Status, tim
 
 /// Polls `store` (the authoritative source, not any UI) until a
 /// `Source::FolderWatch` row reaches `Completed`, up to `timeout` — polling
-/// latency plus a real ffmpeg decode of a ~7s clip is comfortably inside 30s
+/// latency plus a 30s settle and a real ffmpeg decode of a ~7s clip needs
+/// more than 30s
 /// even under sandboxed/loaded CI, the same generous-but-bounded margin
 /// `kittest_actions.rs`'s own real-decode retry test (20s) and
 /// `tests/acceptance.rs`'s real-model run (120s) use for the identical
@@ -382,7 +383,7 @@ fn drop_creates_a_task_and_moves_the_source_to_the_mirrored_output_dir() {
     std::thread::sleep(Duration::from_millis(20));
     drop_fixture(&sub.join("clip.wav"));
 
-    let row = wait_for_folder_watch_completed(&store, Duration::from_secs(30));
+    let row = wait_for_folder_watch_completed(&store, Duration::from_secs(60));
     assert_eq!(row.status, Status::Completed);
 
     // Source moved into the mirrored output subdirectory, under its own
@@ -448,7 +449,7 @@ fn drop_with_delete_processed_files_removes_the_source() {
     let source = input_dir.join("clip.wav");
     drop_fixture(&source);
 
-    wait_for_folder_watch_completed(&store, Duration::from_secs(30));
+    wait_for_folder_watch_completed(&store, Duration::from_secs(60));
 
     assert!(
         !source.exists(),
@@ -517,7 +518,7 @@ fn paused_service_ignores_a_drop_until_resumed() {
     service.pause(false);
     assert!(!service.is_paused());
 
-    let row = wait_for_folder_watch_completed(&store, Duration::from_secs(30));
+    let row = wait_for_folder_watch_completed(&store, Duration::from_secs(60));
     assert_eq!(row.status, Status::Completed);
 
     service.stop();
@@ -527,36 +528,10 @@ fn paused_service_ignores_a_drop_until_resumed() {
 
 #[test]
 fn seen_set_survives_a_rebuild_so_a_recently_enqueued_file_is_not_double_enqueued() {
-    // The race this proves protection against only actually opens up while
-    // the queue's single runner thread is *busy* running some other task:
-    // `humm_core::queue`'s own `Runner::run` only calls
-    // `drain_commands_nonblocking` (which is what turns a pending
-    // `Command::Enqueue` into a real `create_task` store row) *between*
-    // tasks, never while one is executing (`run_task` blocks the runner
-    // thread for its whole duration). With an otherwise-idle runner,
-    // `create_task` for an enqueued candidate lands within microseconds —
-    // long before this test could ever race it — so `store.has_task_for_file`
-    // alone would already suppress a duplicate on its own, and an earlier
-    // revision of this test passed regardless of whether the `SeenSet` was
-    // actually shared, silently testing nothing.
-    //
-    // To open the real window deterministically, this test first occupies
-    // the runner with a "blocker" task backed by a `GatedEngine` whose
-    // `transcribe` call blocks until released, and waits for it to reach
-    // `InProgress` (confirming the runner is now busy and won't drain
-    // anything else). *Then* it runs the service A → drop file → stop A →
-    // start B (same shared `SeenSet`) → rescan sequence — all while
-    // `create_task` for the candidate is still sitting, undrained, behind
-    // the blocker in the runner's command channel, i.e. `has_task_for_file`
-    // is still `false` for it. Only the shared `SeenSet` (rule 6: "seen at
-    // this exact size/mtime") can suppress B's rescan finding it "new"
-    // again at this point. Releasing the gate afterward lets the runner
-    // drain everything at once: with the fix, exactly one `Command::Enqueue`
-    // was ever sent for the candidate (A's), so exactly one
-    // `Source::FolderWatch` row results. (Manually confirmed against a
-    // deliberately-reverted fresh-`SeenSet`-per-`start()` build: this same
-    // sequence then produces two rows — B's rescan finds the candidate
-    // "not known" *and* "not seen" and enqueues it again.)
+    // Stopping during the 30s settle cancels the staged row and does not
+    // record the seen-set. A rebuilt watch must create a new task. The
+    // blocker keeps the runner from adopting anything until we release it,
+    // so both the abandon and the second stage are still ordered commands.
     let root = tempfile::tempdir().expect("root tempdir");
     let input_dir = root.path().join("in");
     let output_dir = root.path().join("out");
@@ -596,36 +571,20 @@ fn seen_set_survives_a_rebuild_so_a_recently_enqueued_file_is_not_double_enqueue
         false,
     );
 
-    // Wait for service A's (unconditional) initial scan to have recorded the
-    // candidate into the *shared* SeenSet — not for the store to show a row
-    // (it can't yet: the runner is still busy on the blocker), so we stop A
-    // squarely inside the real enqueue→create_task race window.
+    // Stop during the 30s settle. The seen-set is recorded only when the
+    // file settles, so it must still be empty, and the staged row is
+    // abandoned. A rebuilt watch has to be able to find the file again.
+    std::thread::sleep(Duration::from_millis(500));
     let metadata = std::fs::metadata(&source).expect("stat fixture");
     let mtime = metadata.modified().expect("mtime");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let recorded = seen
+    assert!(
+        !seen
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .matches(&source, metadata.len(), mtime);
-        if recorded {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "service A never recorded the candidate into the shared SeenSet"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    service_a.stop();
-
-    // The runner is still busy on the blocker here: `create_task` for the
-    // candidate has not run, so `has_task_for_file` still says "not known".
-    assert!(
-        !store.has_task_for_file(&source).expect("has_task_for_file"),
-        "the candidate's create_task must not have landed yet — otherwise this test isn't \
-         actually exercising the SeenSet, just the store check"
+            .matches(&source, metadata.len(), mtime),
+        "stopping during settle must not record the path"
     );
+    service_a.stop();
 
     // Rebuild with the SAME shared SeenSet (and the same queue/store) — the
     // exact shape `app.rs`'s `sync_folder_watch` Restart path performs.
@@ -664,10 +623,14 @@ fn seen_set_survives_a_rebuild_so_a_recently_enqueued_file_is_not_double_enqueue
         .into_iter()
         .filter(|row| row.source == Some(Source::FolderWatch))
         .collect();
+    let live: Vec<_> = folder_watch_rows
+        .iter()
+        .filter(|row| row.status != Status::Canceled)
+        .collect();
     assert_eq!(
-        folder_watch_rows.len(),
+        live.len(),
         1,
-        "expected exactly one enqueued task across the rebuild, got {folder_watch_rows:?}"
+        "a stop during settle must not block a new task, got {folder_watch_rows:?}"
     );
 
     service_b.stop();

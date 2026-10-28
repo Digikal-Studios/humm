@@ -104,7 +104,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use humm_core::boundary::TaskStore;
 use humm_core::domain::{Source, SourceDisposition, Status, TaskSpec, TranscriptionId};
 use humm_core::folderwatch::{self, FileStamp, SeenSet, SettleSet};
 use humm_core::queue::QueueHandle;
@@ -732,11 +731,11 @@ fn rescan_and_enqueue(worker: &mut WorkerCtx) {
         .clone();
     let candidates = {
         let store = Arc::clone(&worker.store);
-        let known = move |path: &Path| match store.has_task_for_file(path) {
+        let known = move |path: &Path| match store.has_blocking_task_for_file(path) {
             Ok(known) => known,
             Err(err) => {
                 log::warn!(
-                    "folder-watch: has_task_for_file failed for {} ({err}) — treating as not known",
+                    "folder-watch: has_blocking_task_for_file failed for {} ({err}) — treating as not known",
                     path.display()
                 );
                 false
@@ -805,14 +804,9 @@ fn rescan_and_enqueue(worker: &mut WorkerCtx) {
         {
             continue;
         }
-        if let Err(err) = worker.store.create_task(&id, &spec, Source::FolderWatch) {
-            log::warn!("folder-watch: create_task failed for {id}: {err}");
-            let _ = worker.settle.remove(&candidate.path);
-            continue;
-        }
+        worker.queue.stage(id, spec, Source::FolderWatch);
         enqueued_any = true;
     }
-    drop(seen);
 
     if enqueued_any {
         worker.ctx.request_repaint();
@@ -857,9 +851,7 @@ fn poll_settled(worker: &mut WorkerCtx) {
         changed = true;
     }
     for (_path, (id, _spec)) in polled.discarded {
-        if let Err(err) = worker.store.mark_canceled(&id) {
-            log::warn!("folder-watch: cancel of unsettled task {id} failed: {err}");
-        }
+        worker.queue.abandon(id);
         changed = true;
     }
     if changed {
@@ -873,9 +865,7 @@ fn discard_pending(worker: &mut WorkerCtx) {
         return;
     }
     for (_path, (id, _spec)) in pending {
-        if let Err(err) = worker.store.mark_canceled(&id) {
-            log::warn!("folder-watch: cancel of unsettled task {id} failed: {err}");
-        }
+        worker.queue.abandon(id);
     }
     worker.ctx.request_repaint();
 }
