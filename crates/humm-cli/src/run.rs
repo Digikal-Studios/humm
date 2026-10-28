@@ -130,6 +130,19 @@ fn validate_add_args(args: &AddArgs, demucs_available: bool) -> Option<ExitCode>
         ));
     }
 
+    if args.wants_speaker_identification() {
+        // Buzz `8d0812a` selects NeMo MSDD or Sortformer and passes
+        // `--speaker-count` into that stack (`cli.py`, `speaker_identifier.py`).
+        // humm's only speaker path is `OrtDiarizer::diarize`, which takes PCM
+        // and nothing else (ADR-011). Running it would ignore the algorithm
+        // and the count. A new engine was not added.
+        return Some(usage_fail(
+            "speaker identification is not available on the CLI: Buzz selects MSDD or Sortformer \
+             and a speaker count, and humm's only diarizer (speakrs) takes neither. No new engine \
+             was added",
+        ));
+    }
+
     if args.model_type == ModelTypeArg::HuggingFace && args.hfid.is_none() {
         // cli.py:146-147, verbatim.
         return Some(usage_fail(
@@ -1241,6 +1254,7 @@ fn run_fail(message: impl std::fmt::Display) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use humm_core::domain::{Millis, Segment};
     use pretty_assertions::assert_eq;
 
@@ -1708,6 +1722,9 @@ mod tests {
             prompt: String::new(),
             word_timestamps: false,
             extract_speech: false,
+            identify_speakers: false,
+            speaker_count: None,
+            speaker_diarizer: None,
             openai_token: None,
             srt: false,
             vtt: false,
@@ -1718,5 +1735,75 @@ mod tests {
             quiet: false,
             files: Vec::new(),
         }
+    }
+
+    fn parse_add(extra: &[&str]) -> AddArgs {
+        let mut argv = vec!["humm", "add", "clip.wav"];
+        argv.extend(extra);
+        let cli = crate::args::Cli::try_parse_from(argv).expect("parse");
+        match cli.command.expect("subcommand") {
+            crate::args::Command::Add(args) => args,
+        }
+    }
+
+    #[test]
+    fn identify_speakers_flag_is_accepted() {
+        let args = parse_add(&["--identify-speakers"]);
+        assert!(args.identify_speakers);
+        assert!(args.wants_speaker_identification());
+    }
+
+    #[test]
+    fn speaker_count_implies_identification_and_must_be_an_integer() {
+        let args = parse_add(&["--speaker-count", "2"]);
+        assert!(!args.identify_speakers);
+        assert_eq!(args.speaker_count, Some(2));
+        assert!(args.wants_speaker_identification());
+        assert!(
+            crate::args::Cli::try_parse_from([
+                "humm",
+                "add",
+                "clip.wav",
+                "--speaker-count",
+                "nope",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn speaker_diarizer_accepts_msdd_and_sortformer_only() {
+        use crate::args::SpeakerDiarizerArg;
+        let msdd = parse_add(&["--speaker-diarizer", "msdd"]);
+        assert_eq!(msdd.speaker_diarizer, Some(SpeakerDiarizerArg::Msdd));
+        assert!(msdd.wants_speaker_identification());
+        let sortformer = parse_add(&["--speaker-diarizer", "sortformer"]);
+        assert_eq!(
+            sortformer.speaker_diarizer,
+            Some(SpeakerDiarizerArg::Sortformer)
+        );
+        assert!(
+            crate::args::Cli::try_parse_from([
+                "humm",
+                "add",
+                "clip.wav",
+                "--speaker-diarizer",
+                "nemo",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn speaker_flags_are_rejected_without_a_matching_engine() {
+        let mut args = base_add_args();
+        args.files = vec!["clip.wav".into()];
+        args.identify_speakers = true;
+        assert!(validate_add_args(&args, true).is_some());
+        args.identify_speakers = false;
+        args.speaker_count = Some(3);
+        assert!(validate_add_args(&args, true).is_some());
+        args.speaker_count = None;
+        assert!(validate_add_args(&args, true).is_none());
     }
 }

@@ -4,6 +4,7 @@
 //! (`buzz/cli.py:52-138`, `docs/analysis/EXTERNAL_SURFACE.md` §2): `-t/--task`,
 //! `-s/--model-size`, `-m/--model-type`, `--hfid`, `-l/--language`,
 //! `-p/--prompt`, `-w/--word-timestamps`, `-e/--extract-speech`,
+//! `--identify-speakers`, `--speaker-count`, `--speaker-diarizer`,
 //! `--openai-token`, `--srt`/`--vtt`/`--txt`, `-d/--output-directory`,
 //! `--hide-gui`, plus file positionals. `--json`/`--quiet` are humm additions
 //! (ADR-007, `docs/design/UX_SPEC.md` §5).
@@ -43,6 +44,17 @@ pub struct Cli {
 pub enum Command {
     /// Transcribe or translate one or more media files.
     Add(AddArgs),
+}
+
+/// Buzz `CommandLineDiarizer` (`cli.py`): `msdd` or `sortformer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SpeakerDiarizerArg {
+    /// NeMo MSDD. Not the engine humm runs.
+    #[value(name = "msdd")]
+    Msdd,
+    /// Sortformer. Not the engine humm runs.
+    #[value(name = "sortformer")]
+    Sortformer,
 }
 
 /// Model backend, `buzz/cli.py:31-36` (`CommandLineModelType`) — CLI-local:
@@ -121,6 +133,19 @@ pub struct AddArgs {
     #[arg(short = 'e', long = "extract-speech")]
     pub extract_speech: bool,
 
+    /// Identify speakers in the audio. Buzz `8d0812a`.
+    #[arg(long = "identify-speakers")]
+    pub identify_speakers: bool,
+
+    /// Number of speakers. Implies `--identify-speakers`. Buzz `cli.py`.
+    #[arg(long = "speaker-count", value_name = "count")]
+    pub speaker_count: Option<i32>,
+
+    /// Speaker diarizer. Allowed: `msdd`, `sortformer`. Implies
+    /// `--identify-speakers`. Default when the flag is passed: `msdd`.
+    #[arg(long = "speaker-diarizer", value_name = "diarizer", value_enum)]
+    pub speaker_diarizer: Option<SpeakerDiarizerArg>,
+
     /// OpenAI access token. Used only when --model-type is openaiapi; else
     /// accepted and ignored (Buzz parity). Empty/absent falls back to the OS
     /// keyring, else the run fails with "No OpenAI access token found".
@@ -158,4 +183,13 @@ pub struct AddArgs {
     /// Input file paths or URLs.
     #[arg(value_name = "FILE")]
     pub files: Vec<String>,
+}
+
+impl AddArgs {
+    /// True when any speaker flag is set. `--speaker-count` and
+    /// `--speaker-diarizer` imply `--identify-speakers` (Buzz `cli.py`).
+    #[must_use]
+    pub fn wants_speaker_identification(&self) -> bool {
+        self.identify_speakers || self.speaker_count.is_some() || self.speaker_diarizer.is_some()
+    }
 }
