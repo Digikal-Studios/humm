@@ -749,8 +749,16 @@ printf 'fake no_vocals data' > "$outdir/htdemucs/no_vocals.mp3"
         let _denoised_track = humm_core::abort::track_temp_file(&denoised, true);
 
         let start = Instant::now();
-        assert!(humm_core::abort::try_emergency_stop(
-            crate::kill_tracked_groups
+        // Only this test's registrations. The process-global stop would
+        // SIGKILL demucs stubs other lib tests still have registered.
+        assert!(humm_core::abort::try_emergency_stop_registered(
+            &[_group.registration_id()],
+            &[
+                _speech_track.registration_id(),
+                _scratch_track.registration_id(),
+                _denoised_track.registration_id(),
+            ],
+            crate::kill_tracked_groups,
         ));
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {

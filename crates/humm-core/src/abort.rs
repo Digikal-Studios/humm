@@ -52,6 +52,13 @@ pub struct TrackedProcess {
     id: u64,
 }
 
+impl TrackedProcess {
+    /// Registry id for [`try_emergency_stop_registered`]. Not a process id.
+    pub fn registration_id(&self) -> u64 {
+        self.id
+    }
+}
+
 impl Drop for TrackedProcess {
     fn drop(&mut self) {
         if let Ok(mut registry) = REGISTRY.lock() {
@@ -63,6 +70,13 @@ impl Drop for TrackedProcess {
 /// Drops the temp-path registration. Does not delete the path.
 pub struct TrackedTemp {
     id: u64,
+}
+
+impl TrackedTemp {
+    /// Registry id for [`try_emergency_stop_registered`]. Not a process id.
+    pub fn registration_id(&self) -> u64 {
+        self.id
+    }
 }
 
 impl Drop for TrackedTemp {
@@ -122,15 +136,51 @@ pub fn try_emergency_stop(kill: impl FnOnce(&[u32])) -> bool {
     let Ok(registry) = REGISTRY.try_lock() else {
         return false;
     };
-    let pids: Vec<u32> = registry.groups.iter().map(|group| group.pid).collect();
+    stop_locked(&registry, |_| true, |_| true, kill);
+    true
+}
+
+/// Same as [`try_emergency_stop`], but only the given registrations.
+///
+/// A lib test can stop the child and temps it registered without signaling
+/// or deleting another test's live entries in this process. The real
+/// handler still calls [`try_emergency_stop`] and covers every registration.
+pub fn try_emergency_stop_registered(
+    groups: &[u64],
+    temps: &[u64],
+    kill: impl FnOnce(&[u32]),
+) -> bool {
+    let Ok(registry) = REGISTRY.try_lock() else {
+        return false;
+    };
+    stop_locked(
+        &registry,
+        |group| groups.contains(&group.id),
+        |temp| temps.contains(&temp.id),
+        kill,
+    );
+    true
+}
+
+fn stop_locked(
+    registry: &Registry,
+    groups: impl Fn(&Group) -> bool,
+    temps: impl Fn(&Temp) -> bool,
+    kill: impl FnOnce(&[u32]),
+) {
+    let pids: Vec<u32> = registry
+        .groups
+        .iter()
+        .filter(|group| groups(group))
+        .map(|group| group.pid)
+        .collect();
     kill(&pids);
     for temp in &registry.temps {
-        if temp.keep {
+        if !temps(temp) || temp.keep {
             continue;
         }
         remove_temp(&temp.path, temp.directory);
     }
-    true
 }
 
 fn remove_temp(path: &Path, directory: bool) {
