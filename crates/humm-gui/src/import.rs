@@ -88,6 +88,30 @@ pub fn scan_folder(root: &Path) -> Vec<PathBuf> {
     results
 }
 
+/// Expands a drag-and-drop payload the way Buzz `dropEvent` does
+/// (`main_window.py`, `56f1d49`).
+///
+/// A directory is replaced by the media files [`scan_folder`] finds inside
+/// it. Any other non-empty path is kept as-is, including a file whose
+/// extension is outside [`SUPPORTED_EXTENSIONS`]: Buzz filters a dropped
+/// folder and keeps a dropped file. An empty path is ignored. A folder with
+/// no media contributes nothing, and the caller treats an empty result as
+/// no drop.
+pub fn expand_dropped_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for path in paths {
+        if path.as_os_str().is_empty() {
+            continue;
+        }
+        if path.is_dir() {
+            files.extend(scan_folder(path));
+        } else {
+            files.push(path.clone());
+        }
+    }
+    files
+}
+
 /// Seam over the (blocking, native) file/folder pickers, so a kittest
 /// harness never has to drive a real rfd dialog: production code always
 /// uses [`RfdFileDialogs`]; a test-only fake can script picks instead.
@@ -291,5 +315,29 @@ mod tests {
 
         let found = scan_folder(dir.path());
         assert_eq!(found, vec![link, target]);
+    }
+
+    #[test]
+    fn expand_dropped_paths_scans_a_folder_and_keeps_a_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let folder = dir.path().join("drop");
+        let media = folder.join("nested").join("talk.mp3");
+        let notes = folder.join("notes.txt");
+        let loose = dir.path().join("loose.dat");
+        touch(&media);
+        touch(&notes);
+        touch(&loose);
+
+        let expanded = expand_dropped_paths(&[folder, loose.clone(), PathBuf::new()]);
+        assert_eq!(expanded, vec![media, loose]);
+    }
+
+    #[test]
+    fn expand_dropped_paths_on_an_empty_folder_is_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            expand_dropped_paths(&[dir.path().to_path_buf()]),
+            Vec::<PathBuf>::new()
+        );
     }
 }

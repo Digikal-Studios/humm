@@ -339,6 +339,8 @@ pub fn run_file_job(
                     .to_string(),
             }));
         };
+        // Failure keeps `segments` unlabeled (`identify_with_diarizer`).
+        // Only cancellation comes back as an error.
         segments = crate::diarize::identify_with_diarizer(&segments, &pcm, diarizer, cancel)
             .map_err(|err| match err {
                 crate::diarize::DiarizeError::Canceled => CoreError::Canceled,

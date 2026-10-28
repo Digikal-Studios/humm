@@ -34,7 +34,9 @@ use crate::events::{self, SharedEventQueue};
 use crate::folder_watch::{FolderWatchService, FolderWatchSnapshot, ReconcileAction};
 use crate::fonts;
 use crate::i18n::{self, tr};
-use crate::import::{FileDialogs, ImportRequest, RfdFileDialogs, scan_folder};
+use crate::import::{
+    FileDialogs, ImportRequest, RfdFileDialogs, expand_dropped_paths, scan_folder,
+};
 use crate::live_fixture::FixtureCapture;
 use crate::live_session::{
     self, LiveEngineFactory, LiveEngineSession, LiveSessionRequest, LiveStore, LiveUpload,
@@ -1156,14 +1158,15 @@ impl HummApp {
         self.open_options_sheet(ImportRequest::Files(files));
     }
 
-    /// Drag-and-drop (F-021, `main_window.py:196-205`): reads
-    /// `egui::RawInput::dropped_files` (no extension filtering — Buzz
-    /// parity) and, if any files were dropped this frame, opens the options
-    /// sheet with them. Guarded by `!modal_open()` so a drop landing while
-    /// some other modal (e.g. Clear-confirm) is already up doesn't silently
-    /// clobber it with a freshly-opened sheet — a humm-only defensive
-    /// addition (Buzz's own top-level-window drop target has no equivalent
-    /// modal to protect).
+    /// Drag-and-drop (F-021, `main_window.py` `dropEvent`, including folder
+    /// expansion from `56f1d49`): reads `egui::RawInput::dropped_files`.
+    /// A dropped directory is replaced by the media files inside it; a
+    /// dropped file is kept with no extension filter. An empty expansion
+    /// (a folder with no media) does not open the sheet. Guarded by
+    /// `!modal_open()` so a drop landing while some other modal (e.g.
+    /// Clear-confirm) is already up doesn't silently clobber it with a
+    /// freshly-opened sheet — a humm-only defensive addition (Buzz's own
+    /// top-level-window drop target has no equivalent modal to protect).
     fn drain_dropped_files(&mut self, ctx: &egui::Context) {
         if self.action_state.modal_open() {
             return;
@@ -1179,7 +1182,11 @@ impl HummApp {
         if dropped.is_empty() {
             return;
         }
-        self.open_options_sheet(ImportRequest::Files(dropped));
+        let files = expand_dropped_paths(&dropped);
+        if files.is_empty() {
+            return;
+        }
+        self.open_options_sheet(ImportRequest::Files(files));
     }
 
     /// Consumes `pending_argv_import` (Finder "open with" parity) on

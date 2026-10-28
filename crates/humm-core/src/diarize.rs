@@ -347,15 +347,31 @@ pub fn label_segments(
     out
 }
 
-/// Labels `segments` with the existing PCM diarizer. Speaker count and a
-/// named algorithm are not inputs: [`Diarizer::diarize`] takes audio only.
+/// Labels `segments` with the existing PCM diarizer.
+///
+/// Speaker count and a named algorithm are not inputs: [`Diarizer::diarize`]
+/// takes audio only (ADR-011, ADR-024). An empty `segments` slice returns
+/// immediately, matching Buzz `identify_speakers` (`speaker_identifier.py`).
+/// A diarizer failure other than cancellation returns `segments` unchanged
+/// so the transcript is still exported (`speaker_identifier.py` returns the
+/// original segments when identification fails). Cancellation stays an error.
 pub fn identify_with_diarizer(
     segments: &[Segment],
     audio: &Pcm,
     diarizer: &dyn Diarizer,
     cancel: &CancelToken,
 ) -> Result<Vec<Segment>, DiarizeError> {
-    let turns = diarizer.diarize(audio, &mut |_| {}, cancel)?;
+    if segments.is_empty() {
+        return Ok(Vec::new());
+    }
+    let turns = match diarizer.diarize(audio, &mut |_| {}, cancel) {
+        Ok(turns) => turns,
+        Err(DiarizeError::Canceled) => return Err(DiarizeError::Canceled),
+        Err(err) => {
+            log::warn!("speaker identification failed ({err}); keeping the unlabeled transcript");
+            return Ok(segments.to_vec());
+        }
+    };
     let speakers = assign_speakers(segments, &turns);
     let count = speakers
         .iter()
@@ -587,5 +603,78 @@ mod tests {
         )
         .expect("diarize");
         assert_eq!(labeled[0].text, "Speaker 0: hello there");
+    }
+
+    #[test]
+    fn identify_with_no_segments_does_not_call_the_diarizer() {
+        struct MustNotRun;
+        impl Diarizer for MustNotRun {
+            fn diarize(
+                &self,
+                _audio: &Pcm,
+                _progress: &mut dyn FnMut(DiarizeProgress),
+                _cancel: &CancelToken,
+            ) -> Result<Vec<SpeakerTurn>, DiarizeError> {
+                panic!("empty transcripts skip diarization");
+            }
+        }
+        let labeled =
+            identify_with_diarizer(&[], &Pcm::new(vec![]), &MustNotRun, &CancelToken::new())
+                .expect("empty");
+        assert!(labeled.is_empty());
+    }
+
+    struct FailingDiarizer;
+
+    impl Diarizer for FailingDiarizer {
+        fn diarize(
+            &self,
+            _audio: &Pcm,
+            _progress: &mut dyn FnMut(DiarizeProgress),
+            _cancel: &CancelToken,
+        ) -> Result<Vec<SpeakerTurn>, DiarizeError> {
+            Err(DiarizeError::Failed {
+                detail: "models exploded".to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn identify_failure_keeps_the_unlabeled_segments() {
+        let segments = vec![seg(0, 1000, "hello"), seg(1000, 2000, "there")];
+        let labeled = identify_with_diarizer(
+            &segments,
+            &Pcm::new(vec![0.0; 8]),
+            &FailingDiarizer,
+            &CancelToken::new(),
+        )
+        .expect("failure keeps the transcript");
+        assert_eq!(labeled, segments);
+    }
+
+    struct CanceledDiarizer;
+
+    impl Diarizer for CanceledDiarizer {
+        fn diarize(
+            &self,
+            _audio: &Pcm,
+            _progress: &mut dyn FnMut(DiarizeProgress),
+            _cancel: &CancelToken,
+        ) -> Result<Vec<SpeakerTurn>, DiarizeError> {
+            Err(DiarizeError::Canceled)
+        }
+    }
+
+    #[test]
+    fn identify_cancel_is_not_kept_as_a_successful_transcript() {
+        let segments = vec![seg(0, 1000, "hello")];
+        let err = identify_with_diarizer(
+            &segments,
+            &Pcm::new(vec![0.0; 8]),
+            &CanceledDiarizer,
+            &CancelToken::new(),
+        )
+        .expect_err("cancel");
+        assert!(matches!(err, DiarizeError::Canceled));
     }
 }

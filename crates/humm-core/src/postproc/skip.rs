@@ -108,13 +108,19 @@ pub(super) fn stem_for(path: &Path) -> String {
 
 /// Searches `input_path`'s parent directory, then `output_dir` (if any), in
 /// that order — per directory, [`SEARCH_FORMATS`] in order — for a result
-/// file whose name starts with the stem and ends with `.{format}` (Buzz's
-/// `glob(f"{stem}*.{ext}")`, `plugin.py:92`, prefix-overmatch quirk
-/// preserved: stem `"audio"` also matches `audio2.srt`). Returns the first
-/// candidate (directory entries visited in sorted order, for determinism)
-/// that parses to at least one segment.
+/// file whose name starts with the sanitized stem and ends with `.{format}`.
+///
+/// The stem is [`stem_for`] passed through
+/// [`crate::export::safe_filename_component`], because export writes that
+/// form (`what?` becomes `what_`). Buzz does the same in
+/// `_find_result_file_segments` (`plugin.py`, `053b388`) and then
+/// `glob.escape`s it. This search reads the directory and uses
+/// [`str::starts_with`], so `[` and `]` stay literal characters. The
+/// prefix-overmatch quirk is preserved: stem `"audio"` also matches
+/// `audio2.srt`. Returns the first candidate (directory entries visited in
+/// sorted order, for determinism) that parses to at least one segment.
 fn find_result_file_segments(input_path: &Path, output_dir: Option<&Path>) -> Option<Vec<Segment>> {
-    let stem = stem_for(input_path);
+    let stem = crate::export::safe_filename_component(&stem_for(input_path));
 
     let mut search_dirs: Vec<PathBuf> = Vec::new();
     if let Some(parent) = input_path.parent() {
@@ -532,6 +538,31 @@ mod tests {
     fn stem_strips_speech_suffix() {
         assert_eq!(stem_for(Path::new("/x/audio_speech.mp3")), "audio");
         assert_eq!(stem_for(Path::new("/x/audio.mp3")), "audio");
+    }
+
+    #[test]
+    fn result_search_matches_the_sanitized_export_stem() {
+        let tmp = TempDir::new().expect("tempdir");
+        let input = tmp.path().join("what?.mp3");
+        std::fs::write(&input, b"fake media").expect("write input");
+        std::fs::write(tmp.path().join("what_.txt"), "sanitized hit").expect("write txt");
+
+        let segments =
+            find_result_file_segments(&input, None).expect("a result file should be found");
+        assert_eq!(segments, vec![seg(0, 0, "sanitized hit")]);
+    }
+
+    #[test]
+    fn result_search_treats_square_brackets_as_literal() {
+        let tmp = TempDir::new().expect("tempdir");
+        let input = tmp.path().join("clip[2].mp3");
+        std::fs::write(&input, b"fake media").expect("write input");
+        std::fs::write(tmp.path().join("clip[2].txt"), "bracket hit").expect("write txt");
+        std::fs::write(tmp.path().join("clip2.txt"), "character class").expect("write other");
+
+        let segments =
+            find_result_file_segments(&input, None).expect("a result file should be found");
+        assert_eq!(segments, vec![seg(0, 0, "bracket hit")]);
     }
 
     // -- glob prefix-overmatch quirk --------------------------------------
