@@ -72,7 +72,7 @@ Google's Rust style guide was applied only where a pattern is harmful. Chromium/
 - Category: demonstrated defect
 - Severity: medium. Confidence: high
 - Location: `crates/humm-cli/src/run.rs` `install_ctrlc` calls `std::process::exit(130)` on the second SIGINT. `crates/humm-media/src/lib.rs` `spawn_own_process_group` detaches the child from the terminal group. ADR-023 already records this and calls it unfixed
-- Consequence: the first Ctrl-C cancels through `CancelToken`. The second skips `Drop` and does not signal the detached group, so demucs, yt-dlp, or an ffmpeg grandchild can keep running and writing after the CLI has exited
+- Consequence: the first Ctrl-C cancels through `CancelToken`. The second skips `Drop` and does not signal the detached group, so demucs, yt-dlp, or an ffmpeg grandchild can keep running and writing after the CLI has exited. The same `process::exit` skips `TempAudioGuard` (`queue.rs`), so `_speech` / denoised temp files from the in-flight job are left behind. One-shot ffmpeg decode and the video streamer kill only the direct child (`decode.rs`, `video.rs`); they do not use the process-group helper. That is a smaller gap: those commands do not themselves spawn a tool that forks grandchildren the way demucs and yt-dlp do
 - Action: P-003
 - Benefit: an immediate abort also stops the tools humm started
 - Risk: a wrong process-group id could signal an unrelated group. The registry has to record only groups this process created
@@ -168,6 +168,22 @@ Google's Rust style guide was applied only where a pattern is harmful. Chromium/
 - Fix: the distribution package, not a humm logic change. See P-011. Do not add a protocol or codec allowlist to “clear” these; that would change which files transcribe
 - humm does not vendor ffmpeg. `whisper.cpp` (whisper-rs-sys 0.15.0 / whisper.cpp 1.8.3, as documented in `humm-whisper`) and `onnxruntime` (`ort` `=2.0.0-rc.12`) have empty GitHub security-advisory lists for `ggml-org/whisper.cpp` and `microsoft/onnxruntime`. That is not an NVD clearance
 - Simpler alternative: already the recommendation — no product diff
+
+### F-014 — a failed digest lookup still accepts the model file
+
+- Category: demonstrated defect
+- Severity: medium. Confidence: high
+- Location: `crates/humm-core/src/models/download.rs` `verify_or_warn`. `Ok(None)` (the publisher has no digest) and `Err` (the digest request failed) both log and return `Ok(())`, then the caller renames the partial into place
+- Consequence: for an official repo that does publish a digest, a failed tree-API lookup — timeout, reset, or a response the client will not trust — skips SHA-256 and keeps the bytes from the file URL. `Ok(None)` for custom URLs and repos that publish no digest is the documented no-digest path and should stay. The `Err` arm is the gap. It gets worse if F-002's trust bundle is still in use
+- Action: P-012
+- Benefit: a model file is not promoted when its expected digest could not be checked
+- Risk: a blip talking to the Hugging Face tree API fails an otherwise finished download. The existing partial/resume path can retry
+- Validation: a stub digest endpoint that returns 500 or resets must not rename the partial; a repo with no `lfs.oid` still promotes
+- Simpler alternative: leave the warn-and-accept behavior so a digest outage never blocks transcription. That keeps a substituted file indistinguishable from a verified one
+
+## Evidence reconciled after the report
+
+Three read-only passes finished after the first commit. Their notes are in the project store, not in this worktree: `internal/audit/architecture-audit-evidence-2026-10-28.md` and `internal/architecture-audit-evidence-2026-10-28.md`. Incorporated above: temp-file leak on the second Ctrl-C (F-005) and the digest fail-open (F-014). Not promoted, because the code or an ADR already treats them as policy: ADR-018 reporting success when the history write failed; the ADR-017 lock-failure fallback; OpenAI cancel detaching the request thread (ADR-022); the untimed `Client::new()` fallback only after two timed builds fail; CLI `reducer` / `lang_detector` left `None` with an explicit comment and `HUMM_SURFACE` deviation; GUI binaries constructing adapters; English strings in kittest labels; folder-watch symlink files being eligible. None of those became a new proposal.
 
 ## Checked and not proposed
 

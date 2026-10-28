@@ -46,10 +46,11 @@ Confirmed gaps: #1595, #1602, #1614, #1651, #1660, #1674. Confirmed already alig
 | F-011 | architectural concern | medium | high | P-009 |
 | F-012 | architectural concern | low | high | P-010 |
 | F-013 | demonstrated defect (host ffmpeg) | medium | medium | P-011 |
+| F-014 | demonstrated defect | medium | high | P-012 |
 
 ## Proposals (design-unreviewed)
 
-Implementation order after review: P-002, P-001, P-004, P-006, P-007, P-003, P-005, P-010. P-008 only with its own design. P-009 is a decision, not an engine. P-011 is an explicit non-change.
+Implementation order after review: P-002, P-001, P-012, P-004, P-006, P-007, P-003, P-005, P-010. P-008 only with its own design. P-009 is a decision, not an engine. P-011 is an explicit non-change.
 
 ### P-001 — bump direct `zip` to >= 9.0.0
 
@@ -171,6 +172,21 @@ Implementation order after review: P-002, P-001, P-004, P-006, P-007, P-003, P-0
 - Risks: crafted media can still hit a vulnerable system ffmpeg.
 - Acceptance: no diff under `crates/humm-media` for this proposal. The ledger keeps the two Ubuntu CVE ids.
 - Verification: `git diff -- crates/humm-media` empty for the CVE pass.
+
+### P-012 — fail closed when a model digest lookup errors
+
+- Objective: do not promote a downloaded model when the digest request fails. Keep promoting when the publisher has no digest.
+- Findings: F-014
+- Design: in `verify_or_warn`, leave `Ok(None)` as skip-and-warn. Return the `Err` from `expected_sha256` instead of logging and returning `Ok(())`. Callers already treat `ModelError` as a failed ensure, and the partial file remains for resume.
+- Contracts: `ModelDownloader::ensure_artifact` for repos that publish `lfs.oid`. Custom URLs with `sha_repo: None` stay unverified, as ADR-008 says.
+- Alternatives: keep warn-and-accept so a digest outage cannot block a download.
+- Risks: transient tree-API failures fail the download. Resume plus retry is the existing recovery.
+- Acceptance: HTTP 500 or a connection error on the tree URL leaves the partial unpromoted and returns an error that names the file. A tree JSON with no matching `lfs.oid` still promotes. A mismatched digest still deletes the partial.
+- Verification: `cargo test -p humm-core --lib models::download`.
+
+## Evidence reconciled
+
+Read-only notes from the later passes live in the project store (`internal/audit/architecture-audit-evidence-2026-10-28.md`, `internal/architecture-audit-evidence-2026-10-28.md`). F-005 now includes the `TempAudioGuard` leak. F-014 / P-012 is the only new proposal. ADR-018, ADR-022 detach, CLI `reducer: None`, and the GUI adapter wiring were confirmed and left as documented policy.
 
 ## Open questions
 
