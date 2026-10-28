@@ -277,6 +277,7 @@ fn sample_task_spec() -> TaskSpec {
             temperature: DEFAULT_TEMPERATURE.to_vec(),
             llm: None,
             extract_speech: false,
+            identify_speakers: false,
         },
         output: OutputSpec {
             formats: [OutputFormat::Txt].into_iter().collect(),

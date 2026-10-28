@@ -364,6 +364,9 @@ pub struct RunnerDeps {
     /// [`postproc::langdetect::should_detect`]. `None` disables the hook
     /// entirely, same precedent as [`Self::isolator`].
     pub lang_detector: Option<Arc<dyn LanguageDetector>>,
+    /// PCM speaker diarizer used when a task sets `identify_speakers`.
+    /// `None` means that flag cannot be honored.
+    pub diarizer: Option<Arc<dyn crate::diarize::Diarizer>>,
 }
 
 /// Shared registry of live subscriber senders.
@@ -1026,6 +1029,8 @@ struct Runner {
     /// Detects the spoken language before transcription (F-114) — see
     /// [`RunnerDeps::lang_detector`].
     lang_detector: Option<Arc<dyn LanguageDetector>>,
+    /// PCM diarizer for tasks that set `identify_speakers`.
+    diarizer: Option<Arc<dyn crate::diarize::Diarizer>>,
     /// Tasks accepted but not yet run (FIFO).
     pending: VecDeque<PendingTask>,
     /// Ids canceled but not yet dequeued (Buzz's canceled-set). *Consumed*: a
@@ -1718,6 +1723,7 @@ impl Runner {
             &mut sink,
             token,
             self.llm.as_deref(),
+            self.diarizer.as_deref(),
         );
 
         self.engine_cache = Some((model, engine));
@@ -2032,6 +2038,7 @@ pub fn spawn_task_runner(deps: RunnerDeps) -> QueueHandle {
         isolator: deps.isolator,
         reducer: deps.reducer,
         lang_detector: deps.lang_detector,
+        diarizer: deps.diarizer,
         pending: VecDeque::new(),
         canceled: HashSet::new(),
         finishing: false,
@@ -2891,6 +2898,7 @@ mod tests {
             isolator: cfg.isolator,
             reducer: cfg.reducer,
             lang_detector: cfg.lang_detector,
+            diarizer: None,
         };
 
         let handle = spawn_task_runner(deps);

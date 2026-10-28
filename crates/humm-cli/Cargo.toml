@@ -14,6 +14,7 @@ humm-core.workspace = true
 humm-media = { path = "../humm-media", version = "0.1.0" }
 humm-whisper = { path = "../humm-whisper", version = "0.1.0" }
 humm-store = { path = "../humm-store", version = "0.1.0" }
+humm-diarize = { path = "../humm-diarize", version = "0.1.0" }
 clap = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }

@@ -775,6 +775,7 @@ mod tests {
                 temperature: DEFAULT_TEMPERATURE.to_vec(),
                 llm: None,
                 extract_speech: false,
+                identify_speakers: false,
             },
             output: OutputSpec::default(),
         }

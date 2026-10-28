@@ -49,6 +49,7 @@ use humm_core::boundary::{
     TranscriptionEngine,
 };
 use humm_core::cancel::CancelToken;
+use humm_core::diarize::Diarizer;
 use humm_core::domain::{
     Backend, DEFAULT_TEMPERATURE, Input, ModelSize, ModelSpec, OutputFormat, OutputSpec, Source,
     TaskSpec, TranscriptionId, TranscriptionOptions,
@@ -71,6 +72,7 @@ use humm_core::queue::{
 };
 use humm_core::secrets::{SecretKey, SecretStore};
 use humm_core::settings::{OpenAiSettings, PostprocSettings, Settings};
+use humm_diarize::OrtDiarizer;
 use humm_media::{DemucsIsolator, FfmpegDecoder, FfprobeProber, YtDlpFetcher, probe_binaries};
 use humm_store::{KeyringSecretStore, SqliteStore};
 use humm_whisper::WhisperEngine;
@@ -130,16 +132,13 @@ fn validate_add_args(args: &AddArgs, demucs_available: bool) -> Option<ExitCode>
         ));
     }
 
-    if args.wants_speaker_identification() {
-        // Buzz `8d0812a` selects NeMo MSDD or Sortformer and passes
-        // `--speaker-count` into that stack (`cli.py`, `speaker_identifier.py`).
-        // humm's only speaker path is `OrtDiarizer::diarize`, which takes PCM
-        // and nothing else (ADR-011). Running it would ignore the algorithm
-        // and the count. A new engine was not added.
+    if args.speaker_count.is_some() || args.speaker_diarizer.is_some() {
+        // Buzz passes these into NeMo MSDD or Sortformer. `Diarizer::diarize`
+        // and speakrs `run` take PCM only (ADR-011, ADR-024). Honoring the
+        // flag would ignore the value the user set. No new engine was added.
         return Some(usage_fail(
-            "speaker identification is not available on the CLI: Buzz selects MSDD or Sortformer \
-             and a speaker count, and humm's only diarizer (speakrs) takes neither. No new engine \
-             was added",
+            "--speaker-count and --speaker-diarizer are not available: the diarizer takes audio \
+             only and is not MSDD or Sortformer. Use --identify-speakers to label speakers",
         ));
     }
 
@@ -242,6 +241,17 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         (resolved.path, resolved.hf_repo, vad_model)
     };
 
+    // Bare `--identify-speakers` runs the PCM diarizer (the same engine the
+    // GUI uses). `--speaker-count` and `--speaker-diarizer` never reach here.
+    let diarizer = if args.identify_speakers {
+        match ensure_cli_diarizer(&model_root, args.json, args.quiet, &download_cancel) {
+            Ok(diarizer) => Some(diarizer),
+            Err(exit_code) => return exit_code,
+        }
+    } else {
+        None
+    };
+
     let tuning = EngineTuning {
         vad_model,
         use_gpu,
@@ -276,6 +286,7 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         // F-027/F-002) — reaching here means either it's `false`, or it's
         // `true` and the isolator wired into `RunnerDeps` below is real.
         extract_speech: args.extract_speech,
+        identify_speakers: args.identify_speakers,
     };
     let output = OutputSpec {
         formats,
@@ -343,6 +354,7 @@ fn execute(args: &AddArgs, language: Option<Language>) -> ExitCode {
         isolator: Some(Arc::new(DemucsIsolator::new()) as Arc<dyn SpeechIsolator>),
         reducer: None,
         lang_detector: None,
+        diarizer,
     };
 
     let handle = spawn_task_runner(deps);
@@ -529,6 +541,24 @@ fn report_download(json: bool, quiet: bool, line: &mut ProgressLine, update: &Do
     } else if !quiet {
         render_download_progress(line, update);
     }
+}
+
+/// Downloads the diarization models if needed and builds the PCM diarizer.
+/// A missing download fails the run: the user asked to identify speakers.
+fn ensure_cli_diarizer(
+    model_root: &Path,
+    json: bool,
+    quiet: bool,
+    cancel: &CancelToken,
+) -> Result<Arc<dyn Diarizer>, ExitCode> {
+    let downloader = ModelDownloader::new(model_root.to_path_buf());
+    let mut line = ProgressLine::new();
+    let mut render = |update: DownloadProgress| report_download(json, quiet, &mut line, &update);
+    let result = downloader.ensure_diarization_models(&mut render, cancel);
+    line.finish();
+    let paths = result.map_err(run_fail)?;
+    let diarizer = OrtDiarizer::new(paths).map_err(run_fail)?;
+    Ok(Arc::new(diarizer))
 }
 
 /// Ensures the VAD model (F-045): the cached copy if present, else a one-time
@@ -1795,15 +1825,18 @@ mod tests {
     }
 
     #[test]
-    fn speaker_flags_are_rejected_without_a_matching_engine() {
+    fn speaker_count_and_diarizer_are_rejected_bare_identify_speakers_is_not() {
         let mut args = base_add_args();
         args.files = vec!["clip.wav".into()];
         args.identify_speakers = true;
-        assert!(validate_add_args(&args, true).is_some());
+        assert!(validate_add_args(&args, true).is_none());
         args.identify_speakers = false;
         args.speaker_count = Some(3);
         assert!(validate_add_args(&args, true).is_some());
         args.speaker_count = None;
+        args.speaker_diarizer = Some(crate::args::SpeakerDiarizerArg::Sortformer);
+        assert!(validate_add_args(&args, true).is_some());
+        args.speaker_diarizer = None;
         assert!(validate_add_args(&args, true).is_none());
     }
 }

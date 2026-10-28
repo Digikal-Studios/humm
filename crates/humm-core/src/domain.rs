@@ -516,6 +516,11 @@ pub struct TranscriptionOptions {
     /// has no `extract_speech` key at all — to `false`.
     #[serde(default)]
     pub extract_speech: bool,
+    /// Run the PCM diarizer after transcription. Set by `--identify-speakers`.
+    /// A speaker count or MSDD/Sortformer is not representable: that engine
+    /// takes audio only. `#[serde(default)]` keeps older `options_json` rows.
+    #[serde(default)]
+    pub identify_speakers: bool,
 }
 
 impl Default for TranscriptionOptions {
@@ -537,6 +542,7 @@ impl Default for TranscriptionOptions {
             temperature: DEFAULT_TEMPERATURE.to_vec(),
             llm: None,
             extract_speech: false,
+            identify_speakers: false,
         }
     }
 }
@@ -817,6 +823,7 @@ mod tests {
                 temperature: DEFAULT_TEMPERATURE.to_vec(),
                 llm: None,
                 extract_speech: false,
+                identify_speakers: false,
             }
         );
     }
@@ -1020,6 +1027,7 @@ mod tests {
                 temperature: vec![0.1, 0.3],
                 llm: None,
                 extract_speech: true,
+                identify_speakers: false,
             },
             output: OutputSpec {
                 formats: [OutputFormat::Srt, OutputFormat::Vtt].into_iter().collect(),

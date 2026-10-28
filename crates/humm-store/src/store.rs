@@ -901,6 +901,7 @@ impl SqliteStore {
             // path predates F-027 too, and Buzz's own restart hardcodes
             // every feature it predates off rather than reading it back.
             extract_speech: false,
+            identify_speakers: false,
         };
 
         // Tolerant, comma-split (Buzz's own restart splits on `','` and
@@ -1646,6 +1647,7 @@ mod tests {
                 temperature: DEFAULT_TEMPERATURE.to_vec(),
                 llm: None,
                 extract_speech: false,
+                identify_speakers: false,
             },
             output: OutputSpec {
                 formats: [OutputFormat::Txt, OutputFormat::Srt].into_iter().collect(),
@@ -3160,6 +3162,7 @@ mod tests {
             temperature: DEFAULT_TEMPERATURE.to_vec(),
             llm: None,
             extract_speech: false,
+            identify_speakers: false,
         }
     }
 

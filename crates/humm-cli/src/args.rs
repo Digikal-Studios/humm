@@ -47,12 +47,14 @@ pub enum Command {
 }
 
 /// Buzz `CommandLineDiarizer` (`cli.py`): `msdd` or `sortformer`.
+///
+/// Neither algorithm is ported. Passing the flag is rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SpeakerDiarizerArg {
-    /// NeMo MSDD. Not the engine humm runs.
+    /// NeMo MSDD.
     #[value(name = "msdd")]
     Msdd,
-    /// Sortformer. Not the engine humm runs.
+    /// Sortformer.
     #[value(name = "sortformer")]
     Sortformer,
 }
@@ -133,16 +135,16 @@ pub struct AddArgs {
     #[arg(short = 'e', long = "extract-speech")]
     pub extract_speech: bool,
 
-    /// Identify speakers in the audio. Buzz `8d0812a`.
+    /// Identify speakers with the local diarizer after transcription.
     #[arg(long = "identify-speakers")]
     pub identify_speakers: bool,
 
-    /// Number of speakers. Implies `--identify-speakers`. Buzz `cli.py`.
+    /// Number of speakers. Rejected: the diarizer takes audio only.
     #[arg(long = "speaker-count", value_name = "count")]
     pub speaker_count: Option<i32>,
 
-    /// Speaker diarizer. Allowed: `msdd`, `sortformer`. Implies
-    /// `--identify-speakers`. Default when the flag is passed: `msdd`.
+    /// Speaker diarizer (`msdd` or `sortformer`). Rejected: those algorithms
+    /// are not ported. `--identify-speakers` uses the PCM diarizer instead.
     #[arg(long = "speaker-diarizer", value_name = "diarizer", value_enum)]
     pub speaker_diarizer: Option<SpeakerDiarizerArg>,
 
@@ -185,6 +187,7 @@ pub struct AddArgs {
     pub files: Vec<String>,
 }
 
+#[cfg(test)]
 impl AddArgs {
     /// True when any speaker flag is set. `--speaker-count` and
     /// `--speaker-diarizer` imply `--identify-speakers` (Buzz `cli.py`).

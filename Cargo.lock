@@ -2646,6 +2646,7 @@ dependencies = [
  "ctrlc",
  "flume",
  "humm-core",
+ "humm-diarize",
  "humm-media",
  "humm-store",
  "humm-whisper",
