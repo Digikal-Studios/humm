@@ -173,6 +173,16 @@ Read-only notes from the later passes live in the project store (`internal/audit
 
 `cargo test --workspace` was not started. Do not treat the Linux stop as a product failure and do not drop `coreml` to make this VM pass.
 
+## Remaining gaps against Buzz `origin/main`
+
+Read at `298dbf003505cf945bdfd1eb8e705348b59a5b34` (`git fetch` of `/tmp/audit-sources/buzz`, then `git fetch --deepen=80 origin main` so `aaf98634` is an ancestor). These are behavior gaps humm does not already handle. Not implemented here.
+
+- Folder watch transcribes a file as soon as it is seen. Buzz `40f6a78` waits until size and mtime are unchanged for `settle_seconds = 30` (`buzz/widgets/transcription_task_folder_watcher.py`). humm `crates/humm-core/src/folderwatch.rs` `scan` plus `crates/humm-gui/src/folder_watch.rs` enqueue on the first sighting. A copy onto a network share can be queued before the file is finished.
+- Skip-already-transcribed does not match a URL task by its URL. Buzz `bc2882b` looks up a completed row by URL (`buzz/plugins/skip_already_transcribed/plugin.py` `_find_db_segments_by_url`). humm `crates/humm-core/src/postproc/skip.rs` has no URL lookup. P-006 left skip on `source.<ext>`, which matched Buzz before that commit.
+- The CLI has no speaker-identification flags. Buzz `8d0812a` added them in `buzz/cli.py`. `crates/humm-cli/src` has no speaker-identification option.
+
+Checked and already handled, so not filed again: multi-file CLI (`humm-cli` `run.rs` loops `args.files`; Buzz `2af05d4`), dangling folder-watch paths (`folderwatch.rs` drops a failed `metadata`), download progress when the total is missing (`humm-media` `fetch.rs`), the resizer's `/100` vs `/1000` conversion (humm does not do that division; Buzz `c6c0a69`), the Qt preferences minimum height (Buzz `298dbf0`), and whisper-server `--host 0.0.0.0` (Buzz `4e3eb63`; humm does not spawn that server). Parakeet (`98b7993`) is the transformers backend, which is not ported. Multiple custom models stay deferred (P-008). FunASR stays the named exception (P-009).
+
 ## Combined lib check
 
 Product tree at `1bfd98699dd015ca02c57266d75779a28e905f07`. These runs were on that tree plus the docs-only `c100d996153508f0097f48e26b574f6e5615b2d4` (`docs/review/patch-review-p003.md` only). `cargo +stable test -p humm-core --lib`: 857 passed, 0 failed, 2 ignored. `cargo +stable test -p humm-whisper --lib`: 37 passed, 0 failed, 0 ignored. `humm-gui` was not run (`speakrs` `coreml` does not compile on Linux; `coreml` was not disabled). `humm-media --lib` was not repeated.
