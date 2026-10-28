@@ -187,3 +187,62 @@ Overlooked on purpose, and not cleared by this review: the Buzz subjects the led
 Unjustified priority: F-010 and F-011 are scope decisions already recorded in ADR-008 / Q-2. Medium severity next to F-007 (files the user cannot import) overstates them. P-008 and P-009 are correctly kept off the CVE patch. They should not jump the unread Buzz fixes if someone later ranks work by the finding table alone.
 
 `cargo test` was not run. The speakrs `coreml` stop on this Linux VM is an environment limit, not a product defect, and it does not affect `humm-core` or `humm-whisper` unit tests.
+
+## Second pass — `d76cd1c`
+
+Reviewed only the revised text in `docs/review/ledger.md` at `d76cd1c3d7ddcfe5206c6e55fa9d8e1cc4f827c4`. Product code is still `125a54da`. The accepted implementations (P-001, P-002, P-004, P-005, P-009, P-011) were not re-reviewed. This section supersedes the first-pass rows for P-003, P-006, P-007, P-008, P-010, and P-012.
+
+| ID | Disposition | Earlier blocking points |
+|---|---|---|
+| P-003 | revise | Drop-after-exit and the handler hang are resolved. The new acceptance is not. |
+| P-006 | revise | Export stem, GUI label, CLI URL label, and the second `--print` are resolved. The title is still an unsanitized path segment. |
+| P-007 | accept | Resolved. No material objection. |
+| P-008 | defer | Resolved. No material objection to staying deferred. |
+| P-010 | accept | Resolved. No material objection. |
+| P-012 | revise | The 416 rule, malformed JSON, named CoreML degrade, and the M1 reversal are in the design. The verification contradicts the 416 rule. |
+
+### P-003 — revise
+
+The two earlier blockers are resolved in the design. Explicit delete before `process::exit` is the right answer to `TempAudioGuard` and the demucs `TempDir`, because `exit` still will not run `Drop`. `Atomic` slots or `try_lock` then exit 130 is the right answer to the handler hang. Signaling only an unreaped child, not joining, and leaving the first signal as `cancel_all` stay correct. `decode.rs`, `encode.rs`, and `video.rs` staying on `child.kill()` is still right.
+
+The new acceptance is wrong for one existing contract. It says the denoised path is gone after the second SIGINT. `TempAudioGuard` does not delete that path when `keep_denoised_file` is set (`queue.rs`, and `denoised_output_kept_when_keep_denoised_file_set`). That file is the artifact the user asked to keep, beside the input, not a scratch file. A second Ctrl-C after denoise has finished and while transcription is still running would remove it. An implementation that respects the setting fails this acceptance; an implementation that satisfies the acceptance breaks the setting.
+
+Revise the acceptance: `_speech` and the demucs scratch directory are gone; a denoised file is gone only when `keep_denoised_file` is false. Do not register the user's source path. `SIGKILL` the group before deleting, so a live child cannot recreate the file, and do not wait for it. Temp-path deletion is not unix-only. When the registry lock is busy, exiting 130 without cleanup is the tradeoff the design already accepts.
+
+### P-006 — revise
+
+The earlier blockers are resolved. One stdout record, not a second `--print` on the path line, stops the parser from taking the title as the path (`fetch.rs` keeps the last non-progress line). `set_task_name` (or equivalent) fixes the GUI, because `display_name_for` is `name`, else the file basename. Leaving the CLI label as `Input::display_name` (the URL) is the current behavior, not a regression. Using the title for `{{ input_file_name }}` on a URL task is the Buzz `display_name` choice, and a queue or pipeline test can catch a fix that only updates the GUI.
+
+`SqliteStore::set_task_name` is not on `TaskStore`. The queue holds `dyn TaskStore`. "Or equivalent" covers adding a trait method. That is not a new design.
+
+What is still wrong: the title is not a filename. `output_file_path` does `directory.join(file_name)` with the stem interpolated raw (`export/mod.rs`). A title `AC/DC` or `../x` becomes another path component. Buzz runs that string through `safe_filename_component` (`paths.py`) immediately after choosing `display_name or basename`: `/` and `\` become `_`, and a trailing space or dot becomes `#`. humm has no equivalent. The acceptance title is one that ends in `.` or ` `, checked against the download path. The default export template appends more text and an extension, so that title does not prove the export path is safe. A slash passes the written acceptance and writes outside the intended directory.
+
+Revise: the GUI `name` is the raw title; the export component is that title after the same sanitizer. Add a title containing `/` or `..` to the export assertion.
+
+Nonblocking: `check_skip` / `stem_for` uses `job.input`. After this change that file is `source.<ext>`, so skip looks for `source*` and will not see a title-named export. Buzz has the same split (`audio.wav` versus `display_name`). Say so, or point skip at the sanitized title. The written acceptance does not run skip.
+
+### P-007 — accept
+
+No material objection. The earlier blocker is resolved.
+
+The fallback is only the final flush. `trim_end_matches('\u{FFFD}')` then `trim` is `rstrip("\ufffd").strip()` (`whisper_cpp.py` line 391). `b"\xffhello"` stays `"\u{FFFD}hello"`. A bad buffer flushed because the next token starts with `b" "` stays dropped (lines 374 and 380 ignore the `False`). `flush_complete_chars` is untouched. One test with those three cases fails a global strip inside every `append_word`. That is the check the first design lacked.
+
+### P-008 — defer
+
+No material objection. The deferral now includes the constraint that mattered: humm's file stays `ggml-custom.bin`, Buzz's legacy name `ggml-model-whisper-custom.bin` is not a rename target, and a later design has to re-read `whisper_cpp_custom_models.py` (including `source_url`). ADR-008's one slot stands. Not part of this patch set.
+
+### P-010 — accept
+
+No material objection. The earlier blocker is resolved.
+
+The design keeps v1.4.5 `aaf98634` as the inventory's written tree, names `298dbf003505cf945bdfd1eb8e705348b59a5b34` as the behavior target, says the bodies were not re-read, and refuses to restamp "verified against v1.4.5" lines. Feature rows stay. `scripts/ci_prepare.py` stays, which is right because the two fixture blobs match `298dbf0`.
+
+Nonblocking: the sentence has to be added in `FEATURE_INVENTORY.md` and `EXTERNAL_SURFACE.md`, beside the existing ground-truth lines. A sentence that exists only in this ledger leaves those files saying they are the v1.4.5 ground truth. "Not a header swap" means do not replace that line with `298dbf0` alone.
+
+### P-012 — revise
+
+Three of the four earlier points are resolved in the design body. Lookup `Err` fails the ensure and does not delete a complete partial. `verify_partial_is_complete` must not treat that `Err` as `RestartFresh`. A parsed tree with no `lfs.oid` still promotes, which keeps the diarization sidecar and custom URLs (`sha_repo: None`) on the old path. A 200 body that does not parse is `Err`, so `find_sha256`'s `serde_json::from_str(...).ok()?` cannot stay as it is. The M1 sentence ("If the API call fails, log a warning and skip verification") is called out as a deliberate reversal. CoreML `ModelError::Http` still degrades and does not fail the ggml ensure. That last sentence is the right resolution of the earlier point: the defect was a design that claimed a failed ensure while `coreml_failure_action` degrades. Degrade itself matches the existing transport policy. Do not fail the ggml model because the encoder's digest lookup failed.
+
+The verification undoes the 416 fix. `ensure_coreml_encoder_416_after_restart_errors_without_looping` still asserts that a tree-API 404 discards the partial and issues a second, non-ranged file GET (`download.rs`, two `zip_requests`, the second with `range.is_none()`). The proposal says that test still passes, and also says `Err` must not restart fresh. Both cannot be true. Update the test: one ranged probe, no second body download, partial still present.
+
+"A single file GET" across two `ensure_artifact` calls is the other trap. A correct second attempt can `Range: bytes=<len>-`, get 416, see the lookup fail, and return without `download_fresh`. That is a second GET to the file URL and zero extra body bytes. A test that counts every GET rejects that and pushes the implementation into skipping resume entirely. Count body downloads, or assert the partial's bytes are unchanged and no non-ranged GET follows the 416. When a later lookup succeeds, `Some(true)` must still promote that same partial. The design does not say to change that arm. Leave it.
