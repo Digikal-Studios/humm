@@ -674,6 +674,11 @@ pub trait TaskStore: Send + Sync {
         name: &str,
     ) -> Result<Option<TranscriptionId>, StoreError>;
 
+    /// Newest `completed` task whose `url` column equals `url`. Used when a
+    /// URL download's local file is `source.<ext>` and the basename cannot
+    /// identify the source (Buzz `bc2882b`, `_find_db_segments_by_url`).
+    fn find_completed_by_url(&self, url: &str) -> Result<Option<TranscriptionId>, StoreError>;
+
     /// Fetches every persisted segment for `id`, in insertion order — the
     /// trait-level counterpart of `SqliteStore::get_segments`, used by the
     /// same F-115 database check to copy a prior completed transcription's

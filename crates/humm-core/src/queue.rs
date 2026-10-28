@@ -1380,6 +1380,10 @@ impl Runner {
                 &job.input,
                 job.output.directory.as_deref(),
                 self.store.as_ref(),
+                match &spec.input {
+                    Input::Url(url) => Some(url.as_str()),
+                    Input::Path(_) => None,
+                },
             )
         {
             return Terminal::Skipped(segments);
@@ -2217,6 +2221,10 @@ mod tests {
         ) -> Result<Option<TranscriptionId>, StoreError> {
             // No queue-level test exercises the DB-check path (that's
             // `postproc::skip`'s own unit tests) — always "no match".
+            Ok(None)
+        }
+
+        fn find_completed_by_url(&self, _url: &str) -> Result<Option<TranscriptionId>, StoreError> {
             Ok(None)
         }
 

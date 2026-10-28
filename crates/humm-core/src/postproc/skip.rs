@@ -41,7 +41,18 @@ pub fn check(
     input_path: &Path,
     output_dir: Option<&Path>,
     store: &dyn TaskStore,
+    source_url: Option<&str>,
 ) -> Option<Vec<Segment>> {
+    // A URL download is `source.<ext>`. That name matches unrelated files, so
+    // only the stored URL identifies it (Buzz `bc2882b`). Result-file search
+    // is not used for a URL.
+    if let Some(url) = source_url {
+        if !settings.check_database {
+            return None;
+        }
+        return find_db_segments_by_url(url, store);
+    }
+
     if settings.check_result_files
         && let Some(segments) = find_result_file_segments(input_path, output_dir)
     {
@@ -317,6 +328,18 @@ fn ts_to_ms(ts: &str) -> Option<i64> {
 /// with no third field, `plugin.py:170-174`). A missing basename, no match,
 /// or any store error is a miss (Buzz's broad `except Exception`,
 /// `plugin.py:175-177`) — logged at `warn`, never surfaced as a failure.
+fn find_db_segments_by_url(url: &str, store: &dyn TaskStore) -> Option<Vec<Segment>> {
+    let id = match store.find_completed_by_url(url) {
+        Ok(Some(id)) => id,
+        Ok(None) => return None,
+        Err(err) => {
+            log::warn!("skip_already_transcribed: URL DB check failed: {err}");
+            return None;
+        }
+    };
+    load_segments(store, &id)
+}
+
 fn find_db_segments(input_path: &Path, store: &dyn TaskStore) -> Option<Vec<Segment>> {
     let name = input_path.file_name()?.to_string_lossy().into_owned();
     let id = match store.find_completed_by_file_name(&name) {
@@ -327,7 +350,14 @@ fn find_db_segments(input_path: &Path, store: &dyn TaskStore) -> Option<Vec<Segm
             return None;
         }
     };
-    match store.segments_for(&id) {
+    load_segments(store, &id)
+}
+
+fn load_segments(
+    store: &dyn TaskStore,
+    id: &crate::domain::TranscriptionId,
+) -> Option<Vec<Segment>> {
+    match store.segments_for(id) {
         Ok(segments) => Some(
             segments
                 .into_iter()
@@ -361,6 +391,7 @@ mod tests {
     #[derive(Default)]
     struct FakeStore {
         found: Option<TranscriptionId>,
+        found_url: Option<TranscriptionId>,
         segments: Vec<Segment>,
         find_fails: bool,
         segments_fail: bool,
@@ -438,6 +469,16 @@ mod tests {
                 })
             } else {
                 Ok(self.found)
+            }
+        }
+
+        fn find_completed_by_url(&self, _url: &str) -> Result<Option<TranscriptionId>, StoreError> {
+            if self.find_fails {
+                Err(StoreError::Query {
+                    detail: "boom".to_string(),
+                })
+            } else {
+                Ok(self.found_url)
             }
         }
 
@@ -644,7 +685,7 @@ mod tests {
         std::fs::write(tmp.path().join("clip.txt"), "would have hit").expect("write txt");
 
         let settings = enabled_skip(false, false);
-        let result = check(&settings, &input, None, &never_touched_store());
+        let result = check(&settings, &input, None, &never_touched_store(), None);
         assert_eq!(result, None);
     }
 
@@ -663,7 +704,7 @@ mod tests {
         // No result file planted, and check_database is off: no hit at all,
         // and the DB is never consulted (asserted implicitly - `found` above
         // would otherwise produce a hit).
-        let result = check(&settings, &input, None, &store);
+        let result = check(&settings, &input, None, &store, None);
         assert_eq!(result, None);
     }
 
@@ -686,7 +727,7 @@ mod tests {
             ..FakeStore::default()
         };
         let settings = enabled_skip(false, true);
-        let result = check(&settings, &input, None, &store).expect("db hit expected");
+        let result = check(&settings, &input, None, &store, None).expect("db hit expected");
         assert_eq!(result, vec![seg(0, 1000, "db text")]);
     }
 
@@ -701,7 +742,7 @@ mod tests {
             ..FakeStore::default()
         };
         let settings = enabled_skip(false, true);
-        assert_eq!(check(&settings, &input, None, &store), None);
+        assert_eq!(check(&settings, &input, None, &store, None), None);
     }
 
     // -- store-error tolerance ----------------------------------------------
@@ -717,7 +758,7 @@ mod tests {
             ..FakeStore::default()
         };
         let settings = enabled_skip(false, true);
-        assert_eq!(check(&settings, &input, None, &store), None);
+        assert_eq!(check(&settings, &input, None, &store, None), None);
     }
 
     #[test]
@@ -732,7 +773,7 @@ mod tests {
             ..FakeStore::default()
         };
         let settings = enabled_skip(false, true);
-        assert_eq!(check(&settings, &input, None, &store), None);
+        assert_eq!(check(&settings, &input, None, &store, None), None);
     }
 
     // -- result-file hit falls through to DB check when files miss --------
@@ -750,7 +791,42 @@ mod tests {
             ..FakeStore::default()
         };
         let settings = enabled_skip(true, true);
-        let result = check(&settings, &input, None, &store).expect("db fallback hit expected");
+        let result =
+            check(&settings, &input, None, &store, None).expect("db fallback hit expected");
         assert_eq!(result, vec![seg(0, 500, "from db")]);
+    }
+
+    #[test]
+    fn url_task_matches_the_stored_url_not_the_download_name() {
+        let store = FakeStore {
+            found: Some(TranscriptionId::new()),
+            found_url: Some(TranscriptionId::new()),
+            segments: vec![seg(0, 1000, "from the url")],
+            ..FakeStore::default()
+        };
+        let settings = enabled_skip(true, true);
+        let downloaded = Path::new("/tmp/media/source.mp3");
+        let hit = check(
+            &settings,
+            downloaded,
+            None,
+            &store,
+            Some("https://example.com/watch?v=1"),
+        )
+        .expect("url hit");
+        assert_eq!(hit, vec![seg(0, 1000, "from the url")]);
+
+        let files_only = enabled_skip(true, false);
+        assert_eq!(
+            check(
+                &files_only,
+                downloaded,
+                None,
+                &store,
+                Some("https://example.com/watch?v=1"),
+            ),
+            None,
+            "a URL task does not fall through to result files"
+        );
     }
 }

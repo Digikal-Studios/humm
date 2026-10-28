@@ -359,6 +359,10 @@ mod tests {
             unreachable!("run() never looks up completed tasks by name")
         }
 
+        fn find_completed_by_url(&self, _url: &str) -> Result<Option<TranscriptionId>, StoreError> {
+            unreachable!("run() never looks up completed tasks by url")
+        }
+
         fn segments_for(&self, _id: &TranscriptionId) -> Result<Vec<Segment>, StoreError> {
             unreachable!("run() is handed its segments directly")
         }
