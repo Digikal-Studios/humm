@@ -75,6 +75,7 @@ Buzz exposes five backends (`FEATURE_INVENTORY.md` F-040/F-041). humm ships **tw
 - **CTranslate2/faster-whisper: not ported** (Standing Policy directive).
 - openai-whisper (.pt) and in-process HF Transformers: superseded — same user outcome (local Whisper inference) served faster by whisper-rs; ggml model set covers all Buzz sizes incl. lumii + custom (F-042).
 - Custom HF Whisper-family repos: supported by fetching/converting ggml equivalents (approved Q-2). **Non-Whisper HF models (MMS/wav2vec2): out of scope** (approved Q-2); the MMS ISO-639-3 language UI is therefore dropped.
+- **FunASR: named exception, not implemented.** Buzz `main` `298dbf003505cf945bdfd1eb8e705348b59a5b34` transcribes FunASR models from `buzz/transformers_whisper.py` (`is_funasr_model`, commit `851c8b3593`). That post-dates the Q-2 approval. humm does not add a FunASR engine. The Q-2 / non-Whisper cut still applies; see `docs/OPEN_QUESTIONS.md` Q-2.
 - Live whisper.cpp: in-process via whisper-rs streaming — **no `whisper-server` subprocess** (Buzz's localhost:3003 hack disappears; hallucination guards become native params).
 
 **Custom-model mechanics (M2 Task 8, F-042 full — the concrete `resolve_hf_repo`/`ensure_custom_model` behavior the paragraph above summarizes):**
