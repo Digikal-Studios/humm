@@ -50,7 +50,7 @@ Confirmed gaps: #1595, #1602, #1614, #1651, #1660, #1674. Confirmed already alig
 
 ## Proposals
 
-Review `a329e4e` accepted P-001, P-002, P-004, P-005, P-009, and P-011. Second pass `95cda13` accepted P-007 and P-010. Those are implemented. P-011 is a non-change. P-003 is implemented. P-006 is implemented below. P-012 is revised below and not implemented. P-008 stays deferred: `ggml-custom.bin` is not renamed. The revised text has not been re-reviewed.
+Review `a329e4e` accepted P-001, P-002, P-004, P-005, P-009, and P-011. Second pass `95cda13` accepted P-007 and P-010. Those are implemented. P-011 is a non-change. P-003 is implemented. P-006 and P-012 are implemented below. P-008 stays deferred: `ggml-custom.bin` is not renamed. The revised text has not been re-reviewed.
 
 ### P-001 — confine zip 8.6.0 symlink extraction (implemented)
 
@@ -128,7 +128,12 @@ Review `a329e4e` accepted P-001, P-002, P-004, P-005, P-009, and P-011. Second p
 
 - No `crates/humm-media` diff. `UBUNTU-CVE-2024-32228` and `UBUNTU-CVE-2025-59734` stay recorded as unconfirmed host advisories for ffmpeg `6.1.1-3ubuntu5`. The 2024 summary names FFmpeg 7.0. Neither bug was reproduced. F-013 is not a demonstrated defect on this build. An argv or codec allowlist is still rejected.
 
-### P-012 — fail closed on a digest lookup error, without a re-download loop (revised, not implemented)
+### P-012 — fail closed on a digest lookup error, without a re-download loop (implemented)
+
+- Implemented. A digest lookup `Err` leaves the partial in place and does not fetch the body again. `Ok(None)` (no `sha_repo`, or a parsed tree with no `lfs.oid`) still finishes; a 416 in that case may `RestartFresh`. `Some(false)` may delete. Malformed tree JSON is `Err`. A CoreML lookup `Http` still degrades. This reverses the M1 "log and skip" branch for a failed API call only (`docs/superpowers/plans/2026-07-20-m1-headless-core-path.md`).
+- `cargo +stable test -p humm-core --lib models::download::` — 49 passed, 0 failed. The old `ensure_coreml_encoder_416_after_restart_errors_without_looping` assertion (delete and re-download on every 416) is gone.
+
+### P-012 — design (revised, then implemented)
 
 - Objective: do not promote a model file when its digest lookup fails, and do not delete a complete partial and download it again on the next attempt.
 - Findings: F-014

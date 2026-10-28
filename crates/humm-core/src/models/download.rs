@@ -335,9 +335,8 @@ impl ModelDownloader {
     /// same `tree/main` API the whisper.cpp/VAD downloads already use
     /// (confirmed against the real HuggingFace API while implementing this);
     /// the tenth (a 4-byte, non-LFS text file) has none, and
-    /// [`Self::verify_or_warn`]'s existing "no digest published, skip
-    /// verification" fallback already handles that — no special-casing
-    /// needed here.
+    /// [`Self::verify_or_warn`] still promotes that `Ok(None)`. A lookup
+    /// error does not: the partial stays and the ensure fails.
     ///
     /// No cross-file progress aggregation: `progress` receives one
     /// [`DownloadProgress`] sequence per file (its `file` field names which
@@ -517,12 +516,11 @@ impl ModelDownloader {
     /// Recovers from an HTTP 416 on a resume request (see
     /// [`Self::download_and_verify`]).
     ///
-    /// If a digest is obtainable and the `.partial` matches it, promote the
-    /// `.partial` in place (rename only — no sentinel; see
-    /// [`Self::download_and_verify`]) — no re-download. Otherwise (no digest
-    /// obtainable, or a mismatch) discard the `.partial` and download fresh
-    /// exactly once, so a stale or corrupt `.partial` can never wedge the
-    /// download in a permanent 416 loop. Shared verbatim by the ggml/VAD path
+    /// If a digest matches, promote the `.partial` in place (rename only —
+    /// no sentinel; see [`Self::download_and_verify`]). A mismatch, or no
+    /// digest at all, discards the `.partial` and downloads fresh once. A
+    /// digest-lookup error does neither: it returns before the delete, and
+    /// the partial stays for a later lookup. Shared by the ggml/VAD path
     /// and the CoreML zip path (`F-043` ticket b).
     fn recover_from_range_not_satisfiable(
         &self,
@@ -535,6 +533,8 @@ impl ModelDownloader {
         let file_name = file_name_of(final_path);
         let partial_path = partial_path_for(final_path);
 
+        // A lookup error is not "no digest". Propagate it before any delete
+        // or fresh GET so the partial stays for a later successful lookup.
         let verified_complete =
             self.verify_partial_is_complete(sha_repo, &file_name, &partial_path)?;
 
@@ -553,10 +553,10 @@ impl ModelDownloader {
     /// Attempts to verify the `.partial` at `partial_path` as a complete
     /// artifact against its upstream digest, for 416 recovery. Returns
     /// `Some(true)` if a published digest matches, `Some(false)` on mismatch,
-    /// and `None` when verification is impossible (no `sha_repo`, no digest
-    /// published, or the digest lookup failed as a transport error — an
-    /// unverifiable partial is restarted fresh, never trusted). A local I/O
-    /// error while hashing propagates.
+    /// and `Ok(None)` when there is nothing to check (`sha_repo` absent, or a
+    /// parsed tree with no `lfs.oid`). A digest-lookup error is returned as
+    /// `Err` and must not be treated as "restart fresh": the caller keeps the
+    /// partial. A local I/O error while hashing propagates.
     fn verify_partial_is_complete(
         &self,
         sha_repo: Option<&str>,
@@ -566,12 +566,12 @@ impl ModelDownloader {
         let Some(repo) = sha_repo else {
             return Ok(None);
         };
-        match self.expected_sha256(repo, file_name) {
-            Ok(Some(expected)) => {
+        match self.expected_sha256(repo, file_name)? {
+            Some(expected) => {
                 let actual = sha256_file(partial_path)?;
                 Ok(Some(actual == expected))
             }
-            Ok(None) | Err(_) => Ok(None),
+            None => Ok(None),
         }
     }
 
@@ -663,10 +663,16 @@ impl ModelDownloader {
     }
 
     /// Fetches the expected SHA256 for `file_name` from `repo`'s HF tree
-    /// API, hashes `partial_path`, and compares. `Ok(None)`/`Err` from the
-    /// lookup are logged and treated as "skip verification" — Buzz only
-    /// verifies "where upstream provides digests" (F-043). A mismatch
-    /// deletes both the partial and (if present) the final path.
+    /// API, hashes `partial_path`, and compares.
+    ///
+    /// `Ok(None)` — a parsed tree with no `lfs.oid` — still skips
+    /// verification and lets the caller rename the partial. That is the M1
+    /// rule for a file upstream does not digest (`docs/superpowers/plans/2026-07-20-m1-headless-core-path.md`).
+    /// A lookup `Err` does not: the partial stays, and this returns the
+    /// error instead of renaming. That reverses the M1 "log and skip" branch
+    /// for a failed API call, so a digest outage cannot promote an unchecked
+    /// file or delete it and fetch the body again. A mismatch still deletes
+    /// the partial and the final path.
     fn verify_or_warn(
         &self,
         repo: &str,
@@ -692,9 +698,9 @@ impl ModelDownloader {
             }
             Err(e) => {
                 log::warn!(
-                    "could not fetch SHA256 digest for {file_name} ({e}); skipping verification"
+                    "could not fetch SHA256 digest for {file_name} ({e}); leaving the partial in place"
                 );
-                Ok(())
+                Err(e)
             }
         }
     }
@@ -714,7 +720,9 @@ impl ModelDownloader {
         let text = response.text().map_err(|e| ModelError::Http {
             detail: e.to_string(),
         })?;
-        Ok(find_sha256(&text, file_name))
+        find_sha256(&text, file_name).map_err(|err| ModelError::Http {
+            detail: format!("{url}: malformed tree response: {err}"),
+        })
     }
 
     /// `GET {hf_base}/api/models/{repo}` (the Hugging Face Hub repo-info API,
@@ -953,11 +961,13 @@ enum RangeRecovery {
     RestartFresh,
 }
 
-/// Decides how to recover from a 416 given the `.partial` verification result:
-/// `Some(true)` (verified complete) promotes it; `Some(false)` (mismatch) and
-/// `None` (no digest obtainable) both restart fresh. There is deliberately no
-/// "loop on 416" outcome, so a completed-but-unrenamed or stale `.partial`
-/// cannot wedge the download permanently.
+/// Decides how to recover from a 416 given the `.partial` verification result.
+///
+/// `Some(true)` promotes. `Some(false)` (mismatch) restarts fresh and may
+/// delete the partial. `None` is "no digest" (`sha_repo` absent, or a parsed
+/// tree with no `lfs.oid`), not a lookup failure: it also restarts fresh so
+/// that partial can still be replaced by a full GET and the download can
+/// finish. A lookup error never reaches this function.
 fn on_range_not_satisfiable(verified_complete: Option<bool>) -> RangeRecovery {
     match verified_complete {
         Some(true) => RangeRecovery::Promote,
@@ -1042,13 +1052,16 @@ struct HfSibling {
 
 /// Parses a HuggingFace `tree/main` API JSON array, returning the `lfs.oid`
 /// (SHA256) for the entry whose `path` matches `file_name`, if any.
-fn find_sha256(tree_json: &str, file_name: &str) -> Option<String> {
-    let entries: Vec<HfTreeEntry> = serde_json::from_str(tree_json).ok()?;
-    entries
+///
+/// A body that is not that JSON array is an error. A parsed tree whose
+/// entry has no `lfs.oid` is `Ok(None)`.
+fn find_sha256(tree_json: &str, file_name: &str) -> Result<Option<String>, serde_json::Error> {
+    let entries: Vec<HfTreeEntry> = serde_json::from_str(tree_json)?;
+    Ok(entries
         .into_iter()
         .find(|entry| entry.path == file_name)
         .and_then(|entry| entry.lfs)
-        .map(|lfs| lfs.oid)
+        .map(|lfs| lfs.oid))
 }
 
 /// Extracts the zip archive at `zip_path` into `dest` (must exist).
@@ -1411,10 +1424,11 @@ mod tests {
     }
 
     #[test]
-    fn on_range_not_satisfiable_restarts_on_mismatch_or_unverifiable() {
-        // Mismatch (corrupt/stale partial) and "no digest obtainable" both
-        // discard and restart fresh — never trust an unverified partial, and
-        // never loop on 416.
+    fn on_range_not_satisfiable_restarts_on_mismatch_or_no_digest() {
+        // A mismatch may delete and download again. No digest (`None`) may
+        // too: banning that restart leaves a no-digest partial unable to
+        // finish. A lookup error is not `None`; it never reaches this
+        // function.
         assert_eq!(
             on_range_not_satisfiable(Some(false)),
             RangeRecovery::RestartFresh
@@ -1505,7 +1519,7 @@ mod tests {
     fn find_sha256_locates_matching_entry() {
         let json = r#"[{"path":"ggml-tiny.bin","lfs":{"oid":"abcdef1234567890"}}]"#;
         assert_eq!(
-            find_sha256(json, "ggml-tiny.bin"),
+            find_sha256(json, "ggml-tiny.bin").unwrap(),
             Some("abcdef1234567890".to_string())
         );
     }
@@ -1513,18 +1527,18 @@ mod tests {
     #[test]
     fn find_sha256_none_when_file_not_in_tree() {
         let json = r#"[{"path":"ggml-tiny.bin","lfs":{"oid":"abcdef1234567890"}}]"#;
-        assert_eq!(find_sha256(json, "ggml-small.bin"), None);
+        assert_eq!(find_sha256(json, "ggml-small.bin").unwrap(), None);
     }
 
     #[test]
     fn find_sha256_none_when_entry_has_no_lfs() {
         let json = r#"[{"path":"README.md"}]"#;
-        assert_eq!(find_sha256(json, "README.md"), None);
+        assert_eq!(find_sha256(json, "README.md").unwrap(), None);
     }
 
     #[test]
-    fn find_sha256_none_on_malformed_json() {
-        assert_eq!(find_sha256("not json", "ggml-tiny.bin"), None);
+    fn find_sha256_errors_on_malformed_json() {
+        assert!(find_sha256("not json", "ggml-tiny.bin").is_err());
     }
 
     /// Builds an in-memory zip containing `__MACOSX/junk` (a macOS metadata
@@ -1899,18 +1913,19 @@ mod tests {
         );
     }
 
-    /// Ticket b (continued): if the restart-fresh attempt *also* gets a 416,
-    /// the result must be a hard error — never a second recovery attempt
-    /// (no infinite 416 loop).
+    /// A 416 while the digest lookup is failing keeps the partial. The
+    /// ranged probe is allowed again on the next call. No non-ranged body
+    /// GET follows. When a later lookup matches, that same partial is
+    /// promoted.
     #[test]
-    fn ensure_coreml_encoder_416_after_restart_errors_without_looping() {
+    fn ensure_coreml_encoder_416_on_digest_lookup_error_keeps_the_partial() {
         let dir = tempfile::tempdir().expect("tempdir");
         let size = ModelSize::Small;
+        let repo = repo_for(size).unwrap();
 
         let zip_bytes = build_test_zip();
-        let zip_path = dir
-            .path()
-            .join(format!("ggml-{}-encoder.mlmodelc.zip", size.ggml_name()));
+        let zip_file_name = format!("ggml-{}-encoder.mlmodelc.zip", size.ggml_name());
+        let zip_path = dir.path().join(&zip_file_name);
         let partial_zip_path = partial_path_for(&zip_path);
         std::fs::write(&partial_zip_path, &zip_bytes).expect("write partial");
 
@@ -1918,18 +1933,17 @@ mod tests {
         let base = server.base_url();
         let zip_url = registry::coreml_zip_url_with_base(&base, size).unwrap();
         let zip_url_path = path_of(&zip_url);
-        // No tree-api route registered, so the digest lookup 404s and the
-        // partial is treated as unverifiable — recovery discards it and
-        // restarts fresh exactly once. Every request to this path (ranged or
-        // not) gets 416, so that restart also fails.
         server.set_route(zip_url_path.clone(), Canned::forced_416());
+        let tree_url_path = path_of(&tree_api_url(&base, repo));
+        server.set_route(tree_url_path.clone(), Canned::status(500));
 
         let downloader = ModelDownloader::with_hf_base(dir.path(), base);
         let cancel = CancelToken::new();
         let err = downloader
             .ensure_coreml_encoder(size, &mut |_| {}, &cancel)
-            .expect_err("a second 416 after restart should error, not loop forever");
+            .expect_err("a digest lookup error must not promote the partial");
         assert!(matches!(err, ModelError::Http { .. }));
+        assert_eq!(std::fs::read(&partial_zip_path).unwrap(), zip_bytes);
         assert_eq!(coreml_state(dir.path(), size), CoremlState::Missing);
 
         let zip_requests: Vec<_> = server
@@ -1937,18 +1951,43 @@ mod tests {
             .into_iter()
             .filter(|r| r.path == zip_url_path)
             .collect();
-        assert_eq!(
-            zip_requests.len(),
-            2,
-            "expected exactly one ranged retry then one non-ranged restart, no more: {zip_requests:?}"
-        );
+        assert_eq!(zip_requests.len(), 1, "{zip_requests:?}");
+        assert!(zip_requests[0].range.is_some(), "{zip_requests:?}");
+
+        let err = downloader
+            .ensure_coreml_encoder(size, &mut |_| {}, &cancel)
+            .expect_err("a second lookup error still must not download the body");
+        assert!(matches!(err, ModelError::Http { .. }));
+        assert_eq!(std::fs::read(&partial_zip_path).unwrap(), zip_bytes);
+        let zip_requests: Vec<_> = server
+            .requests()
+            .into_iter()
+            .filter(|r| r.path == zip_url_path)
+            .collect();
+        assert_eq!(zip_requests.len(), 2, "{zip_requests:?}");
         assert!(
-            zip_requests[0].range.is_some(),
-            "first request should carry Range"
+            zip_requests.iter().all(|request| request.range.is_some()),
+            "both probes are ranged; neither is a fresh body GET: {zip_requests:?}"
         );
+
+        let tree_json = format!(
+            r#"[{{"path":"{zip_file_name}","lfs":{{"oid":"{}"}}}}]"#,
+            sha256_bytes(&zip_bytes)
+        );
+        server.set_route(tree_url_path, Canned::ok(tree_json.into_bytes()));
+        downloader
+            .ensure_coreml_encoder(size, &mut |_| {}, &cancel)
+            .expect("a later matching digest promotes the same partial");
+        assert_eq!(coreml_state(dir.path(), size), CoremlState::Complete);
+        assert!(!partial_zip_path.exists());
+        let zip_requests: Vec<_> = server
+            .requests()
+            .into_iter()
+            .filter(|r| r.path == zip_url_path)
+            .collect();
         assert!(
-            zip_requests[1].range.is_none(),
-            "restart-fresh request should carry no Range"
+            zip_requests.iter().all(|request| request.range.is_some()),
+            "promotion still must not fetch the body: {zip_requests:?}"
         );
     }
 
@@ -1969,6 +2008,13 @@ mod tests {
         server.set_route(
             zip_url_path.clone(),
             Canned::ok(b"not a real zip archive".to_vec()),
+        );
+        // No `lfs.oid`: the download still finishes, then extraction fails.
+        let repo = repo_for(size).unwrap();
+        let zip_file_name = format!("ggml-{}-encoder.mlmodelc.zip", size.ggml_name());
+        server.set_route(
+            path_of(&tree_api_url(&base, repo)),
+            Canned::ok(format!(r#"[{{"path":"{zip_file_name}"}}]"#).into_bytes()),
         );
 
         let downloader = ModelDownloader::with_hf_base(dir.path(), base);
@@ -2148,6 +2194,130 @@ mod tests {
         );
     }
 
+    /// No digest (`sha_repo` is `None`). A resume past EOF is a 416, then one
+    /// fresh GET finishes the file. Restarting that case stays allowed.
+    #[test]
+    fn ensure_custom_model_416_without_a_digest_downloads_fresh_and_finishes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let full_bytes = b"custom-model-bytes-for-a-416-restart".to_vec();
+        let server = TestServer::start();
+        let custom_path = "/someuser/somerepo/resolve/main/custom-model.bin";
+        server.set_route(custom_path, Canned::ok(full_bytes.clone()));
+        let url = format!("{}{custom_path}", server.base_url());
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), server.base_url());
+        let final_path = dir.path().join(registry::custom_model_file_name());
+        let partial_path = partial_path_for(&final_path);
+        let mut stale = full_bytes.clone();
+        stale.push(0xff);
+        std::fs::write(&partial_path, &stale).expect("seed a partial past EOF");
+
+        let cancel = CancelToken::new();
+        let path = downloader
+            .ensure_custom_model(&url, &mut |_| {}, &cancel)
+            .expect("a no-digest 416 must still finish");
+        assert_eq!(path, final_path);
+        assert_eq!(std::fs::read(&final_path).unwrap(), full_bytes);
+        assert!(sentinel_path_for(&final_path).is_file());
+        assert!(!partial_path.exists());
+
+        let requests: Vec<_> = server
+            .requests()
+            .into_iter()
+            .filter(|request| request.path == custom_path)
+            .collect();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert!(requests[0].range.is_some(), "{requests:?}");
+        assert!(requests[1].range.is_none(), "{requests:?}");
+    }
+
+    /// A published digest that does not match deletes the partial.
+    #[test]
+    fn ensure_ggml_checksum_mismatch_deletes_the_partial() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let size = ModelSize::Tiny;
+        let repo = repo_for(size).unwrap();
+        let bytes = b"ggml-bytes-that-will-not-match".to_vec();
+        let server = TestServer::start();
+        let base = server.base_url();
+        let ggml_url_path = path_of(&registry::ggml_url_with_base(&base, size).unwrap());
+        server.set_route(ggml_url_path, Canned::ok(bytes));
+        let file = ggml_file_name(size);
+        server.set_route(
+            path_of(&tree_api_url(&base, repo)),
+            Canned::ok(format!(r#"[{{"path":"{file}","lfs":{{"oid":"deadbeef"}}}}]"#).into_bytes()),
+        );
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), base);
+        let err = downloader
+            .ensure_ggml(size, &mut |_| {}, &CancelToken::new())
+            .expect_err("a mismatch must not promote");
+        assert!(matches!(err, ModelError::ChecksumMismatch { .. }));
+        let final_path = dir.path().join(file);
+        assert!(!final_path.exists());
+        assert!(!partial_path_for(&final_path).exists());
+    }
+
+    /// Malformed tree JSON is a lookup error: the partial stays, and it is
+    /// not renamed.
+    #[test]
+    fn ensure_ggml_malformed_digest_json_keeps_the_partial() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let size = ModelSize::Tiny;
+        let repo = repo_for(size).unwrap();
+        let bytes = b"ggml-bytes-with-a-bad-tree".to_vec();
+        let server = TestServer::start();
+        let base = server.base_url();
+        let ggml_url_path = path_of(&registry::ggml_url_with_base(&base, size).unwrap());
+        server.set_route(ggml_url_path.clone(), Canned::ok(bytes.clone()));
+        server.set_route(
+            path_of(&tree_api_url(&base, repo)),
+            Canned::ok(b"not json".to_vec()),
+        );
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), base);
+        let err = downloader
+            .ensure_ggml(size, &mut |_| {}, &CancelToken::new())
+            .expect_err("malformed JSON must not promote");
+        assert!(matches!(err, ModelError::Http { .. }));
+        let final_path = dir.path().join(ggml_file_name(size));
+        assert!(!final_path.exists());
+        assert_eq!(std::fs::read(partial_path_for(&final_path)).unwrap(), bytes);
+        let file_gets: Vec<_> = server
+            .requests()
+            .into_iter()
+            .filter(|request| request.path == ggml_url_path)
+            .collect();
+        assert_eq!(file_gets.len(), 1, "{file_gets:?}");
+        assert!(file_gets[0].range.is_none());
+    }
+
+    /// A CoreML digest lookup failure degrades; the ggml ensure still
+    /// succeeds.
+    #[test]
+    fn resolve_model_coreml_digest_lookup_error_degrades() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let size = ModelSize::Small;
+        let ggml_path = dir.path().join(ggml_file_name(size));
+        std::fs::write(&ggml_path, b"local ggml").expect("ggml");
+        std::fs::write(sentinel_path_for(&ggml_path), b"").expect("sentinel");
+
+        let server = TestServer::start();
+        let base = server.base_url();
+        let repo = repo_for(size).unwrap();
+        let zip_url_path = path_of(&registry::coreml_zip_url_with_base(&base, size).unwrap());
+        server.set_route(zip_url_path, Canned::ok(build_test_zip()));
+        server.set_route(path_of(&tree_api_url(&base, repo)), Canned::status(500));
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), base);
+        let resolved = downloader
+            .resolve_model(size, true, &mut |_| {}, &CancelToken::new())
+            .expect("a CoreML lookup error must not fail the ggml model");
+        assert_eq!(resolved.path, ggml_path);
+        assert!(resolved.coreml_degraded);
+        assert_eq!(coreml_state(dir.path(), size), CoremlState::Missing);
+    }
+
     /// F-087 (M8): all 10 diarization model files download and each gets its
     /// own completeness sentinel; a second call is a pure fast path (no
     /// further network requests at all — not even a sha-digest lookup, since
@@ -2167,6 +2337,19 @@ mod tests {
             let path = format!("/{}/resolve/main/{file_name}", registry::DIARIZE_MODEL_REPO);
             server.set_route(path, Canned::ok(format!("fake-bytes-{i}").into_bytes()));
         }
+        // Parsed tree, no `lfs.oid`: each file still promotes.
+        let tree = registry::DIARIZE_MODEL_FILES
+            .iter()
+            .map(|name| format!(r#"{{"path":"{name}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        server.set_route(
+            path_of(&tree_api_url(
+                &server.base_url(),
+                registry::DIARIZE_MODEL_REPO,
+            )),
+            Canned::ok(format!("[{tree}]").into_bytes()),
+        );
 
         let downloader = ModelDownloader::with_hf_base(dir.path(), server.base_url());
         let cancel = CancelToken::new();
@@ -2284,6 +2467,12 @@ mod tests {
         let base = server.base_url();
         let ggml_url_path = path_of(&registry::ggml_url_with_base(&base, size).unwrap());
         server.set_route(ggml_url_path.clone(), Canned::ok(ggml_bytes.clone()));
+        let repo = repo_for(size).unwrap();
+        let file = ggml_file_name(size);
+        server.set_route(
+            path_of(&tree_api_url(&base, repo)),
+            Canned::ok(format!(r#"[{{"path":"{file}"}}]"#).into_bytes()),
+        );
 
         let downloader = ModelDownloader::with_hf_base(dir.path(), base);
         let cancel = CancelToken::new();
