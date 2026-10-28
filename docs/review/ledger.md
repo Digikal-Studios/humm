@@ -155,7 +155,7 @@ Read-only notes from the later passes live in the project store (`internal/audit
 - Multiple custom models: implement P-008 or write the exception? Not blocked for the CVE and timestamp work.
 - Second Ctrl-C orphans: fix (P-003) or keep ADR-023's debt?
 - `UBUNTU-CVE-2024-32228` on ffmpeg 6.1.1 specifically: tracker says the Ubuntu 24.04 package is affected; the summary names 7.0. Not reproduced.
-- Uncompared Buzz commits in the list above. Do not file them as gaps without reading both sides.
+- Buzz commits after the v1.4.5 tag were read against `origin/main` `298dbf0`. Remaining gaps are in the section below. Do not re-file a commit from that section without a new source.
 - Clippy on this Linux VM stops at `speakrs`'s macOS-only `coreml` feature (ledger, Clippy status). Stable fmt passed. Do not disable `coreml` to get a green Linux log.
 
 ## Style notes kept out of the finding list
@@ -177,7 +177,7 @@ Read-only notes from the later passes live in the project store (`internal/audit
 
 Read at `298dbf003505cf945bdfd1eb8e705348b59a5b34` (`git fetch` of `/tmp/audit-sources/buzz`, then `git fetch --deepen=80 origin main` so `aaf98634` is an ancestor). These are behavior gaps humm does not already handle. Not implemented here.
 
-- Folder watch transcribes a file as soon as it is seen. Buzz `40f6a78` waits until size and mtime are unchanged for `settle_seconds = 30` (`buzz/widgets/transcription_task_folder_watcher.py`). humm `crates/humm-core/src/folderwatch.rs` `scan` plus `crates/humm-gui/src/folder_watch.rs` enqueue on the first sighting. A copy onto a network share can be queued before the file is finished.
+- Folder watch settle is implemented. Buzz `40f6a78`: a file is a queued row when first seen and is transcribed only after its size and mtime are unchanged for 30s. `SettleSet` plus `QueueHandle::adopt`. A disappeared file cancels that row.
 - Skip-already-transcribed does not match a URL task by its URL. Buzz `bc2882b` looks up a completed row by URL (`buzz/plugins/skip_already_transcribed/plugin.py` `_find_db_segments_by_url`). humm `crates/humm-core/src/postproc/skip.rs` has no URL lookup. P-006 left skip on `source.<ext>`, which matched Buzz before that commit.
 - The CLI has no speaker-identification flags. Buzz `8d0812a` added them in `buzz/cli.py`. `crates/humm-cli/src` has no speaker-identification option.
 

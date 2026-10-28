@@ -102,10 +102,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use humm_core::domain::{Source, SourceDisposition, TranscriptionId};
-use humm_core::folderwatch::{self, SeenSet};
+use humm_core::boundary::TaskStore;
+use humm_core::domain::{Source, SourceDisposition, Status, TaskSpec, TranscriptionId};
+use humm_core::folderwatch::{self, FileStamp, SeenSet, SettleSet};
 use humm_core::queue::QueueHandle;
 use humm_core::settings::{FileTranscriberSettings, FolderWatchSettings};
 use humm_store::SqliteStore;
@@ -528,6 +529,8 @@ impl FolderWatchService {
                 paused: worker_paused,
                 stopping: worker_stopping,
                 seen,
+                settle: SettleSet::new(),
+                origin: Instant::now(),
                 rx,
             });
         });
@@ -627,6 +630,10 @@ struct WorkerCtx {
     /// Shared across every `start()` for the process's lifetime — see this
     /// module's "`SeenSet` lifetime" doc.
     seen: Arc<Mutex<SeenSet>>,
+    /// Files waiting for a stable size and mtime before transcription.
+    settle: SettleSet<(TranscriptionId, TaskSpec)>,
+    /// Clock origin for [`SettleSet`]. Set again when the worker starts.
+    origin: Instant,
     rx: mpsc::Receiver<WorkerMsg>,
 }
 
@@ -634,7 +641,8 @@ struct WorkerCtx {
 /// stopping — see below), then drain-all-pending-then-rescan on every
 /// subsequent wakeup, until [`WorkerMsg::Shutdown`] (or a disconnected
 /// channel — the same thing, defensively) ends the loop.
-fn run_worker(worker: WorkerCtx) {
+fn run_worker(mut worker: WorkerCtx) {
+    worker.origin = Instant::now();
     // Gated on `paused`/`stopping` at the moment this actually runs (not
     // captured at spawn time): `FolderWatchService::start` returns as soon
     // as the thread is *spawned*, not once this line has run, so a caller
@@ -645,13 +653,38 @@ fn run_worker(worker: WorkerCtx) {
     // scheduling delays, not merely a theoretical one (caught by this
     // module's own integration test under load).
     if !worker.stopping.load(Ordering::Relaxed) && !worker.paused.load(Ordering::Relaxed) {
-        rescan_and_enqueue(&worker);
+        rescan_and_enqueue(&mut worker);
     }
 
     loop {
-        match worker.rx.recv() {
-            Err(_) | Ok(WorkerMsg::Shutdown) => return,
-            Ok(WorkerMsg::Fs) => {
+        let incoming = if worker.settle.is_empty() {
+            match worker.rx.recv() {
+                Ok(msg) => Some(msg),
+                Err(_) => {
+                    discard_pending(&mut worker);
+                    return;
+                }
+            }
+        } else {
+            match worker
+                .rx
+                .recv_timeout(folderwatch::FOLDER_WATCH_SETTLE_POLL)
+            {
+                Ok(msg) => Some(msg),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    discard_pending(&mut worker);
+                    return;
+                }
+            }
+        };
+        match incoming {
+            None => poll_settled(&mut worker),
+            Some(WorkerMsg::Shutdown) => {
+                discard_pending(&mut worker);
+                return;
+            }
+            Some(WorkerMsg::Fs) => {
                 // Drain every other message already queued (event
                 // coalescing — Buzz's own equivalent is rescanning the whole
                 // tree per `directoryChanged` signal regardless of how many
@@ -659,18 +692,22 @@ fn run_worker(worker: WorkerCtx) {
                 // seen mid-drain rather than starting one more rescan.
                 loop {
                     match worker.rx.try_recv() {
-                        Ok(WorkerMsg::Shutdown) => return,
+                        Ok(WorkerMsg::Shutdown) => {
+                            discard_pending(&mut worker);
+                            return;
+                        }
                         Ok(WorkerMsg::Fs) => continue,
                         Err(_) => break,
                     }
                 }
                 if worker.stopping.load(Ordering::Relaxed) {
+                    discard_pending(&mut worker);
                     return;
                 }
                 if worker.paused.load(Ordering::Relaxed) {
                     continue;
                 }
-                rescan_and_enqueue(&worker);
+                rescan_and_enqueue(&mut worker);
             }
         }
     }
@@ -686,29 +723,31 @@ fn run_worker(worker: WorkerCtx) {
 /// bails out early once [`FolderWatchService::stop`] has set `stopping` in
 /// the meantime — see this module's "Threading model" doc for what that
 /// does and doesn't bound.
-fn rescan_and_enqueue(worker: &WorkerCtx) {
+fn rescan_and_enqueue(worker: &mut WorkerCtx) {
+    poll_settled(worker);
     let template = worker
         .template
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
-    let store = &worker.store;
-    let known = |path: &Path| match store.has_task_for_file(path) {
-        Ok(known) => known,
-        Err(err) => {
-            log::warn!(
-                "folder-watch: has_task_for_file failed for {} ({err}) — treating as not known",
-                path.display()
-            );
-            false
-        }
+    let candidates = {
+        let store = Arc::clone(&worker.store);
+        let known = move |path: &Path| match store.has_task_for_file(path) {
+            Ok(known) => known,
+            Err(err) => {
+                log::warn!(
+                    "folder-watch: has_task_for_file failed for {} ({err}) — treating as not known",
+                    path.display()
+                );
+                false
+            }
+        };
+        let seen = worker
+            .seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        folderwatch::scan(&worker.input_dir, &seen, &known)
     };
-
-    let mut seen = worker
-        .seen
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let candidates = folderwatch::scan(&worker.input_dir, &seen, &known);
     if candidates.is_empty() {
         return;
     }
@@ -755,35 +794,90 @@ fn rescan_and_enqueue(worker: &WorkerCtx) {
             disposition,
             template.default_export_template.as_deref(),
         );
-        worker
-            .queue
-            .enqueue(TranscriptionId::new(), spec, Source::FolderWatch);
-        enqueued_any = true;
-
-        match std::fs::metadata(&candidate.path) {
-            Ok(metadata) => {
-                if let Ok(mtime) = metadata.modified() {
-                    seen.record(candidate.path.clone(), metadata.len(), mtime);
-                } else {
-                    log::debug!(
-                        "folder-watch: mtime unavailable for {} after enqueue — it may re-emit \
-                         on the next rescan",
-                        candidate.path.display()
-                    );
-                }
-            }
-            Err(err) => log::debug!(
-                "folder-watch: could not re-stat {} after enqueue ({err}) — it may re-emit on \
-                 the next rescan",
-                candidate.path.display()
-            ),
+        let Some(stamp) = file_stamp(&candidate.path) else {
+            continue;
+        };
+        let id = TranscriptionId::new();
+        let now = worker.origin.elapsed();
+        if !worker
+            .settle
+            .insert(candidate.path.clone(), stamp, now, (id, spec.clone()))
+        {
+            continue;
         }
+        if let Err(err) = worker.store.create_task(&id, &spec, Source::FolderWatch) {
+            log::warn!("folder-watch: create_task failed for {id}: {err}");
+            let _ = worker.settle.remove(&candidate.path);
+            continue;
+        }
+        enqueued_any = true;
     }
     drop(seen);
 
     if enqueued_any {
         worker.ctx.request_repaint();
     }
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(FileStamp {
+        size: metadata.len(),
+        mtime: metadata.modified().ok()?,
+    })
+}
+
+/// Starts transcription for files whose stamp has been stable for 30s, and
+/// cancels rows whose file disappeared. Records the seen-set only once a
+/// file has settled, so a copy that is still growing is not treated as done.
+fn poll_settled(worker: &mut WorkerCtx) {
+    if worker.settle.is_empty() {
+        return;
+    }
+    let now = worker.origin.elapsed();
+    let polled = worker
+        .settle
+        .poll(now, folderwatch::FOLDER_WATCH_SETTLE, file_stamp);
+    let mut changed = false;
+    for (path, stamp, (id, spec)) in polled.settled {
+        let still_queued = worker
+            .store
+            .get_task(&id)
+            .ok()
+            .flatten()
+            .is_some_and(|row| row.status == Status::Queued);
+        if still_queued {
+            worker.queue.adopt(id, spec);
+        }
+        worker
+            .seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record(path, stamp.size, stamp.mtime);
+        changed = true;
+    }
+    for (_path, (id, _spec)) in polled.discarded {
+        if let Err(err) = worker.store.mark_canceled(&id) {
+            log::warn!("folder-watch: cancel of unsettled task {id} failed: {err}");
+        }
+        changed = true;
+    }
+    if changed {
+        worker.ctx.request_repaint();
+    }
+}
+
+fn discard_pending(worker: &mut WorkerCtx) {
+    let pending = worker.settle.drain();
+    if pending.is_empty() {
+        return;
+    }
+    for (_path, (id, _spec)) in pending {
+        if let Err(err) = worker.store.mark_canceled(&id) {
+            log::warn!("folder-watch: cancel of unsettled task {id} failed: {err}");
+        }
+    }
+    worker.ctx.request_repaint();
 }
 
 #[cfg(test)]

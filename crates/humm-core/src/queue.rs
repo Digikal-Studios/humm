@@ -427,6 +427,15 @@ enum Command {
         /// Where the task came from.
         source: Source,
     },
+    /// Run a task whose row was already inserted as `queued`. Folder watch
+    /// creates the row when the file is first seen and only then hands it
+    /// to the runner, after the file's size and mtime have been stable.
+    Adopt {
+        /// The task's id. The store row must already exist.
+        id: TranscriptionId,
+        /// The task specification to run.
+        spec: Box<TaskSpec>,
+    },
     /// Re-enqueue an already-terminated task's *existing* row for a retry:
     /// same `id`, fresh `spec` (see [`QueueHandle::retry`]).
     Retry {
@@ -481,6 +490,15 @@ impl QueueHandle {
             id,
             spec: Box::new(spec),
             source,
+        });
+    }
+
+    /// Starts a task that is already a `queued` row. Does not call
+    /// `create_task`. Folder watch uses this after the file has settled.
+    pub fn adopt(&self, id: TranscriptionId, spec: TaskSpec) {
+        let _ = self.commands.send(Command::Adopt {
+            id,
+            spec: Box::new(spec),
         });
     }
 
@@ -1061,6 +1079,9 @@ impl Runner {
     /// Applies one command to the runner's state.
     fn handle_command(&mut self, command: Command) {
         match command {
+            Command::Adopt { id, spec } => {
+                self.pending.push_back(PendingTask { id, spec });
+            }
             Command::Enqueue { id, spec, source } => {
                 match self.store.create_task(&id, &spec, source) {
                     Ok(()) => {
@@ -3284,6 +3305,35 @@ mod tests {
                 .any(|c| matches!(c, StoreCall::Completed(x, _) if *x == a))
         );
         assert_eq!(h.fetch_calls.lock().expect("fetch").len(), 1);
+    }
+
+    #[test]
+    fn adopt_runs_a_row_that_already_exists_without_creating_it() {
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            ..Cfg::default()
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = dir.path().join("clip.wav");
+        std::fs::write(&input, b"bytes").expect("write");
+        let id = TranscriptionId::new();
+        q.adopt(id, path_task(input));
+        q.finish().expect("finish");
+        let calls = h.store_calls();
+        assert!(
+            !calls
+                .iter()
+                .any(|call| matches!(call, StoreCall::Create(_))),
+            "{calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| matches!(call, StoreCall::Started(x) if *x == id))
+        );
     }
 
     #[test]

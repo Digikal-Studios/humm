@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// Buzz's folder-watch/import supported extensions, lowercase and without a
 /// leading dot. Audio then video, in the order of Buzz `main`
@@ -284,6 +284,138 @@ fn is_folder_watch_candidate(path: &Path, seen: &SeenSet, known: &dyn Fn(&Path) 
     }
 
     true
+}
+
+/// How long a folder-watch file's size and mtime must stay unchanged before
+/// it is transcribed. Buzz `40f6a78` (`settle_seconds = 30`).
+pub const FOLDER_WATCH_SETTLE: Duration = Duration::from_secs(30);
+
+/// How often a pending file is re-stat'd. Buzz `settle_poll_interval_ms = 5000`.
+pub const FOLDER_WATCH_SETTLE_POLL: Duration = Duration::from_secs(5);
+
+/// Size and modification time of one watched file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStamp {
+    /// Length in bytes.
+    pub size: u64,
+    /// Last modification time.
+    pub mtime: SystemTime,
+}
+
+/// Files seen by folder watch that are not transcribed until their stamp has
+/// been stable for [`FOLDER_WATCH_SETTLE`].
+///
+/// `now` is a duration from an arbitrary origin the caller owns, so tests can
+/// move the clock without sleeping. Buzz stores `time.monotonic()`.
+#[derive(Debug)]
+pub struct SettleSet<T> {
+    pending: HashMap<PathBuf, Pending<T>>,
+}
+
+#[derive(Debug)]
+struct Pending<T> {
+    stamp: FileStamp,
+    since: Duration,
+    value: T,
+}
+
+/// What [`SettleSet::poll`] decided for the files it was asked about.
+#[derive(Debug)]
+pub struct SettlePoll<T> {
+    /// Stamp unchanged for the settle interval. Removed from the set.
+    pub settled: Vec<(PathBuf, FileStamp, T)>,
+    /// `stat` returned `None` (removed, or unreadable). Removed from the set.
+    pub discarded: Vec<(PathBuf, T)>,
+}
+
+impl<T> Default for SettleSet<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> SettleSet<T> {
+    /// An empty set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            pending: HashMap::new(),
+        }
+    }
+
+    /// Whether any file is waiting.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// Remembers `path` if it is not already pending. Returns `true` when
+    /// this is the first sighting.
+    pub fn insert(&mut self, path: PathBuf, stamp: FileStamp, now: Duration, value: T) -> bool {
+        if self.pending.contains_key(&path) {
+            return false;
+        }
+        self.pending.insert(
+            path,
+            Pending {
+                stamp,
+                since: now,
+                value,
+            },
+        );
+        true
+    }
+
+    /// Re-stats every pending file. A changed stamp resets the clock. A
+    /// missing file is discarded. An unchanged stamp older than
+    /// `settle_after` is settled.
+    pub fn poll(
+        &mut self,
+        now: Duration,
+        settle_after: Duration,
+        mut stat: impl FnMut(&Path) -> Option<FileStamp>,
+    ) -> SettlePoll<T> {
+        let mut settled = Vec::new();
+        let mut discarded = Vec::new();
+        let paths: Vec<PathBuf> = self.pending.keys().cloned().collect();
+        for path in paths {
+            let Some(pending) = self.pending.get_mut(&path) else {
+                continue;
+            };
+            let Some(stamp) = stat(&path) else {
+                if let Some(pending) = self.pending.remove(&path) {
+                    discarded.push((path, pending.value));
+                }
+                continue;
+            };
+            if stamp != pending.stamp {
+                pending.stamp = stamp;
+                pending.since = now;
+                continue;
+            }
+            if now.saturating_sub(pending.since) < settle_after {
+                continue;
+            }
+            if let Some(pending) = self.pending.remove(&path) {
+                settled.push((path, stamp, pending.value));
+            }
+        }
+        SettlePoll { settled, discarded }
+    }
+
+    /// Forgets `path` and returns its value, if it was pending.
+    pub fn remove(&mut self, path: &Path) -> Option<T> {
+        self.pending.remove(path).map(|pending| pending.value)
+    }
+
+    /// Drops every pending file and returns the values, for a watch that is
+    /// stopping.
+    pub fn drain(&mut self) -> Vec<(PathBuf, T)> {
+        self.pending
+            .drain()
+            .map(|(path, pending)| (path, pending.value))
+            .collect()
+    }
 }
 
 /// Where `relative_dir` (a [`Candidate::relative_dir`]) mirrors to under
@@ -651,5 +783,65 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn stamp(size: u64, secs: u64) -> FileStamp {
+        FileStamp {
+            size,
+            mtime: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+        }
+    }
+
+    #[test]
+    fn settle_waits_thirty_seconds_of_unchanged_stamp() {
+        assert_eq!(FOLDER_WATCH_SETTLE, Duration::from_secs(30));
+        let path = PathBuf::from("/watch/clip.wav");
+        let mut set = SettleSet::new();
+        assert!(set.insert(path.clone(), stamp(10, 1), Duration::ZERO, "task"));
+        assert!(!set.insert(path.clone(), stamp(10, 1), Duration::from_secs(1), "other"));
+
+        let early = set.poll(Duration::from_secs(29), FOLDER_WATCH_SETTLE, |_| {
+            Some(stamp(10, 1))
+        });
+        assert!(early.settled.is_empty());
+        assert!(early.discarded.is_empty());
+
+        let ready = set.poll(Duration::from_secs(30), FOLDER_WATCH_SETTLE, |_| {
+            Some(stamp(10, 1))
+        });
+        assert_eq!(ready.settled.len(), 1);
+        assert_eq!(ready.settled[0].0, path);
+        assert_eq!(ready.settled[0].2, "task");
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn settle_resets_when_the_stamp_changes() {
+        let path = PathBuf::from("/watch/clip.wav");
+        let mut set = SettleSet::new();
+        set.insert(path.clone(), stamp(10, 1), Duration::ZERO, ());
+        let changed = set.poll(Duration::from_secs(20), FOLDER_WATCH_SETTLE, |_| {
+            Some(stamp(40, 2))
+        });
+        assert!(changed.settled.is_empty());
+        let too_soon = set.poll(Duration::from_secs(49), FOLDER_WATCH_SETTLE, |_| {
+            Some(stamp(40, 2))
+        });
+        assert!(too_soon.settled.is_empty());
+        let ready = set.poll(Duration::from_secs(50), FOLDER_WATCH_SETTLE, |_| {
+            Some(stamp(40, 2))
+        });
+        assert_eq!(ready.settled.len(), 1);
+        assert_eq!(ready.settled[0].1, stamp(40, 2));
+    }
+
+    #[test]
+    fn settle_discards_a_file_that_disappears() {
+        let path = PathBuf::from("/watch/clip.wav");
+        let mut set = SettleSet::new();
+        set.insert(path.clone(), stamp(10, 1), Duration::ZERO, 7);
+        let polled = set.poll(Duration::from_secs(5), FOLDER_WATCH_SETTLE, |_| None);
+        assert!(polled.settled.is_empty());
+        assert_eq!(polled.discarded, vec![(path, 7)]);
     }
 }
