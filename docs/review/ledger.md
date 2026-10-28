@@ -186,3 +186,7 @@ Checked and already handled, so not filed again: multi-file CLI (`humm-cli` `run
 ## Combined lib check
 
 Product tree at `1bfd98699dd015ca02c57266d75779a28e905f07`. These runs were on that tree plus the docs-only `c100d996153508f0097f48e26b574f6e5615b2d4` (`docs/review/patch-review-p003.md` only). `cargo +stable test -p humm-core --lib`: 857 passed, 0 failed, 2 ignored. `cargo +stable test -p humm-whisper --lib`: 37 passed, 0 failed, 0 ignored. `humm-gui` was not run (`speakrs` `coreml` does not compile on Linux; `coreml` was not disabled). `humm-media --lib` was not repeated.
+
+## Combined lib check after `0d2de40`
+
+Product commit `0d2de407246a7b214215c1c2596c67e640507a88`. These runs were on that tree plus the docs-only `0d9978ef435517b8990a196ab260d327870fe7c2` (`docs/review/patch-review-watch-skip-cli.md` only). `cargo +stable test -p humm-core --lib`: 874 passed, 0 failed, 2 ignored. `cargo +stable test -p humm-whisper --lib`: 38 passed, 0 failed, 0 ignored. `cargo +stable test -p humm-cli --bin humm`: 41 passed, 0 failed, 0 ignored. `humm-gui` was not repeated. `folder_watch_int` was not repeated.
