@@ -50,7 +50,7 @@ Confirmed gaps: #1595, #1602, #1614, #1651, #1660, #1674. Confirmed already alig
 
 ## Proposals
 
-Review `a329e4e` accepted P-001, P-002, P-004, P-005, P-009, and P-011. Those are implemented on this branch except P-011, which is a non-change. P-003, P-006, P-007, P-010, and P-012 are revised below and not implemented. P-008 stays deferred, with the review's constraint added. None of the revised text has been re-reviewed.
+Review `a329e4e` accepted P-001, P-002, P-004, P-005, P-009, and P-011. Second pass `95cda13` accepted P-007 and P-010. Those are implemented. P-011 is a non-change. P-003, P-006, and P-012 are revised again below and not implemented. P-008 stays deferred: `ggml-custom.bin` is not renamed. The revised text has not been re-reviewed.
 
 ### P-001 — confine zip 8.6.0 symlink extraction (implemented)
 

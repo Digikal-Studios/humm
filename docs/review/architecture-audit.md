@@ -187,7 +187,7 @@ Three read-only passes finished after the first commit. Their notes are in the p
 
 ## Proposal text after review `a329e4e`
 
-Accepted work is implemented on `audit/architecture-review` (P-001, P-002, P-004, P-005, P-009). P-011 has no code change. The revised designs for P-003, P-006, P-007, P-008, P-010, and P-012 are in `docs/review/ledger.md` and have not been re-reviewed. They were not implemented.
+Accepted work is implemented on `audit/architecture-review` (P-001, P-002, P-004, P-005, P-007, P-009, P-010). P-011 has no code change. P-008 stays deferred and `ggml-custom.bin` is not renamed. The revised designs for P-003, P-006, and P-012 are in `docs/review/ledger.md` and have not been re-reviewed. They were not implemented.
 
 ## Checked and not proposed
 
