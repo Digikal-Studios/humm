@@ -7,10 +7,9 @@
 //! whisper model, no network. Drop a fixture file → `wait_for` the store to
 //! show a `Completed` `Source::FolderWatch` row → assert the mirrored export
 //! exists and the source was moved/deleted per the disposition; a pause/
-//! resume case; and a busy-runner rebuild case (see that test's own doc)
-//! proving the shared `SeenSet` (Buzz's `paths_emitted`) — not merely the
-//! store's own `has_task_for_file` check — is what prevents a double-enqueue
-//! across a service restart.
+//! resume case; a stop during settle, which must not record `SeenSet`; and a
+//! file that settles while the runner is inside another task, which is
+//! adopted once that task ends rather than left queued.
 //!
 //! ## Watcher backend: `PollWatcher`, not FSEvents
 //!
@@ -634,4 +633,90 @@ fn seen_set_survives_a_rebuild_so_a_recently_enqueued_file_is_not_double_enqueue
     );
 
     service_b.stop();
+}
+
+/// A file that reaches the 30s settle while the runner is inside another
+/// task must be adopted after that task ends. `Stage` cannot create the row
+/// until `run_task` returns, so the settle must not record `SeenSet` first.
+#[test]
+fn file_that_settles_during_a_long_task_is_adopted() {
+    let root = tempfile::tempdir().expect("root tempdir");
+    let input_dir = root.path().join("in");
+    let output_dir = root.path().join("out");
+    let blocker_input = root.path().join("blocker.wav");
+    std::fs::create_dir_all(&input_dir).expect("create input root");
+    std::fs::create_dir_all(&output_dir).expect("create output root");
+    drop_fixture(&blocker_input);
+
+    let store = Arc::new(SqliteStore::open_in_memory().expect("open store"));
+    let (engine_factory, gate) = GatedEngineFactory::new();
+    let mut services =
+        test_services_with_engine(Arc::clone(&store), root.path(), Box::new(engine_factory));
+    let queue = Arc::new(services.queue.take().expect("queue present"));
+    let seen = fresh_seen();
+
+    let blocker_id = TranscriptionId::new();
+    queue.enqueue(blocker_id, blocker_spec(blocker_input), Source::FileImport);
+    wait_for_status(
+        &store,
+        blocker_id,
+        Status::InProgress,
+        Duration::from_secs(10),
+    );
+
+    let source = input_dir.join("clip.wav");
+    drop_fixture(&source);
+    let service = start_service(
+        Arc::clone(&queue),
+        Arc::clone(&store),
+        &input_dir,
+        &output_dir,
+        false,
+        Arc::clone(&seen),
+        false,
+    );
+
+    // Past the 30s settle and one 5s poll, still inside the blocker. The
+    // staged row must not exist yet, and the path must not be seen.
+    std::thread::sleep(Duration::from_secs(40));
+    assert_eq!(
+        store
+            .get_task(&blocker_id)
+            .expect("blocker row")
+            .expect("blocker exists")
+            .status,
+        Status::InProgress,
+        "the blocker must still be running when the second file settles"
+    );
+    let folder_rows: Vec<_> = store
+        .list_tasks()
+        .expect("list_tasks")
+        .into_iter()
+        .filter(|row| row.source == Some(Source::FolderWatch))
+        .collect();
+    assert!(
+        folder_rows.is_empty(),
+        "Stage must still be queued behind the blocker, got {folder_rows:?}"
+    );
+    let metadata = std::fs::metadata(&source).expect("stat watched file");
+    let mtime = metadata.modified().expect("mtime");
+    assert!(
+        !seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .matches(&source, metadata.len(), mtime),
+        "a settle before the row exists must not record the path"
+    );
+
+    release_gate(&gate);
+    let row = wait_for_folder_watch_completed(&store, Duration::from_secs(30));
+    assert_eq!(row.status, Status::Completed);
+    assert!(
+        seen.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .matches(&source, metadata.len(), mtime),
+        "the path is seen only once the queued row was adopted"
+    );
+
+    service.stop();
 }

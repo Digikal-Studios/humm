@@ -712,11 +712,11 @@ fn run_worker(mut worker: WorkerCtx) {
     }
 }
 
-/// One full rescan of `worker.input_dir`, enqueueing every new candidate and
-/// recording it into the shared `SeenSet` immediately after its `enqueue`
-/// call (Buzz records into `paths_emitted` only after actually emitting the
-/// task, `:120-123`) — repaints once at the end iff at least one candidate
-/// was enqueued, rather than once per candidate. `folderwatch::scan`'s own
+/// One full rescan of `worker.input_dir`. A new file is staged (a queued row,
+/// once the runner handles it) and held in [`SettleSet`] until its stamp has
+/// been stable for 30s. The shared `SeenSet` is recorded only when that file
+/// is adopted — repaints once at the end iff at least one candidate was
+/// staged, rather than once per candidate. `folderwatch::scan`'s own
 /// recursive walk runs to completion uninterrupted (it isn't itself
 /// `stopping`-aware); only the per-candidate work *after* that walk returns
 /// bails out early once [`FolderWatchService::stop`] has set `stopping` in
@@ -822,8 +822,11 @@ fn file_stamp(path: &Path) -> Option<FileStamp> {
 }
 
 /// Starts transcription for files whose stamp has been stable for 30s, and
-/// cancels rows whose file disappeared. Records the seen-set only once a
-/// file has settled, so a copy that is still growing is not treated as done.
+/// cancels rows whose file disappeared. A settled file whose row is not in
+/// the store yet stays pending and is not recorded in the seen-set: `Stage`
+/// is not applied while the runner is inside `run_task`. The 30s clock is
+/// already elapsed, so the next poll adopts the row once it is queued.
+/// The seen-set is recorded when that row exists.
 fn poll_settled(worker: &mut WorkerCtx) {
     if worker.settle.is_empty() {
         return;
@@ -834,13 +837,32 @@ fn poll_settled(worker: &mut WorkerCtx) {
         .poll(now, folderwatch::FOLDER_WATCH_SETTLE, file_stamp);
     let mut changed = false;
     for (path, stamp, (id, spec)) in polled.settled {
-        let still_queued = worker
-            .store
-            .get_task(&id)
-            .ok()
-            .flatten()
-            .is_some_and(|row| row.status == Status::Queued);
-        if still_queued {
+        let row = match worker.store.get_task(&id) {
+            Ok(row) => row,
+            Err(err) => {
+                log::warn!(
+                    "folder-watch: get_task failed for {id} ({err}) — leaving {} pending",
+                    path.display()
+                );
+                None
+            }
+        };
+        if row.is_none() {
+            // `Stage` has not created the row yet (the runner is inside
+            // `run_task`). The 30s wait already elapsed. Keep the file
+            // pending at that age so the next poll adopts the row, and do
+            // not record the seen-set — a later scan would otherwise ignore
+            // a queued row that nothing starts.
+            let aged = now.saturating_sub(folderwatch::FOLDER_WATCH_SETTLE);
+            let display = path.display().to_string();
+            if !worker.settle.insert(path, stamp, aged, (id, spec)) {
+                log::warn!(
+                    "folder-watch: {display} settled before its row existed, but it was already pending"
+                );
+            }
+            continue;
+        }
+        if row.is_some_and(|row| row.status == Status::Queued) {
             worker.queue.adopt(id, spec);
         }
         worker
