@@ -18,8 +18,10 @@
 //! (the crate's *default* features pull `ndarray-linalg`'s from-source
 //! `openblas-static`, which fails to link on this machine's Homebrew
 //! toolchain — `openblas-system` links Homebrew's prebuilt OpenBLAS instead;
-//! macOS build prerequisite: `brew install openblas libomp`). **`online`
-//! deliberately dropped (task-9 review):** the spike's originally-recorded
+//! macOS build prerequisite: `brew install openblas libomp`). Non-macOS
+//! builds omit `coreml`: speakrs refuses to compile that feature off macOS.
+//! macOS still uses the workspace feature set, `coreml` included.
+//! **`online` deliberately dropped (task-9 review):** the spike's originally-recorded
 //! feature set included `online`, but that was never a deliberate choice —
 //! `online` gates only `speakrs::models::ModelManager`/`from_pretrained`'s
 //! HuggingFace-download path, which this crate never calls (`OrtDiarizer`

@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::cancel::CancelToken;
@@ -335,9 +335,8 @@ impl ModelDownloader {
     /// same `tree/main` API the whisper.cpp/VAD downloads already use
     /// (confirmed against the real HuggingFace API while implementing this);
     /// the tenth (a 4-byte, non-LFS text file) has none, and
-    /// [`Self::verify_or_warn`]'s existing "no digest published, skip
-    /// verification" fallback already handles that — no special-casing
-    /// needed here.
+    /// [`Self::verify_or_warn`] still promotes that `Ok(None)`. A lookup
+    /// error does not: the partial stays and the ensure fails.
     ///
     /// No cross-file progress aggregation: `progress` receives one
     /// [`DownloadProgress`] sequence per file (its `file` field names which
@@ -517,12 +516,11 @@ impl ModelDownloader {
     /// Recovers from an HTTP 416 on a resume request (see
     /// [`Self::download_and_verify`]).
     ///
-    /// If a digest is obtainable and the `.partial` matches it, promote the
-    /// `.partial` in place (rename only — no sentinel; see
-    /// [`Self::download_and_verify`]) — no re-download. Otherwise (no digest
-    /// obtainable, or a mismatch) discard the `.partial` and download fresh
-    /// exactly once, so a stale or corrupt `.partial` can never wedge the
-    /// download in a permanent 416 loop. Shared verbatim by the ggml/VAD path
+    /// If a digest matches, promote the `.partial` in place (rename only —
+    /// no sentinel; see [`Self::download_and_verify`]). A mismatch, or no
+    /// digest at all, discards the `.partial` and downloads fresh once. A
+    /// digest-lookup error does neither: it returns before the delete, and
+    /// the partial stays for a later lookup. Shared by the ggml/VAD path
     /// and the CoreML zip path (`F-043` ticket b).
     fn recover_from_range_not_satisfiable(
         &self,
@@ -535,6 +533,8 @@ impl ModelDownloader {
         let file_name = file_name_of(final_path);
         let partial_path = partial_path_for(final_path);
 
+        // A lookup error is not "no digest". Propagate it before any delete
+        // or fresh GET so the partial stays for a later successful lookup.
         let verified_complete =
             self.verify_partial_is_complete(sha_repo, &file_name, &partial_path)?;
 
@@ -553,10 +553,10 @@ impl ModelDownloader {
     /// Attempts to verify the `.partial` at `partial_path` as a complete
     /// artifact against its upstream digest, for 416 recovery. Returns
     /// `Some(true)` if a published digest matches, `Some(false)` on mismatch,
-    /// and `None` when verification is impossible (no `sha_repo`, no digest
-    /// published, or the digest lookup failed as a transport error — an
-    /// unverifiable partial is restarted fresh, never trusted). A local I/O
-    /// error while hashing propagates.
+    /// and `Ok(None)` when there is nothing to check (`sha_repo` absent, or a
+    /// parsed tree with no `lfs.oid`). A digest-lookup error is returned as
+    /// `Err` and must not be treated as "restart fresh": the caller keeps the
+    /// partial. A local I/O error while hashing propagates.
     fn verify_partial_is_complete(
         &self,
         sha_repo: Option<&str>,
@@ -566,12 +566,12 @@ impl ModelDownloader {
         let Some(repo) = sha_repo else {
             return Ok(None);
         };
-        match self.expected_sha256(repo, file_name) {
-            Ok(Some(expected)) => {
+        match self.expected_sha256(repo, file_name)? {
+            Some(expected) => {
                 let actual = sha256_file(partial_path)?;
                 Ok(Some(actual == expected))
             }
-            Ok(None) | Err(_) => Ok(None),
+            None => Ok(None),
         }
     }
 
@@ -663,10 +663,16 @@ impl ModelDownloader {
     }
 
     /// Fetches the expected SHA256 for `file_name` from `repo`'s HF tree
-    /// API, hashes `partial_path`, and compares. `Ok(None)`/`Err` from the
-    /// lookup are logged and treated as "skip verification" — Buzz only
-    /// verifies "where upstream provides digests" (F-043). A mismatch
-    /// deletes both the partial and (if present) the final path.
+    /// API, hashes `partial_path`, and compares.
+    ///
+    /// `Ok(None)` — a parsed tree with no `lfs.oid` — still skips
+    /// verification and lets the caller rename the partial. That is the M1
+    /// rule for a file upstream does not digest (`docs/superpowers/plans/2026-07-20-m1-headless-core-path.md`).
+    /// A lookup `Err` does not: the partial stays, and this returns the
+    /// error instead of renaming. That reverses the M1 "log and skip" branch
+    /// for a failed API call, so a digest outage cannot promote an unchecked
+    /// file or delete it and fetch the body again. A mismatch still deletes
+    /// the partial and the final path.
     fn verify_or_warn(
         &self,
         repo: &str,
@@ -692,9 +698,9 @@ impl ModelDownloader {
             }
             Err(e) => {
                 log::warn!(
-                    "could not fetch SHA256 digest for {file_name} ({e}); skipping verification"
+                    "could not fetch SHA256 digest for {file_name} ({e}); leaving the partial in place"
                 );
-                Ok(())
+                Err(e)
             }
         }
     }
@@ -714,7 +720,9 @@ impl ModelDownloader {
         let text = response.text().map_err(|e| ModelError::Http {
             detail: e.to_string(),
         })?;
-        Ok(find_sha256(&text, file_name))
+        find_sha256(&text, file_name).map_err(|err| ModelError::Http {
+            detail: format!("{url}: malformed tree response: {err}"),
+        })
     }
 
     /// `GET {hf_base}/api/models/{repo}` (the Hugging Face Hub repo-info API,
@@ -953,11 +961,13 @@ enum RangeRecovery {
     RestartFresh,
 }
 
-/// Decides how to recover from a 416 given the `.partial` verification result:
-/// `Some(true)` (verified complete) promotes it; `Some(false)` (mismatch) and
-/// `None` (no digest obtainable) both restart fresh. There is deliberately no
-/// "loop on 416" outcome, so a completed-but-unrenamed or stale `.partial`
-/// cannot wedge the download permanently.
+/// Decides how to recover from a 416 given the `.partial` verification result.
+///
+/// `Some(true)` promotes. `Some(false)` (mismatch) restarts fresh and may
+/// delete the partial. `None` is "no digest" (`sha_repo` absent, or a parsed
+/// tree with no `lfs.oid`), not a lookup failure: it also restarts fresh so
+/// that partial can still be replaced by a full GET and the download can
+/// finish. A lookup error never reaches this function.
 fn on_range_not_satisfiable(verified_complete: Option<bool>) -> RangeRecovery {
     match verified_complete {
         Some(true) => RangeRecovery::Promote,
@@ -1042,21 +1052,234 @@ struct HfSibling {
 
 /// Parses a HuggingFace `tree/main` API JSON array, returning the `lfs.oid`
 /// (SHA256) for the entry whose `path` matches `file_name`, if any.
-fn find_sha256(tree_json: &str, file_name: &str) -> Option<String> {
-    let entries: Vec<HfTreeEntry> = serde_json::from_str(tree_json).ok()?;
-    entries
+///
+/// A body that is not that JSON array is an error. A parsed tree whose
+/// entry has no `lfs.oid` is `Ok(None)`.
+fn find_sha256(tree_json: &str, file_name: &str) -> Result<Option<String>, serde_json::Error> {
+    let entries: Vec<HfTreeEntry> = serde_json::from_str(tree_json)?;
+    Ok(entries
         .into_iter()
         .find(|entry| entry.path == file_name)
         .and_then(|entry| entry.lfs)
-        .map(|lfs| lfs.oid)
+        .map(|lfs| lfs.oid))
 }
 
 /// Extracts the zip archive at `zip_path` into `dest` (must exist).
+///
+/// Does not call [`zip::ZipArchive::extract`]. zip 8.6.0 creates a symlink
+/// with the archive's target bytes and does not require that target to stay
+/// inside `dest` (`RUSTSEC-2026-0368`). A later entry, or
+/// [`place_coreml_contents`], can then write through that link. Symlink
+/// entries whose target leaves `dest` are refused and not created. File
+/// modes from the archive are not applied, so a zip cannot mark an extracted
+/// file setuid.
 fn extract_zip_archive(zip_path: &Path, dest: &Path) -> Result<(), ModelError> {
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file).map_err(zip_error_to_model_error)?;
-    archive.extract(dest).map_err(zip_error_to_model_error)?;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(zip_error_to_model_error)?;
+        let Some(relative) = entry.enclosed_name() else {
+            return Err(zip_path_error("CoreML zip entry path escapes the archive"));
+        };
+        let outpath = dest.join(relative);
+        if path_escapes(dest, &outpath)? {
+            return Err(zip_path_error(
+                "CoreML zip entry is reached through a symlink that leaves the extract directory",
+            ));
+        }
+        if entry.is_symlink() {
+            let mut target_bytes = Vec::new();
+            entry
+                .read_to_end(&mut target_bytes)
+                .map_err(ModelError::Io)?;
+            let target = String::from_utf8(target_bytes)
+                .map_err(|_| zip_path_error("CoreML zip symlink target is not UTF-8"))?;
+            if proposed_symlink_escapes(&outpath, Path::new(&target), dest) {
+                return Err(zip_path_error(
+                    "CoreML zip symlink target leaves the extract directory",
+                ));
+            }
+            if let Some(parent) = outpath.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            create_contained_symlink(Path::new(&target), &outpath)?;
+            continue;
+        }
+        if entry.is_dir() {
+            std::fs::create_dir_all(&outpath)?;
+            continue;
+        }
+        if let Some(parent) = outpath.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut outfile = std::fs::File::create(&outpath)?;
+        std::io::copy(&mut entry, &mut outfile)?;
+    }
     Ok(())
+}
+
+fn zip_path_error(detail: &str) -> ModelError {
+    ModelError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, detail))
+}
+
+/// How many symlink hops one resolution may follow before it is treated as
+/// an escape. A cycle must not hang extraction.
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// `true` when `link` is a symlink whose target, after following links that
+/// already exist, is not inside `root`. A missing path is not an escaping link.
+fn symlink_target_escapes(link: &Path, root: &Path) -> Result<bool, ModelError> {
+    let meta = match std::fs::symlink_metadata(link) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err.into()),
+    };
+    if !meta.file_type().is_symlink() {
+        return Ok(false);
+    }
+    let target = std::fs::read_link(link)?;
+    Ok(proposed_symlink_escapes(link, &target, root))
+}
+
+/// Whether creating `link` → `target` would leave `root` once existing
+/// symlinks are followed. `..` is applied to the resolved directory, not
+/// cancelled against a symlink component lexically. A target whose final
+/// component does not exist yet still counts as an escape when that
+/// location is outside `root`.
+fn proposed_symlink_escapes(link: &Path, target: &Path, root: &Path) -> bool {
+    let Some(parent) = link.parent() else {
+        return true;
+    };
+    match resolve_within(root, parent, target) {
+        Ok(_) => false,
+        Err(WalkError::Escape) => true,
+        Err(WalkError::Io(_)) => true,
+    }
+}
+
+/// `true` when `path` is outside `root` or reaches outside by following a
+/// symlink that already exists.
+fn path_escapes(root: &Path, path: &Path) -> Result<bool, ModelError> {
+    if path.is_absolute() && !path.starts_with(root) {
+        return Ok(true);
+    }
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    match resolve_within(root, root, relative) {
+        Ok(_) => Ok(false),
+        Err(WalkError::Escape) => Ok(true),
+        Err(WalkError::Io(err)) => Err(err.into()),
+    }
+}
+
+enum WalkError {
+    Escape,
+    Io(std::io::Error),
+}
+
+/// Walk `extra` starting from `start`, following symlinks that exist.
+/// The result stays inside `root` or the walk returns [`WalkError::Escape`].
+fn resolve_within(root: &Path, start: &Path, extra: &Path) -> Result<PathBuf, WalkError> {
+    let mut hops = 0;
+    let mut current = if extra.is_absolute() {
+        PathBuf::new()
+    } else if start == root {
+        root.to_path_buf()
+    } else {
+        let relative = start.strip_prefix(root).map_err(|_| WalkError::Escape)?;
+        let mut base = root.to_path_buf();
+        apply_components(root, &mut base, relative, &mut hops)?;
+        base
+    };
+    apply_components(root, &mut current, extra, &mut hops)?;
+    if !is_inside(root, &current) {
+        return Err(WalkError::Escape);
+    }
+    Ok(current)
+}
+
+fn apply_components(
+    root: &Path,
+    current: &mut PathBuf,
+    path: &Path,
+    hops: &mut usize,
+) -> Result<(), WalkError> {
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // A missing component is not a real directory. Popping it
+                // would cancel `..` lexically before a later zip entry can
+                // make that name a symlink (`a/b/link` → `missing/../../outside`
+                // while `missing` does not exist yet).
+                match std::fs::symlink_metadata(&*current) {
+                    Ok(meta) if meta.is_dir() => {
+                        if !pop_inside(root, current) {
+                            return Err(WalkError::Escape);
+                        }
+                    }
+                    Ok(_) => return Err(WalkError::Escape),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(WalkError::Escape);
+                    }
+                    Err(err) => return Err(WalkError::Io(err)),
+                }
+            }
+            Component::Normal(name) => {
+                let next = current.join(name);
+                match std::fs::symlink_metadata(&next) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        *hops += 1;
+                        if *hops > MAX_SYMLINK_HOPS {
+                            return Err(WalkError::Escape);
+                        }
+                        let target = std::fs::read_link(&next).map_err(WalkError::Io)?;
+                        if target.is_absolute() {
+                            *current = PathBuf::new();
+                        }
+                        apply_components(root, current, &target, hops)?;
+                    }
+                    Ok(_) => *current = next,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => *current = next,
+                    Err(err) => return Err(WalkError::Io(err)),
+                }
+                if !is_inside(root, current) {
+                    return Err(WalkError::Escape);
+                }
+            }
+            Component::RootDir => *current = PathBuf::from("/"),
+            Component::Prefix(prefix) => *current = PathBuf::from(prefix.as_os_str()),
+        }
+    }
+    Ok(())
+}
+
+fn is_inside(root: &Path, path: &Path) -> bool {
+    path == root || path.starts_with(root)
+}
+
+/// `..` from `root` leaves the extract directory. Pop only while `current`
+/// is a strict descendant of `root`.
+fn pop_inside(root: &Path, current: &mut PathBuf) -> bool {
+    if *current == root || !current.starts_with(root) {
+        return false;
+    }
+    current.pop();
+    *current == root || current.starts_with(root)
+}
+
+fn create_contained_symlink(target: &Path, outpath: &Path) -> Result<(), ModelError> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, outpath)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (target, outpath);
+        Err(zip_path_error(
+            "CoreML zip symlinks are not extracted on this platform",
+        ))
+    }
 }
 
 fn zip_error_to_model_error(err: zip::result::ZipError) -> ModelError {
@@ -1075,20 +1298,49 @@ fn zip_error_to_model_error(err: zip::result::ZipError) -> ModelError {
 /// completeness sentinel last.
 fn place_coreml_contents(extracted: &Path, target_dir: &Path) -> Result<(), ModelError> {
     let macosx = extracted.join("__MACOSX");
-    if macosx.exists() {
-        std::fs::remove_dir_all(&macosx)?;
+    // `remove_dir_all` and `exists` follow symlinks. An entry named
+    // `__MACOSX` that points outside `extracted` must be unlinked, not traversed.
+    if symlink_target_escapes(&macosx, extracted)? {
+        return Err(zip_path_error(
+            "CoreML zip symlink target leaves the extract directory",
+        ));
+    }
+    match std::fs::symlink_metadata(&macosx) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::remove_file(&macosx)?,
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&macosx)?,
+        Ok(_) => std::fs::remove_file(&macosx)?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
     }
 
     let entries: Vec<PathBuf> = std::fs::read_dir(extracted)?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .collect();
+    for entry in &entries {
+        if symlink_target_escapes(entry, extracted)? {
+            return Err(zip_path_error(
+                "CoreML zip symlink target leaves the extract directory",
+            ));
+        }
+    }
 
-    if target_dir.exists() {
-        std::fs::remove_dir_all(target_dir)?;
+    // Same rule for a pre-existing `target_dir`: never `remove_dir_all` or
+    // write the sentinel through a link that leaves `extracted`.
+    if symlink_target_escapes(target_dir, extracted)? {
+        return Err(zip_path_error(
+            "CoreML zip symlink target leaves the extract directory",
+        ));
+    }
+    match std::fs::symlink_metadata(target_dir) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::remove_file(target_dir)?,
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(target_dir)?,
+        Ok(_) => std::fs::remove_file(target_dir)?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
     }
 
     let single_dir = match entries.as_slice() {
-        [only] if only.is_dir() => Some(only.clone()),
+        [only] if !is_symlink(only)? && only.is_dir() => Some(only.clone()),
         _ => None,
     };
 
@@ -1107,8 +1359,17 @@ fn place_coreml_contents(extracted: &Path, target_dir: &Path) -> Result<(), Mode
         }
     }
 
+    if symlink_target_escapes(target_dir, extracted)? {
+        return Err(zip_path_error(
+            "CoreML zip symlink target leaves the extract directory",
+        ));
+    }
     std::fs::write(target_dir.join(registry::SENTINEL_SUFFIX), b"")?;
     Ok(())
+}
+
+fn is_symlink(path: &Path) -> Result<bool, ModelError> {
+    Ok(std::fs::symlink_metadata(path)?.file_type().is_symlink())
 }
 
 #[cfg(test)]
@@ -1163,10 +1424,11 @@ mod tests {
     }
 
     #[test]
-    fn on_range_not_satisfiable_restarts_on_mismatch_or_unverifiable() {
-        // Mismatch (corrupt/stale partial) and "no digest obtainable" both
-        // discard and restart fresh — never trust an unverified partial, and
-        // never loop on 416.
+    fn on_range_not_satisfiable_restarts_on_mismatch_or_no_digest() {
+        // A mismatch may delete and download again. No digest (`None`) may
+        // too: banning that restart leaves a no-digest partial unable to
+        // finish. A lookup error is not `None`; it never reaches this
+        // function.
         assert_eq!(
             on_range_not_satisfiable(Some(false)),
             RangeRecovery::RestartFresh
@@ -1257,7 +1519,7 @@ mod tests {
     fn find_sha256_locates_matching_entry() {
         let json = r#"[{"path":"ggml-tiny.bin","lfs":{"oid":"abcdef1234567890"}}]"#;
         assert_eq!(
-            find_sha256(json, "ggml-tiny.bin"),
+            find_sha256(json, "ggml-tiny.bin").unwrap(),
             Some("abcdef1234567890".to_string())
         );
     }
@@ -1265,18 +1527,18 @@ mod tests {
     #[test]
     fn find_sha256_none_when_file_not_in_tree() {
         let json = r#"[{"path":"ggml-tiny.bin","lfs":{"oid":"abcdef1234567890"}}]"#;
-        assert_eq!(find_sha256(json, "ggml-small.bin"), None);
+        assert_eq!(find_sha256(json, "ggml-small.bin").unwrap(), None);
     }
 
     #[test]
     fn find_sha256_none_when_entry_has_no_lfs() {
         let json = r#"[{"path":"README.md"}]"#;
-        assert_eq!(find_sha256(json, "README.md"), None);
+        assert_eq!(find_sha256(json, "README.md").unwrap(), None);
     }
 
     #[test]
-    fn find_sha256_none_on_malformed_json() {
-        assert_eq!(find_sha256("not json", "ggml-tiny.bin"), None);
+    fn find_sha256_errors_on_malformed_json() {
+        assert!(find_sha256("not json", "ggml-tiny.bin").is_err());
     }
 
     /// Builds an in-memory zip containing `__MACOSX/junk` (a macOS metadata
@@ -1319,6 +1581,185 @@ mod tests {
                 .join("model.mil")
                 .is_file()
         );
+    }
+
+    /// A symlink entry whose target is outside the extract directory, followed
+    /// by a file that would be written through that link.
+    fn build_escaping_symlink_zip() -> Vec<u8> {
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buf);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            writer
+                .add_symlink("encoder", "../outside", options)
+                .expect("symlink entry");
+            writer
+                .start_file("encoder/pwned", options)
+                .expect("file through the link");
+            writer.write_all(b"owned").expect("payload");
+            writer.finish().expect("finish zip");
+        }
+        buf.into_inner()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_zip_archive_does_not_create_an_escaping_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).expect("outside dir");
+        let zip_path = dir.path().join("encoder.zip");
+        std::fs::write(&zip_path, build_escaping_symlink_zip()).expect("write zip");
+
+        let extract_dir = dir.path().join("extracted");
+        std::fs::create_dir(&extract_dir).expect("mkdir");
+        let err = extract_zip_archive(&zip_path, &extract_dir).expect_err("escaping symlink");
+        assert!(matches!(err, ModelError::Io(_)), "error was {err:?}");
+        assert!(
+            std::fs::symlink_metadata(extract_dir.join("encoder")).is_err(),
+            "the escaping symlink must not be created"
+        );
+        assert!(
+            std::fs::read_dir(&outside)
+                .expect("read outside")
+                .next()
+                .is_none(),
+            "nothing may be written outside the extract directory"
+        );
+    }
+
+    /// `a/b/missing` → `..` first, then `a/b/link` → `missing/../../outside`,
+    /// then file `a/b/link/pwned`. `missing` exists before `link` is checked.
+    fn build_symlink_chain_zip() -> Vec<u8> {
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buf);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            writer
+                .add_symlink("a/b/missing", "..", options)
+                .expect("missing symlink");
+            writer
+                .add_symlink("a/b/link", "missing/../../outside", options)
+                .expect("chain symlink");
+            writer
+                .start_file("a/b/link/pwned", options)
+                .expect("file through the chain");
+            writer.write_all(b"owned").expect("payload");
+            writer.finish().expect("finish zip");
+        }
+        buf.into_inner()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_zip_archive_rejects_symlink_chain_that_escapes_via_dotdot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).expect("outside dir");
+        let zip_path = dir.path().join("encoder.zip");
+        std::fs::write(&zip_path, build_symlink_chain_zip()).expect("write zip");
+
+        let extract_dir = dir.path().join("extracted");
+        std::fs::create_dir(&extract_dir).expect("mkdir");
+        let err = extract_zip_archive(&zip_path, &extract_dir).expect_err("escaping chain");
+        assert!(matches!(err, ModelError::Io(_)), "error was {err:?}");
+        assert!(
+            !outside.join("pwned").exists(),
+            "the chained symlink must not write outside the extract directory"
+        );
+        assert!(
+            std::fs::symlink_metadata(extract_dir.join("a/b/link")).is_err(),
+            "the escaping link must not be created"
+        );
+    }
+
+    /// Same chain with `link` created before `missing` exists. A lexical
+    /// pop of the missing name would accept `missing/../../outside`.
+    fn build_swapped_symlink_chain_zip() -> Vec<u8> {
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buf);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            writer
+                .add_symlink("a/b/link", "missing/../../outside", options)
+                .expect("link before missing");
+            writer
+                .add_symlink("a/b/missing", "..", options)
+                .expect("missing symlink");
+            writer
+                .start_file("a/b/link/pwned", options)
+                .expect("file through the chain");
+            writer.write_all(b"owned").expect("payload");
+            writer.finish().expect("finish zip");
+        }
+        buf.into_inner()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_zip_archive_rejects_symlink_chain_when_dotdot_precedes_the_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).expect("outside dir");
+        let zip_path = dir.path().join("encoder.zip");
+        std::fs::write(&zip_path, build_swapped_symlink_chain_zip()).expect("write zip");
+
+        let extract_dir = dir.path().join("extracted");
+        std::fs::create_dir(&extract_dir).expect("mkdir");
+        let err = extract_zip_archive(&zip_path, &extract_dir).expect_err("swapped chain");
+        assert!(matches!(err, ModelError::Io(_)), "error was {err:?}");
+        assert!(
+            std::fs::symlink_metadata(extract_dir.join("a/b/link")).is_err(),
+            "link must not be created before missing exists"
+        );
+        assert!(
+            std::fs::read_dir(&outside)
+                .expect("read outside")
+                .next()
+                .is_none(),
+            "outside must stay empty"
+        );
+
+        let target_dir = dir.path().join("placed.mlmodelc");
+        let placed = place_coreml_contents(&extract_dir, &target_dir);
+        if placed.is_ok() {
+            assert!(
+                std::fs::symlink_metadata(target_dir.join("b/link")).is_err(),
+                "place must not install the escaping link"
+            );
+        }
+        assert!(
+            std::fs::read_dir(&outside)
+                .expect("read outside")
+                .next()
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn place_coreml_contents_does_not_follow_an_escaping_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).expect("outside dir");
+        let extracted = dir.path().join("extracted");
+        std::fs::create_dir(&extracted).expect("mkdir");
+        std::os::unix::fs::symlink("../outside", extracted.join("encoder")).expect("symlink");
+
+        let target_dir = dir.path().join("placed.mlmodelc");
+        let err = place_coreml_contents(&extracted, &target_dir).expect_err("escaping symlink");
+        assert!(matches!(err, ModelError::Io(_)), "error was {err:?}");
+        assert!(
+            !outside.join(registry::SENTINEL_SUFFIX).exists(),
+            "sentinel must not be written through the symlink"
+        );
+        assert!(
+            std::fs::read_dir(&outside)
+                .expect("read outside")
+                .next()
+                .is_none()
+        );
+        assert!(!target_dir.join(registry::SENTINEL_SUFFIX).exists());
     }
 
     #[test]
@@ -1472,18 +1913,19 @@ mod tests {
         );
     }
 
-    /// Ticket b (continued): if the restart-fresh attempt *also* gets a 416,
-    /// the result must be a hard error — never a second recovery attempt
-    /// (no infinite 416 loop).
+    /// A 416 while the digest lookup is failing keeps the partial. The
+    /// ranged probe is allowed again on the next call. No non-ranged body
+    /// GET follows. When a later lookup matches, that same partial is
+    /// promoted.
     #[test]
-    fn ensure_coreml_encoder_416_after_restart_errors_without_looping() {
+    fn ensure_coreml_encoder_416_on_digest_lookup_error_keeps_the_partial() {
         let dir = tempfile::tempdir().expect("tempdir");
         let size = ModelSize::Small;
+        let repo = repo_for(size).unwrap();
 
         let zip_bytes = build_test_zip();
-        let zip_path = dir
-            .path()
-            .join(format!("ggml-{}-encoder.mlmodelc.zip", size.ggml_name()));
+        let zip_file_name = format!("ggml-{}-encoder.mlmodelc.zip", size.ggml_name());
+        let zip_path = dir.path().join(&zip_file_name);
         let partial_zip_path = partial_path_for(&zip_path);
         std::fs::write(&partial_zip_path, &zip_bytes).expect("write partial");
 
@@ -1491,18 +1933,17 @@ mod tests {
         let base = server.base_url();
         let zip_url = registry::coreml_zip_url_with_base(&base, size).unwrap();
         let zip_url_path = path_of(&zip_url);
-        // No tree-api route registered, so the digest lookup 404s and the
-        // partial is treated as unverifiable — recovery discards it and
-        // restarts fresh exactly once. Every request to this path (ranged or
-        // not) gets 416, so that restart also fails.
         server.set_route(zip_url_path.clone(), Canned::forced_416());
+        let tree_url_path = path_of(&tree_api_url(&base, repo));
+        server.set_route(tree_url_path.clone(), Canned::status(500));
 
         let downloader = ModelDownloader::with_hf_base(dir.path(), base);
         let cancel = CancelToken::new();
         let err = downloader
             .ensure_coreml_encoder(size, &mut |_| {}, &cancel)
-            .expect_err("a second 416 after restart should error, not loop forever");
+            .expect_err("a digest lookup error must not promote the partial");
         assert!(matches!(err, ModelError::Http { .. }));
+        assert_eq!(std::fs::read(&partial_zip_path).unwrap(), zip_bytes);
         assert_eq!(coreml_state(dir.path(), size), CoremlState::Missing);
 
         let zip_requests: Vec<_> = server
@@ -1510,18 +1951,43 @@ mod tests {
             .into_iter()
             .filter(|r| r.path == zip_url_path)
             .collect();
-        assert_eq!(
-            zip_requests.len(),
-            2,
-            "expected exactly one ranged retry then one non-ranged restart, no more: {zip_requests:?}"
-        );
+        assert_eq!(zip_requests.len(), 1, "{zip_requests:?}");
+        assert!(zip_requests[0].range.is_some(), "{zip_requests:?}");
+
+        let err = downloader
+            .ensure_coreml_encoder(size, &mut |_| {}, &cancel)
+            .expect_err("a second lookup error still must not download the body");
+        assert!(matches!(err, ModelError::Http { .. }));
+        assert_eq!(std::fs::read(&partial_zip_path).unwrap(), zip_bytes);
+        let zip_requests: Vec<_> = server
+            .requests()
+            .into_iter()
+            .filter(|r| r.path == zip_url_path)
+            .collect();
+        assert_eq!(zip_requests.len(), 2, "{zip_requests:?}");
         assert!(
-            zip_requests[0].range.is_some(),
-            "first request should carry Range"
+            zip_requests.iter().all(|request| request.range.is_some()),
+            "both probes are ranged; neither is a fresh body GET: {zip_requests:?}"
         );
+
+        let tree_json = format!(
+            r#"[{{"path":"{zip_file_name}","lfs":{{"oid":"{}"}}}}]"#,
+            sha256_bytes(&zip_bytes)
+        );
+        server.set_route(tree_url_path, Canned::ok(tree_json.into_bytes()));
+        downloader
+            .ensure_coreml_encoder(size, &mut |_| {}, &cancel)
+            .expect("a later matching digest promotes the same partial");
+        assert_eq!(coreml_state(dir.path(), size), CoremlState::Complete);
+        assert!(!partial_zip_path.exists());
+        let zip_requests: Vec<_> = server
+            .requests()
+            .into_iter()
+            .filter(|r| r.path == zip_url_path)
+            .collect();
         assert!(
-            zip_requests[1].range.is_none(),
-            "restart-fresh request should carry no Range"
+            zip_requests.iter().all(|request| request.range.is_some()),
+            "promotion still must not fetch the body: {zip_requests:?}"
         );
     }
 
@@ -1542,6 +2008,13 @@ mod tests {
         server.set_route(
             zip_url_path.clone(),
             Canned::ok(b"not a real zip archive".to_vec()),
+        );
+        // No `lfs.oid`: the download still finishes, then extraction fails.
+        let repo = repo_for(size).unwrap();
+        let zip_file_name = format!("ggml-{}-encoder.mlmodelc.zip", size.ggml_name());
+        server.set_route(
+            path_of(&tree_api_url(&base, repo)),
+            Canned::ok(format!(r#"[{{"path":"{zip_file_name}"}}]"#).into_bytes()),
         );
 
         let downloader = ModelDownloader::with_hf_base(dir.path(), base);
@@ -1721,6 +2194,130 @@ mod tests {
         );
     }
 
+    /// No digest (`sha_repo` is `None`). A resume past EOF is a 416, then one
+    /// fresh GET finishes the file. Restarting that case stays allowed.
+    #[test]
+    fn ensure_custom_model_416_without_a_digest_downloads_fresh_and_finishes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let full_bytes = b"custom-model-bytes-for-a-416-restart".to_vec();
+        let server = TestServer::start();
+        let custom_path = "/someuser/somerepo/resolve/main/custom-model.bin";
+        server.set_route(custom_path, Canned::ok(full_bytes.clone()));
+        let url = format!("{}{custom_path}", server.base_url());
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), server.base_url());
+        let final_path = dir.path().join(registry::custom_model_file_name());
+        let partial_path = partial_path_for(&final_path);
+        let mut stale = full_bytes.clone();
+        stale.push(0xff);
+        std::fs::write(&partial_path, &stale).expect("seed a partial past EOF");
+
+        let cancel = CancelToken::new();
+        let path = downloader
+            .ensure_custom_model(&url, &mut |_| {}, &cancel)
+            .expect("a no-digest 416 must still finish");
+        assert_eq!(path, final_path);
+        assert_eq!(std::fs::read(&final_path).unwrap(), full_bytes);
+        assert!(sentinel_path_for(&final_path).is_file());
+        assert!(!partial_path.exists());
+
+        let requests: Vec<_> = server
+            .requests()
+            .into_iter()
+            .filter(|request| request.path == custom_path)
+            .collect();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert!(requests[0].range.is_some(), "{requests:?}");
+        assert!(requests[1].range.is_none(), "{requests:?}");
+    }
+
+    /// A published digest that does not match deletes the partial.
+    #[test]
+    fn ensure_ggml_checksum_mismatch_deletes_the_partial() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let size = ModelSize::Tiny;
+        let repo = repo_for(size).unwrap();
+        let bytes = b"ggml-bytes-that-will-not-match".to_vec();
+        let server = TestServer::start();
+        let base = server.base_url();
+        let ggml_url_path = path_of(&registry::ggml_url_with_base(&base, size).unwrap());
+        server.set_route(ggml_url_path, Canned::ok(bytes));
+        let file = ggml_file_name(size);
+        server.set_route(
+            path_of(&tree_api_url(&base, repo)),
+            Canned::ok(format!(r#"[{{"path":"{file}","lfs":{{"oid":"deadbeef"}}}}]"#).into_bytes()),
+        );
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), base);
+        let err = downloader
+            .ensure_ggml(size, &mut |_| {}, &CancelToken::new())
+            .expect_err("a mismatch must not promote");
+        assert!(matches!(err, ModelError::ChecksumMismatch { .. }));
+        let final_path = dir.path().join(file);
+        assert!(!final_path.exists());
+        assert!(!partial_path_for(&final_path).exists());
+    }
+
+    /// Malformed tree JSON is a lookup error: the partial stays, and it is
+    /// not renamed.
+    #[test]
+    fn ensure_ggml_malformed_digest_json_keeps_the_partial() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let size = ModelSize::Tiny;
+        let repo = repo_for(size).unwrap();
+        let bytes = b"ggml-bytes-with-a-bad-tree".to_vec();
+        let server = TestServer::start();
+        let base = server.base_url();
+        let ggml_url_path = path_of(&registry::ggml_url_with_base(&base, size).unwrap());
+        server.set_route(ggml_url_path.clone(), Canned::ok(bytes.clone()));
+        server.set_route(
+            path_of(&tree_api_url(&base, repo)),
+            Canned::ok(b"not json".to_vec()),
+        );
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), base);
+        let err = downloader
+            .ensure_ggml(size, &mut |_| {}, &CancelToken::new())
+            .expect_err("malformed JSON must not promote");
+        assert!(matches!(err, ModelError::Http { .. }));
+        let final_path = dir.path().join(ggml_file_name(size));
+        assert!(!final_path.exists());
+        assert_eq!(std::fs::read(partial_path_for(&final_path)).unwrap(), bytes);
+        let file_gets: Vec<_> = server
+            .requests()
+            .into_iter()
+            .filter(|request| request.path == ggml_url_path)
+            .collect();
+        assert_eq!(file_gets.len(), 1, "{file_gets:?}");
+        assert!(file_gets[0].range.is_none());
+    }
+
+    /// A CoreML digest lookup failure degrades; the ggml ensure still
+    /// succeeds.
+    #[test]
+    fn resolve_model_coreml_digest_lookup_error_degrades() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let size = ModelSize::Small;
+        let ggml_path = dir.path().join(ggml_file_name(size));
+        std::fs::write(&ggml_path, b"local ggml").expect("ggml");
+        std::fs::write(sentinel_path_for(&ggml_path), b"").expect("sentinel");
+
+        let server = TestServer::start();
+        let base = server.base_url();
+        let repo = repo_for(size).unwrap();
+        let zip_url_path = path_of(&registry::coreml_zip_url_with_base(&base, size).unwrap());
+        server.set_route(zip_url_path, Canned::ok(build_test_zip()));
+        server.set_route(path_of(&tree_api_url(&base, repo)), Canned::status(500));
+
+        let downloader = ModelDownloader::with_hf_base(dir.path(), base);
+        let resolved = downloader
+            .resolve_model(size, true, &mut |_| {}, &CancelToken::new())
+            .expect("a CoreML lookup error must not fail the ggml model");
+        assert_eq!(resolved.path, ggml_path);
+        assert!(resolved.coreml_degraded);
+        assert_eq!(coreml_state(dir.path(), size), CoremlState::Missing);
+    }
+
     /// F-087 (M8): all 10 diarization model files download and each gets its
     /// own completeness sentinel; a second call is a pure fast path (no
     /// further network requests at all — not even a sha-digest lookup, since
@@ -1740,6 +2337,19 @@ mod tests {
             let path = format!("/{}/resolve/main/{file_name}", registry::DIARIZE_MODEL_REPO);
             server.set_route(path, Canned::ok(format!("fake-bytes-{i}").into_bytes()));
         }
+        // Parsed tree, no `lfs.oid`: each file still promotes.
+        let tree = registry::DIARIZE_MODEL_FILES
+            .iter()
+            .map(|name| format!(r#"{{"path":"{name}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        server.set_route(
+            path_of(&tree_api_url(
+                &server.base_url(),
+                registry::DIARIZE_MODEL_REPO,
+            )),
+            Canned::ok(format!("[{tree}]").into_bytes()),
+        );
 
         let downloader = ModelDownloader::with_hf_base(dir.path(), server.base_url());
         let cancel = CancelToken::new();
@@ -1857,6 +2467,12 @@ mod tests {
         let base = server.base_url();
         let ggml_url_path = path_of(&registry::ggml_url_with_base(&base, size).unwrap());
         server.set_route(ggml_url_path.clone(), Canned::ok(ggml_bytes.clone()));
+        let repo = repo_for(size).unwrap();
+        let file = ggml_file_name(size);
+        server.set_route(
+            path_of(&tree_api_url(&base, repo)),
+            Canned::ok(format!(r#"[{{"path":"{file}"}}]"#).into_bytes()),
+        );
 
         let downloader = ModelDownloader::with_hf_base(dir.path(), base);
         let cancel = CancelToken::new();

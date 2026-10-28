@@ -203,6 +203,10 @@ mod tests {
             unreachable!("run() never updates the file path")
         }
 
+        fn set_task_name(&self, _id: &TranscriptionId, _name: &str) -> Result<(), StoreError> {
+            unreachable!("run() never sets the task name")
+        }
+
         fn update_language(
             &self,
             _id: &TranscriptionId,
@@ -240,6 +244,10 @@ mod tests {
             _name: &str,
         ) -> Result<Option<TranscriptionId>, StoreError> {
             unreachable!("run() never looks up completed tasks by name")
+        }
+
+        fn find_completed_by_url(&self, _url: &str) -> Result<Option<TranscriptionId>, StoreError> {
+            unreachable!("run() never looks up completed tasks by url")
         }
 
         fn segments_for(&self, _id: &TranscriptionId) -> Result<Vec<Segment>, StoreError> {

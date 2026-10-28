@@ -9,26 +9,29 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
-/// Buzz's folder-watch/import supported extensions
-/// (`transcription_task_folder_watcher.py:15-18`), lowercase and without a
-/// leading dot: 6 audio + 7 video = 13. Shared by [`scan`]'s extension rule
+/// Buzz's folder-watch/import supported extensions, lowercase and without a
+/// leading dot. Audio then video, in the order of Buzz `main`
+/// `buzz/transcriber/transcriber.py` `SUPPORTED_AUDIO_EXTENSIONS` /
+/// `SUPPORTED_VIDEO_EXTENSIONS` (8 + 8). Shared by [`scan`]'s extension rule
 /// and `humm_gui::import`'s folder-import scan / file-dialog filters, which
-/// re-export this rather than duplicating it.
-pub const SUPPORTED_EXTENSIONS: [&str; 13] = [
-    "mp3", "wav", "m4a", "ogg", "opus", "flac", "mp4", "webm", "ogm", "mov", "mkv", "avi", "wmv",
+/// re-export this rather than duplicating it. The viewer playback classifier
+/// is a separate list and already includes `m4v`.
+pub const SUPPORTED_EXTENSIONS: [&str; 16] = [
+    "mp3", "wav", "m4a", "m4b", "aac", "ogg", "opus", "flac", "mp4", "m4v", "webm", "ogm", "mov",
+    "mkv", "avi", "wmv",
 ];
 
-/// The "Audio files" file-dialog filter group (`transcriber.py:222-225`) —
-/// the audio-only subset of [`SUPPORTED_EXTENSIONS`], same order. Lives here
-/// (rather than only in `humm-gui`) so `humm_gui::import`'s re-export has a
-/// single source of truth for every extension grouping.
-pub const AUDIO_EXTENSIONS: [&str; 6] = ["mp3", "wav", "m4a", "ogg", "opus", "flac"];
+/// The "Audio files" file-dialog filter group — the audio-only subset of
+/// [`SUPPORTED_EXTENSIONS`], same order. Lives here (rather than only in
+/// `humm-gui`) so `humm_gui::import`'s re-export has a single source of truth
+/// for every extension grouping.
+pub const AUDIO_EXTENSIONS: [&str; 8] = ["mp3", "wav", "m4a", "m4b", "aac", "ogg", "opus", "flac"];
 
-/// The "Video files" file-dialog filter group (`transcriber.py:222-225`) —
-/// the video-only subset of [`SUPPORTED_EXTENSIONS`], same order.
-pub const VIDEO_EXTENSIONS: [&str; 7] = ["mp4", "webm", "ogm", "mov", "mkv", "avi", "wmv"];
+/// The "Video files" file-dialog filter group — the video-only subset of
+/// [`SUPPORTED_EXTENSIONS`], same order.
+pub const VIDEO_EXTENSIONS: [&str; 8] = ["mp4", "m4v", "webm", "ogm", "mov", "mkv", "avi", "wmv"];
 
 /// Whether `path`'s extension (case-insensitive) is one of
 /// [`SUPPORTED_EXTENSIONS`] — Buzz's
@@ -283,6 +286,138 @@ fn is_folder_watch_candidate(path: &Path, seen: &SeenSet, known: &dyn Fn(&Path) 
     true
 }
 
+/// How long a folder-watch file's size and mtime must stay unchanged before
+/// it is transcribed. Buzz `40f6a78` (`settle_seconds = 30`).
+pub const FOLDER_WATCH_SETTLE: Duration = Duration::from_secs(30);
+
+/// How often a pending file is re-stat'd. Buzz `settle_poll_interval_ms = 5000`.
+pub const FOLDER_WATCH_SETTLE_POLL: Duration = Duration::from_secs(5);
+
+/// Size and modification time of one watched file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStamp {
+    /// Length in bytes.
+    pub size: u64,
+    /// Last modification time.
+    pub mtime: SystemTime,
+}
+
+/// Files seen by folder watch that are not transcribed until their stamp has
+/// been stable for [`FOLDER_WATCH_SETTLE`].
+///
+/// `now` is a duration from an arbitrary origin the caller owns, so tests can
+/// move the clock without sleeping. Buzz stores `time.monotonic()`.
+#[derive(Debug)]
+pub struct SettleSet<T> {
+    pending: HashMap<PathBuf, Pending<T>>,
+}
+
+#[derive(Debug)]
+struct Pending<T> {
+    stamp: FileStamp,
+    since: Duration,
+    value: T,
+}
+
+/// What [`SettleSet::poll`] decided for the files it was asked about.
+#[derive(Debug)]
+pub struct SettlePoll<T> {
+    /// Stamp unchanged for the settle interval. Removed from the set.
+    pub settled: Vec<(PathBuf, FileStamp, T)>,
+    /// `stat` returned `None` (removed, or unreadable). Removed from the set.
+    pub discarded: Vec<(PathBuf, T)>,
+}
+
+impl<T> Default for SettleSet<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> SettleSet<T> {
+    /// An empty set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            pending: HashMap::new(),
+        }
+    }
+
+    /// Whether any file is waiting.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// Remembers `path` if it is not already pending. Returns `true` when
+    /// this is the first sighting.
+    pub fn insert(&mut self, path: PathBuf, stamp: FileStamp, now: Duration, value: T) -> bool {
+        if self.pending.contains_key(&path) {
+            return false;
+        }
+        self.pending.insert(
+            path,
+            Pending {
+                stamp,
+                since: now,
+                value,
+            },
+        );
+        true
+    }
+
+    /// Re-stats every pending file. A changed stamp resets the clock. A
+    /// missing file is discarded. An unchanged stamp older than
+    /// `settle_after` is settled.
+    pub fn poll(
+        &mut self,
+        now: Duration,
+        settle_after: Duration,
+        mut stat: impl FnMut(&Path) -> Option<FileStamp>,
+    ) -> SettlePoll<T> {
+        let mut settled = Vec::new();
+        let mut discarded = Vec::new();
+        let paths: Vec<PathBuf> = self.pending.keys().cloned().collect();
+        for path in paths {
+            let Some(pending) = self.pending.get_mut(&path) else {
+                continue;
+            };
+            let Some(stamp) = stat(&path) else {
+                if let Some(pending) = self.pending.remove(&path) {
+                    discarded.push((path, pending.value));
+                }
+                continue;
+            };
+            if stamp != pending.stamp {
+                pending.stamp = stamp;
+                pending.since = now;
+                continue;
+            }
+            if now.saturating_sub(pending.since) < settle_after {
+                continue;
+            }
+            if let Some(pending) = self.pending.remove(&path) {
+                settled.push((path, stamp, pending.value));
+            }
+        }
+        SettlePoll { settled, discarded }
+    }
+
+    /// Forgets `path` and returns its value, if it was pending.
+    pub fn remove(&mut self, path: &Path) -> Option<T> {
+        self.pending.remove(path).map(|pending| pending.value)
+    }
+
+    /// Drops every pending file and returns the values, for a watch that is
+    /// stopping.
+    pub fn drain(&mut self) -> Vec<(PathBuf, T)> {
+        self.pending
+            .drain()
+            .map(|(path, pending)| (path, pending.value))
+            .collect()
+    }
+}
+
 /// Where `relative_dir` (a [`Candidate::relative_dir`]) mirrors to under
 /// `output_root` — Buzz's subdirectory-preserving output layout
 /// (`transcription_task_folder_watcher.py:97-107`): an empty `relative_dir`
@@ -426,6 +561,28 @@ mod tests {
         let candidates = scan(dir.path(), &SeenSet::new(), &never_known);
 
         assert_eq!(candidates, Vec::new());
+    }
+
+    #[test]
+    fn m4b_aac_and_m4v_are_supported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        touch(&dir.path().join("book.m4b"), b"audio");
+        touch(&dir.path().join("clip.aac"), b"audio");
+        touch(&dir.path().join("film.m4v"), b"video");
+
+        let mut names: Vec<_> = scan(dir.path(), &SeenSet::new(), &never_known)
+            .into_iter()
+            .map(|candidate| {
+                candidate
+                    .path
+                    .file_name()
+                    .expect("fixture file name")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, ["book.m4b", "clip.aac", "film.m4v"]);
     }
 
     #[test]
@@ -626,5 +783,102 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn stamp(size: u64, secs: u64) -> FileStamp {
+        FileStamp {
+            size,
+            mtime: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+        }
+    }
+
+    #[test]
+    fn settle_waits_thirty_seconds_of_unchanged_stamp() {
+        assert_eq!(FOLDER_WATCH_SETTLE, Duration::from_secs(30));
+        let path = PathBuf::from("/watch/clip.wav");
+        let mut set = SettleSet::new();
+        assert!(set.insert(path.clone(), stamp(10, 1), Duration::ZERO, "task"));
+        assert!(!set.insert(path.clone(), stamp(10, 1), Duration::from_secs(1), "other"));
+
+        let early = set.poll(Duration::from_secs(29), FOLDER_WATCH_SETTLE, |_| {
+            Some(stamp(10, 1))
+        });
+        assert!(early.settled.is_empty());
+        assert!(early.discarded.is_empty());
+
+        let ready = set.poll(Duration::from_secs(30), FOLDER_WATCH_SETTLE, |_| {
+            Some(stamp(10, 1))
+        });
+        assert_eq!(ready.settled.len(), 1);
+        assert_eq!(ready.settled[0].0, path);
+        assert_eq!(ready.settled[0].2, "task");
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn settle_resets_when_the_stamp_changes() {
+        let path = PathBuf::from("/watch/clip.wav");
+        let mut set = SettleSet::new();
+        set.insert(path.clone(), stamp(10, 1), Duration::ZERO, ());
+        let changed = set.poll(Duration::from_secs(20), FOLDER_WATCH_SETTLE, |_| {
+            Some(stamp(40, 2))
+        });
+        assert!(changed.settled.is_empty());
+        let too_soon = set.poll(Duration::from_secs(49), FOLDER_WATCH_SETTLE, |_| {
+            Some(stamp(40, 2))
+        });
+        assert!(too_soon.settled.is_empty());
+        let ready = set.poll(Duration::from_secs(50), FOLDER_WATCH_SETTLE, |_| {
+            Some(stamp(40, 2))
+        });
+        assert_eq!(ready.settled.len(), 1);
+        assert_eq!(ready.settled[0].1, stamp(40, 2));
+    }
+
+    #[test]
+    fn settle_discards_a_file_that_disappears() {
+        let path = PathBuf::from("/watch/clip.wav");
+        let mut set = SettleSet::new();
+        set.insert(path.clone(), stamp(10, 1), Duration::ZERO, 7);
+        let polled = set.poll(Duration::from_secs(5), FOLDER_WATCH_SETTLE, |_| None);
+        assert!(polled.settled.is_empty());
+        assert_eq!(polled.discarded, vec![(path, 7)]);
+    }
+
+    /// A file that vanishes during the 30s wait is not recorded as seen, so
+    /// putting it back makes `scan` return it again. A canceled row must not
+    /// count as known — that is the watcher's `has_blocking_task_for_file`.
+    #[test]
+    fn file_removed_during_settle_is_found_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("clip.wav");
+        touch(&file, b"partial");
+        let seen = SeenSet::new();
+        let mut settle: SettleSet<()> = SettleSet::new();
+        let first = scan(dir.path(), &seen, &|_| false);
+        assert_eq!(first.len(), 1);
+        let (size, mtime) = metadata_of(&file);
+        assert!(settle.insert(file.clone(), FileStamp { size, mtime }, Duration::ZERO, ()));
+
+        std::fs::remove_file(&file).expect("remove");
+        let polled = settle.poll(Duration::from_secs(5), FOLDER_WATCH_SETTLE, |path| {
+            let metadata = std::fs::metadata(path).ok()?;
+            let mtime = metadata.modified().ok()?;
+            Some(FileStamp {
+                size: metadata.len(),
+                mtime,
+            })
+        });
+        assert!(polled.settled.is_empty());
+        assert_eq!(polled.discarded.len(), 1);
+        assert!(
+            !seen.matches(&file, size, mtime),
+            "a discard must not record the path as seen"
+        );
+
+        touch(&file, b"replaced");
+        let again = scan(dir.path(), &seen, &|_| false);
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].path, file);
     }
 }

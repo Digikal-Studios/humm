@@ -3125,6 +3125,7 @@ impl HummApp {
             // (Buzz has no demucs pre-pass for live recording either) —
             // always off for a recording session's persisted snapshot.
             extract_speech: false,
+            identify_speakers: false,
         };
 
         let request = LiveSessionRequest {

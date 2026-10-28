@@ -673,6 +673,32 @@ impl SqliteStore {
         .transpose()
     }
 
+    /// Newest completed task stored with this exact URL. The downloaded
+    /// file name is not the source identity (Buzz `bc2882b`).
+    pub fn find_completed_transcription_by_url(
+        &self,
+        url: &str,
+    ) -> Result<Option<TranscriptionId>, StoreError> {
+        let conn = self.lock();
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT id FROM transcription \
+                 WHERE status = ?1 AND url = ?2 \
+                 ORDER BY time_ended DESC \
+                 LIMIT 1",
+                params![Status::Completed.as_str(), url],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(query_error)?;
+        raw.map(|raw| {
+            TranscriptionId::parse(&raw).ok_or_else(|| StoreError::Corrupt {
+                detail: format!("invalid task id {raw:?}"),
+            })
+        })
+        .transpose()
+    }
+
     /// Reports whether any task — regardless of status — has `file` exactly
     /// equal to `path`'s displayed form. An exact-path existence check, not
     /// a basename search (contrast
@@ -682,6 +708,20 @@ impl SqliteStore {
         conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM transcription WHERE file = ?1)",
             params![path.display().to_string()],
+            |row| row.get(0),
+        )
+        .map_err(query_error)
+    }
+
+    /// Whether a task for `path` should keep folder watch from creating
+    /// another. A `canceled` row does not: Buzz leaves `paths_emitted` unset
+    /// when a file disappears or the watch stops during settle, and the next
+    /// scan creates a new task. Completed, queued, and failed rows still do.
+    pub fn has_blocking_task_for_file(&self, path: &Path) -> Result<bool, StoreError> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM transcription WHERE file = ?1 AND status != ?2)",
+            params![path.display().to_string(), Status::Canceled.as_str()],
             |row| row.get(0),
         )
         .map_err(query_error)
@@ -861,6 +901,7 @@ impl SqliteStore {
             // path predates F-027 too, and Buzz's own restart hardcodes
             // every feature it predates off rather than reading it back.
             extract_speech: false,
+            identify_speakers: false,
         };
 
         // Tolerant, comma-split (Buzz's own restart splits on `','` and
@@ -1448,6 +1489,10 @@ impl TaskStore for SqliteStore {
         Ok(())
     }
 
+    fn set_task_name(&self, id: &TranscriptionId, name: &str) -> Result<(), StoreError> {
+        SqliteStore::set_task_name(self, id, name)
+    }
+
     fn update_language(&self, id: &TranscriptionId, language: &str) -> Result<(), StoreError> {
         let conn = self.lock();
         conn.execute(
@@ -1547,6 +1592,10 @@ impl TaskStore for SqliteStore {
         self.find_completed_transcription_by_basename(name)
     }
 
+    fn find_completed_by_url(&self, url: &str) -> Result<Option<TranscriptionId>, StoreError> {
+        self.find_completed_transcription_by_url(url)
+    }
+
     fn segments_for(&self, id: &TranscriptionId) -> Result<Vec<Segment>, StoreError> {
         self.get_segments(id)
     }
@@ -1598,6 +1647,7 @@ mod tests {
                 temperature: DEFAULT_TEMPERATURE.to_vec(),
                 llm: None,
                 extract_speech: false,
+                identify_speakers: false,
             },
             output: OutputSpec {
                 formats: [OutputFormat::Txt, OutputFormat::Srt].into_iter().collect(),
@@ -2069,6 +2119,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn canceled_file_does_not_block_folder_watch() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut spec = sample_task_spec();
+        spec.input = Input::Path(PathBuf::from("/watch/clip.wav"));
+        let id = TranscriptionId::new();
+        store
+            .create_task(&id, &spec, Source::FolderWatch)
+            .expect("create");
+        assert!(
+            store
+                .has_blocking_task_for_file(Path::new("/watch/clip.wav"))
+                .expect("queued blocks")
+        );
+        store.mark_canceled(&id).expect("cancel");
+        assert!(
+            store
+                .has_task_for_file(Path::new("/watch/clip.wav"))
+                .expect("file column remains")
+        );
+        assert!(
+            !store
+                .has_blocking_task_for_file(Path::new("/watch/clip.wav"))
+                .expect("canceled does not block")
+        );
+    }
+
     /// End-to-end proof that `humm_core::postproc::skip::check`'s database
     /// check (F-115) works against a *real* `SqliteStore` reached purely
     /// through the `TaskStore` trait object (exercising the
@@ -2118,6 +2195,7 @@ mod tests {
             Path::new("/some/other/dir/clip.mp3"),
             None,
             &store,
+            None,
         )
         .expect("db hit expected");
 
@@ -2126,6 +2204,54 @@ mod tests {
         assert_eq!(found[0].translation, "");
         assert_eq!(found[1].text, "dos");
         assert_eq!(found[1].translation, "");
+    }
+
+    #[test]
+    fn skip_matches_a_completed_url_and_ignores_a_different_one() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let id = TranscriptionId::new();
+        let mut spec = sample_task_spec();
+        spec.input = Input::Url(url::Url::parse("https://example.com/watch?v=1").expect("url"));
+        store
+            .create_task(&id, &spec, Source::UrlImport)
+            .expect("create");
+        store
+            .mark_completed(
+                &id,
+                &[Segment {
+                    start: Millis(0),
+                    end: Millis(500),
+                    text: "from the url".into(),
+                    translation: "nope".into(),
+                }],
+            )
+            .expect("complete");
+
+        let settings = humm_core::settings::SkipSettings {
+            enabled: true,
+            check_result_files: true,
+            check_database: true,
+        };
+        let found = humm_core::postproc::skip::check(
+            &settings,
+            Path::new("/tmp/media/id/source.mp3"),
+            None,
+            &store,
+            Some("https://example.com/watch?v=1"),
+        )
+        .expect("url hit");
+        assert_eq!(found[0].text, "from the url");
+        assert_eq!(found[0].translation, "");
+        assert_eq!(
+            humm_core::postproc::skip::check(
+                &settings,
+                Path::new("/tmp/media/id/source.mp3"),
+                None,
+                &store,
+                Some("https://example.com/other"),
+            ),
+            None
+        );
     }
 
     #[test]
@@ -3036,6 +3162,7 @@ mod tests {
             temperature: DEFAULT_TEMPERATURE.to_vec(),
             llm: None,
             extract_speech: false,
+            identify_speakers: false,
         }
     }
 

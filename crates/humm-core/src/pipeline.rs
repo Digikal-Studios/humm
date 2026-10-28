@@ -165,6 +165,7 @@ pub fn run_file_job(
     observer: &mut dyn SegmentSink,
     cancel: &CancelToken,
     llm: Option<&dyn LlmEndpointSource>,
+    diarizer: Option<&dyn crate::diarize::Diarizer>,
 ) -> Result<JobOutcome, CoreError> {
     // `audio_input`, not `job.input`: the decode target may be an isolated/
     // denoised derivative (M8 pre-transcription chain) — see this fn's doc
@@ -331,6 +332,22 @@ pub fn run_file_job(
         }
     }
 
+    if job.options.identify_speakers {
+        let Some(diarizer) = diarizer else {
+            return Err(CoreError::Engine(crate::error::EngineError::Inference {
+                detail: "speaker identification was requested but no diarizer is configured"
+                    .to_string(),
+            }));
+        };
+        segments = crate::diarize::identify_with_diarizer(&segments, &pcm, diarizer, cancel)
+            .map_err(|err| match err {
+                crate::diarize::DiarizeError::Canceled => CoreError::Canceled,
+                other => CoreError::Engine(crate::error::EngineError::Inference {
+                    detail: other.to_string(),
+                }),
+            })?;
+    }
+
     let now = chrono::Local::now().naive_local();
     let mut written = Vec::with_capacity(job.output.formats.len());
     for format in &job.output.formats {
@@ -351,6 +368,7 @@ pub fn run_file_job(
             job.output.directory.as_deref(),
             job.output.file_name_template.as_deref(),
             now,
+            job.display_name.as_deref(),
         );
 
         if let Some(parent) = path.parent()
@@ -681,6 +699,7 @@ mod tests {
                 paragraph_split: Millis(2000),
                 source_disposition: None,
             },
+            display_name: None,
         }
     }
 
@@ -724,6 +743,7 @@ mod tests {
             &mut observer,
             &cancel,
             None,
+            None,
         )
         .unwrap();
 
@@ -743,6 +763,58 @@ mod tests {
             srt,
             "1\n00:00:00,040 --> 00:00:00,299\nBien\n\n2\n00:00:00,299 --> 00:00:00,329\nvenue dans\n\n"
         );
+    }
+
+    #[test]
+    fn url_title_export_stays_inside_the_output_directory() {
+        let cases = [
+            ("AC/DC", "AC_DC.srt"),
+            ("../x", ".._x.srt"),
+            ("..", ".#.srt"),
+            ("C:/x", "C__x.srt"),
+            ("CON", "_CON.srt"),
+        ];
+        for (title, file_name) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let input = tmp.path().join("source.mp3");
+            touch(&input);
+            let mut job = job_with(
+                input,
+                [OutputFormat::Srt].into_iter().collect(),
+                Some(tmp.path().to_path_buf()),
+                Some("{{ input_file_name }}".to_string()),
+            );
+            job.display_name = Some(title.to_string());
+
+            let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+            let prober = prober_with_audio();
+            let mut engine = FakeEngine {
+                behavior: EngineBehavior::EmitFixtureSegments,
+            };
+            let mut observer = NullSink;
+            let cancel = CancelToken::new();
+            let outcome = run_file_job(
+                &job,
+                &job.input,
+                None,
+                &EngineTuning::default(),
+                &decoder,
+                &prober,
+                &mut engine,
+                &mut observer,
+                &cancel,
+                None,
+                None,
+            )
+            .unwrap();
+
+            let written = tmp.path().join(file_name);
+            assert_eq!(outcome.written, vec![written.clone()], "{title}");
+            assert!(written.is_file(), "{title}");
+            assert_eq!(written.parent(), Some(tmp.path()), "{title}");
+            let outside = tmp.path().join("..").join(file_name);
+            assert_ne!(written, outside);
+        }
     }
 
     #[test]
@@ -771,6 +843,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
             None,
         )
         .unwrap();
@@ -813,6 +886,7 @@ mod tests {
             &mut observer,
             &cancel,
             None,
+            None,
         );
 
         assert!(matches!(
@@ -853,6 +927,7 @@ mod tests {
             &mut observer,
             &cancel,
             None,
+            None,
         );
 
         assert!(matches!(result, Err(CoreError::Canceled)));
@@ -889,6 +964,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
             None,
         );
 
@@ -937,6 +1013,7 @@ mod tests {
             &mut observer,
             &cancel,
             None,
+            None,
         );
         assert!(matches!(
             result,
@@ -965,6 +1042,7 @@ mod tests {
             &mut engine2,
             &mut observer2,
             &cancel2,
+            None,
             None,
         );
         assert!(result2.is_ok());
@@ -997,6 +1075,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
             None,
         )
         .unwrap();
@@ -1044,6 +1123,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
             None,
         )
         .unwrap();
@@ -1095,6 +1175,7 @@ mod tests {
             &mut observer,
             &cancel,
             None,
+            None,
         )
         .unwrap();
 
@@ -1135,6 +1216,7 @@ mod tests {
             &mut observer,
             &cancel,
             None,
+            None,
         );
 
         assert!(matches!(result, Err(CoreError::NoAudioDecoded)));
@@ -1168,6 +1250,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
             None,
         )
         .unwrap();
@@ -1223,6 +1306,7 @@ mod tests {
             &mut observer,
             &cancel,
             None,
+            None,
         );
 
         assert!(matches!(result, Err(CoreError::Canceled)));
@@ -1270,6 +1354,7 @@ mod tests {
             &mut observer,
             &cancel,
             None,
+            None,
         );
 
         assert!(matches!(result, Err(CoreError::Canceled)));
@@ -1308,6 +1393,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
             None,
         )
         .unwrap();
@@ -1352,6 +1438,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
             None,
         )
         .unwrap();
@@ -1411,6 +1498,7 @@ mod tests {
             &mut observer,
             &cancel,
             None,
+            None,
         );
 
         assert!(
@@ -1463,6 +1551,7 @@ mod tests {
             &mut observer,
             &cancel,
             None,
+            None,
         )
         .unwrap();
 
@@ -1507,6 +1596,7 @@ mod tests {
             &mut engine,
             &mut observer,
             &cancel,
+            None,
             None,
         )
         .unwrap();

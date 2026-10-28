@@ -575,6 +575,7 @@ fn transcription_options_from_state(state: &SheetState) -> TranscriptionOptions 
         temperature: DEFAULT_TEMPERATURE.to_vec(),
         llm: llm_options(state),
         extract_speech: state.extract_speech,
+        identify_speakers: false,
     }
 }
 

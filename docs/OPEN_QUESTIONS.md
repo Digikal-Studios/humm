@@ -16,6 +16,8 @@ Buzz sends a PostHog `app_launched` event with a hardcoded project key and persi
 Buzz's HF backend runs arbitrary Transformers ASR models — Whisper-family AND non-Whisper (MMS/wav2vec2 with ISO-639-3 languages, `buzz/transformers_whisper.py`). whisper-rs covers Whisper-family only. Outcome-level parity ("transcribe with a custom HF model") for non-Whisper models would need candle/ort or a deliberate scope cut.
 **Proposed default:** support custom *Whisper-family* HF models by converting/fetching ggml equivalents; declare non-Whisper (MMS) out of scope in the ADR unless the user needs it. — *Status: RESOLVED — proposed default approved by user 2026-07-20*
 
+**Named exception — FunASR (Buzz `main` `298dbf003505cf945bdfd1eb8e705348b59a5b34`).** Current Buzz adds FunASR on the Hugging Face path (`buzz/transformers_whisper.py`, `is_funasr_model`, commit `851c8b3593`). That is a non-Whisper model family. It stays out of scope under this question and ADR-008. humm does not ship a FunASR engine, an in-process Python runtime, or a `transformers` dependency. A later design may revisit it only if it does not pull those in.
+
 ## Q-3 — Speaker identification strategy
 Buzz's diarization = NeMo MSDD + ctc-forced-aligner + punctuation model (three vendored submodules + torch; `speaker_identification_widget.py`). No mature pure-Rust equivalent. Options: (a) ONNX pipeline via `ort` (e.g. pyannote/silero embeddings + clustering — different models than Buzz, comparable outcome), (b) external subprocess tool, (c) defer to a later milestone, (d) drop.
 **Proposed default:** (a) with (c) sequencing — design the `Diarizer` trait boundary now, implement via `ort` in a late milestone. — *Status: RESOLVED — proposed default approved by user 2026-07-20*

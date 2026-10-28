@@ -364,6 +364,9 @@ pub struct RunnerDeps {
     /// [`postproc::langdetect::should_detect`]. `None` disables the hook
     /// entirely, same precedent as [`Self::isolator`].
     pub lang_detector: Option<Arc<dyn LanguageDetector>>,
+    /// PCM speaker diarizer used when a task sets `identify_speakers`.
+    /// `None` means that flag cannot be honored.
+    pub diarizer: Option<Arc<dyn crate::diarize::Diarizer>>,
 }
 
 /// Shared registry of live subscriber senders.
@@ -427,6 +430,28 @@ enum Command {
         /// Where the task came from.
         source: Source,
     },
+    /// Insert a `queued` row and emit [`TaskEventKind::Queued`] without
+    /// starting the task. Folder watch does this on first sight.
+    Stage {
+        /// The task's id.
+        id: TranscriptionId,
+        /// The task specification.
+        spec: Box<TaskSpec>,
+        /// Where the task came from.
+        source: Source,
+    },
+    /// Cancel a staged task that never started. Emits
+    /// [`TaskEventKind::Canceled`]. Does not record the path as seen.
+    Abandon(TranscriptionId),
+    /// Run a task whose row was already inserted as `queued`. Folder watch
+    /// creates the row when the file is first seen and only then hands it
+    /// to the runner, after the file's size and mtime have been stable.
+    Adopt {
+        /// The task's id. The store row must already exist.
+        id: TranscriptionId,
+        /// The task specification to run.
+        spec: Box<TaskSpec>,
+    },
     /// Re-enqueue an already-terminated task's *existing* row for a retry:
     /// same `id`, fresh `spec` (see [`QueueHandle::retry`]).
     Retry {
@@ -481,6 +506,29 @@ impl QueueHandle {
             id,
             spec: Box::new(spec),
             source,
+        });
+    }
+
+    /// Persists a queued row and emits `Queued`. Does not start the task.
+    pub fn stage(&self, id: TranscriptionId, spec: TaskSpec, source: Source) {
+        let _ = self.commands.send(Command::Stage {
+            id,
+            spec: Box::new(spec),
+            source,
+        });
+    }
+
+    /// Cancels a staged task that was never adopted. Emits `Canceled`.
+    pub fn abandon(&self, id: TranscriptionId) {
+        let _ = self.commands.send(Command::Abandon(id));
+    }
+
+    /// Starts a task that is already a `queued` row. Does not call
+    /// `create_task`. Folder watch uses this after the file has settled.
+    pub fn adopt(&self, id: TranscriptionId, spec: TaskSpec) {
+        let _ = self.commands.send(Command::Adopt {
+            id,
+            spec: Box::new(spec),
         });
     }
 
@@ -721,6 +769,11 @@ struct TempAudioGuard {
     isolated: Option<PathBuf>,
     denoised: Option<PathBuf>,
     keep_denoised: bool,
+    /// Unregisters on drop. Deletion stays in [`Drop`] so a normal return
+    /// still removes the file; a second Ctrl-C, which skips `Drop`, uses
+    /// the registration instead.
+    isolated_track: Option<crate::abort::TrackedTemp>,
+    denoised_track: Option<crate::abort::TrackedTemp>,
 }
 
 impl Drop for TempAudioGuard {
@@ -976,6 +1029,8 @@ struct Runner {
     /// Detects the spoken language before transcription (F-114) — see
     /// [`RunnerDeps::lang_detector`].
     lang_detector: Option<Arc<dyn LanguageDetector>>,
+    /// PCM diarizer for tasks that set `identify_speakers`.
+    diarizer: Option<Arc<dyn crate::diarize::Diarizer>>,
     /// Tasks accepted but not yet run (FIFO).
     pending: VecDeque<PendingTask>,
     /// Ids canceled but not yet dequeued (Buzz's canceled-set). *Consumed*: a
@@ -1056,6 +1111,33 @@ impl Runner {
     /// Applies one command to the runner's state.
     fn handle_command(&mut self, command: Command) {
         match command {
+            Command::Stage { id, spec, source } => {
+                match self.store.create_task(&id, &spec, source) {
+                    Ok(()) => {
+                        self.emit(TaskEvent {
+                            task_id: id,
+                            kind: TaskEventKind::Queued,
+                        });
+                    }
+                    Err(err) => {
+                        let message = CoreError::from(err).to_string();
+                        log::error!("create_task failed for task {id}: {message}");
+                        if let Err(err2) = self.store.mark_failed(&id, &message) {
+                            self.store_write_failed(id, "mark_failed", &err2);
+                        }
+                        self.emit(TaskEvent {
+                            task_id: id,
+                            kind: TaskEventKind::Failed { message },
+                        });
+                    }
+                }
+            }
+            Command::Abandon(id) => {
+                self.write_canceled(id);
+            }
+            Command::Adopt { id, spec } => {
+                self.pending.push_back(PendingTask { id, spec });
+            }
             Command::Enqueue { id, spec, source } => {
                 match self.store.create_task(&id, &spec, source) {
                     Ok(()) => {
@@ -1311,10 +1393,10 @@ impl Runner {
     /// [`ModelDownloadProgress`*] → `Progress`/`SegmentAdded`*), acquires the
     /// engine, and runs the file-transcription pipeline.
     fn run_job(&mut self, id: TranscriptionId, spec: &TaskSpec, token: &CancelToken) -> Terminal {
-        let input_path = match &spec.input {
-            Input::Path(path) => path.clone(),
+        let (input_path, display_name) = match &spec.input {
+            Input::Path(path) => (path.clone(), None),
             Input::Url(url) => match self.fetch_url(id, url, token) {
-                Ok(path) => path,
+                Ok(fetched) => fetched,
                 Err(terminal) => return terminal,
             },
         };
@@ -1324,6 +1406,7 @@ impl Runner {
             input: input_path,
             options: spec.options.clone(),
             output: spec.output.clone(),
+            display_name,
         };
 
         // A single [`PostprocConfig`] snapshot for this whole task (design
@@ -1339,7 +1422,8 @@ impl Runner {
         let postproc_cfg = self.postproc.as_ref().map(|source| source.snapshot());
 
         // F-115 `check_skip` seam (design spec §2.1): after input resolution
-        // (a URL task's `job.input` is by now the fetched local file) and
+        // (a URL task's `job.input` is by now the fetched local file, named
+        // `source.<ext>`, not the title) and
         // before artifact-ensure/engine-build — Buzz's own ordering
         // (`file_transcriber_queue_worker.py:208-230`), which runs the check
         // right after `mark_started`/`Started` too. Dispatches on
@@ -1352,6 +1436,10 @@ impl Runner {
                 &job.input,
                 job.output.directory.as_deref(),
                 self.store.as_ref(),
+                match &spec.input {
+                    Input::Url(url) => Some(url.as_str()),
+                    Input::Path(_) => None,
+                },
             )
         {
             return Terminal::Skipped(segments);
@@ -1379,6 +1467,8 @@ impl Runner {
                 .as_ref()
                 .map(|cfg| cfg.noise_reduction.keep_denoised_file)
                 .unwrap_or(false),
+            isolated_track: None,
+            denoised_track: None,
         };
 
         // (1) F-027 speech isolation — gated on the task's own option
@@ -1407,6 +1497,10 @@ impl Runner {
                     // its input path back must never cause `TempAudioGuard`
                     // to delete the user's own source (review fix).
                     if isolated != audio_input {
+                        // The source path is not registered. Only a new file
+                        // is, so emergency cleanup cannot delete the user's media.
+                        guard.isolated_track =
+                            Some(crate::abort::track_temp_file(isolated.clone(), false));
                         guard.isolated = Some(isolated.clone());
                     }
                     audio_input = isolated;
@@ -1469,6 +1563,10 @@ impl Runner {
                     // Same identity check as the isolation step above: never
                     // queue the reducer's own input path for cleanup.
                     if denoised != prior_audio {
+                        guard.denoised_track = Some(crate::abort::track_temp_file(
+                            denoised.clone(),
+                            guard.keep_denoised,
+                        ));
                         guard.denoised = Some(denoised.clone());
                     }
                     audio_input = denoised;
@@ -1625,6 +1723,7 @@ impl Runner {
             &mut sink,
             token,
             self.llm.as_deref(),
+            self.diarizer.as_deref(),
         );
 
         self.engine_cache = Some((model, engine));
@@ -1849,13 +1948,16 @@ impl Runner {
 
     /// Downloads a URL input into `media_dir/<id>/`, emitting `DownloadProgress`
     /// events (only while the total is known) and recording the local path via
-    /// `update_file`. Returns the local path, or a [`Terminal`] on failure.
+    /// `update_file`. A raw title, when the fetcher reports one, is stored
+    /// with [`TaskStore::set_task_name`] and returned for the export stem.
+    /// The CLI progress label stays the URL (`Input::display_name`).
+    /// Returns `(local path, raw title)`, or a [`Terminal`] on failure.
     fn fetch_url(
         &self,
         id: TranscriptionId,
         url: &url::Url,
         token: &CancelToken,
-    ) -> Result<PathBuf, Terminal> {
+    ) -> Result<(PathBuf, Option<String>), Terminal> {
         let Some(fetcher) = self.fetcher.as_ref() else {
             return Err(Terminal::Failed(YTDLP_MISSING.to_string()));
         };
@@ -1884,15 +1986,20 @@ impl Runner {
             }
         };
 
-        let local = match fetcher.fetch(url, &dest, &mut progress, token) {
-            Ok(path) => path,
+        let fetched = match fetcher.fetch(url, &dest, &mut progress, token) {
+            Ok(fetched) => fetched,
             Err(err) => return Err(classify(CoreError::from(err))),
         };
 
-        if let Err(err) = self.store.update_file(&id, &local) {
+        if let Some(title) = fetched.title.as_deref().filter(|title| !title.is_empty())
+            && let Err(err) = self.store.set_task_name(&id, title)
+        {
+            self.store_write_failed(id, "set_task_name", &err);
+        }
+        if let Err(err) = self.store.update_file(&id, &fetched.path) {
             self.store_write_failed(id, "update_file", &err);
         }
-        Ok(local)
+        Ok((fetched.path, fetched.title))
     }
 
     /// Emits `event` to all subscribers.
@@ -1931,6 +2038,7 @@ pub fn spawn_task_runner(deps: RunnerDeps) -> QueueHandle {
         isolator: deps.isolator,
         reducer: deps.reducer,
         lang_detector: deps.lang_detector,
+        diarizer: deps.diarizer,
         pending: VecDeque::new(),
         canceled: HashSet::new(),
         finishing: false,
@@ -2026,6 +2134,7 @@ mod tests {
         Started(TranscriptionId),
         Progress(TranscriptionId, f64),
         UpdateFile(TranscriptionId, PathBuf),
+        SetName(TranscriptionId, String),
         Completed(TranscriptionId, Vec<Segment>),
         Failed(TranscriptionId, String),
         Canceled(TranscriptionId),
@@ -2120,6 +2229,11 @@ mod tests {
             Ok(())
         }
 
+        fn set_task_name(&self, id: &TranscriptionId, name: &str) -> Result<(), StoreError> {
+            self.record(StoreCall::SetName(*id, name.to_string()));
+            Ok(())
+        }
+
         fn update_language(&self, id: &TranscriptionId, language: &str) -> Result<(), StoreError> {
             self.record(StoreCall::UpdateLanguage(*id, language.to_string()));
             Ok(())
@@ -2165,6 +2279,10 @@ mod tests {
         ) -> Result<Option<TranscriptionId>, StoreError> {
             // No queue-level test exercises the DB-check path (that's
             // `postproc::skip`'s own unit tests) — always "no match".
+            Ok(None)
+        }
+
+        fn find_completed_by_url(&self, _url: &str) -> Result<Option<TranscriptionId>, StoreError> {
             Ok(None)
         }
 
@@ -2390,6 +2508,7 @@ mod tests {
 
     struct FakeFetcher {
         steps: Vec<FetchProgress>,
+        title: Option<String>,
         calls: Arc<Mutex<Vec<url::Url>>>,
         /// When set, `fetch` panics instead of returning — exercises a panic
         /// that unwinds *before* `run_job` ever reaches the cached-engine
@@ -2406,7 +2525,7 @@ mod tests {
             dest_dir: &Path,
             progress: &mut dyn FnMut(FetchProgress),
             _cancel: &CancelToken,
-        ) -> Result<PathBuf, MediaError> {
+        ) -> Result<crate::boundary::FetchedMedia, MediaError> {
             if self.panics {
                 panic!("fetcher exploded");
             }
@@ -2419,7 +2538,10 @@ mod tests {
             }
             let path = dest_dir.join("audio.wav");
             std::fs::write(&path, b"fake audio").map_err(MediaError::Io)?;
-            Ok(path)
+            Ok(crate::boundary::FetchedMedia {
+                path,
+                title: self.title.clone(),
+            })
         }
     }
 
@@ -2684,6 +2806,7 @@ mod tests {
         completed_gate: Option<Gate>,
         canceled_gate: Option<Gate>,
         fetch_steps: Vec<FetchProgress>,
+        fetch_title: Option<String>,
         fetch_panics: bool,
         ensurer: Option<Arc<dyn ArtifactEnsurer>>,
         llm: Option<Arc<dyn LlmEndpointSource>>,
@@ -2751,6 +2874,7 @@ mod tests {
         } else {
             Some(Arc::new(FakeFetcher {
                 steps: cfg.fetch_steps,
+                title: cfg.fetch_title,
                 calls: Arc::clone(&fetch_calls),
                 panics: cfg.fetch_panics,
             }))
@@ -2774,6 +2898,7 @@ mod tests {
             isolator: cfg.isolator,
             reducer: cfg.reducer,
             lang_detector: cfg.lang_detector,
+            diarizer: None,
         };
 
         let handle = spawn_task_runner(deps);
@@ -3247,6 +3372,97 @@ mod tests {
                 .any(|c| matches!(c, StoreCall::Completed(x, _) if *x == a))
         );
         assert_eq!(h.fetch_calls.lock().expect("fetch").len(), 1);
+    }
+
+    #[test]
+    fn adopt_runs_a_row_that_already_exists_without_creating_it() {
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            ..Cfg::default()
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = dir.path().join("clip.wav");
+        std::fs::write(&input, b"bytes").expect("write");
+        let id = TranscriptionId::new();
+        q.adopt(id, path_task(input));
+        q.finish().expect("finish");
+        let calls = h.store_calls();
+        assert!(
+            !calls
+                .iter()
+                .any(|call| matches!(call, StoreCall::Create(_))),
+            "{calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| matches!(call, StoreCall::Started(x) if *x == id))
+        );
+    }
+
+    #[test]
+    fn stage_emits_queued_without_starting_and_abandon_cancels() {
+        let (q, h) = build(Cfg::default());
+        let rx = q.subscribe();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = dir.path().join("clip.wav");
+        std::fs::write(&input, b"bytes").expect("write");
+        let id = TranscriptionId::new();
+        q.stage(id, path_task(input), Source::FolderWatch);
+        let queued = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("queued event");
+        assert!(matches!(queued.kind, TaskEventKind::Queued));
+        assert_eq!(queued.task_id, id);
+        q.abandon(id);
+        let canceled = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("canceled event");
+        assert!(matches!(canceled.kind, TaskEventKind::Canceled));
+        q.finish().expect("finish");
+        let calls = h.store_calls();
+        assert!(
+            calls
+                .iter()
+                .any(|call| matches!(call, StoreCall::Create(x) if *x == id))
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| matches!(call, StoreCall::Canceled(x) if *x == id))
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|call| matches!(call, StoreCall::Started(_)))
+        );
+    }
+
+    #[test]
+    fn url_task_stores_the_raw_title_and_keeps_the_url_as_the_cli_label() {
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            fetch_title: Some("C:/x".to_string()),
+            ..Cfg::default()
+        });
+        let a = TranscriptionId::new();
+        let spec = url_task();
+        assert_eq!(spec.input.display_name(), "https://example.com/video");
+        q.enqueue(a, spec, Source::UrlImport);
+        q.finish().expect("finish");
+        let calls = h.store_calls();
+        assert!(calls.contains(&StoreCall::SetName(a, "C:/x".to_string())));
+        assert!(
+            !calls
+                .iter()
+                .any(|call| matches!(call, StoreCall::SetName(_, name) if name == "C__x"))
+        );
     }
 
     #[test]

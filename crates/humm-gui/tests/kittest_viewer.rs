@@ -209,6 +209,7 @@ fn spec_for(file: &str) -> TaskSpec {
             temperature: vec![0.0],
             llm: None,
             extract_speech: false,
+            identify_speakers: false,
         },
         output: OutputSpec::default(),
     }

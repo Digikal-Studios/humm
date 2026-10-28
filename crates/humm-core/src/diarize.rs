@@ -347,6 +347,28 @@ pub fn label_segments(
     out
 }
 
+/// Labels `segments` with the existing PCM diarizer. Speaker count and a
+/// named algorithm are not inputs: [`Diarizer::diarize`] takes audio only.
+pub fn identify_with_diarizer(
+    segments: &[Segment],
+    audio: &Pcm,
+    diarizer: &dyn Diarizer,
+    cancel: &CancelToken,
+) -> Result<Vec<Segment>, DiarizeError> {
+    let turns = diarizer.diarize(audio, &mut |_| {}, cancel)?;
+    let speakers = assign_speakers(segments, &turns);
+    let count = speakers
+        .iter()
+        .copied()
+        .max()
+        .map(|speaker| speaker + 1)
+        .unwrap_or(0);
+    let names: Vec<String> = (0..count)
+        .map(|speaker| format!("Speaker {speaker}"))
+        .collect();
+    Ok(label_segments(segments, &speakers, &names, true))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,5 +561,31 @@ mod tests {
                 translation: String::new(),
             }]
         );
+    }
+
+    struct OneTurn;
+
+    impl Diarizer for OneTurn {
+        fn diarize(
+            &self,
+            _audio: &Pcm,
+            _progress: &mut dyn FnMut(DiarizeProgress),
+            _cancel: &CancelToken,
+        ) -> Result<Vec<SpeakerTurn>, DiarizeError> {
+            Ok(vec![turn(0, 2000, 0)])
+        }
+    }
+
+    #[test]
+    fn identify_with_diarizer_prefixes_the_pcm_speakers() {
+        let segments = vec![seg(0, 1000, "hello"), seg(1000, 2000, "there")];
+        let labeled = identify_with_diarizer(
+            &segments,
+            &Pcm::new(vec![0.0; 8]),
+            &OneTurn,
+            &CancelToken::new(),
+        )
+        .expect("diarize");
+        assert_eq!(labeled[0].text, "Speaker 0: hello there");
     }
 }

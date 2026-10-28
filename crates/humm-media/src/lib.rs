@@ -103,6 +103,29 @@ pub(crate) fn signal_process_group(child: &std::process::Child, signal: nix::sys
 /// descendant then keeps the killed child's stdout/stderr pipes open,
 /// blocking the caller's reader-thread `join`s until it exits naturally on
 /// its own.
+/// SIGKILL each process-group leader in `pids` and do not wait.
+///
+/// `process_group(0)` makes the child's pid the group id, so the signal
+/// goes to `-pid`. Leaders that have already been waited and unregistered
+/// are not in `pids`. Non-unix has no process groups; this is a no-op there.
+pub fn kill_tracked_groups(pids: &[u32]) {
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+        for &pid in pids {
+            if pid == 0 {
+                continue;
+            }
+            let _ = kill(Pid::from_raw(-(pid as i32)), Signal::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pids;
+    }
+}
+
 pub(crate) fn kill_process_group(child: &mut std::process::Child) {
     #[cfg(unix)]
     signal_process_group(child, nix::sys::signal::Signal::SIGKILL);

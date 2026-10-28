@@ -4,6 +4,7 @@
 //! (`buzz/cli.py:52-138`, `docs/analysis/EXTERNAL_SURFACE.md` §2): `-t/--task`,
 //! `-s/--model-size`, `-m/--model-type`, `--hfid`, `-l/--language`,
 //! `-p/--prompt`, `-w/--word-timestamps`, `-e/--extract-speech`,
+//! `--identify-speakers`, `--speaker-count`, `--speaker-diarizer`,
 //! `--openai-token`, `--srt`/`--vtt`/`--txt`, `-d/--output-directory`,
 //! `--hide-gui`, plus file positionals. `--json`/`--quiet` are humm additions
 //! (ADR-007, `docs/design/UX_SPEC.md` §5).
@@ -43,6 +44,19 @@ pub struct Cli {
 pub enum Command {
     /// Transcribe or translate one or more media files.
     Add(AddArgs),
+}
+
+/// Buzz `CommandLineDiarizer` (`cli.py`): `msdd` or `sortformer`.
+///
+/// Neither algorithm is ported. Passing the flag is rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SpeakerDiarizerArg {
+    /// NeMo MSDD.
+    #[value(name = "msdd")]
+    Msdd,
+    /// Sortformer.
+    #[value(name = "sortformer")]
+    Sortformer,
 }
 
 /// Model backend, `buzz/cli.py:31-36` (`CommandLineModelType`) — CLI-local:
@@ -121,6 +135,19 @@ pub struct AddArgs {
     #[arg(short = 'e', long = "extract-speech")]
     pub extract_speech: bool,
 
+    /// Identify speakers with the local diarizer after transcription.
+    #[arg(long = "identify-speakers")]
+    pub identify_speakers: bool,
+
+    /// Number of speakers. Rejected: the diarizer takes audio only.
+    #[arg(long = "speaker-count", value_name = "count")]
+    pub speaker_count: Option<i32>,
+
+    /// Speaker diarizer (`msdd` or `sortformer`). Rejected: those algorithms
+    /// are not ported. `--identify-speakers` uses the PCM diarizer instead.
+    #[arg(long = "speaker-diarizer", value_name = "diarizer", value_enum)]
+    pub speaker_diarizer: Option<SpeakerDiarizerArg>,
+
     /// OpenAI access token. Used only when --model-type is openaiapi; else
     /// accepted and ignored (Buzz parity). Empty/absent falls back to the OS
     /// keyring, else the run fails with "No OpenAI access token found".
@@ -158,4 +185,14 @@ pub struct AddArgs {
     /// Input file paths or URLs.
     #[arg(value_name = "FILE")]
     pub files: Vec<String>,
+}
+
+#[cfg(test)]
+impl AddArgs {
+    /// True when any speaker flag is set. `--speaker-count` and
+    /// `--speaker-diarizer` imply `--identify-speakers` (Buzz `cli.py`).
+    #[must_use]
+    pub fn wants_speaker_identification(&self) -> bool {
+        self.identify_speakers || self.speaker_count.is_some() || self.speaker_diarizer.is_some()
+    }
 }

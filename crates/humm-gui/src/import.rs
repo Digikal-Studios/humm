@@ -186,13 +186,21 @@ mod tests {
     }
 
     #[test]
-    fn supported_extensions_is_buzz_s_thirteen_lowercase_no_dot() {
+    fn supported_extensions_match_buzz_main_lowercase_no_dot() {
         assert_eq!(
             SUPPORTED_EXTENSIONS,
             [
-                "mp3", "wav", "m4a", "ogg", "opus", "flac", "mp4", "webm", "ogm", "mov", "mkv",
-                "avi", "wmv",
+                "mp3", "wav", "m4a", "m4b", "aac", "ogg", "opus", "flac", "mp4", "m4v", "webm",
+                "ogm", "mov", "mkv", "avi", "wmv",
             ]
+        );
+        assert_eq!(
+            AUDIO_EXTENSIONS,
+            ["mp3", "wav", "m4a", "m4b", "aac", "ogg", "opus", "flac",]
+        );
+        assert_eq!(
+            VIDEO_EXTENSIONS,
+            ["mp4", "m4v", "webm", "ogm", "mov", "mkv", "avi", "wmv",]
         );
     }
 

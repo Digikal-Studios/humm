@@ -20,15 +20,11 @@
 //!   humm passes `--no-playlist` so a playlist URL downloads only the
 //!   single requested item instead of silently discarding all but the last
 //!   entry.
-//! - **Filename sanitization.** Buzz fetches `info["title"]` via a separate
-//!   metadata-only extraction, sanitizes it by hand
-//!   (`YoutubeDL.sanitize_info` plus a `/\:*?"<>|` character replacement,
-//!   `file_transcriber.py:90-94`), then downloads to that fixed name. humm
-//!   instead lets yt-dlp's own `-o %(title)s.%(ext)s` output template apply
-//!   yt-dlp's *own* filesystem-safe sanitization to the title during the
-//!   download itself — same outcome class (a filesystem-safe filename
-//!   derived from the video title), without duplicating that logic or
-//!   requiring a separate metadata-only round trip.
+//! - **Download name.** Buzz writes `source.%(ext)s` and keeps `info["title"]`
+//!   as `display_name` (`file_transcriber.py`). humm does the same: the
+//!   output template is `source.%(ext)s`, and one `--print` record carries
+//!   the filepath and the raw title. Export sanitizes that title; this
+//!   adapter does not.
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -37,16 +33,24 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use humm_core::boundary::{FetchProgress, MediaFetcher};
+use humm_core::boundary::{FetchProgress, FetchedMedia, MediaFetcher};
 use humm_core::cancel::CancelToken;
 use humm_core::error::MediaError;
 
 use crate::{binary_from_env, map_spawn_error};
 
 /// Prefix that marks a yt-dlp stdout line as a progress update (from this
-/// module's `--progress-template`) rather than the final
-/// `--print after_move:filepath` line or other stray output.
+/// module's `--progress-template`) rather than the final result record.
 const PROGRESS_PREFIX: &str = "humm-dl:";
+
+/// One stdout record: `humm-result:` plus a JSON object with `path` and
+/// `title`. A single `--print`, not a second print that could be taken as
+/// the path.
+const RESULT_PREFIX: &str = "humm-result:";
+
+/// `--print` template. `j` JSON-encodes each field so a title can contain
+/// quotes, slashes, or newlines without becoming a second line.
+const RESULT_TEMPLATE: &str = "after_move:humm-result:{\"path\":%(filepath)j,\"title\":%(title)j}";
 
 /// How long the main thread waits for the next stdout line before
 /// re-checking `cancel`. Bounds cancellation latency even when yt-dlp is
@@ -90,12 +94,12 @@ impl MediaFetcher for YtDlpFetcher {
         dest_dir: &Path,
         progress: &mut dyn FnMut(FetchProgress),
         cancel: &CancelToken,
-    ) -> Result<PathBuf, MediaError> {
+    ) -> Result<FetchedMedia, MediaError> {
         if cancel.is_canceled() {
             return Err(MediaError::Canceled);
         }
 
-        let output_template = dest_dir.join("%(title)s.%(ext)s");
+        let output_template = dest_dir.join("source.%(ext)s");
         let progress_template = format!(
             "download:{PROGRESS_PREFIX}%(progress.downloaded_bytes)s:%(progress.total_bytes)s:%(progress.total_bytes_estimate)s"
         );
@@ -110,7 +114,7 @@ impl MediaFetcher for YtDlpFetcher {
             .args(["--newline", "--progress"])
             .arg("--progress-template")
             .arg(&progress_template)
-            .args(["--print", "after_move:filepath"])
+            .args(["--print", RESULT_TEMPLATE])
             .arg("--no-simulate");
         if let Some(cookie_file) = &self.cookie_file {
             command.arg("--cookies").arg(cookie_file);
@@ -137,6 +141,8 @@ impl MediaFetcher for YtDlpFetcher {
                     err,
                 )
             })?;
+        // Register after spawn. The lock is not held across `spawn`.
+        let _group = humm_core::abort::track_process(child.id());
 
         let stdout = child.stdout.take().expect("stdout was piped at spawn");
         let stderr = child.stderr.take().expect("stderr was piped at spawn");
@@ -159,7 +165,7 @@ impl MediaFetcher for YtDlpFetcher {
         // sides if we read them sequentially instead.
         let stderr_handle = thread::spawn(move || read_stderr_tail(stderr));
 
-        let mut last_line: Option<String> = None;
+        let mut fetched: Option<FetchedMedia> = None;
         loop {
             if cancel.is_canceled() {
                 // Group-SIGKILL (unix) + direct `Child::kill()` fallback —
@@ -174,15 +180,13 @@ impl MediaFetcher for YtDlpFetcher {
                 return Err(MediaError::Canceled);
             }
             match rx.recv_timeout(CANCEL_POLL_INTERVAL) {
-                Ok(line) => match parse_progress_line(&line) {
-                    Some(update) => progress(update),
-                    None if line.starts_with(PROGRESS_PREFIX) => {
-                        // A malformed progress line: ignore it rather than
-                        // treating it as a candidate final path.
+                Ok(line) => {
+                    if let Some(update) = parse_progress_line(&line) {
+                        progress(update);
+                    } else if let Some(record) = parse_fetch_record(&line) {
+                        fetched = Some(record);
                     }
-                    None if !line.trim().is_empty() => last_line = Some(line),
-                    None => {}
-                },
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
@@ -192,8 +196,8 @@ impl MediaFetcher for YtDlpFetcher {
         let status = child.wait().map_err(MediaError::Io)?;
         let stderr_tail = stderr_handle.join().unwrap_or_default();
 
-        match (status.success(), last_line) {
-            (true, Some(path)) => Ok(PathBuf::from(path.trim())),
+        match (status.success(), fetched) {
+            (true, Some(fetched)) => Ok(fetched),
             (true, None) => Err(MediaError::FetchFailed {
                 detail: if stderr_tail.is_empty() {
                     "yt-dlp exited successfully but printed no output path".to_string()
@@ -237,6 +241,26 @@ fn parse_progress_line(line: &str) -> Option<FetchProgress> {
 /// and any other non-numeric text alike as `None`.
 fn parse_u64(field: &str) -> Option<u64> {
     field.trim().parse::<u64>().ok()
+}
+
+/// Parses the single `humm-result:` JSON record. Returns `None` for progress
+/// lines and anything that is not that record, so a title cannot be taken
+/// as the download path.
+fn parse_fetch_record(line: &str) -> Option<FetchedMedia> {
+    let json = line.trim().strip_prefix(RESULT_PREFIX)?;
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let path = value.get("path")?.as_str()?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let title = match value.get("title") {
+        Some(serde_json::Value::String(title)) if !title.is_empty() => Some(title.clone()),
+        _ => None,
+    };
+    Some(FetchedMedia {
+        path: PathBuf::from(path),
+        title,
+    })
 }
 
 /// Reads `stderr` to completion in the background (so the child never
@@ -325,6 +349,80 @@ mod tests {
     #[test]
     fn empty_line_is_ignored() {
         assert_eq!(parse_progress_line(""), None);
+    }
+
+    #[test]
+    fn fetch_record_keeps_the_raw_title_and_one_path() {
+        let cases = [
+            "AC/DC",
+            "../x",
+            "..",
+            "C:/x",
+            "CON",
+            "title with \"quotes\"",
+        ];
+        for title in cases {
+            let line = format!(
+                "humm-result:{}",
+                serde_json::json!({"path": "/tmp/media/source.mp3", "title": title})
+            );
+            let record = parse_fetch_record(&line).expect(title);
+            assert_eq!(record.path, PathBuf::from("/tmp/media/source.mp3"));
+            assert_eq!(record.title.as_deref(), Some(title));
+        }
+        assert!(parse_fetch_record("humm-dl:1:2:3").is_none());
+        assert!(parse_fetch_record("/tmp/media/source.mp3").is_none());
+        let missing =
+            parse_fetch_record("humm-result:{\"path\":\"/tmp/media/source.mp3\",\"title\":null}")
+                .expect("path without a title");
+        assert_eq!(missing.title, None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fetch_reads_one_result_record_and_downloads_as_source() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stub = dir.path().join("yt-dlp-stub.sh");
+        std::fs::write(
+            &stub,
+            r#"#!/bin/sh
+o_next=0
+for arg in "$@"; do
+  if [ "$o_next" = 1 ]; then
+    dest=$(dirname "$arg")
+    printf '%s\n' "$@" > "$dest/args"
+    printf 'humm-result:{"path":"%s/source.mp3","title":"AC/DC"}\n' "$dest"
+    exit 0
+  fi
+  if [ "$arg" = "-o" ]; then
+    o_next=1
+  else
+    o_next=0
+  fi
+done
+exit 1
+"#,
+        )
+        .expect("write stub");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let dest = tempfile::tempdir().expect("dest");
+        let fetcher = YtDlpFetcher::with_binary(&stub, None);
+        let url = url::Url::parse("https://example.com/video").expect("url");
+        let cancel = CancelToken::new();
+        let fetched = fetcher
+            .fetch(&url, dest.path(), &mut |_| {}, &cancel)
+            .expect("fetch");
+        assert_eq!(fetched.path, dest.path().join("source.mp3"));
+        assert_eq!(fetched.title.as_deref(), Some("AC/DC"));
+
+        let args = std::fs::read_to_string(dest.path().join("args")).expect("args");
+        assert!(args.contains("source.%(ext)s"), "{args}");
+        assert!(!args.contains("%(title)s.%(ext)s"), "{args}");
+        assert_eq!(args.matches("--print").count(), 1, "{args}");
+        assert!(args.contains("--no-playlist"), "{args}");
     }
 
     #[test]

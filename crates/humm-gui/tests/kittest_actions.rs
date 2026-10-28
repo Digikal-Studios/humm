@@ -103,6 +103,7 @@ fn sample_spec(input: Input) -> TaskSpec {
             temperature: DEFAULT_TEMPERATURE.to_vec(),
             llm: None,
             extract_speech: false,
+            identify_speakers: false,
         },
         output: OutputSpec::default(),
     }

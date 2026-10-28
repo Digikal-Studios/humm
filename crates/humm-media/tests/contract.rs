@@ -883,7 +883,8 @@ fn fetch_downloads_file_and_reports_progress() {
             &mut |_update: FetchProgress| progress_calls += 1,
             &cancel,
         )
-        .expect("fetch should succeed");
+        .expect("fetch should succeed")
+        .path;
 
     assert!(path.exists(), "downloaded file should exist at {path:?}");
     assert!(

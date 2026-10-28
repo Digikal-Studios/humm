@@ -7,11 +7,20 @@ repository.workspace = true
 
 [dependencies]
 humm-core.workspace = true
-speakrs.workspace = true
 # Direct dependency so ADR-024's exact `=2.0.0-rc.12` pin is real rather than
 # only enforced transitively through `speakrs`'s own (caret) requirement —
 # see the workspace `Cargo.toml`'s comment on this line.
 ort.workspace = true
+
+# macOS keeps the workspace feature set, including `coreml` (ADR-024).
+# speakrs refuses to compile `coreml` on any other target, so those builds
+# use the same pin with `openblas-system` only. CPU execution is the path
+# `OrtDiarizer` actually runs.
+[target.'cfg(target_os = "macos")'.dependencies]
+speakrs.workspace = true
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+speakrs = { version = "=0.5.0", default-features = false, features = ["openblas-system"] }
 
 [dev-dependencies]
 pretty_assertions.workspace = true

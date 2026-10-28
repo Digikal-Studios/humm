@@ -62,18 +62,12 @@
 //! via the explicit group-SIGTERM/SIGKILL above, not by relying on the
 //! terminal to deliver a signal to demucs itself.
 //!
-//! **This covers only the *first* Ctrl-C.** `humm-cli::run::install_ctrlc`'s
-//! second SIGINT calls `std::process::exit(130)` directly — bypassing Rust's
-//! normal unwind/`Drop` machinery entirely, so nothing runs the
-//! cancel-and-wait path above, and nothing signals the detached process
-//! group at all. Because that group is no longer in the terminal's
-//! foreground group either (the same detachment this doc just explained),
-//! a second Ctrl-C during isolation now orphans the demucs child (reparented
-//! to init once humm itself exits), not killed — the same is true of yt-dlp
-//! (`fetch.rs`, the same `spawn_own_process_group`/`kill_process_group`
-//! helpers). Not fixed here (a pgid registry the second-Ctrl-C path could
-//! signal before exiting is scoped debt, not this wave); stated honestly
-//! rather than left implied-covered by the first-Ctrl-C rationale above.
+//! **The second Ctrl-C does not unwind.** `humm-cli`'s handler calls
+//! [`humm_core::abort::try_emergency_stop`] before `std::process::exit`,
+//! which SIGKILLs this child's process group (registered below) and deletes
+//! the scratch directory without waiting and without running `Drop`. The
+//! user's source file is not registered. A denoised file is registered
+//! separately and kept when the user asked to keep it.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -193,6 +187,9 @@ impl SpeechIsolator for DemucsIsolator {
                 err,
             )
         })?;
+        // Register after spawn. The lock is not held across `spawn`.
+        let _group = humm_core::abort::track_process(child.id());
+        let _scratch_track = humm_core::abort::track_temp_dir(scratch.path());
 
         let mut stdout = child.stdout.take().expect("stdout was piped at spawn");
         let mut stderr = child.stderr.take().expect("stderr was piped at spawn");
@@ -721,5 +718,67 @@ printf 'fake no_vocals data' > "$outdir/htdemucs/no_vocals.mp3"
             to.is_dir(),
             "dest path should still be the untouched directory"
         );
+    }
+
+    /// Second Ctrl-C path: SIGKILL the group without waiting, delete speech
+    /// and the scratch dir, and leave a denoised file the user asked to keep
+    /// plus the untracked source.
+    #[test]
+    #[cfg(unix)]
+    fn emergency_stop_kills_grandchild_and_respects_keep_denoised_file() {
+        use std::process::Command;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("clip.mp3");
+        let speech = dir.path().join("clip_speech.mp3");
+        let denoised = dir.path().join("clip_DeepFilterNet3.wav");
+        let scratch = dir.path().join("scratch");
+        std::fs::write(&source, b"source").expect("source");
+        std::fs::write(&speech, b"speech").expect("speech");
+        std::fs::write(&denoised, b"denoised").expect("denoised");
+        std::fs::create_dir(&scratch).expect("scratch");
+        std::fs::write(scratch.join("partial"), b"partial").expect("partial");
+
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("sleep 30");
+        crate::spawn_own_process_group(&mut cmd);
+        let mut child = cmd.spawn().expect("spawn sleep");
+        let _group = humm_core::abort::track_process(child.id());
+        let _speech_track = humm_core::abort::track_temp_file(&speech, false);
+        let _scratch_track = humm_core::abort::track_temp_dir(&scratch);
+        let _denoised_track = humm_core::abort::track_temp_file(&denoised, true);
+
+        let start = Instant::now();
+        // Only this test's registrations. The process-global stop would
+        // SIGKILL demucs stubs other lib tests still have registered.
+        assert!(humm_core::abort::try_emergency_stop_registered(
+            &[_group.registration_id()],
+            &[
+                _speech_track.registration_id(),
+                _scratch_track.registration_id(),
+                _denoised_track.registration_id(),
+            ],
+            crate::kill_tracked_groups,
+        ));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Ok(None) => panic!("grandchild still running after SIGKILL"),
+                Err(err) => panic!("try_wait: {err}"),
+            }
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "kill waited {:?}",
+            start.elapsed()
+        );
+        assert!(!speech.exists());
+        assert!(!scratch.exists());
+        assert!(denoised.exists());
+        assert!(source.exists());
     }
 }

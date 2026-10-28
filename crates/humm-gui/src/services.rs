@@ -431,6 +431,7 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
             Arc::new(WhisperLangDetector::new(use_gpu, Arc::clone(&settings)))
                 as Arc<dyn LanguageDetector>,
         ),
+        diarizer: None,
     };
     let queue = spawn_task_runner(deps);
     let events = queue.subscribe();
@@ -748,6 +749,7 @@ pub fn init_with(deps: TestDeps) -> Services {
         isolator: None,
         reducer: None,
         lang_detector: None,
+        diarizer: None,
     };
     let queue = spawn_task_runner(runner_deps);
     let events = queue.subscribe();

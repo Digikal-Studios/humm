@@ -149,9 +149,10 @@ pub const DEFAULT_PARAGRAPH_SPLIT: Millis = Millis(2000);
 
 /// Builds the output file path for one export, applying filename templating.
 ///
-/// Ported from Buzz's `get_output_file_path` (`transcriber.py:228-265`). The
-/// input's file stem is used as `{{ input_file_name }}`, with a trailing
-/// `"_speech"` (extracted-speech marker) stripped if present. `template`
+/// Ported from Buzz's `get_output_file_path` (`transcriber.py:250-289`). The
+/// URL title (`display_name`) or else the input's file stem is
+/// `{{ input_file_name }}`, with a trailing `"_speech"` stripped if present,
+/// then [`safe_filename_component`]. `template`
 /// falls back to [`DEFAULT_EXPORT_TEMPLATE`]; `output_directory` falls back
 /// to the input's parent directory.
 ///
@@ -161,6 +162,12 @@ pub const DEFAULT_PARAGRAPH_SPLIT: Millis = Millis(2000);
 /// `"Whisper.cpp"`, `buzz/model_loader.py:179`). Buzz's other backends
 /// (`WHISPER`, `FASTER_WHISPER`, `HUGGING_FACE`, `OPEN_AI_WHISPER_API`) are
 /// not ported (ADR-008), so no other `{{ model_type }}` value is possible.
+///
+/// `display_name`, when non-empty, is the URL title (Buzz's `display_name`)
+/// and replaces the input stem as `{{ input_file_name }}`. It is not joined
+/// raw: [`safe_filename_component`] runs first, then
+/// [`confine_export_file_name`] keeps the finished name a single relative
+/// component so `Path::join` cannot treat a disk prefix as a new root.
 #[allow(clippy::too_many_arguments)]
 pub fn output_file_path(
     input: &Path,
@@ -171,15 +178,25 @@ pub fn output_file_path(
     output_directory: Option<&Path>,
     template: Option<&str>,
     now: chrono::NaiveDateTime,
+    display_name: Option<&str>,
 ) -> PathBuf {
-    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
-    let input_file_name = stem.strip_suffix("_speech").unwrap_or(&stem);
+    let stem_owned = input
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let chosen = display_name
+        .filter(|name| !name.is_empty())
+        .unwrap_or(stem_owned.as_str());
+    // Buzz strips `_speech` before sanitizing, on the title or the stem.
+    let without_speech = chosen.strip_suffix("_speech").unwrap_or(chosen);
+    let input_file_name = safe_filename_component(without_speech);
 
     let template = template.unwrap_or(DEFAULT_EXPORT_TEMPLATE);
     let date_time = now.format("%d-%b-%Y %H-%M-%S").to_string();
 
     let file_name = template
-        .replace("{{ input_file_name }}", input_file_name)
+        .replace("{{ input_file_name }}", &input_file_name)
         .replace("{{ task }}", task.as_str())
         .replace("{{ language }}", language.map(Language::code).unwrap_or(""))
         .replace("{{ model_type }}", "Whisper.cpp")
@@ -187,6 +204,7 @@ pub fn output_file_path(
         .replace("{{ date_time }}", &date_time)
         + "."
         + format.extension();
+    let file_name = confine_export_file_name(&file_name);
 
     let directory = output_directory.map(Path::to_path_buf).unwrap_or_else(|| {
         input
@@ -196,6 +214,81 @@ pub fn output_file_path(
     });
 
     directory.join(file_name)
+}
+
+/// One portable filename component, matching Buzz `safe_filename_component`
+/// (`paths.py`).
+///
+/// `<>:"/\|?*` and ASCII controls become `_`. One trailing space or dot
+/// becomes `#`. An empty result becomes `transcript`. Windows device names
+/// (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`), matched on the
+/// stem before the first dot, gain a leading `_`.
+pub fn safe_filename_component(name: &str) -> String {
+    let mut sanitized: String = name
+        .chars()
+        .map(|c| {
+            if is_windows_invalid_filename_char(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if sanitized.ends_with(' ') || sanitized.ends_with('.') {
+        sanitized.pop();
+        sanitized.push('#');
+    }
+    if sanitized.is_empty() {
+        return "transcript".to_string();
+    }
+    let stem = sanitized.split('.').next().unwrap_or(sanitized.as_str());
+    let stem = stem.trim_end_matches([' ', '.']);
+    if is_windows_reserved(stem) {
+        sanitized.insert(0, '_');
+    }
+    sanitized
+}
+
+/// The finished export name, after templating, as one relative component.
+///
+/// Buzz's sanitizer already turns `C:/x` into `C__x` (both `:` and `/` are
+/// in the invalid class) and `CON` into `_CON`. This repeats that pass when
+/// the templated name would still be a Windows disk prefix, a separator, a
+/// parent segment, or a reserved device, so `Path::join` keeps the file
+/// inside the output directory on Windows as well as on Unix.
+pub fn confine_export_file_name(name: &str) -> String {
+    if export_file_name_stays_inside(name) {
+        name.to_string()
+    } else {
+        safe_filename_component(name)
+    }
+}
+
+fn is_windows_invalid_filename_char(c: char) -> bool {
+    matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || c <= '\u{1f}'
+}
+
+fn is_windows_reserved(stem: &str) -> bool {
+    let upper = stem.to_ascii_uppercase();
+    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (upper.len() == 4
+            && (upper.starts_with("COM") || upper.starts_with("LPT"))
+            && matches!(upper.as_bytes()[3], b'1'..=b'9'))
+}
+
+/// `true` when `name` is one relative component `Path::join` will not use
+/// as a new root. A Windows disk prefix (`C:`) counts even on Unix, where
+/// `Path` does not treat it as a prefix.
+fn export_file_name_stays_inside(name: &str) -> bool {
+    if name.is_empty() || name == "." || name == ".." {
+        return false;
+    }
+    if name.contains(['/', '\\', ':']) || name.chars().any(|c| c <= '\u{1f}') {
+        return false;
+    }
+    let stem = name.split('.').next().unwrap_or(name);
+    let stem = stem.trim_end_matches([' ', '.']);
+    !is_windows_reserved(stem)
 }
 
 #[cfg(test)]
@@ -377,6 +470,7 @@ mod tests {
             None,
             None,
             fixed_now(),
+            None,
         );
         assert_eq!(
             path,
@@ -395,6 +489,7 @@ mod tests {
             Some(Path::new("/out")),
             Some("{{ input_file_name }}-{{ model_size }}-{{ language }}"),
             fixed_now(),
+            None,
         );
         assert_eq!(path, Path::new("/out/interview-small-fr.txt"));
     }
@@ -410,6 +505,7 @@ mod tests {
             None,
             Some("{{ input_file_name }}"),
             fixed_now(),
+            None,
         );
         assert_eq!(path, Path::new("/tmp/interview.txt"));
     }
@@ -437,6 +533,7 @@ mod tests {
             None,
             Some("{{ input_file_name }}"),
             fixed_now(),
+            None,
         );
         assert_eq!(path, Path::new("/tmp/interview_speech.txt"));
     }
@@ -452,8 +549,72 @@ mod tests {
             None,
             Some("{{ model_type }}"),
             fixed_now(),
+            None,
         );
         assert_eq!(path, Path::new("/tmp/Whisper.cpp.txt"));
+    }
+
+    #[test]
+    fn safe_filename_component_matches_buzz() {
+        let cases = [
+            ("中文 | QVD-123.", "中文 _ QVD-123#"),
+            ("foo:bar?.wav", "foo_bar_.wav"),
+            ("trailing-dot.", "trailing-dot#"),
+            ("trailing-space ", "trailing-space#"),
+            ("emoji-🚀", "emoji-🚀"),
+            ("CON", "_CON"),
+            ("CON.txt", "_CON.txt"),
+            ("AC/DC", "AC_DC"),
+            ("../x", ".._x"),
+            ("..", ".#"),
+            ("C:/x", "C__x"),
+            ("", "transcript"),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(safe_filename_component(name), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn confine_export_file_name_rejects_a_windows_disk_prefix_and_reserved_device() {
+        assert_eq!(confine_export_file_name("C:_x.srt"), "C__x.srt");
+        assert_eq!(confine_export_file_name("CON.srt"), "_CON.srt");
+        assert_eq!(
+            confine_export_file_name("interview (translated on 20-Jul-2026 14-03-05).srt"),
+            "interview (translated on 20-Jul-2026 14-03-05).srt"
+        );
+    }
+
+    #[test]
+    fn url_titles_stay_a_single_file_inside_the_output_directory() {
+        let cases = [
+            ("AC/DC", "AC_DC.srt"),
+            ("../x", ".._x.srt"),
+            ("..", ".#.srt"),
+            ("C:/x", "C__x.srt"),
+            ("CON", "_CON.srt"),
+            ("C:/x ", "C__x#.srt"),
+        ];
+        let dir = Path::new("/out");
+        for (title, file_name) in cases {
+            let path = output_file_path(
+                Path::new("/tmp/media/id/source.mp3"),
+                TaskKind::Transcribe,
+                None,
+                ModelSize::Small,
+                OutputFormat::Srt,
+                Some(dir),
+                Some("{{ input_file_name }}"),
+                fixed_now(),
+                Some(title),
+            );
+            assert_eq!(path, dir.join(file_name), "{title}");
+            assert_eq!(path.parent(), Some(dir), "{title}");
+            let name = path.file_name().unwrap().to_string_lossy();
+            assert!(!name.contains(':'), "{title} -> {name}");
+            assert!(!name.contains('/'), "{title}");
+            assert!(!name.contains('\\'), "{title}");
+        }
     }
 
     #[test]
