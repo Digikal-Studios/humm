@@ -110,7 +110,7 @@ Review `a329e4e` accepted P-001, P-002, P-004, P-005, P-009, and P-011. Second p
 - Implemented in `89489dac2ff22c8fc3543cc2ccdafb51faddbe73`. The fallback is only the final flush: lossy-decode, `trim_end_matches('\u{FFFD}')`, then `trim`. Mid-loop flushes still drop an invalid buffer. `flush_complete_chars` is unchanged.
 - `cargo test -p humm-whisper --lib words::` — 8 passed, including `final_flush_strips_only_a_trailing_replacement_character` (`hello\xff` → `hello`, `\xffhello` → `\u{FFFD}hello`, and `hello\xff` plus ` world` → only `world`).
 - Deferred, not a code change: that test does not cover whitespace after the invalid byte (`hello\xff `). `push_lossy_final_word` already strips a trailing U+FFFD and then trims, which is Buzz's order. A later test can add the case. Do not change the function for it.
-- Deferred, out of P-007 scope: segment text and live text still keep a trailing U+FFFD (`Bridge::on_segment`, `to_str_lossy`). Buzz strips that in `_parse_segment_timings`. Not part of the word-flush fix.
+- Deferred, out of P-007 scope: segment text and live text still keep a trailing U+FFFD (`Bridge::on_segment`, `to_str_lossy`). Buzz strips that in `_parse_segment_timings`. Not part of the word-flush fix. Done later: `segment_text` applies `trim_end_matches('\u{FFFD}')` then `trim` on `Bridge::on_segment` and on the live join. `89489dac` was not amended.
 
 ### P-008 — more than one custom ggml model (deferred, not implemented)
 

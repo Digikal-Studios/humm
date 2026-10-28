@@ -534,7 +534,9 @@ impl Bridge<'_> {
         // Translate mode yields English directly in `text`; `translation` stays
         // empty on the segment path, matching Buzz's `_parse_segment_timings`,
         // which never fills `translation`.
-        let text = data.text.trim().to_string();
+        // Buzz `_parse_segment_timings`: drop a trailing U+FFFD from the
+        // lossy decode, then trim. A replacement earlier in the text stays.
+        let text = segment_text(&data.text);
         self.sink.on_segment(Segment {
             start: self
                 .remap
@@ -717,20 +719,28 @@ fn build_live_params(
     params
 }
 
-/// Joins per-segment texts into one live utterance string: each text is
-/// trimmed, empty results are dropped, and the remainder are joined with a
-/// single space — the observable behavior of Buzz's whisper-server JSON
-/// response join (`" ".join(segment["text"] for segment in segments)`,
-/// `buzz/transcriber/recording_transcriber.py:340-345`), trimmed per segment
-/// because whisper.cpp segment text carries a leading space by convention
-/// (the same convention [`Bridge::on_segment`] trims for file mode).
+/// Joins per-segment texts into one live utterance string: each text drops a
+/// trailing U+FFFD and is trimmed, empty results are dropped, and the
+/// remainder are joined with a single space — the observable behavior of
+/// Buzz's whisper-server JSON response join
+/// (`" ".join(segment["text"] for segment in segments)`,
+/// `buzz/transcriber/recording_transcriber.py:340-345`). The replacement
+/// strip is Buzz's lossy branch in `_parse_segment_timings`
+/// (`whisper_cpp.py`): `rstrip("\ufffd")` then `strip`. Live text comes from
+/// `to_str_lossy`, which leaves that trailing character in place.
 fn join_segment_texts(texts: &[&str]) -> String {
     texts
         .iter()
-        .map(|text| text.trim())
+        .map(|text| segment_text(text))
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Segment text the way Buzz's lossy `_parse_segment_timings` branch does:
+/// drop only a trailing run of U+FFFD, then trim whitespace.
+fn segment_text(text: &str) -> String {
+    text.trim_end_matches('\u{FFFD}').trim().to_string()
 }
 
 /// One contiguous speech region kept by VAD: its sample range in the ORIGINAL
@@ -1155,5 +1165,19 @@ mod tests {
     #[test]
     fn join_segment_texts_empty_input_is_empty_string() {
         assert_eq!(join_segment_texts(&[]), "");
+    }
+
+    #[test]
+    fn segment_text_strips_only_a_trailing_replacement_character() {
+        assert_eq!(segment_text("hello\u{FFFD}"), "hello");
+        assert_eq!(segment_text("\u{FFFD}hello"), "\u{FFFD}hello");
+        assert_eq!(segment_text("hello\u{FFFD}\u{FFFD}"), "hello");
+        assert_eq!(segment_text("  hello\u{FFFD}"), "hello");
+        // Buzz rstrips U+FFFD before trimming, so a trailing space hides it.
+        assert_eq!(segment_text("hello\u{FFFD} "), "hello\u{FFFD}");
+        assert_eq!(
+            join_segment_texts(&["hello\u{FFFD}", " world\u{FFFD}"]),
+            "hello world"
+        );
     }
 }
