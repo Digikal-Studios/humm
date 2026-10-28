@@ -721,6 +721,11 @@ struct TempAudioGuard {
     isolated: Option<PathBuf>,
     denoised: Option<PathBuf>,
     keep_denoised: bool,
+    /// Unregisters on drop. Deletion stays in [`Drop`] so a normal return
+    /// still removes the file; a second Ctrl-C, which skips `Drop`, uses
+    /// the registration instead.
+    isolated_track: Option<crate::abort::TrackedTemp>,
+    denoised_track: Option<crate::abort::TrackedTemp>,
 }
 
 impl Drop for TempAudioGuard {
@@ -1379,6 +1384,8 @@ impl Runner {
                 .as_ref()
                 .map(|cfg| cfg.noise_reduction.keep_denoised_file)
                 .unwrap_or(false),
+            isolated_track: None,
+            denoised_track: None,
         };
 
         // (1) F-027 speech isolation — gated on the task's own option
@@ -1407,6 +1414,10 @@ impl Runner {
                     // its input path back must never cause `TempAudioGuard`
                     // to delete the user's own source (review fix).
                     if isolated != audio_input {
+                        // The source path is not registered. Only a new file
+                        // is, so emergency cleanup cannot delete the user's media.
+                        guard.isolated_track =
+                            Some(crate::abort::track_temp_file(isolated.clone(), false));
                         guard.isolated = Some(isolated.clone());
                     }
                     audio_input = isolated;
@@ -1469,6 +1480,10 @@ impl Runner {
                     // Same identity check as the isolation step above: never
                     // queue the reducer's own input path for cleanup.
                     if denoised != prior_audio {
+                        guard.denoised_track = Some(crate::abort::track_temp_file(
+                            denoised.clone(),
+                            guard.keep_denoised,
+                        ));
                         guard.denoised = Some(denoised.clone());
                     }
                     audio_input = denoised;

@@ -786,7 +786,12 @@ fn install_ctrlc(shared: Arc<Mutex<Option<QueueHandle>>>) {
     let signaled = Arc::new(AtomicBool::new(false));
     let result = ctrlc::set_handler(move || {
         if signaled.swap(true, Ordering::SeqCst) {
-            // Second signal: don't wait for a graceful drain.
+            // Second signal: do not lock `shared` (the runner may hold it
+            // across work) and do not wait. A busy abort registry exits
+            // without cleanup. `process::exit` skips `Drop`, so temps and
+            // process groups are handled here. A denoised file registered
+            // with keep stays.
+            let _ = humm_core::abort::try_emergency_stop(humm_media::kill_tracked_groups);
             std::process::exit(130);
         }
         if let Ok(guard) = shared.lock()

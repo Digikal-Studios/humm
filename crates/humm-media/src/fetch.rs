@@ -137,6 +137,8 @@ impl MediaFetcher for YtDlpFetcher {
                     err,
                 )
             })?;
+        // Register after spawn. The lock is not held across `spawn`.
+        let _group = humm_core::abort::track_process(child.id());
 
         let stdout = child.stdout.take().expect("stdout was piped at spawn");
         let stderr = child.stderr.take().expect("stderr was piped at spawn");
