@@ -98,7 +98,12 @@ fn group_space_delimited(tokens: &[TokenInfo]) -> Vec<Segment> {
             word_end = token.end;
         }
     }
-    append_word(&word_buffer, word_start, word_end, &mut segments);
+    // Mid-loop flushes ignore a `false` return and drop the word (Buzz
+    // lines 374 and 380). Only the segment's final buffer gets the
+    // lossy prefix (`whisper_cpp.py` around line 391).
+    if !append_word(&word_buffer, word_start, word_end, &mut segments) {
+        push_lossy_final_word(&word_buffer, word_start, word_end, &mut segments);
+    }
     segments
 }
 
@@ -150,24 +155,49 @@ fn lstrip_commas(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Decodes `buffer` as UTF-8, trims it, and — if non-empty — pushes a word
-/// segment (`buzz/transcriber/whisper_cpp.py:107-125`, `_append_word`). A
-/// buffer that is not valid UTF-8 after the run is dropped, exactly as Buzz's
-/// `_append_word` returns `False` and emits nothing.
-fn append_word(buffer: &[u8], start: Millis, end: Millis, segments: &mut Vec<Segment>) {
+/// segment (`buzz/transcriber/whisper_cpp.py` `_append_word`).
+///
+/// Returns `true` when the buffer was empty or valid UTF-8 (even if `trim`
+/// left nothing to emit). Returns `false` when the bytes are not valid UTF-8,
+/// and emits nothing. Callers that flush because the next token starts a new
+/// word ignore `false` and drop the word. Only [`push_lossy_final_word`]
+/// recovers a prefix, and only for the segment's last buffer.
+fn append_word(buffer: &[u8], start: Millis, end: Millis, segments: &mut Vec<Segment>) -> bool {
     if buffer.is_empty() {
+        return true;
+    }
+    let Ok(text) = std::str::from_utf8(buffer) else {
+        return false;
+    };
+    let trimmed = text.trim();
+    if !trimmed.is_empty() {
+        segments.push(Segment {
+            start,
+            end,
+            text: trimmed.to_string(),
+            translation: String::new(),
+        });
+    }
+    true
+}
+
+/// Buzz's final-flush fallback (`whisper_cpp.py` around line 391):
+/// `decode(errors="replace").rstrip("\ufffd").strip()`.
+///
+/// `trim_end_matches` removes a trailing run of U+FFFD only. A replacement
+/// at the start or in the middle stays. Not used for mid-word flushes.
+fn push_lossy_final_word(buffer: &[u8], start: Millis, end: Millis, segments: &mut Vec<Segment>) {
+    let lossy = String::from_utf8_lossy(buffer);
+    let text = lossy.trim_end_matches('\u{FFFD}').trim();
+    if text.is_empty() {
         return;
     }
-    if let Ok(text) = std::str::from_utf8(buffer) {
-        let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            segments.push(Segment {
-                start,
-                end,
-                text: trimmed.to_string(),
-                translation: String::new(),
-            });
-        }
-    }
+    segments.push(Segment {
+        start,
+        end,
+        text: text.to_string(),
+        translation: String::new(),
+    });
 }
 
 /// Extracts every complete UTF-8 character from the front of `buffer`, pushing
@@ -334,6 +364,31 @@ mod tests {
                 word("ち", 90, 120),
                 word("は", 120, 150),
             ]
+        );
+    }
+
+    /// Three cases in one test so a global strip inside every `append_word`
+    /// cannot pass. The fallback is only the segment's last buffer.
+    #[test]
+    fn final_flush_strips_only_a_trailing_replacement_character() {
+        // Trailing incomplete byte: keep the prefix, drop the trailing U+FFFD.
+        assert_eq!(
+            group_words(&[tok(b"hello\xff", 0, 10, 1.0)], Some("en")),
+            vec![word("hello", 0, 10)]
+        );
+        // Leading invalid byte stays. Stripping every U+FFFD would yield "hello".
+        assert_eq!(
+            group_words(&[tok(b"\xffhello", 0, 10, 1.0)], Some("en")),
+            vec![word("\u{FFFD}hello", 0, 10)]
+        );
+        // The next token starts with a space, so the bad buffer is a mid-loop
+        // flush and is dropped. A fallback on that flush would also emit "hello".
+        assert_eq!(
+            group_words(
+                &[tok(b"hello\xff", 0, 10, 1.0), tok(b" world", 10, 20, 1.0),],
+                Some("en"),
+            ),
+            vec![word("world", 10, 20)]
         );
     }
 
