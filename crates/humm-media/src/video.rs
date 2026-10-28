@@ -11,7 +11,7 @@
 use std::collections::VecDeque;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -127,7 +127,8 @@ impl FfmpegFrameStream {
         info: VideoStreamInfo,
     ) -> Result<Self, MediaError> {
         let start_secs = (start.0 as f64 / 1000.0).max(0.0);
-        let mut child = Command::new(binary)
+        let (mut command, binary) = crate::prepare_command(binary);
+        let mut child = command
             .args(["-ss", &start_secs.to_string()])
             .arg("-i")
             .arg(path)
@@ -145,8 +146,8 @@ impl FfmpegFrameStream {
                 map_spawn_error(
                     "ffmpeg",
                     "HUMM_FFMPEG",
-                    "install it (e.g. `brew install ffmpeg`)",
-                    binary,
+                    crate::install_hint("ffmpeg"),
+                    &binary,
                     err,
                 )
             })?;
@@ -193,7 +194,7 @@ impl FfmpegFrameStream {
     fn stop_current(&self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
+            crate::kill_process_group(&mut child);
         }
     }
 }
@@ -279,7 +280,7 @@ fn read_loop(
     }
 
     if let Ok(mut child) = child.lock() {
-        let _ = child.kill();
+        crate::kill_process_group(&mut child);
         let _ = child.wait();
     }
 }

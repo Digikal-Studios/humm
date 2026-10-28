@@ -59,7 +59,16 @@ const OS_LINESEP: &str = "\n";
 /// "\n"`) the second replace is a no-op and the net effect is simply
 /// `"\r\n" -> "\n"`, with bare `"\n"` unchanged.
 pub fn strip_newlines(text: &str) -> String {
-    text.replace("\r\n", OS_LINESEP).replace('\n', OS_LINESEP)
+    replace_newlines(text, OS_LINESEP)
+}
+
+/// Buzz's two-step newline rewrite with an explicit `os.linesep`.
+///
+/// `linesep == "\n"` is every Unix, including macOS. `linesep == "\r\n"` is
+/// Windows, and the second replace rewrites the `\n` inside the `\r\n` the
+/// first step just wrote, so an input `"\r\n"` becomes `"\r\r\n"`.
+pub fn replace_newlines(text: &str, linesep: &str) -> String {
+    text.replace("\r\n", linesep).replace('\n', linesep)
 }
 
 /// The live-translation consumer: the translation-side twin of the
@@ -195,12 +204,24 @@ mod tests {
     }
 
     #[test]
+    fn windows_linesep_rewrites_crlf_into_cr_crlf() {
+        // The Windows result of Buzz's two replaces. Tested here so a Linux
+        // or macOS runner still locks the order; `strip_newlines` itself
+        // uses the host separator.
+        assert_eq!(replace_newlines("a\r\nb", "\r\n"), "a\r\r\nb");
+        assert_eq!(replace_newlines("a\nb", "\r\n"), "a\r\nb");
+        assert_eq!(replace_newlines("a\r\nb", "\n"), "a\nb");
+    }
+
+    #[test]
     fn strip_newlines_two_step_order_removes_the_cr_of_a_crlf() {
         // Pins the two-step order's Unix-observable consequence: because the
         // FIRST replace targets the whole "\r\n" pair, the "\r" is consumed
         // rather than left stranded. A one-step "\n"-only replace would have
         // left "x\r\ny" as "x\r\ny" (stray "\r"); the two-step yields "x\ny".
+        // On Windows the same order produces "x\r\r\ny", covered above.
         assert_eq!(strip_newlines("x\r\ny"), format!("x{OS_LINESEP}y"));
+        #[cfg(not(windows))]
         assert!(!strip_newlines("x\r\ny").contains('\r'));
     }
 

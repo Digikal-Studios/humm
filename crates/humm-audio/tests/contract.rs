@@ -162,7 +162,7 @@ fn cpal_capture_streams_16khz_mono_and_stops_promptly() {
 #[test]
 #[ignore = "requires a real audio input device (CoreAudio); run with --ignored"]
 fn cpal_capture_reports_native_device_rate() {
-    let host = cpal::default_host();
+    let host = humm_audio::system_host().expect("audio host initializes");
     let device = host
         .default_input_device()
         .expect("a default input device is available on this machine");

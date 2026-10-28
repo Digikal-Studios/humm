@@ -30,11 +30,13 @@
 #![forbid(unsafe_code)]
 
 mod capture;
+mod host;
 mod mock;
 mod output;
 mod player;
 
 pub use capture::CpalCapture;
+pub use host::system_host;
 pub use mock::MockCapture;
 pub use output::CpalOutput;
 pub use player::Player;

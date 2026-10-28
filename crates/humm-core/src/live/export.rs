@@ -218,15 +218,37 @@ fn open_for_write(path: &Path, mode: WriteMode) -> io::Result<std::fs::File> {
     }
 }
 
+/// Whether `err` is the lock class Buzz retries: Python `PermissionError`.
+///
+/// That is [`std::io::ErrorKind::PermissionDenied`] everywhere. On Windows it
+/// is also `ERROR_SHARING_VIOLATION` (32) and `ERROR_LOCK_VIOLATION` (33)
+/// when the standard library leaves them as a raw OS error instead of
+/// `PermissionDenied`. Those numbers are unrelated errno values on Unix, so
+/// they count only when `windows` is true. `windows` is a parameter so the
+/// Windows codes are tested on Linux.
+pub(crate) fn is_export_lock_error(
+    kind: std::io::ErrorKind,
+    raw_os_error: Option<i32>,
+    windows: bool,
+) -> bool {
+    if kind == std::io::ErrorKind::PermissionDenied {
+        return true;
+    }
+    windows && matches!(raw_os_error, Some(32 | 33))
+}
+
+fn export_io_is_lock(err: &std::io::Error) -> bool {
+    is_export_lock_error(err.kind(), err.raw_os_error(), cfg!(windows))
+}
+
 /// Writes `content` to `path`, retrying up to [`RETRY_ATTEMPTS`] times at
-/// [`RETRY_DELAY`] when the failure is a lock-class error
-/// (`io::ErrorKind::PermissionDenied` -- Rust's analogue of Windows'
-/// `PermissionError`, which is what Buzz's retry loop specifically catches).
-/// Any other I/O error logs a warning and gives up immediately without
-/// retrying; exhausting every attempt on `PermissionDenied` also logs a
-/// warning. Never returns an error -- a failed export write is a
-/// best-effort side channel, not a hard failure (Buzz: both call sites
-/// return `None` either way).
+/// [`RETRY_DELAY`] when the failure is a lock-class error (see
+/// [`is_export_lock_error`] -- Rust's analogue of Windows' `PermissionError`,
+/// which is what Buzz's retry loop specifically catches). Any other I/O
+/// error logs a warning and gives up immediately without retrying;
+/// exhausting every attempt on a lock error also logs a warning. Never
+/// returns an error -- a failed export write is a best-effort side channel,
+/// not a hard failure (Buzz: both call sites return `None` either way).
 ///
 /// Ported from `write_to_export_file` (`:786-801`); see the module doc's
 /// "Divergences" note for why this same helper also backs the CSV writer's
@@ -236,7 +258,7 @@ pub fn write_to_export_file(path: &Path, content: &str, mode: WriteMode, sleeper
     for attempt in 0..RETRY_ATTEMPTS {
         match open_for_write(path, mode).and_then(|mut f| f.write_all(content.as_bytes())) {
             Ok(()) => return,
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            Err(e) if export_io_is_lock(&e) => {
                 if attempt + 1 < RETRY_ATTEMPTS {
                     sleeper.sleep(RETRY_DELAY);
                 } else {
@@ -267,7 +289,7 @@ fn read_export_file(path: &Path, sleeper: &dyn Sleeper) -> String {
     for attempt in 0..RETRY_ATTEMPTS {
         match std::fs::read_to_string(path) {
             Ok(content) => return content,
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            Err(e) if export_io_is_lock(&e) => {
                 if attempt + 1 < RETRY_ATTEMPTS {
                     sleeper.sleep(RETRY_DELAY);
                 } else {
@@ -1099,6 +1121,22 @@ mod tests {
     }
 
     #[test]
+    fn windows_sharing_violation_is_a_lock_error_only_on_windows() {
+        use std::io::ErrorKind;
+        assert!(is_export_lock_error(
+            ErrorKind::PermissionDenied,
+            None,
+            false
+        ));
+        assert!(is_export_lock_error(ErrorKind::Other, Some(32), true));
+        assert!(is_export_lock_error(ErrorKind::Other, Some(33), true));
+        // errno 32 on Unix is not a sharing violation.
+        assert!(!is_export_lock_error(ErrorKind::Other, Some(32), false));
+        assert!(!is_export_lock_error(ErrorKind::NotFound, None, true));
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn read_retry_gives_up_after_five_attempts_on_permission_denied() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1107,7 +1145,9 @@ mod tests {
         std::fs::write(&path, "content").unwrap();
         // `set_readonly` only clears the write bits (still readable), so
         // clear every permission bit directly to force a real read-side
-        // `PermissionDenied` (this crate targets macOS/Unix only).
+        // `PermissionDenied`. Unix-only: Windows has no mode bits, and its
+        // sharing-violation codes are covered by
+        // `windows_sharing_violation_is_a_lock_error_only_on_windows`.
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
 
         let sleeper = CountingSleeper::default();

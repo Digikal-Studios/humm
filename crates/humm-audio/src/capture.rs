@@ -108,26 +108,8 @@ impl CpalCapture {
 
 impl AudioCapture for CpalCapture {
     fn devices(&self) -> Result<Vec<AudioDevice>, AudioError> {
-        let host = cpal::default_host();
-        let default_name = host.default_input_device().map(|d| d.to_string());
-
-        let devices = host
-            .input_devices()
-            .map_err(|e| AudioError::DeviceUnavailable {
-                detail: format!("could not enumerate input devices: {e}"),
-            })?;
-
-        Ok(devices
-            .map(|d| {
-                let name = d.to_string();
-                let is_default = default_name.as_deref() == Some(name.as_str());
-                AudioDevice {
-                    id: name.clone(),
-                    name,
-                    is_default,
-                }
-            })
-            .collect())
+        let host = crate::host::system_host()?;
+        crate::host::input_device_list(&host)
     }
 
     fn start(
@@ -270,7 +252,7 @@ fn open_stream(
     meter: Arc<MeterSnapshot>,
     dropped: Arc<AtomicU64>,
 ) -> Result<OpenedCapture, AudioError> {
-    let host = cpal::default_host();
+    let host = crate::host::system_host()?;
     let device = resolve_device(&host, device_id)?;
 
     let input_configs: Vec<SupportedStreamConfigRange> = device

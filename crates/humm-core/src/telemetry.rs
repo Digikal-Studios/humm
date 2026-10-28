@@ -58,35 +58,33 @@ impl Event {
     ///   `locale.getlocale()`, a 2-tuple; humm sends a single string or
     ///   nothing — the exact locale representation is GUI-shell work, not
     ///   this constructor's concern).
-    /// - `system`: `"Darwin"` on macOS (`cfg!(target_os = "macos")`) — Buzz's
-    ///   `platform.system()` reports the same string there — else
-    ///   [`std::env::consts::OS`] as-is (humm targets macOS only today, but
-    ///   this keeps the mapping total rather than partial).
+    /// - `system`: Python `platform.system()` spelling via
+    ///   [`crate::platform::platform_system_name`] — `"Darwin"`, `"Linux"`,
+    ///   or `"Windows"`, not Rust's lowercase `consts::OS`.
     /// - `release`: `kernel_release` verbatim, or `null` when `None` (Buzz:
     ///   `platform.release()`, the kernel version string, e.g. `"25.5.0"` —
     ///   see [`kernel_release`] for how a caller obtains this value; it is
     ///   deliberately a parameter here, not called internally, so this
-    ///   constructor stays a pure function of its inputs).
+    ///   constructor stays a pure function of its inputs). On Windows the
+    ///   caller passes the release from [`crate::platform::parse_windows_ver`]
+    ///   (`"10"` or `"11"`), because `uname` is not part of Windows.
     /// - `machine`: [`std::env::consts::ARCH`] with `"aarch64"` mapped to
     ///   `"arm64"` (Buzz's `platform.machine()` reports `"arm64"` on Apple
     ///   Silicon; Rust's `ARCH` constant reports `"aarch64"` for the
     ///   identical hardware — a naming difference to normalize, not a real
     ///   platform difference), else `ARCH` as-is.
     /// - `version`: `os_version` verbatim, or `null` when `None` (Buzz:
-    ///   `platform.version()`, a long kernel build string; humm substitutes
-    ///   the shorter, more useful `sw_vers -productVersion` — see
-    ///   [`macos_version`] — again passed in rather than called here).
+    ///   `platform.version()`). macOS sends `sw_vers -productVersion` — see
+    ///   [`macos_version`]. Linux sends `uname -v`. Windows sends the
+    ///   `ver` version token — see [`os_version`]. The value is a parameter
+    ///   so this constructor stays a pure function of its inputs).
     pub fn app_launched(
         app_version: &str,
         locale: Option<&str>,
         kernel_release: Option<&str>,
         os_version: Option<&str>,
     ) -> Event {
-        let system = if cfg!(target_os = "macos") {
-            "Darwin"
-        } else {
-            std::env::consts::OS
-        };
+        let system = crate::platform::platform_system_name(std::env::consts::OS);
         let machine = match std::env::consts::ARCH {
             "aarch64" => "arm64",
             other => other,
@@ -224,7 +222,48 @@ pub fn telemetry_enabled(
 /// tests pass explicit values to [`Event::app_launched`] instead, so they
 /// stay hermetic and deterministic regardless of the host running them.
 pub fn kernel_release() -> Option<String> {
-    run_trimmed("uname", &["-r"])
+    if let Some(release) = run_trimmed("uname", &["-r"]) {
+        return Some(release);
+    }
+    windows_ver().map(|ver| ver.release)
+}
+
+/// OS version string for [`Event::app_launched`]'s `version` property.
+///
+/// macOS: `sw_vers -productVersion`. Linux and other Unix: `uname -v`
+/// (Python `platform.version()`). Windows: the version token inside
+/// `cmd /C ver`, parsed by [`crate::platform::parse_windows_ver`].
+pub fn os_version() -> Option<String> {
+    if cfg!(target_os = "macos") {
+        return macos_version();
+    }
+    #[cfg(windows)]
+    {
+        windows_ver().map(|ver| ver.version)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        run_trimmed("uname", &["-v"])
+    }
+}
+
+fn windows_ver() -> Option<crate::platform::WindowsVer> {
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "ver"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8(output.stdout).ok()?;
+        crate::platform::parse_windows_ver(&text)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
 /// Best-effort macOS product version via `sw_vers -productVersion` (e.g.
@@ -288,13 +327,26 @@ mod tests {
     }
 
     #[test]
-    fn app_launched_system_is_darwin_on_macos() {
+    fn app_launched_system_matches_python_platform_system() {
         let event = Event::app_launched("1.0.0", None, None, None);
-        if cfg!(target_os = "macos") {
-            assert_eq!(event.properties["system"], "Darwin");
-        } else {
-            assert_eq!(event.properties["system"], std::env::consts::OS);
+        assert_eq!(
+            event.properties["system"],
+            crate::platform::platform_system_name(std::env::consts::OS)
+        );
+    }
+
+    #[test]
+    fn linux_reports_uname_release_and_version() {
+        if !cfg!(target_os = "linux") {
+            return;
         }
+        let release = kernel_release().expect("uname -r");
+        let version = os_version().expect("uname -v");
+        assert!(!release.is_empty());
+        assert!(!version.is_empty());
+        // `sw_vers` is macOS-only. A Linux run must not pretend it produced
+        // a macOS product version by leaving this as the only check.
+        assert!(macos_version().is_none());
     }
 
     #[test]

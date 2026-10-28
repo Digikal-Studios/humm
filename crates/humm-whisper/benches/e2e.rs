@@ -82,7 +82,8 @@ fn bench_e2e(c: &mut Criterion) {
 
     if !ffmpeg_available() {
         println!(
-            "SKIP humm-whisper e2e bench: ffmpeg not found — install it (e.g. `brew install ffmpeg`) or set HUMM_FFMPEG"
+            "SKIP humm-whisper e2e bench: ffmpeg not found — {} or set HUMM_FFMPEG",
+            humm_core::platform::subprocess_install_hint(std::env::consts::OS, "ffmpeg")
         );
         return;
     }

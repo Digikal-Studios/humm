@@ -1,7 +1,7 @@
 //! ffprobe-backed [`MediaProber`] (ADR-003).
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use humm_core::boundary::{MediaInfo, MediaProber, VideoStreamInfo};
 use humm_core::domain::Millis;
@@ -37,7 +37,8 @@ impl Default for FfprobeProber {
 
 impl MediaProber for FfprobeProber {
     fn probe(&self, path: &Path) -> Result<MediaInfo, MediaError> {
-        let output = Command::new(&self.binary)
+        let (mut command, binary) = crate::prepare_command(&self.binary);
+        let output = command
             .args([
                 "-v",
                 "error",
@@ -53,8 +54,8 @@ impl MediaProber for FfprobeProber {
                 map_spawn_error(
                     "ffprobe",
                     "HUMM_FFPROBE",
-                    "install it (e.g. `brew install ffmpeg` — ffprobe ships inside it)",
-                    &self.binary,
+                    crate::install_hint("ffprobe"),
+                    &binary,
                     err,
                 )
             })?;

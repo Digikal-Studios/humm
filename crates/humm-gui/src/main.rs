@@ -1,3 +1,4 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 //! `humm-gui` binary entry point. The module tree (`app`, `services`,
 //! `events`, `i18n`, `shortcuts`, `viewmodel`, `views`, `logging`) lives in
 //! `lib.rs` so `tests/kittest_smoke.rs` can build a real [`HummApp`]
@@ -14,6 +15,11 @@
 //! own critical path (see `services::fire_launch_telemetry`'s doc comment).
 //! Any failure up to and including `services::init` renders a minimal error
 //! app with the actionable cause and a Quit button — never a panic.
+//!
+//! A release build on Windows is a GUI subsystem binary (`windows_subsystem`),
+//! so launching humm-gui from Explorer does not open a spare console. Debug
+//! builds keep the console. Child processes hide their own consoles via
+//! `CREATE_NO_WINDOW` in humm-media.
 
 use std::path::PathBuf;
 
