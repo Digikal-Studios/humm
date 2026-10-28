@@ -55,7 +55,8 @@ Review `a329e4e` accepted P-001, P-002, P-004, P-005, P-009, and P-011. Second p
 ### P-001 — confine zip 8.6.0 symlink extraction (implemented)
 
 - Implemented in `e6637e08483ff8c00669fa1874cc40f41b6bcb00`. zip stays 8.6.0. `extract_zip_archive` does not call `ZipArchive::extract`; an escaping symlink is not created, and archive unix modes are not applied. `place_coreml_contents` uses `symlink_metadata` and refuses a link whose target leaves the extract directory, including before `remove_dir_all` and the sentinel write.
-- Tests: `extract_zip_archive_does_not_create_an_escaping_symlink`, `place_coreml_contents_does_not_follow_an_escaping_symlink`. `cargo test -p humm-core --lib models::download::` — 43 passed.
+- Follow-up `7d887ded7323356af790a33c323576327f55b4b1` (does not rewrite `e6637e0`): `..` is applied after existing symlinks are followed, so `a/b/missing` → `..` plus `a/b/link` → `missing/../../outside` is rejected. Not zip 9.0.0 or 9.0.1.
+- Tests: `extract_zip_archive_does_not_create_an_escaping_symlink`, `extract_zip_archive_rejects_symlink_chain_that_escapes_via_dotdot`, `place_coreml_contents_does_not_follow_an_escaping_symlink`. `cargo test -p humm-core --lib models::download::` — 44 passed.
 
 ### P-002 — patch the rustls trust path (implemented)
 
@@ -100,6 +101,8 @@ Review `a329e4e` accepted P-001, P-002, P-004, P-005, P-009, and P-011. Second p
 
 - Implemented in `89489dac2ff22c8fc3543cc2ccdafb51faddbe73`. The fallback is only the final flush: lossy-decode, `trim_end_matches('\u{FFFD}')`, then `trim`. Mid-loop flushes still drop an invalid buffer. `flush_complete_chars` is unchanged.
 - `cargo test -p humm-whisper --lib words::` — 8 passed, including `final_flush_strips_only_a_trailing_replacement_character` (`hello\xff` → `hello`, `\xffhello` → `\u{FFFD}hello`, and `hello\xff` plus ` world` → only `world`).
+- Deferred, not a code change: that test does not cover whitespace after the invalid byte (`hello\xff `). `push_lossy_final_word` already strips a trailing U+FFFD and then trims, which is Buzz's order. A later test can add the case. Do not change the function for it.
+- Deferred, out of P-007 scope: segment text and live text still keep a trailing U+FFFD (`Bridge::on_segment`, `to_str_lossy`). Buzz strips that in `_parse_segment_timings`. Not part of the word-flush fix.
 
 ### P-008 — more than one custom ggml model (deferred, not implemented)
 
