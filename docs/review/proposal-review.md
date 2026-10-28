@@ -246,3 +246,40 @@ Three of the four earlier points are resolved in the design body. Lookup `Err` f
 The verification undoes the 416 fix. `ensure_coreml_encoder_416_after_restart_errors_without_looping` still asserts that a tree-API 404 discards the partial and issues a second, non-ranged file GET (`download.rs`, two `zip_requests`, the second with `range.is_none()`). The proposal says that test still passes, and also says `Err` must not restart fresh. Both cannot be true. Update the test: one ranged probe, no second body download, partial still present.
 
 "A single file GET" across two `ensure_artifact` calls is the other trap. A correct second attempt can `Range: bytes=<len>-`, get 416, see the lookup fail, and return without `download_fresh`. That is a second GET to the file URL and zero extra body bytes. A test that counts every GET rejects that and pushes the implementation into skipping resume entirely. Count body downloads, or assert the partial's bytes are unchanged and no non-ranged GET follows the 416. When a later lookup succeeds, `Some(true)` must still promote that same partial. The design does not say to change that arm. Leave it.
+
+## Third pass — `1944de90` / `4dc9ae5`
+
+Last revision round. Reviewed the ledger text at `4dc9ae5f256b786d4edd09a068ae18d360ec6d79`, which contains the `1944de90` rewrite of P-003, P-006, and P-012. Those three are still design text. Product code was not re-read for an implementation, and `patch-review-accepted.md` / `patch-review-p007-p010.md` were not touched. A remaining blocker is a defer, not another revise.
+
+| ID | Disposition | Claim |
+|---|---|---|
+| P-003 | accept | The keep-file claim holds. No material objection. |
+| P-006 | defer | `/` and `..` are specified. The cited sanitizer is not. |
+| P-012 | defer | The Range probe is allowed. A blanket ban on `RestartFresh` is not the same rule. |
+
+### P-003 — accept
+
+The keep-file claim holds. Acceptance and verification now say the denoised file is removed only when `keep_denoised_file` is false, and that it remains when the setting is true, citing `TempAudioGuard` and `denoised_output_kept_when_keep_denoised_file_set`. The user's source path is not registered. `SIGKILL` happens before the delete, without a wait. Temp deletion is not unix-only. A busy registry lock exits 130 instead of blocking.
+
+The earlier objections stay resolved: paths are deleted explicitly because `process::exit` skips `Drop`, and the handler must not wait on a mutex the worker holds across `spawn`.
+
+No material objection. The objective line still says a second SIGINT does not leave "denoised temp files" behind. That is the `keep_denoised_file = false` case. The acceptance is the contract that distinguishes the setting.
+
+### P-006 — defer
+
+The `/` and `..` examples are in the design. `AC/DC` becomes `AC_DC`. `../x` becomes `.._x` once `/` is `_`. A bare `..` ends in `.`, so the one-character trailing replacement in `safe_filename_component` (`re.sub(r"[ .]$", "#", ...)`) turns it into `.#`. Those are one path component. The GUI stores the raw title. The CLI label stays the URL. Skip staying on `source.<ext>` is an explicit choice and matches Buzz's `audio.wav` versus `display_name` split. `set_task_name` not being on `TaskStore` is named.
+
+That is not the function they cite. `paths.py` `WINDOWS_INVALID_FILENAME_CHARS` is `[<>:"/\\|?*\x00-\x1f]`. The design's gloss after `safe_filename_component` is only `/`, `\`, and a trailing space or dot. `:` is in the same class and is not in the gloss. The acceptance titles are `AC/DC` and `../x`. A title `C:/x` under that gloss becomes `C:_x`. On Windows, `Path::join` / `Path::push` replaces the current path when the new path has a disk prefix and no root, so the default export name `C:_x (transcribed on ...).srt` does not stay inside the output directory. The written test does not catch it. The same function also prefixes `CON` / `PRN` / `AUX` / `NUL` / `COM1`–`COM9` / `LPT1`–`LPT9` and replaces an empty result with `transcript`. None of that is in the acceptance.
+
+Unresolved check: an export whose title is `C:/x` (and a reserved name such as `CON`) is still a single file inside the output directory, which means the sanitizer is the character class and the reserved-name rule, not only `/` and `\`. This is the last round, so the proposal is deferred until that check is in the design.
+
+### P-012 — defer
+
+The old test is no longer required to pass unchanged. A Range probe is allowed. A lookup error must not rename the partial and must not follow 416 with a non-ranged body GET. `Some(true)` still promotes that partial. Malformed JSON on HTTP 200 does not promote. CoreML HTTP errors still degrade. The M1 skip is still named as a reversal. Those parts of the claim hold.
+
+The acceptance then says `416` must not take the `RestartFresh` arm at all, including "no delete of the partial". `on_range_not_satisfiable` uses that one arm for both `Some(false)` and `None`. Two cases that arm covers are not lookup errors:
+
+- A mismatched digest is `Some(false)`. The same acceptance says a mismatch still deletes the partial. "416 deletes nothing" and "a mismatch deletes" cannot both be true when the mismatch is discovered on the 416 probe.
+- `Ok(None)` is the no-digest path (`sha_repo: None`, or a parsed tree with no `lfs.oid`). Today that 416 deletes the partial and downloads once, which is how a custom-model body that died between the last write and the rename ever gets a sentinel. Promoting is only `Some(true)`. If `None` neither promotes nor restarts, every later attempt Range-probes, gets 416, and returns. The partial sits forever. The verification text describes the lookup-error fixture, not this one.
+
+Unresolved check: split the 416 result. Lookup `Err` keeps the partial and does not issue a second body GET. `Some(false)` may delete and must not be forbidden by the `Err` rule. `Ok(None)` must still finish (promote the complete body, or one restart), so a no-digest artifact cannot stick. Do not implement a single "no 416 calls `RestartFresh`" rule. This is the last round, so the proposal is deferred until that split is written.
