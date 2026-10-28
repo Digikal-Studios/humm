@@ -2,6 +2,8 @@
 
 Source of truth: Buzz source at `/Users/jawad/RustroverProjects/buzz` (package `buzz-captions` v1.4.5, Python >=3.12,<3.13, PyQt6 6.9.1). Every claim cites the implementing file. This document defines the contract humm must honor (or deliberately deviate from, with an ADR).
 
+Behavior target for work after this surface is Buzz `main` `298dbf003505cf945bdfd1eb8e705348b59a5b34`. This document was written against v1.4.5 `aaf98634cd354be207e00cc5aaa1bfbd9e19cf22` and has not been re-read against that main commit. The sections below still describe the v1.4.5 tree. Known gaps are in `docs/review/ledger.md`. The CI fixture pin stays on `aaf98634`.
+
 ## 1. Process model & entry points
 
 - Entry points `main.py`, `buzz/__main__.py`, and the `buzz` console script all call `buzz.buzz.main()` (`buzz/buzz.py`).

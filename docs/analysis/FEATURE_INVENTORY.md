@@ -2,6 +2,8 @@
 
 Ground truth: Buzz source at `/Users/jawad/RustroverProjects/buzz` (v1.4.5). IDs are stable and referenced by `PARITY_MATRIX.md`. Format per feature: what it does / how invoked / inputs / outputs / errors & edges / source.
 
+Behavior target for work after this inventory is Buzz `main` `298dbf003505cf945bdfd1eb8e705348b59a5b34`. This inventory was written against v1.4.5 `aaf98634cd354be207e00cc5aaa1bfbd9e19cf22` and has not been re-read against that main commit. The feature rows below still describe the v1.4.5 tree. Known gaps are in `docs/review/ledger.md`. The CI fixture pin stays on `aaf98634`.
+
 ID blocks: F-00x app & platform · F-02x import & file transcription · F-04x backends & models · F-06x live recording · F-08x transcript viewer · F-10x preferences · F-11x plugins.
 
 ---
