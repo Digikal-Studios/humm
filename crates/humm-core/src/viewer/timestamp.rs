@@ -11,12 +11,13 @@ use crate::domain::Millis;
 ///
 /// Accepts `HH:MM:SS[.mmm]`, `MM:SS[.mmm]`, or `SS[.mmm]` — the fractional
 /// milliseconds part is optional in all three forms. Every hour/minute/
-/// second/millisecond part must parse as an integer; anything else (wrong
-/// colon-part count, non-numeric part) yields `None`. Ported verbatim from
-/// Buzz's `parse_timestamp` (`transcription_segments_editor_widget.py:42-69`),
-/// including its permissiveness (no upper bound on minutes/seconds, and a
-/// seconds part with more than one `.` silently keeps only the first
-/// fractional group — Buzz's `seconds_parts[1]` never checks `len() > 2`).
+/// second part must parse as an integer; anything else (wrong colon-part
+/// count, non-numeric part) yields `None`. The fraction is Buzz `main`'s
+/// rule (`transcription_segments_editor_widget.py` `parse_timestamp`,
+/// `int(fraction[:3].ljust(3, "0"))`): at most three digits, right-padded
+/// with zeros, so `1.2` is 1200 ms and a trailing dot (`1.`) is 1000 ms.
+/// A seconds part with more than one `.` still keeps only the first
+/// fractional group.
 pub fn parse_timestamp(s: &str) -> Option<Millis> {
     let parts: Vec<&str> = s.trim().split(':').collect();
 
@@ -30,7 +31,9 @@ pub fn parse_timestamp(s: &str) -> Option<Millis> {
     let seconds_parts: Vec<&str> = seconds_part.split('.').collect();
     let seconds = seconds_parts.first()?.parse::<i64>().ok()?;
     let milliseconds = if seconds_parts.len() > 1 {
-        seconds_parts[1].parse::<i64>().ok()?
+        let fraction = seconds_parts[1];
+        let digits = &fraction[..fraction.len().min(3)];
+        format!("{digits:0<3}").parse::<i64>().ok()?
     } else {
         0
     };
@@ -78,10 +81,18 @@ mod tests {
     }
 
     #[test]
+    fn short_fractions_are_decimal_milliseconds() {
+        assert_eq!(parse_timestamp("1.2"), Some(Millis(1_200)));
+        assert_eq!(parse_timestamp("1.45"), Some(Millis(1_450)));
+        assert_eq!(parse_timestamp("1.4567"), Some(Millis(1_456)));
+        assert_eq!(parse_timestamp("1."), Some(Millis(1_000)));
+    }
+
+    #[test]
     fn trailing_extra_fraction_groups_are_ignored_not_rejected() {
-        // Buzz's `seconds_parts[1]` never validates `len(seconds_parts) > 2` —
-        // a stray extra `.` group is silently dropped, not an error.
-        assert_eq!(parse_timestamp("1.2.3"), Some(Millis(1_002)));
+        // Buzz keeps `seconds_parts[1]` only. `1.2.3` uses fraction `2`,
+        // padded to 200 ms: 1200 ms total, not 200 ms and not 1002 ms.
+        assert_eq!(parse_timestamp("1.2.3"), Some(Millis(1_200)));
     }
 
     #[test]
