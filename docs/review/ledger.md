@@ -162,3 +162,7 @@ Read-only notes from the later passes live in the project store (`internal/audit
 4. Exit 101 after `libasound2-dev` and `libopenblas-dev`. `speakrs` 0.5.0: `the coreml feature is only supported on macOS` (`speakrs-0.5.0/src/lib.rs:204`). The workspace Cargo.toml turns that feature on (ADR-024). Further Linux retries would require disabling it. Not done.
 
 `cargo test --workspace` was not started. Do not treat the Linux stop as a product failure and do not drop `coreml` to make this VM pass.
+
+## Combined lib check
+
+Product tree at `1bfd98699dd015ca02c57266d75779a28e905f07`. These runs were on that tree plus the docs-only `c100d996153508f0097f48e26b574f6e5615b2d4` (`docs/review/patch-review-p003.md` only). `cargo +stable test -p humm-core --lib`: 857 passed, 0 failed, 2 ignored. `cargo +stable test -p humm-whisper --lib`: 37 passed, 0 failed, 0 ignored. `humm-gui` was not run (`speakrs` `coreml` does not compile on Linux; `coreml` was not disabled). `humm-media --lib` was not repeated.
