@@ -229,11 +229,22 @@ mod tests {
         std::fs::write(&denoised, b"denoised").expect("denoised");
         std::fs::write(&source, b"source").expect("source");
 
-        let _speech_track = track_temp_file(&speech, false);
-        let _scratch_track = track_temp_dir(&scratch);
-        let _denoised_track = track_temp_file(&denoised, true);
+        let speech_track = track_temp_file(&speech, false);
+        let scratch_track = track_temp_dir(&scratch);
+        let denoised_track = track_temp_file(&denoised, true);
 
-        assert!(try_emergency_stop(|_| {}));
+        // Only this test's registrations. The process-global stop deletes
+        // every temp still registered in this process, including a file
+        // another lib test has not dropped yet.
+        assert!(try_emergency_stop_registered(
+            &[],
+            &[
+                speech_track.registration_id(),
+                scratch_track.registration_id(),
+                denoised_track.registration_id(),
+            ],
+            |_| {},
+        ));
         assert!(!speech.exists(), "speech temp must be removed");
         assert!(!scratch.exists(), "scratch dir must be removed");
         assert!(
@@ -248,8 +259,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let denoised = dir.path().join("clip_DeepFilterNet3.wav");
         std::fs::write(&denoised, b"denoised").expect("denoised");
-        let _track = track_temp_file(&denoised, false);
-        assert!(try_emergency_stop(|_| {}));
+        let track = track_temp_file(&denoised, false);
+        assert!(try_emergency_stop_registered(
+            &[],
+            &[track.registration_id()],
+            |_| {},
+        ));
         assert!(!denoised.exists());
     }
 
@@ -258,10 +273,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let speech = dir.path().join("clip_speech.mp3");
         std::fs::write(&speech, b"speech").expect("speech");
-        {
-            let _track = track_temp_file(&speech, false);
-        }
-        assert!(try_emergency_stop(|_| {}));
+        let id = {
+            let track = track_temp_file(&speech, false);
+            track.registration_id()
+        };
+        // The registration is gone. Stopping that id must not delete the
+        // file, and must not sweep temps other tests still have registered.
+        assert!(try_emergency_stop_registered(&[], &[id], |_| {}));
         assert!(speech.exists());
     }
 }
