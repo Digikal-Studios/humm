@@ -216,6 +216,25 @@ mod tests {
         );
     }
 
+    /// Stops only `temps`.
+    ///
+    /// [`emergency_stop_does_not_wait_when_the_registry_lock_is_held`] holds
+    /// the registry lock on another thread, and [`try_emergency_stop_registered`]
+    /// then returns false without deleting. Retry until this caller's own
+    /// registrations are stopped. Never call [`try_emergency_stop`]: that
+    /// deletes every temp still registered in the process, including a file
+    /// another test has not dropped yet.
+    fn stop_only(temps: &[u64]) {
+        let start = Instant::now();
+        while !try_emergency_stop_registered(&[], temps, |_| {}) {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(2),
+                "registry lock stayed busy"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     #[test]
     fn emergency_stop_deletes_speech_and_scratch_but_keeps_requested_denoise_and_source() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -233,18 +252,11 @@ mod tests {
         let scratch_track = track_temp_dir(&scratch);
         let denoised_track = track_temp_file(&denoised, true);
 
-        // Only this test's registrations. The process-global stop deletes
-        // every temp still registered in this process, including a file
-        // another lib test has not dropped yet.
-        assert!(try_emergency_stop_registered(
-            &[],
-            &[
-                speech_track.registration_id(),
-                scratch_track.registration_id(),
-                denoised_track.registration_id(),
-            ],
-            |_| {},
-        ));
+        stop_only(&[
+            speech_track.registration_id(),
+            scratch_track.registration_id(),
+            denoised_track.registration_id(),
+        ]);
         assert!(!speech.exists(), "speech temp must be removed");
         assert!(!scratch.exists(), "scratch dir must be removed");
         assert!(
@@ -260,11 +272,9 @@ mod tests {
         let denoised = dir.path().join("clip_DeepFilterNet3.wav");
         std::fs::write(&denoised, b"denoised").expect("denoised");
         let track = track_temp_file(&denoised, false);
-        assert!(try_emergency_stop_registered(
-            &[],
-            &[track.registration_id()],
-            |_| {},
-        ));
+        // Only this registration. A process-global stop would also delete a
+        // file another lib test still has registered.
+        stop_only(&[track.registration_id()]);
         assert!(!denoised.exists());
     }
 
@@ -279,7 +289,7 @@ mod tests {
         };
         // The registration is gone. Stopping that id must not delete the
         // file, and must not sweep temps other tests still have registered.
-        assert!(try_emergency_stop_registered(&[], &[id], |_| {}));
+        stop_only(&[id]);
         assert!(speech.exists());
     }
 }
