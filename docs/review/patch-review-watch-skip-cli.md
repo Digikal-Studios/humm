@@ -119,3 +119,24 @@ Bare `--identify-speakers` is no longer rejected. `validate_add_args` returns `N
 ### Nonblocking
 
 A diarize error fails the task. Buzz `identify_speakers` returns the original segments when identification fails (`speaker_identifier.py`), so the transcript is still exported. `SegmentAdded` events are emitted during `transcribe`, before the labels exist. The stored row and the export files are the labeled segments. The CLI progress callback passed to `diarize` is empty.
+
+## `0d2de407` — PASS
+
+`561aa9b7` stays REQUEST_CHANGES. `95d98099` stays PASS.
+
+No blocking issue. `poll_settled` (`folder_watch.rs` lines 850–863) puts a settled path back into `SettleSet` when `get_task` is missing or errors, with `since` already 30s in the past, and it does not record `SeenSet`. `SettleSet::poll` removes the path before that insert, so the insert is the first sighting of that key and keeps the same id. The command channel is unbounded (`flume::unbounded`). The next poll, at most one 5s timeout later, or the `poll_settled` at the start of the next rescan, sees the `queued` row and calls `adopt`.
+
+These orders do not leave the file queued:
+
+- `Stage` lands while the runner is still inside `run_task`. The path stays pending and unseen. After `run_task`'s tail drain creates the row, the next poll adopts it.
+- Another task is already in `pending` when `Stage` lands. `Adopt` waits behind it, then runs.
+- The file disappears after the aged re-insert. The next poll discards it and sends `Abandon`. That command is behind `Stage`, so the row is created and then canceled.
+- A later rescan finds the same path before the row exists. `insert` returns false, so no second `Stage` is sent. The original id is the one that gets adopted.
+- A stamp change resets the 30s clock. That is Buzz's rule, and the row is adopted after the new wait.
+- Shutdown before adopt sends `Abandon`, or the next process's `cancel_stale_tasks` flips a leftover `queued` row. `SeenSet` was not recorded, and a canceled row does not block the next scan.
+
+`file_that_settles_during_a_long_task_is_adopted` sleeps 40s while the blocker is in progress, asserts that no folder-watch row exists and that `SeenSet` does not match, then releases the gate and waits for `Completed`. The gate stays open, so the adopted task is not blocked again. `HUMM_BUZZ_TESTDATA=/tmp/audit-sources/buzz/testdata cargo +stable test -p humm-gui --test folder_watch_int` — 5 passed in 40.17s. `cargo +stable test -p humm-core --lib folderwatch::` — 22 passed.
+
+### Nonblocking
+
+A row that exists and is not `queued` (a failed `Stage`) is still recorded in `SeenSet` and not adopted (`folder_watch.rs` lines 865–872). That row is not left queued. A user cancel during the wait still only fills the runner's canceled set until `adopt`, so the table can show queued for the rest of the wait. The task then ends canceled.
