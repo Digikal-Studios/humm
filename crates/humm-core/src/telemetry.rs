@@ -242,6 +242,9 @@ pub fn kernel_release() -> Option<String> {
 /// (Python `platform.version()`). Windows: the version token inside
 /// `cmd /C ver`, parsed by [`crate::platform::parse_windows_ver`].
 pub fn os_version() -> Option<String> {
+    // Each target compiles exactly one body. An `if cfg!(...) { return }`
+    // plus cfg-stripped tails leaves macOS with an `if` whose type is `()`
+    // (E0317), because the other arms are not in the crate.
     #[cfg(target_os = "macos")]
     {
         macos_version()

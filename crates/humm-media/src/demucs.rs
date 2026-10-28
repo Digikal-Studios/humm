@@ -38,11 +38,12 @@
 //! has no SIGTERM (`Child::kill` is always SIGKILL), so the unix path sends
 //! it via `nix::sys::signal::kill` (already resolved in this workspace's
 //! dependency graph via `humm-cli`'s `ctrlc`) through the shared
-//! [`crate::signal_process_group`]/[`crate::kill_process_group`] helpers;
-//! non-unix targets have no separate terminate/kill distinction to make
-//! (Windows' own `TerminateProcess`, which `Child::kill` already calls, is
-//! immediate — matching Python `multiprocessing.Process.terminate()`'s own
-//! Windows behavior) so they go straight to `Child::kill()`.
+//! [`crate::signal_process_group`]/[`crate::kill_process_group`] helpers.
+//! Windows has no SIGTERM. A pip or cmd launcher is often the direct child,
+//! and `Child::kill` stops only that process, so cancellation calls
+//! [`crate::kill_process_group`] (`taskkill /F /T`) immediately. Waiting for
+//! the launcher to exit and then returning would leave the Python
+//! interpreter running.
 //!
 //! **Why the whole process group, not just the direct child** (earned
 //! empirically mid-task-5, not anticipated by the spike, which never
@@ -256,9 +257,10 @@ impl SpeechIsolator for DemucsIsolator {
 /// Waits for `child` to exit, polling `cancel` every [`POLL_INTERVAL`]
 /// instead of blocking on `wait()` — the only way to react to cancellation
 /// promptly without a blocking-forever `wait()` call. On cancellation: sends
-/// SIGTERM (unix) — or `kill()` on other targets, which is already an
-/// immediate terminate there — then polls for up to [`TERM_GRACE`] before
-/// escalating to a hard kill, reaping either way. Buzz parity:
+/// SIGTERM to the process group (unix), or [`crate::kill_process_group`]
+/// (Windows `taskkill /F /T`, the same tree kill decode/fetch/video use),
+/// then polls for up to [`TERM_GRACE`] before escalating to a hard kill,
+/// reaping either way. Buzz parity:
 /// `_terminate_speech_extractor_process` (`:339-350`).
 fn wait_checking_cancel(
     child: &mut Child,
@@ -309,9 +311,10 @@ fn send_terminate(child: &mut Child) {
 
 #[cfg(not(unix))]
 fn send_terminate(child: &mut Child) {
-    // No separate terminate/kill distinction on this target — `Child::kill`
-    // is already the platform's immediate-terminate call.
-    let _ = child.kill();
+    // Tree kill, not `Child::kill`. A Windows pip/cmd shim exits on
+    // TerminateProcess while the Python child keeps running, and
+    // `terminate_then_kill` returns as soon as this direct child is reaped.
+    crate::kill_process_group(child);
 }
 
 /// Reads `stderr` to completion in the background (so demucs never blocks
