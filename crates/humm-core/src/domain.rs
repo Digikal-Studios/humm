@@ -607,6 +607,9 @@ pub struct JobSpec {
     pub options: TranscriptionOptions,
     /// Where and how to write the results.
     pub output: OutputSpec,
+    /// Raw URL title used as `{{ input_file_name }}`. `None` for a file
+    /// task, which keeps the input stem. Not a path; export sanitizes it.
+    pub display_name: Option<String>,
 }
 
 /// Where a transcription task reads its media from: a local file or a remote

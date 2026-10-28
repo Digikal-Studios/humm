@@ -312,6 +312,10 @@ mod tests {
             unreachable!("run() never updates progress")
         }
 
+        fn set_task_name(&self, _id: &TranscriptionId, _name: &str) -> Result<(), StoreError> {
+            unreachable!("run() never sets the task name")
+        }
+
         fn update_file(&self, _id: &TranscriptionId, _path: &Path) -> Result<(), StoreError> {
             unreachable!("run() never updates the file path")
         }

@@ -351,6 +351,7 @@ pub fn run_file_job(
             job.output.directory.as_deref(),
             job.output.file_name_template.as_deref(),
             now,
+            job.display_name.as_deref(),
         );
 
         if let Some(parent) = path.parent()
@@ -681,6 +682,7 @@ mod tests {
                 paragraph_split: Millis(2000),
                 source_disposition: None,
             },
+            display_name: None,
         }
     }
 
@@ -743,6 +745,57 @@ mod tests {
             srt,
             "1\n00:00:00,040 --> 00:00:00,299\nBien\n\n2\n00:00:00,299 --> 00:00:00,329\nvenue dans\n\n"
         );
+    }
+
+    #[test]
+    fn url_title_export_stays_inside_the_output_directory() {
+        let cases = [
+            ("AC/DC", "AC_DC.srt"),
+            ("../x", ".._x.srt"),
+            ("..", ".#.srt"),
+            ("C:/x", "C__x.srt"),
+            ("CON", "_CON.srt"),
+        ];
+        for (title, file_name) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let input = tmp.path().join("source.mp3");
+            touch(&input);
+            let mut job = job_with(
+                input,
+                [OutputFormat::Srt].into_iter().collect(),
+                Some(tmp.path().to_path_buf()),
+                Some("{{ input_file_name }}".to_string()),
+            );
+            job.display_name = Some(title.to_string());
+
+            let decoder = FakeDecoder::new(Pcm::new(vec![0.0; 16_000]));
+            let prober = prober_with_audio();
+            let mut engine = FakeEngine {
+                behavior: EngineBehavior::EmitFixtureSegments,
+            };
+            let mut observer = NullSink;
+            let cancel = CancelToken::new();
+            let outcome = run_file_job(
+                &job,
+                &job.input,
+                None,
+                &EngineTuning::default(),
+                &decoder,
+                &prober,
+                &mut engine,
+                &mut observer,
+                &cancel,
+                None,
+            )
+            .unwrap();
+
+            let written = tmp.path().join(file_name);
+            assert_eq!(outcome.written, vec![written.clone()], "{title}");
+            assert!(written.is_file(), "{title}");
+            assert_eq!(written.parent(), Some(tmp.path()), "{title}");
+            let outside = tmp.path().join("..").join(file_name);
+            assert_ne!(written, outside);
+        }
     }
 
     #[test]

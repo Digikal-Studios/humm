@@ -452,6 +452,16 @@ pub struct FetchProgress {
     pub total: Option<u64>,
 }
 
+/// A downloaded file plus the raw media title, when the downloader reported
+/// one. The title is not a filename.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedMedia {
+    /// Local path of the downloaded file.
+    pub path: PathBuf,
+    /// Raw title. `None` when the downloader did not report one.
+    pub title: Option<String>,
+}
+
 /// Downloads remote media to a local file. Implemented by the yt-dlp
 /// subprocess adapter (`humm-media`, Task 6).
 ///
@@ -460,7 +470,7 @@ pub struct FetchProgress {
 /// happens inside the task run, immediately before transcription.
 pub trait MediaFetcher: Send + Sync {
     /// Downloads the best audio of `url` into `dest_dir`, returning the
-    /// downloaded file's path.
+    /// downloaded file's path and, when known, the raw title.
     ///
     /// Emits progress through `progress` (called zero or more times) and polls
     /// `cancel` cooperatively, killing the subprocess if cancellation is
@@ -471,7 +481,7 @@ pub trait MediaFetcher: Send + Sync {
         dest_dir: &Path,
         progress: &mut dyn FnMut(FetchProgress),
         cancel: &CancelToken,
-    ) -> Result<PathBuf, MediaError>;
+    ) -> Result<FetchedMedia, MediaError>;
 }
 
 /// Receives incremental transcription results as they're produced.
@@ -612,6 +622,11 @@ pub trait TaskStore: Send + Sync {
     /// Updates the task's resolved local file path, e.g. once a
     /// [`crate::domain::Input::Url`] task's download completes.
     fn update_file(&self, id: &TranscriptionId, path: &Path) -> Result<(), StoreError>;
+
+    /// Stores the raw URL title as the task's display name. Not a filename:
+    /// export runs it through [`crate::export::safe_filename_component`].
+    /// The GUI label reads this column; the CLI progress label stays the URL.
+    fn set_task_name(&self, id: &TranscriptionId, name: &str) -> Result<(), StoreError>;
 
     /// Updates the task's `language` column to `language` (a
     /// [`crate::language::Language::code`] wire string), e.g. once F-114

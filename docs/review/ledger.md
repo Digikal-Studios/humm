@@ -50,7 +50,7 @@ Confirmed gaps: #1595, #1602, #1614, #1651, #1660, #1674. Confirmed already alig
 
 ## Proposals
 
-Review `a329e4e` accepted P-001, P-002, P-004, P-005, P-009, and P-011. Second pass `95cda13` accepted P-007 and P-010. Those are implemented. P-011 is a non-change. P-003, P-006, and P-012 are revised again below and not implemented. P-008 stays deferred: `ggml-custom.bin` is not renamed. The revised text has not been re-reviewed.
+Review `a329e4e` accepted P-001, P-002, P-004, P-005, P-009, and P-011. Second pass `95cda13` accepted P-007 and P-010. Those are implemented. P-011 is a non-change. P-003 is implemented. P-006 is implemented below. P-012 is revised below and not implemented. P-008 stays deferred: `ggml-custom.bin` is not renamed. The revised text has not been re-reviewed.
 
 ### P-001 — confine zip 8.6.0 symlink extraction (implemented)
 
@@ -88,7 +88,12 @@ Review `a329e4e` accepted P-001, P-002, P-004, P-005, P-009, and P-011. Second p
 - Implemented in `4c1ac2b4d1670f9440d7d0683e7ff648061f3576`. All three handwritten arrays in `folderwatch.rs` gained the suffixes, in Buzz's order. `SUPPORTED_EXTENSIONS` is still handwritten, not derived. `humm-gui` `import.rs` `supported_extensions_match_buzz_main_lowercase_no_dot` asserts all three. `viewer.rs` `is_video` was not given a fourth list.
 - `cargo test -p humm-core --lib folderwatch::` — 18 passed, including `m4b_aac_and_m4v_are_supported`. `cargo test -p humm-gui --lib import::tests::supported_extensions_match_buzz_main_lowercase_no_dot` did not run: `speakrs` 0.5.0 `coreml` does not compile on Linux. `coreml` was not disabled.
 
-### P-006 — URL download name, GUI label, and export stem (revised, not implemented)
+### P-006 — URL download name, GUI label, and export stem (implemented)
+
+- Implemented. Download template is `source.%(ext)s`. One `humm-result:` JSON `--print` carries path and raw title. `TaskStore::set_task_name` stores that title. The CLI label stays `Input::display_name` (the URL). `{{ input_file_name }}` for a URL task uses `safe_filename_component` (`paths.py`: invalid class including `:`, one trailing space or dot to `#`, reserved `CON`/`PRN`/`AUX`/`NUL`/`COM1`–`COM9`/`LPT1`–`LPT9` prefixed with `_`). `confine_export_file_name` repeats that pass when the templated name would still be a Windows disk prefix, a separator, `..`, or a reserved device. `C:/x` becomes `C__x`, not `C:_x`. Skip stays on `job.input` (`source.<ext>`).
+- `cargo +stable test -p humm-core --lib`: 862 passed, 0 failed, 2 ignored. `humm-media --lib`: 81 passed, 0 failed. `humm-store --lib`: 53 passed. Clippy `-D warnings` on those three crates passed. `humm-gui` was not run (`speakrs` `coreml` does not compile on Linux).
+
+### P-006 — design (revised, then implemented)
 
 - Objective: the on-disk download name is not the media title, and the title still reaches the GUI label and the export stem the way Buzz uses `display_name`.
 - Findings: F-008

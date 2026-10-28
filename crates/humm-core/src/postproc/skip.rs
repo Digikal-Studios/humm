@@ -392,6 +392,10 @@ mod tests {
             unreachable!("check() never updates the file path")
         }
 
+        fn set_task_name(&self, _id: &TranscriptionId, _name: &str) -> Result<(), StoreError> {
+            unreachable!("check() never sets the task name")
+        }
+
         fn update_language(
             &self,
             _id: &TranscriptionId,

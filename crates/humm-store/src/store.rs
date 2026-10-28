@@ -1448,6 +1448,10 @@ impl TaskStore for SqliteStore {
         Ok(())
     }
 
+    fn set_task_name(&self, id: &TranscriptionId, name: &str) -> Result<(), StoreError> {
+        SqliteStore::set_task_name(self, id, name)
+    }
+
     fn update_language(&self, id: &TranscriptionId, language: &str) -> Result<(), StoreError> {
         let conn = self.lock();
         conn.execute(

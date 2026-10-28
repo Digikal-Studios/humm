@@ -1316,10 +1316,10 @@ impl Runner {
     /// [`ModelDownloadProgress`*] → `Progress`/`SegmentAdded`*), acquires the
     /// engine, and runs the file-transcription pipeline.
     fn run_job(&mut self, id: TranscriptionId, spec: &TaskSpec, token: &CancelToken) -> Terminal {
-        let input_path = match &spec.input {
-            Input::Path(path) => path.clone(),
+        let (input_path, display_name) = match &spec.input {
+            Input::Path(path) => (path.clone(), None),
             Input::Url(url) => match self.fetch_url(id, url, token) {
-                Ok(path) => path,
+                Ok(fetched) => fetched,
                 Err(terminal) => return terminal,
             },
         };
@@ -1329,6 +1329,7 @@ impl Runner {
             input: input_path,
             options: spec.options.clone(),
             output: spec.output.clone(),
+            display_name,
         };
 
         // A single [`PostprocConfig`] snapshot for this whole task (design
@@ -1344,7 +1345,8 @@ impl Runner {
         let postproc_cfg = self.postproc.as_ref().map(|source| source.snapshot());
 
         // F-115 `check_skip` seam (design spec §2.1): after input resolution
-        // (a URL task's `job.input` is by now the fetched local file) and
+        // (a URL task's `job.input` is by now the fetched local file, named
+        // `source.<ext>`, not the title) and
         // before artifact-ensure/engine-build — Buzz's own ordering
         // (`file_transcriber_queue_worker.py:208-230`), which runs the check
         // right after `mark_started`/`Started` too. Dispatches on
@@ -1864,13 +1866,16 @@ impl Runner {
 
     /// Downloads a URL input into `media_dir/<id>/`, emitting `DownloadProgress`
     /// events (only while the total is known) and recording the local path via
-    /// `update_file`. Returns the local path, or a [`Terminal`] on failure.
+    /// `update_file`. A raw title, when the fetcher reports one, is stored
+    /// with [`TaskStore::set_task_name`] and returned for the export stem.
+    /// The CLI progress label stays the URL (`Input::display_name`).
+    /// Returns `(local path, raw title)`, or a [`Terminal`] on failure.
     fn fetch_url(
         &self,
         id: TranscriptionId,
         url: &url::Url,
         token: &CancelToken,
-    ) -> Result<PathBuf, Terminal> {
+    ) -> Result<(PathBuf, Option<String>), Terminal> {
         let Some(fetcher) = self.fetcher.as_ref() else {
             return Err(Terminal::Failed(YTDLP_MISSING.to_string()));
         };
@@ -1899,15 +1904,20 @@ impl Runner {
             }
         };
 
-        let local = match fetcher.fetch(url, &dest, &mut progress, token) {
-            Ok(path) => path,
+        let fetched = match fetcher.fetch(url, &dest, &mut progress, token) {
+            Ok(fetched) => fetched,
             Err(err) => return Err(classify(CoreError::from(err))),
         };
 
-        if let Err(err) = self.store.update_file(&id, &local) {
+        if let Some(title) = fetched.title.as_deref().filter(|title| !title.is_empty())
+            && let Err(err) = self.store.set_task_name(&id, title)
+        {
+            self.store_write_failed(id, "set_task_name", &err);
+        }
+        if let Err(err) = self.store.update_file(&id, &fetched.path) {
             self.store_write_failed(id, "update_file", &err);
         }
-        Ok(local)
+        Ok((fetched.path, fetched.title))
     }
 
     /// Emits `event` to all subscribers.
@@ -2041,6 +2051,7 @@ mod tests {
         Started(TranscriptionId),
         Progress(TranscriptionId, f64),
         UpdateFile(TranscriptionId, PathBuf),
+        SetName(TranscriptionId, String),
         Completed(TranscriptionId, Vec<Segment>),
         Failed(TranscriptionId, String),
         Canceled(TranscriptionId),
@@ -2132,6 +2143,11 @@ mod tests {
 
         fn update_file(&self, id: &TranscriptionId, path: &Path) -> Result<(), StoreError> {
             self.record(StoreCall::UpdateFile(*id, path.to_path_buf()));
+            Ok(())
+        }
+
+        fn set_task_name(&self, id: &TranscriptionId, name: &str) -> Result<(), StoreError> {
+            self.record(StoreCall::SetName(*id, name.to_string()));
             Ok(())
         }
 
@@ -2405,6 +2421,7 @@ mod tests {
 
     struct FakeFetcher {
         steps: Vec<FetchProgress>,
+        title: Option<String>,
         calls: Arc<Mutex<Vec<url::Url>>>,
         /// When set, `fetch` panics instead of returning — exercises a panic
         /// that unwinds *before* `run_job` ever reaches the cached-engine
@@ -2421,7 +2438,7 @@ mod tests {
             dest_dir: &Path,
             progress: &mut dyn FnMut(FetchProgress),
             _cancel: &CancelToken,
-        ) -> Result<PathBuf, MediaError> {
+        ) -> Result<crate::boundary::FetchedMedia, MediaError> {
             if self.panics {
                 panic!("fetcher exploded");
             }
@@ -2434,7 +2451,10 @@ mod tests {
             }
             let path = dest_dir.join("audio.wav");
             std::fs::write(&path, b"fake audio").map_err(MediaError::Io)?;
-            Ok(path)
+            Ok(crate::boundary::FetchedMedia {
+                path,
+                title: self.title.clone(),
+            })
         }
     }
 
@@ -2699,6 +2719,7 @@ mod tests {
         completed_gate: Option<Gate>,
         canceled_gate: Option<Gate>,
         fetch_steps: Vec<FetchProgress>,
+        fetch_title: Option<String>,
         fetch_panics: bool,
         ensurer: Option<Arc<dyn ArtifactEnsurer>>,
         llm: Option<Arc<dyn LlmEndpointSource>>,
@@ -2766,6 +2787,7 @@ mod tests {
         } else {
             Some(Arc::new(FakeFetcher {
                 steps: cfg.fetch_steps,
+                title: cfg.fetch_title,
                 calls: Arc::clone(&fetch_calls),
                 panics: cfg.fetch_panics,
             }))
@@ -3262,6 +3284,30 @@ mod tests {
                 .any(|c| matches!(c, StoreCall::Completed(x, _) if *x == a))
         );
         assert_eq!(h.fetch_calls.lock().expect("fetch").len(), 1);
+    }
+
+    #[test]
+    fn url_task_stores_the_raw_title_and_keeps_the_url_as_the_cli_label() {
+        let (q, h) = build(Cfg {
+            scripts: vec![EngineScript::Emit {
+                progress: vec![],
+                segments: vec![seg("hi")],
+            }],
+            fetch_title: Some("C:/x".to_string()),
+            ..Cfg::default()
+        });
+        let a = TranscriptionId::new();
+        let spec = url_task();
+        assert_eq!(spec.input.display_name(), "https://example.com/video");
+        q.enqueue(a, spec, Source::UrlImport);
+        q.finish().expect("finish");
+        let calls = h.store_calls();
+        assert!(calls.contains(&StoreCall::SetName(a, "C:/x".to_string())));
+        assert!(
+            !calls
+                .iter()
+                .any(|call| matches!(call, StoreCall::SetName(_, name) if name == "C__x"))
+        );
     }
 
     #[test]

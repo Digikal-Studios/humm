@@ -154,8 +154,16 @@ fn export_entry(vm: &mut ViewerVm, deps: &ViewerDeps, format: OutputFormat, key:
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.file_transcriber.default_export_template.clone()
     };
-    let default_path =
-        default_export_path(&deps.store, vm.id, &file, format, now, template.as_deref());
+    let display_name = url_title(&deps.store, vm.id);
+    let default_path = default_export_path(
+        &deps.store,
+        vm.id,
+        &file,
+        format,
+        now,
+        template.as_deref(),
+        display_name.as_deref(),
+    );
 
     let Some(chosen) = deps.dialogs.save_file(
         &tr("viewer-export-dialog-title"),
@@ -269,6 +277,16 @@ fn default_export_directory(store: &SqliteStore, id: TranscriptionId) -> Option<
 /// (design spec §8.1, F-100) so a custom template applies here too, not just
 /// at import time — with [`default_export_directory`] substituted for the
 /// input file's own directory when a valid last-export folder exists.
+/// Raw title of a URL task. File tasks keep the input stem, even after a
+/// rename, so a user-chosen file name is not rewritten as an export stem.
+fn url_title(store: &SqliteStore, id: TranscriptionId) -> Option<String> {
+    let row = store.get_task(&id).ok().flatten()?;
+    if row.url.as_deref().is_none_or(|url| url.is_empty()) {
+        return None;
+    }
+    row.name.filter(|name| !name.is_empty())
+}
+
 fn default_export_path(
     store: &SqliteStore,
     id: TranscriptionId,
@@ -276,6 +294,7 @@ fn default_export_path(
     format: OutputFormat,
     now: chrono::NaiveDateTime,
     template: Option<&str>,
+    display_name: Option<&str>,
 ) -> PathBuf {
     let options = export_options(store, id);
     let directory = default_export_directory(store, id);
@@ -288,6 +307,7 @@ fn default_export_path(
         directory.as_deref(),
         template,
         now,
+        display_name,
     )
 }
 
@@ -347,7 +367,15 @@ mod tests {
         let id = seed(&store, file.to_str().expect("utf8 path"));
 
         // No last folder set yet: falls back to the input file's own directory.
-        let path = default_export_path(&store, id, &file, OutputFormat::Srt, fixed_now(), None);
+        let path = default_export_path(
+            &store,
+            id,
+            &file,
+            OutputFormat::Srt,
+            fixed_now(),
+            None,
+            None,
+        );
         assert_eq!(path.parent(), Some(input_dir.path()));
         assert_eq!(
             path.file_name().and_then(|n| n.to_str()),
@@ -359,13 +387,29 @@ mod tests {
         store
             .set_last_export_folder(id, export_dir.path())
             .expect("set last export folder");
-        let path = default_export_path(&store, id, &file, OutputFormat::Srt, fixed_now(), None);
+        let path = default_export_path(
+            &store,
+            id,
+            &file,
+            OutputFormat::Srt,
+            fixed_now(),
+            None,
+            None,
+        );
         assert_eq!(path.parent(), Some(export_dir.path()));
 
         // A last export folder that no longer exists falls back to the input
         // file's directory again, rather than building a path into nowhere.
         drop(export_dir); // deletes the tempdir
-        let path = default_export_path(&store, id, &file, OutputFormat::Srt, fixed_now(), None);
+        let path = default_export_path(
+            &store,
+            id,
+            &file,
+            OutputFormat::Srt,
+            fixed_now(),
+            None,
+            None,
+        );
         assert_eq!(path.parent(), Some(input_dir.path()));
     }
 
@@ -389,6 +433,7 @@ mod tests {
             OutputFormat::Srt,
             fixed_now(),
             Some("{{ input_file_name }}-custom"),
+            None,
         );
         assert_eq!(
             path.file_name().and_then(|n| n.to_str()),

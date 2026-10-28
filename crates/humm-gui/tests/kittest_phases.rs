@@ -115,7 +115,7 @@ impl MediaFetcher for GatedFetcher {
         dest_dir: &Path,
         progress: &mut dyn FnMut(FetchProgress),
         _cancel: &CancelToken,
-    ) -> Result<PathBuf, humm_core::error::MediaError> {
+    ) -> Result<humm_core::boundary::FetchedMedia, humm_core::error::MediaError> {
         progress(FetchProgress {
             downloaded: 50,
             total: Some(100),
@@ -124,7 +124,7 @@ impl MediaFetcher for GatedFetcher {
         let src = testdata_dir().join("whisper-latvian.wav");
         let path = dest_dir.join("audio.wav");
         std::fs::copy(&src, &path).map_err(humm_core::error::MediaError::Io)?;
-        Ok(path)
+        Ok(humm_core::boundary::FetchedMedia { path, title: None })
     }
 }
 
