@@ -5,6 +5,7 @@ Reviewed the commits below on `audit/architecture-review`. HEAD while this was w
 | ID | Commit | Verdict |
 |---|---|---|
 | P-001 | `e6637e08483ff8c00669fa1874cc40f41b6bcb00` | REQUEST_CHANGES |
+| P-001 follow-up | `7d887ded7323356af790a33c323576327f55b4b1` | REQUEST_CHANGES |
 | P-002 | `8e2244670c6a4692094f6584cb584e0a6a501628` | PASS |
 | P-004 | `423ec1fd2160dedc2579469c5fcee6f08fe74db9` | PASS |
 | P-005 | `4c1ac2b4d1670f9440d7d0683e7ff648061f3576` | PASS |
@@ -36,6 +37,8 @@ What has to be true: a `..` that follows a component that is not already a real,
 Calling `ZipArchive::extract` on zip 9.0.0 or 9.0.1 is not a substitute. [GHSA-x2x8-gq67-9mq6](https://github.com/zip-rs/zip2/security/advisories/GHSA-x2x8-gq67-9mq6) (patched 9.0.2) is the same class: lexical cancellation of `..` across a component that a later entry can create as a symlink. Their example is `l → x/../outside` followed by `x → .`. I did not run 9.0.2.
 
 Archive unix modes are not applied. `File::create` leaves SUID/SGID unset, so that part of `RUSTSEC-2026-0367` is closed here and is not the objection. `docx` still only reads zip entries. The direct dependency remains zip 8.6.0 (`Cargo.toml`, lockfile package `zip` 8.6.0). The write above is the defect.
+
+The follow-up `7d887ded7323356af790a33c323576327f55b4b1` is a separate verdict below. This SHA stays REQUEST_CHANGES.
 
 ## P-002 — PASS
 
@@ -95,3 +98,24 @@ Ubuntu's current pages:
 Neither bug was reproduced here. The fix Ubuntu declined is in ffmpeg. An extension allowlist does not stop the CLI from passing a path to `-i`, and it was not shown to skip HEVC or SANM probing. No `crates/humm-media` change is the right humm patch.
 
 Uncertain, and not a reason to patch humm: whether 6.1.1's HEVC decoder contains the 7.0 SEGV. Ubuntu did not mark 24.04 "Not affected", and this review did not run a sample.
+
+## P-001 follow-up — REQUEST_CHANGES
+
+`7d887ded7323356af790a33c323576327f55b4b1`
+
+Blocking. The original chain is rejected when `missing` is created first. The same names in the other order still create the escaping link, return success, and install it.
+
+`extract_zip_archive_rejects_symlink_chain_that_escapes_via_dotdot` does build the archive from the previous review: symlink `a/b/missing` → `..`, then symlink `a/b/link` → `missing/../../outside`, then file `a/b/link/pwned`. I ran that test: pass. `missing` exists before `link` is checked, `apply_components` follows it, and `..` is applied to the resolved directory, so `link` is not created. zip stays 8.6.0. That part of the claim is true.
+
+`apply_components` still treats a missing component as a real directory. On `NotFound` it sets `current` to that name (`download.rs` around the `NotFound` arm), and `ParentDir` then pops it (`pop_inside`). A `..` after a name that does not exist yet is cancelled lexically. A later entry can create that name as a symlink. The earlier link is not checked again.
+
+This archive is the same chain with the entries swapped, and no file entry after them:
+
+1. symlink `a/b/link` → `missing/../../outside`
+2. symlink `a/b/missing` → `..`
+
+While `missing` is absent, `missing/../../outside` from `a/b` walks to `<dest>/a/outside`, which is inside `<dest>`. Both links are created. `extract_zip_archive` returns `Ok(())`. Writing `a/b/link/pwned` then creates `<parent>/outside/pwned` with body `owned`. `place_coreml_contents` returns `Ok` and the placed model directory contains `b/link` → `missing/../../outside`. `place_coreml_contents` still only runs `symlink_target_escapes` on the immediate children of the extract directory, so the real directory `a` hides the nested link.
+
+I ran that zip through `extract_zip_archive` and `place_coreml_contents` under `cargo +stable test` on Linux. The probe was not committed. The new test cannot see it: its zip writer adds `missing` before `link`.
+
+A `..` after a component that does not exist has to be an escape, not a pop. For the swapped archive, extract must not return success, `a/b/link` must be absent, and `outside` must stay empty. `place_coreml_contents` must not install that link. The committed test has to build this order, not only the order where `missing` already exists.
