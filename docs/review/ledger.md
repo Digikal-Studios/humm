@@ -71,8 +71,8 @@ Review `a329e4e` accepted P-001, P-002, P-004, P-005, P-009, and P-011. Those ar
 - Contracts: CLI exit code 130. First Ctrl-C still cancels cooperatively.
 - Alternatives: leave ADR-023's debt, including the temp files.
 - Risks: a recycled pgid, and deleting a path that is no longer the job's temp file. Only paths this process created, and only groups it has not reaped.
-- Acceptance: a stub grandchild is dead after the second SIGINT; the `_speech` and denoised paths and the demucs scratch dir are gone; a handler that cannot take the registry lock still exits 130 instead of blocking.
-- Verification: `humm-media` grandchild unit tests, a temp-file assertion around the exit path, and a test that the handler does not wait on the worker's mutex.
+- Acceptance: a stub grandchild is dead after the second SIGINT. `_speech` and the demucs scratch directory are gone. The denoised file is gone only when `keep_denoised_file` is false; when that setting is true the file the user asked to keep is still there (`TempAudioGuard` / `denoised_output_kept_when_keep_denoised_file_set`). Do not register the user's source path. `SIGKILL` the group before deleting, so a live child cannot recreate the file, and do not wait for it. Temp-path deletion is not unix-only. When the registry lock is busy, exit 130 without cleanup rather than blocking.
+- Verification: `humm-media` grandchild unit tests; a temp-file assertion for `_speech`, the scratch dir, and both values of `keep_denoised_file`; a test that the handler does not wait on the worker's mutex.
 
 ### P-004 — parse timestamp fractions as Buzz main does (implemented)
 
@@ -89,24 +89,17 @@ Review `a329e4e` accepted P-001, P-002, P-004, P-005, P-009, and P-011. Those ar
 - Objective: the on-disk download name is not the media title, and the title still reaches the GUI label and the export stem the way Buzz uses `display_name`.
 - Findings: F-008
 - Why the previous design is not enough: `source.%(ext)s` is the right template, and `media_dir/<id>/` already keeps tasks from colliding. humm does not have Buzz's `display_name`. `create_task` inserts URL rows with `name` NULL. `display_name_for` is `name`, else the file basename, else the URL, so after `update_file` the GUI label is the downloaded filename. Changing only the template makes that label `source.<ext>` and makes `{{ input_file_name }}` export as `source`, because `output_file_path` uses `job.input`'s stem. The CLI label is `Input::display_name`, which for a URL is the URL string, not the title. Keeping the CLI label is not a title regression. `fetch` treats the last non-progress stdout line as the path. A second `--print` of the title overwrites that path unless the parser changes.
-- Design for the next review: one machine-readable yt-dlp record carries path and title. Do not add a second `--print` that shares the path line. Store the title with `set_task_name` (or equivalent) so the GUI label is the title. For a URL task, `{{ input_file_name }}` uses that title, matching Buzz `get_output_file_path`'s `display_name or basename(file_path)`. Keep `--no-playlist`, cookies, and the process-group kill.
-- Contracts: `MediaFetcher::fetch`, task `name`, GUI `display_name_for`, CLI URL label (stays the URL unless a separate change says otherwise), `output_file_path` for URL jobs.
+- Design for the next review: one machine-readable yt-dlp record carries path and title. Do not add a second `--print` that shares the path line. Store the raw title with `set_task_name` (or an equivalent `TaskStore` method; `set_task_name` is not on the trait today) so the GUI label is the title. The CLI label stays the URL. For a URL task, `{{ input_file_name }}` uses that title only after the same sanitizing Buzz applies in `safe_filename_component` (`paths.py`): `/` and `\` become `_`, and a trailing space or dot becomes `#`. `output_file_path` must not `join` the raw title. `check_skip` / `stem_for` still sees `job.input`, which will be `source.<ext>`, so skip looks for `source*` and will not see a title-named export. Buzz has the same split (`audio.wav` versus `display_name`). Leave skip on the file stem unless a later change points it at the sanitized title. Keep `--no-playlist`, cookies, and the process-group kill.
+- Contracts: `MediaFetcher::fetch`, task `name` (raw title), GUI `display_name_for`, CLI URL label (stays the URL), `output_file_path` for URL jobs (sanitized stem only).
 - Alternatives: keep `%(title)s.%(ext)s` and accept the Windows trailing-dot failure.
-- Risks: export names of existing URL tasks change only for new downloads. Tests that expect the title inside the downloaded filename must move that expectation to the task name and the export stem.
-- Acceptance: a title ending in `.` or ` ` does not create that path; the GUI label and the export stem are the title; the CLI progress label remains the URL; stdout still yields exactly one path line; cancel still kills the process group.
-- Verification: `humm-media` fetch unit tests with a stub that prints one path line, plus a queue or pipeline test that the export stem is the title.
+- Risks: export names of existing URL tasks change only for new downloads. A sanitizer that is not applied before `Path::join` writes outside the output directory.
+- Acceptance: a title ending in `.` or ` ` does not create that download path; the GUI label is the raw title; the CLI progress label remains the URL; stdout still yields exactly one path line. A title containing `/` or `..` (for example `AC/DC` or `../x`) does not add a path component: the export file stays inside the output directory, and the stem has those characters replaced the way `safe_filename_component` does. Cancel still kills the process group.
+- Verification: `humm-media` fetch unit tests with a stub that prints one path line, plus a queue or pipeline test whose title contains `/` or `..` and whose export path is still inside the output directory.
 
-### P-007 — final-flush UTF-8 prefix only (revised, not implemented)
+### P-007 — final-flush UTF-8 prefix only (implemented)
 
-- Objective: when a word-level segment ends on an incomplete UTF-8 sequence, keep the valid prefix the way Buzz `main` does on that one call.
-- Findings: F-009
-- Why the previous design is wrong: Buzz's `rstrip("\ufffd")` is only the final flush (`whisper_cpp.py` around line 391). It removes a trailing run. It does not remove `U+FFFD` at the start or in the middle. The calls that flush because the next token starts with a space ignore `_append_word`'s `False` and drop the word. Doing a full strip inside every `append_word` would keep those words and would turn `b"\xffhello"` into `hello`.
-- Design for the next review: apply the fallback only on the final flush. Lossy-decode, `trim_end_matches('\u{FFFD}')`, then `trim`, and emit only if that is non-empty. Leave `flush_complete_chars` and the mid-loop drop alone.
-- Contracts: `group_words` output for a segment that ends on an incomplete sequence.
-- Alternatives: keep dropping the whole final word.
-- Risks: a test that expected the final word to disappear.
-- Acceptance: a final buffer of valid UTF-8 plus one trailing incomplete byte emits the valid text and no replacement character. `b"\xffhello"` on that final flush stays `"\u{FFFD}hello"` (leading replacement is not stripped). A bad buffer flushed because the next token starts with `b" "` is still dropped. A fully valid buffer is unchanged.
-- Verification: `cargo test -p humm-whisper --lib words`, with those three cases in one test so a global strip cannot pass it.
+- Implemented in `89489dac2ff22c8fc3543cc2ccdafb51faddbe73`. The fallback is only the final flush: lossy-decode, `trim_end_matches('\u{FFFD}')`, then `trim`. Mid-loop flushes still drop an invalid buffer. `flush_complete_chars` is unchanged.
+- `cargo test -p humm-whisper --lib words::` — 8 passed, including `final_flush_strips_only_a_trailing_replacement_character` (`hello\xff` → `hello`, `\xffhello` → `\u{FFFD}hello`, and `hello\xff` plus ` world` → only `world`).
 
 ### P-008 — more than one custom ggml model (deferred, not implemented)
 
@@ -116,17 +109,9 @@ Review `a329e4e` accepted P-001, P-002, P-004, P-005, P-009, and P-011. Those ar
 
 - Implemented in `66613c07a5516e0cc0209176e45b62ca58eed29d`. `docs/OPEN_QUESTIONS.md` Q-2 and ADR-008 name FunASR as out of scope against Buzz `main` `298dbf003505cf945bdfd1eb8e705348b59a5b34` (`is_funasr_model`, commit `851c8b3593`). No engine, crate, or dependency was added.
 
-### P-010 — say what the behavior pin is, without restamping the inventory (revised, not implemented)
+### P-010 — say what the behavior pin is, without restamping the inventory (implemented)
 
-- Objective: a reader can tell that Buzz `main` is the behavior target and that the inventory was not re-read against it.
-- Findings: F-012
-- Why the previous design is wrong: replacing the v1.4.5 ground-truth headers with `298dbf0` would claim `FEATURE_INVENTORY.md` and `EXTERNAL_SURFACE.md` were checked against that commit. They were not. F-020 still lists the old 13 extensions. Spec headers that say a claim was verified against v1.4.5 would become false if only the commit id changed.
-- Design for the next review: one sentence, not a header swap. Behavior target is Buzz `298dbf003505cf945bdfd1eb8e705348b59a5b34`. This inventory was written against v1.4.5 `aaf98634`. Known gaps live in this ledger. Update a feature row only when that row is actually re-read. Do not restamp "verified against v1.4.5" lines. Keep `scripts/ci_prepare.py` `BUZZ_COMMIT` and the two blob hashes; those blobs match `298dbf0`.
-- Contracts: none at runtime.
-- Alternatives: leave the analysis docs exactly as they are and rely on this ledger alone.
-- Risks: the one sentence is still easy to over-read as a full re-audit. It has to say the bodies were not re-read.
-- Acceptance: the new sentence is present, feature rows are unchanged, and `git diff` for `scripts/ci_prepare.py` is empty.
-- Verification: diff review. No test.
+- Implemented in `bd2c7d720c12dc4ac745189b34cc64fde938b623`. `FEATURE_INVENTORY.md` and `EXTERNAL_SURFACE.md` keep their v1.4.5 ground-truth lines. A following sentence names Buzz `main` `298dbf003505cf945bdfd1eb8e705348b59a5b34` as the behavior target and says those bodies were not re-read against it. Feature rows are unchanged. `scripts/ci_prepare.py` was not edited.
 
 ### P-011 — do not change humm to clear host ffmpeg CVEs (accepted, no code)
 
@@ -141,8 +126,8 @@ Review `a329e4e` accepted P-001, P-002, P-004, P-005, P-009, and P-011. Those ar
 - Contracts: `ensure_artifact`, the 416 recovery arm, `find_sha256`, `coreml_failure_action`.
 - Alternatives: keep warn-and-accept, matching the M1 plan, so a digest outage never blocks or re-downloads.
 - Risks: a tree-API blip fails the ggml or VAD ensure until the lookup works. The partial must still be reusable.
-- Acceptance: two `ensure_artifact` calls with the tree route left at 500 perform a single file GET, leave the partial in place, and do not rename it. A parsed tree with no `lfs.oid` still promotes. Malformed JSON on HTTP 200 does not promote. A CoreML encoder digest failure still degrades rather than failing the ggml model. A mismatched digest still deletes the partial.
-- Verification: `cargo test -p humm-core --lib models::download`, including the double-call 500 case and the existing 416 test.
+- Acceptance: a digest lookup error does not rename the partial and does not download the whole file again. A second `ensure_artifact` may send `Range: bytes=<len>-` and may receive 416; that probe is allowed. 416 must not take the `RestartFresh` arm (no delete of the partial, no second non-ranged body GET). When a later lookup returns `Some(true)`, that same partial is still promoted. A parsed tree with no `lfs.oid` still promotes. Malformed JSON on HTTP 200 does not promote. A CoreML encoder digest failure still degrades rather than failing the ggml model. A mismatched digest still deletes the partial.
+- Verification: replace `ensure_coreml_encoder_416_after_restart_errors_without_looping`'s delete-and-re-download assertion. The 416 case is one ranged probe, no second body download, and the partial still present. The double-call 500 case must not count every file-URL GET as a failure: assert the partial's bytes are unchanged and that no non-ranged GET follows the 416, not "a single file GET". `cargo test -p humm-core --lib models::download` covers those rewritten tests. Do not require the old 416 test to keep passing unchanged.
 
 ## Evidence reconciled
 
