@@ -237,7 +237,14 @@ pub(crate) fn is_export_lock_error(
     windows && matches!(raw_os_error, Some(32 | 33))
 }
 
-fn export_io_is_lock(err: &std::io::Error) -> bool {
+/// A lock-class error on a file is retried. A directory is not: Windows
+/// reports opening one as `PermissionDenied` (`ERROR_ACCESS_DENIED`), which
+/// is the same kind as a locked file, but it will not become readable by
+/// waiting.
+fn export_io_is_lock(path: &Path, err: &std::io::Error) -> bool {
+    if path.is_dir() {
+        return false;
+    }
     is_export_lock_error(err.kind(), err.raw_os_error(), cfg!(windows))
 }
 
@@ -258,7 +265,7 @@ pub fn write_to_export_file(path: &Path, content: &str, mode: WriteMode, sleeper
     for attempt in 0..RETRY_ATTEMPTS {
         match open_for_write(path, mode).and_then(|mut f| f.write_all(content.as_bytes())) {
             Ok(()) => return,
-            Err(e) if export_io_is_lock(&e) => {
+            Err(e) if export_io_is_lock(path, &e) => {
                 if attempt + 1 < RETRY_ATTEMPTS {
                     sleeper.sleep(RETRY_DELAY);
                 } else {
@@ -289,7 +296,7 @@ fn read_export_file(path: &Path, sleeper: &dyn Sleeper) -> String {
     for attempt in 0..RETRY_ATTEMPTS {
         match std::fs::read_to_string(path) {
             Ok(content) => return content,
-            Err(e) if export_io_is_lock(&e) => {
+            Err(e) if export_io_is_lock(path, &e) => {
                 if attempt + 1 < RETRY_ATTEMPTS {
                     sleeper.sleep(RETRY_DELAY);
                 } else {
@@ -1133,6 +1140,13 @@ mod tests {
         // errno 32 on Unix is not a sharing violation.
         assert!(!is_export_lock_error(ErrorKind::Other, Some(32), false));
         assert!(!is_export_lock_error(ErrorKind::NotFound, None, true));
+        // Opening a directory is PermissionDenied on Windows. That kind is
+        // a lock for a file and is not a lock for a directory.
+        assert!(is_export_lock_error(
+            ErrorKind::PermissionDenied,
+            Some(5),
+            true
+        ));
     }
 
     #[test]
@@ -1172,12 +1186,15 @@ mod tests {
         let sleeper = CountingSleeper::default();
         let result = read_export_file(&dir_path, &sleeper);
 
-        // A directory-as-file read fails immediately with a non-permission
-        // error (e.g. `IsADirectory`), so it gives up on the first attempt
-        // without ever sleeping -- pins the "other I/O errors warn-and-return
-        // immediately" half of the retry policy.
+        // Unix reports this as `IsADirectory`. Windows reports it as
+        // `PermissionDenied`, the same kind as a locked file. A directory
+        // is not a lock, so neither read nor write sleeps.
         assert_eq!(result, "");
         assert_eq!(sleeper.calls(), 0);
+
+        let write_sleeper = CountingSleeper::default();
+        write_to_export_file(&dir_path, "x", WriteMode::Append, &write_sleeper);
+        assert_eq!(write_sleeper.calls(), 0);
     }
 
     // -- effective_upload_url ----------------------------------------------------
