@@ -445,8 +445,23 @@ def resolve_macos_dep(dep: str, current: Path) -> Path | None:
     return None
 
 
+def macos_stage_basename(dep: str, resolved: Path) -> str:
+    """Basename used when copying a Mach-O dep into the stage.
+
+    Prefer the ``otool -L`` install-name basename so ``rewrite_macos_stage``
+    can ``install_name_tool -change`` against staged files. ``Path.resolve()``
+    may collapse Homebrew versioned symlinks (``libopenblas.0.dylib`` →
+    ``libopenblas.dylib``); staging under the resolved name leaves the
+    absolute Homebrew install name on the binary and fails verify.
+    """
+    install_base = Path(dep).name
+    if install_base and install_base not in (".", "/"):
+        return install_base
+    return resolved.name
+
+
 def collect_macos_closure(roots: list[Path]) -> dict[str, Path]:
-    """Map basename -> absolute source path for non-system Mach-O deps."""
+    """Map install-name basename -> absolute source path for non-system deps."""
     queue = list(roots)
     seen_files: set[Path] = set()
     closure: dict[str, Path] = {}
@@ -462,7 +477,7 @@ def collect_macos_closure(roots: list[Path]) -> dict[str, Path]:
             dep_path = resolve_macos_dep(dep, current)
             if dep_path is None:
                 continue
-            name = dep_path.name
+            name = macos_stage_basename(dep, dep_path)
             if name not in closure:
                 closure[name] = dep_path
                 queue.append(dep_path)

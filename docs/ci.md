@@ -126,8 +126,9 @@ workflow installs the LLVM **woa64** package via
 `KyleMayes/install-llvm-action` (`arch: arm64`) into a **non-default**
 directory (not `C:\Program Files\LLVM`), sets `LIBCLANG_PATH` to that
 `bin`, puts `clang-cl` on `PATH`, and builds `whisper-rs-sys` with
-`CC`/`CXX=clang-cl`, `CXXFLAGS=/EHsc`, `CMAKE_GENERATOR=Ninja`, plus
-`ilammy/msvc-dev-cmd` (`arch: arm64`) for the Windows SDK. It does
+`CC`/`CXX=clang-cl`, `CXXFLAGS=-EHsc` (dash form — Git Bash/MSYS would
+rewrite `/EHsc` into `C:/Program Files/Git/EHsc`), `CMAKE_GENERATOR=Ninja`,
+plus `ilammy/msvc-dev-cmd` (`arch: arm64`) for the Windows SDK. It does
 **not** pass `env: true` on the LLVM action (that would set plain
 `CC`/`CXX=clang` and inject GNU `-fPIC` into cmake-rs). After
 `msvc-dev-cmd`, the workflow sets
