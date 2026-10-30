@@ -1,60 +1,97 @@
 # humm
 
-humm is an independent Rust port of [Buzz](https://github.com/chidiwilliams/buzz). Buzz is a local application for transcribing and translating audio. humm is not an official Buzz project.
+Offline transcription and translation for media files — a desktop app and a
+command-line tool.
 
-The `humm` command transcribes or translates media files and can write plain text, SubRip (`.srt`), or WebVTT (`.vtt`). The desktop app is `humm-gui`. Transcription uses Whisper models through the `whisper-rs` crate.
+## Based on Buzz
 
-## License
+humm is an **independent Rust port** of
+[Buzz](https://github.com/chidiwilliams/buzz) by Chidi Williams.
 
-humm uses the [MIT License](LICENSE), the same license as Buzz. Buzz's copyright notice is kept in that file, with a short note that humm is a Rust port.
+- Upstream: <https://github.com/chidiwilliams/buzz>
+- humm is **unofficial** and **not affiliated with** the Buzz project or its
+  authors.
+- Behavior aims to match Buzz; this tree is a from-scratch Rust
+  implementation under the same [MIT License](LICENSE). See [NOTICE](NOTICE)
+  for attribution.
 
-Copyright (c) 2022 Chidi Williams
+## Install
 
-## Build and run
+Pre-built installers are not published yet. Build from a checkout with a
+recent Rust toolchain.
 
-Run these from a checkout of this repository.
+**Prerequisites (all platforms):** [ffmpeg](https://ffmpeg.org/) and
+[yt-dlp](https://github.com/yt-dlp/yt-dlp) on `PATH` for media decode and URL
+import. Speaker diarization needs OpenBLAS.
 
-Speaker diarization uses OpenBLAS. On macOS that is Homebrew's library, linked by absolute path, plus libomp, and the GUI does not start without them. CoreML stays enabled on macOS only.
+| Platform | Extra packages |
+| -------- | -------------- |
+| **macOS** | `brew install openblas libomp ffmpeg yt-dlp` (OpenBLAS + libomp are required to launch `humm-gui`) |
+| **Linux** | `ffmpeg`, `yt-dlp`, `pkg-config`, OpenBLAS (`libopenblas-dev`), ALSA (`libasound2-dev`); a desktop portal or zenity for file dialogs |
+| **Windows** | ffmpeg and yt-dlp (e.g. `winget install Gyan.FFmpeg` and `winget install yt-dlp.yt-dlp`); OpenBLAS via vcpkg for diarization (`vcpkg install openblas`) |
 
 ```bash
-brew install openblas libomp ffmpeg yt-dlp
+cargo run -p humm-cli -- add <file> --srt
+cargo run -p humm-gui
 ```
 
-On Linux, ffmpeg, yt-dlp, pkg-config, and a system OpenBLAS are required. libomp is not; distribution OpenBLAS uses libgomp. Native file dialogs need a desktop portal or zenity. Audio capture uses ALSA.
+Optional tools for specific features: `demucs` (speech isolation), and a
+working OpenBLAS install for speaker diarization.
 
-```bash
-sudo apt install ffmpeg yt-dlp pkg-config libopenblas-dev libasound2-dev
-```
+## What works today
 
-On Windows, install ffmpeg and yt-dlp (`winget install Gyan.FFmpeg`, `winget install yt-dlp.yt-dlp`). MSVC builds of speaker diarization need OpenBLAS from vcpkg (`vcpkg install openblas`). CoreML is not compiled into Windows or Linux builds. Running the GUI, WASAPI, and process-tree cancellation still needs a Windows machine.
+- Local Whisper transcription and translation via `whisper-rs` (CLI and GUI)
+- File and URL import (yt-dlp), folder import, drag-and-drop in the GUI
+- Exports: plain text, SubRip (`.srt`), WebVTT (`.vtt`)
+- Task queue, history, preferences, and localization
+- Optional speech isolation (`demucs`), noise reduction (DeepFilterNet), and
+  speaker diarization when those dependencies are available
+- macOS, Linux, and Windows builds (platform audio and subprocess paths)
+
+Gaps versus Buzz main and remaining environment-blocked parity rows are
+tracked in `docs/analysis/PARITY_MATRIX.md`. Release binaries are a separate
+follow-up.
+
+## For developers
+
+Start with the design and analysis docs — not historical recovery notes:
+
+- [`docs/design/ARCHITECTURE.md`](docs/design/ARCHITECTURE.md) — crate layout and boundaries
+- [`docs/design/IMPLEMENTATION_PLAN.md`](docs/design/IMPLEMENTATION_PLAN.md) — milestones
+- [`docs/analysis/FEATURE_INVENTORY.md`](docs/analysis/FEATURE_INVENTORY.md) — feature IDs (F-###)
+- [`docs/analysis/PARITY_MATRIX.md`](docs/analysis/PARITY_MATRIX.md) — parity status
+- [`docs/HUMM_SURFACE.md`](docs/HUMM_SURFACE.md) — CLI grammar and contracts
+- [`docs/ci.md`](docs/ci.md) — CI expectations
 
 ```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo test -p humm-media -- --ignored
-cargo bench
-cargo run -p humm-cli -- add <file> --srt
-cargo run -p humm-gui
+cargo test -p humm-media -- --ignored   # needs ffmpeg and yt-dlp
 ```
 
-`cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` are the checks each change is expected to pass.
+Heavier ignored adapter checks stay off unless an environment variable is
+set (`HUMM_DEMUCS_CONTRACT`, `HUMM_DFN_CONTRACT`, `HUMM_DIARIZE_CONTRACT`, or
+`HUMM_LLM_TEST_BASE` / `_KEY` / `_MODEL`).
 
-`cargo test -p humm-media -- --ignored` needs `ffmpeg` and `yt-dlp`. Heavier ignored adapter checks stay off unless an environment variable is set, so that command still runs with only those two tools:
+### Crates
 
-- `HUMM_DEMUCS_CONTRACT=1` runs the real demucs check.
-- `HUMM_DFN_CONTRACT=1 cargo test -p humm-dfn -- --ignored` runs the DeepFilterNet check.
-- `HUMM_DIARIZE_CONTRACT=1 cargo test -p humm-diarize -- --ignored` runs the diarization check. The first run downloads about 60 MB of models.
-- `HUMM_LLM_TEST_BASE`, `HUMM_LLM_TEST_KEY`, and `HUMM_LLM_TEST_MODEL` point at a real OpenAI-compatible chat endpoint.
+- `humm-core` — domain types, export, transcription pipeline
+- `humm-media` — ffmpeg, ffprobe, yt-dlp, demucs adapters
+- `humm-whisper` — Whisper via whisper-rs
+- `humm-audio` — capture, playback, resample
+- `humm-store` — SQLite history and OS keyring secrets
+- `humm-dfn` — DeepFilterNet noise reduction
+- `humm-diarize` — speaker diarization
+- `humm-cli` — `humm` command
+- `humm-gui` — desktop app (egui / eframe)
 
-## Crates
+## License
 
-- `humm-core` holds domain types, export, and the transcription pipeline.
-- `humm-media` adapts ffmpeg, ffprobe, yt-dlp, and demucs.
-- `humm-whisper` runs Whisper through whisper-rs.
-- `humm-audio` plays, captures, and resamples audio.
-- `humm-store` stores transcription tasks in SQLite and secrets in the system keyring.
-- `humm-dfn` reduces noise with DeepFilterNet.
-- `humm-diarize` identifies speakers.
-- `humm-cli` is the `humm` command.
-- `humm-gui` is the desktop app, built with egui and eframe.
+[MIT](LICENSE) — same terms as Buzz. Copyright notices for Chidi Williams
+(Buzz) and Digikal Studios / Jawad (humm) are in `LICENSE`. Third-party /
+Buzz attribution is summarized in [NOTICE](NOTICE).
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
