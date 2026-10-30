@@ -354,7 +354,11 @@ pub fn label_segments(
 /// immediately, matching Buzz `identify_speakers` (`speaker_identifier.py`).
 /// A diarizer failure other than cancellation returns `segments` unchanged
 /// so the transcript is still exported (`speaker_identifier.py` returns the
-/// original segments when identification fails). Cancellation stays an error.
+/// original segments when identification fails). An `Ok` result with no
+/// turns does the same: Buzz logs that identification returned no speakers
+/// and returns the original segments, rather than labeling everything
+/// speaker 0. [`assign_speakers`]'s empty-turn contract is unchanged and is
+/// not used on this path. Cancellation stays an error.
 pub fn identify_with_diarizer(
     segments: &[Segment],
     audio: &Pcm,
@@ -372,6 +376,13 @@ pub fn identify_with_diarizer(
             return Ok(segments.to_vec());
         }
     };
+    // Buzz `identify_speakers`: `if not result: return segments`. An empty
+    // success is not a labeling pass. `assign_speakers` still maps empty
+    // turns to speaker 0 for the GUI speaker window.
+    if turns.is_empty() {
+        log::warn!("speaker identification returned no speakers; keeping the unlabeled transcript");
+        return Ok(segments.to_vec());
+    }
     let speakers = assign_speakers(segments, &turns);
     let count = speakers
         .iter()
@@ -637,6 +648,44 @@ mod tests {
                 detail: "models exploded".to_string(),
             })
         }
+    }
+
+    struct NoSpeakers;
+
+    impl Diarizer for NoSpeakers {
+        fn diarize(
+            &self,
+            _audio: &Pcm,
+            _progress: &mut dyn FnMut(DiarizeProgress),
+            _cancel: &CancelToken,
+        ) -> Result<Vec<SpeakerTurn>, DiarizeError> {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn identify_with_no_speakers_keeps_the_original_segments() {
+        let mut hello = seg(0, 1000, "hello");
+        hello.translation = "hola".to_string();
+        let mut there = seg(1000, 2000, "there");
+        there.translation = "allí".to_string();
+        let segments = vec![hello, there];
+        let labeled = identify_with_diarizer(
+            &segments,
+            &Pcm::new(vec![0.0; 8]),
+            &NoSpeakers,
+            &CancelToken::new(),
+        )
+        .expect("empty speaker list keeps the transcript");
+        assert_eq!(labeled, segments);
+        assert_eq!(labeled.len(), 2);
+        assert!(
+            !labeled
+                .iter()
+                .any(|segment| segment.text.contains("Speaker 0:"))
+        );
+        assert_eq!(labeled[0].translation, "hola");
+        assert_eq!(labeled[1].translation, "allí");
     }
 
     #[test]
