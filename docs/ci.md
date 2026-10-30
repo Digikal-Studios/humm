@@ -88,10 +88,19 @@ process-tree kill.
 
 ## Release artifacts
 
-`.github/workflows/release.yml` builds installable archives on GitHub-hosted
-runners only (`macos-14`, `ubuntu-latest`, `ubuntu-24.04-arm`, `windows-latest`,
-`windows-11-arm`). It triggers on `v*` tags and on `workflow_dispatch`, uploads
-per-platform archives plus `SHA256SUMS`, and opens or updates a **draft** GitHub
-Release. The `humm` CLI is required on every cell; `humm-gui` is best-effort
-except Windows ARM64 (CLI only). macOS artifacts are unsigned. OpenBLAS stays a
-runtime prerequisite (ADR-024). See the README Download section for users.
+`.github/workflows/release.yml` builds release archives on GitHub-hosted
+runners only (`macos-14`, `ubuntu-24.04`, `ubuntu-24.04-arm`, `windows-latest`,
+`windows-11-arm`). It is separate from the `CI` workflow:
+
+| Event | What runs |
+| --- | --- |
+| `pull_request` touching the release workflow / `scripts/package_release.py` / this doc | Linux x86_64 **dry-run** only (build, bundle, smoke). No GitHub Release. |
+| `push` of tag `v*` | Full matrix → **draft** release (never mints tags; never auto-publishes). |
+| `workflow_dispatch` on `main` with an **existing** tag | Full matrix → draft release for that tag. Refuses other branches and refuses to create tags. Publishing the draft is a human step. |
+
+Each archive is produced by `scripts/package_release.py`, which bundles
+OpenBLAS and ONNX Runtime load-time libraries beside the binaries, rewrites
+macOS install names / Linux `$ORIGIN` RPATH, and fail-closes on `otool` /
+`ldd` / smoke failures. GUI cells fail the job if `humm-gui` does not build;
+Windows ARM64 is explicitly `windows-aarch64-cli`. The shipped Rust toolchain
+is pinned to `1.99.1`. See the README Download section for the public story.

@@ -1,14 +1,16 @@
-# Build installable release archives for GitHub Releases.
+# Build release archives with bundled OpenBLAS + ONNX Runtime load-time libs.
 #
 # Triggers:
-#   - push of tags matching v* (creates a draft release for that version)
-#   - workflow_dispatch (draft by default; version from input or humm-cli Cargo.toml)
+#   - push of tags matching v* → draft GitHub Release (human publishes)
+#   - workflow_dispatch on main only → draft release for an *existing* tag
+#     (never mints tags; never publishes non-draft)
+#   - pull_request touching this workflow / packaging script → Linux dry-run
+#     only (no GitHub Release)
 #
-# Artifacts: humm CLI on every matrix cell; humm-gui when the cell builds it
-# cleanly (Windows ARM64 ships CLI only — DeepFilterNet/tract ARM64 asm).
-# No Apple Developer ID / notarization secrets are required; macOS binaries
-# are unsigned. OpenBLAS remains a runtime prerequisite (ADR-024 absolute
-# Homebrew path on macOS). No new non-Rust crate dependencies.
+# Archives are fail-closed: scripts/package_release.py rewrites rpaths /
+# bundles DLLs and refuses to upload if otool/ldd/smoke still need the
+# builder's Homebrew/vcpkg layout. GUI cells fail the job on build error
+# (Windows ARM64 is explicitly CLI-only). No new non-Rust crate deps.
 
 name: Release
 
@@ -18,18 +20,18 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version without leading v (empty = humm-cli Cargo.toml)"
-        required: false
+      tag:
+        description: "Existing git tag to attach a DRAFT release to (required)"
+        required: true
         type: string
-      draft:
-        description: "Publish as a draft GitHub Release"
-        required: false
-        type: boolean
-        default: true
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "scripts/package_release.py"
+      - "docs/ci.md"
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -37,56 +39,89 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTUP_TOOLCHAIN: stable
+  # Pin the shipped toolchain (do not float on "stable").
+  RUSTUP_TOOLCHAIN: "1.99.1"
   HOMEBREW_NO_AUTO_UPDATE: "1"
   HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
 
 jobs:
   version:
     name: Resolve version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
-      draft: ${{ steps.resolve.outputs.draft }}
+      publish: ${{ steps.resolve.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Guard workflow_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "workflow_dispatch is only allowed on main (got ${GITHUB_REF})" >&2
+            exit 1
+          fi
+          TAG_INPUT="${{ github.event.inputs.tag }}"
+          TAG_INPUT="${TAG_INPUT#v}"
+          if [[ -z "${TAG_INPUT}" || ! "${TAG_INPUT}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
+            echo "tag input must look like a semver (got '${{ github.event.inputs.tag }}')" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          fetch-depth: 0
 
-      - name: Resolve version and draft flag
+      - name: Resolve version and publish flag
         id: resolve
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          INPUT_VERSION: ${{ github.event.inputs.version }}
-          INPUT_DRAFT: ${{ github.event.inputs.draft }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
+          PUBLISH=false
+          if [[ "${EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
-            DRAFT=true
-          elif [[ -n "${INPUT_VERSION}" ]]; then
-            VERSION="${INPUT_VERSION#v}"
-            DRAFT="${INPUT_DRAFT:-true}"
+            TAG="${GITHUB_REF_NAME}"
+            PUBLISH=true
+          elif [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            TAG_RAW="${INPUT_TAG}"
+            TAG_RAW="${TAG_RAW#v}"
+            VERSION="${TAG_RAW}"
+            TAG="v${TAG_RAW}"
+            if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+              echo "Refusing to mint ${TAG}; push the tag first, then re-run dispatch." >&2
+              exit 1
+            fi
+            PUBLISH=true
           else
+            # pull_request dry-run: version from Cargo.toml, no GitHub Release.
             VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' crates/humm-cli/Cargo.toml | head -n1)"
-            DRAFT="${INPUT_DRAFT:-true}"
+            TAG="v${VERSION}"
+            PUBLISH=false
           fi
-          if [[ -z "${VERSION}" || ! "${VERSION}" =~ ^[0-9] ]]; then
-            echo "Could not resolve a numeric version (got '${VERSION:-}')" >&2
+          if [[ -z "${VERSION}" || ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
+            echo "Could not resolve a semver version (got '${VERSION:-}')" >&2
             exit 1
           fi
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "tag=v${VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "draft=${DRAFT}" >> "${GITHUB_OUTPUT}"
-          echo "Resolved version=${VERSION} tag=v${VERSION} draft=${DRAFT} event=${EVENT_NAME}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "publish=${PUBLISH}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved version=${VERSION} tag=${TAG} publish=${PUBLISH} event=${EVENT_NAME}"
 
   build:
     name: ${{ matrix.name }}
     needs: version
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
+    # PR dry-run only exercises Linux x86_64 packaging. Full matrix runs on
+    # tag push and main workflow_dispatch.
+    if: >
+      github.event_name != 'pull_request'
+      || matrix.artifact == 'linux-x86_64'
     permissions:
       contents: read
       actions: write
@@ -100,7 +135,7 @@ jobs:
             archive: tar.gz
             gui: true
             exe_suffix: ""
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             name: Linux x86_64
             artifact: linux-x86_64
             archive: tar.gz
@@ -120,16 +155,14 @@ jobs:
             exe_suffix: ".exe"
             vcpkg_triplet: x64-windows
           - os: windows-11-arm
-            name: Windows ARM64
-            artifact: windows-aarch64
+            name: Windows ARM64 (CLI only)
+            artifact: windows-aarch64-cli
             archive: zip
-            # humm-gui → humm-dfn → tract-linalg ARM64 .S does not assemble
-            # under MSVC/clang on this target (see Windows verification notes).
             gui: false
             exe_suffix: ".exe"
             vcpkg_triplet: arm64-windows
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
 
@@ -138,8 +171,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Release builds need link/compile deps only (no ffmpeg fixtures).
-          # openblas + libomp: ADR-024. cmake/pkgconf: whisper-rs / speakrs.
           brew install openblas libomp cmake pkgconf
           OPENBLAS_PREFIX="$(brew --prefix openblas)"
           if ! pkg-config --exists openblas; then
@@ -148,6 +179,7 @@ jobs:
           fi
           test -f "${OPENBLAS_PREFIX}/lib/libopenblas.dylib"
           test -f "$(brew --prefix libomp)/lib/libomp.dylib"
+          echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,@loader_path" >> "${GITHUB_ENV}"
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -158,6 +190,7 @@ jobs:
             build-essential \
             cmake \
             pkg-config \
+            patchelf \
             libopenblas-dev \
             libasound2-dev \
             libgtk-3-dev \
@@ -166,6 +199,7 @@ jobs:
             libxcb-xfixes0-dev \
             libxkbcommon-dev \
             libwayland-dev
+          echo 'RUSTFLAGS=-C link-arg=-Wl,-rpath,$ORIGIN' >> "${GITHUB_ENV}"
 
       - name: Install Windows build dependencies
         if: runner.os == 'Windows'
@@ -173,7 +207,6 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           if ("${{ matrix.os }}" -eq "windows-11-arm") {
-            # ring on aarch64-pc-windows-msvc looks up clang.
             choco install llvm -y --no-progress
             $llvm = "C:\Program Files\LLVM\bin"
             echo $llvm | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
@@ -185,90 +218,63 @@ jobs:
           if (-not $env:VCPKG_ROOT) {
             $env:VCPKG_ROOT = "C:\vcpkg"
           }
-          # openblas-system (speakrs / ndarray-linalg) needs headers + import
-          # lib; pkgconf helps discovery on MSVC where brew-style paths are absent.
           & "$env:VCPKG_ROOT\vcpkg.exe" install "openblas:$triplet" "pkgconf:$triplet"
           $prefix = Join-Path $env:VCPKG_ROOT "installed\$triplet"
-          $inc = Join-Path $prefix "include"
-          $lib = Join-Path $prefix "lib"
           $pc = Join-Path $prefix "lib\pkgconfig"
-          "OPENBLAS_INCLUDE_DIR=$inc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "OPENBLAS_LIB_DIR=$lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "OPENBLAS_PATH=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "PKG_CONFIG_PATH=$pc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "VCPKG_ROOT=$($env:VCPKG_ROOT)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          if ($env:LIB) {
-            "LIB=$lib;$($env:LIB)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          } else {
-            "LIB=$lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          }
+          "VCPKG_PREFIX=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PKG_CONFIG_PATH=$pc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           $pkgBin = Join-Path $prefix "tools\pkgconf"
           if (Test-Path $pkgBin) {
             echo $pkgBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           }
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: "1.99.1"
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
         with:
           shared-key: release-${{ matrix.artifact }}
-          save-if: true
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: Build humm CLI (release)
         shell: bash
         run: cargo build --locked --release -p humm-cli
 
       - name: Build humm-gui (release)
-        id: gui
         if: matrix.gui
-        continue-on-error: true
         shell: bash
         run: cargo build --locked --release -p humm-gui
 
-      - name: Package archive
+      - name: Package archive (bundled libs + smoke)
         shell: bash
         env:
           VERSION: ${{ needs.version.outputs.version }}
           ARTIFACT: ${{ matrix.artifact }}
           ARCHIVE: ${{ matrix.archive }}
           EXE_SUFFIX: ${{ matrix.exe_suffix }}
-          GUI_OUTCOME: ${{ steps.gui.outcome }}
           WANT_GUI: ${{ matrix.gui }}
+          VCPKG_PREFIX: ${{ env.VCPKG_PREFIX }}
         run: |
           set -euo pipefail
           STAGE="dist/humm-${VERSION}-${ARTIFACT}"
-          mkdir -p "${STAGE}"
-          cp "target/release/humm${EXE_SUFFIX}" "${STAGE}/"
-          if [[ "${GUI_OUTCOME}" == "success" ]]; then
-            cp "target/release/humm-gui${EXE_SUFFIX}" "${STAGE}/"
-            echo "gui=yes" > "${STAGE}/CONTENTS.txt"
-          else
-            echo "gui=no" > "${STAGE}/CONTENTS.txt"
-            echo "humm-gui was not included in this archive." >> "${STAGE}/CONTENTS.txt"
-            if [[ "${WANT_GUI}" == "true" ]]; then
-              echo "A GUI build was attempted on this runner and failed; use cargo for humm-gui here." >> "${STAGE}/CONTENTS.txt"
-            else
-              echo "This target ships CLI only (GUI not attempted)." >> "${STAGE}/CONTENTS.txt"
-            fi
+          BIN_ARGS=(--bin humm)
+          if [[ "${WANT_GUI}" == "true" ]]; then
+            BIN_ARGS+=(--bin humm-gui)
           fi
-          cp LICENSE "${STAGE}/"
-          printf '%s\n' \
-            'humm release archive' \
-            '' \
-            'Runtime prerequisites (not bundled):' \
-            '- ffmpeg and yt-dlp on PATH for media decode and URL import' \
-            '- OpenBLAS for speaker diarization (on macOS: brew install openblas libomp;' \
-            '  binaries link Homebrew OpenBLAS by absolute path — ADR-024)' \
-            '- On Linux GUI: a desktop portal or zenity for native file dialogs; ALSA' \
-            '' \
-            'macOS binaries from this workflow are unsigned (no Developer ID /' \
-            'notarization secrets). Gatekeeper may block first launch: right-click' \
-            'the binary, choose Open, or clear quarantine after you trust the download.' \
-            '' \
-            'Verify the archive against SHA256SUMS on the GitHub Release.' \
-            > "${STAGE}/RUNTIME.txt"
+          VCPKG_ARGS=()
+          if [[ -n "${VCPKG_PREFIX}" ]]; then
+            VCPKG_ARGS=(--vcpkg-prefix "${VCPKG_PREFIX}")
+          fi
+          python3 scripts/package_release.py \
+            --stage "${STAGE}" \
+            --bin-dir target/release \
+            --exe-suffix "${EXE_SUFFIX}" \
+            "${BIN_ARGS[@]}" \
+            "${VCPKG_ARGS[@]}"
 
           mkdir -p dist
           OUT="dist/humm-${VERSION}-${ARTIFACT}.${ARCHIVE}"
@@ -283,11 +289,10 @@ jobs:
             tar -C dist -czf "${OUT}" "humm-${VERSION}-${ARTIFACT}"
           fi
           ls -la dist/
-          # Drop the staging directory; keep only the archive for upload.
           rm -rf "${STAGE}"
 
       - name: Upload archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: humm-${{ needs.version.outputs.version }}-${{ matrix.artifact }}
           path: dist/humm-${{ needs.version.outputs.version }}-${{ matrix.artifact }}.${{ matrix.archive }}
@@ -304,17 +309,31 @@ jobs:
   publish:
     name: Draft GitHub Release
     needs: [version, build]
-    runs-on: ubuntu-latest
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
+      actions: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Require existing tag (never mint)
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Refusing to create release: tag ${TAG} does not exist locally." >&2
+            echo "Push the tag first. This job never mints tags." >&2
+            exit 1
+          fi
 
       - name: Download archives
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
         with:
           path: release-assets
           pattern: humm-${{ needs.version.outputs.version }}-*
@@ -333,7 +352,9 @@ jobs:
           {
             echo "## humm ${VERSION}"
             echo
-            echo "Draft release produced by the Release workflow."
+            echo "Draft release from tag \`${TAG}\`. Publish it from the GitHub UI"
+            echo "when the archives have been smoke-checked; drafts are not visible"
+            echo "to users without write access."
             echo
             echo "### Assets"
             echo
@@ -345,13 +366,13 @@ jobs:
             echo
             echo "### Install"
             echo
-            echo "1. Download the archive for your OS/CPU from this release."
-            echo "2. Verify: \`sha256sum -c SHA256SUMS\` (or check the row above)."
-            echo "3. Unpack and put \`humm\` on your \`PATH\`."
-            echo "4. Install runtime deps (ffmpeg, yt-dlp; OpenBLAS — see README)."
+            echo "1. Download the archive for your OS/CPU from this release (after it is published)."
+            echo "2. Verify checksums: \`sha256sum -c SHA256SUMS\` (Linux) or \`shasum -a 256 -c SHA256SUMS\` (macOS)."
+            echo "3. Unpack; keep the bundled shared libraries beside \`humm\` / \`humm-gui\`."
+            echo "4. Put \`ffmpeg\` and \`yt-dlp\` on your \`PATH\`."
             echo
-            echo "macOS builds are **unsigned**. Windows ARM64 ships **CLI only**."
-            echo "Full GUI packaging notes and OpenBLAS caveats are in the README."
+            echo "macOS builds are **unsigned**. \`windows-aarch64-cli\` is **CLI only**."
+            echo "Each archive's \`CONTENTS.txt\` records whether \`humm-gui\` is present."
           } > ../RELEASE_NOTES.md
 
       - name: Create or update draft release
@@ -359,41 +380,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.version.outputs.version }}
           TAG: ${{ needs.version.outputs.tag }}
-          DRAFT: ${{ needs.version.outputs.draft }}
-          TARGET_COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [[ "${DRAFT}" == "true" ]]; then
-            DRAFT_ARGS=(--draft)
-          else
-            DRAFT_ARGS=(--draft=false)
-          fi
-
-          # Prefer an existing tag; for workflow_dispatch without a tag, create
-          # the release against this commit and let `gh` create the tag.
-          CREATE_ARGS=("${TAG}")
-          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
-            CREATE_ARGS+=(--target "${TARGET_COMMIT}")
-          fi
-
+          # Always draft. Publishing to the public is a human step in the GitHub UI.
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release upload "${TAG}" release-assets/* --clobber
             gh release edit "${TAG}" \
-              "${DRAFT_ARGS[@]}" \
+              --draft \
               --title "humm ${VERSION}" \
               --notes-file RELEASE_NOTES.md
           else
-            # --draft=false is only meaningful on edit; create defaults to published
-            # unless --draft is passed.
-            CREATE_DRAFT=()
-            if [[ "${DRAFT}" == "true" ]]; then
-              CREATE_DRAFT=(--draft)
-            fi
-            gh release create "${CREATE_ARGS[@]}" \
-              "${CREATE_DRAFT[@]}" \
+            gh release create "${TAG}" \
+              --draft \
               --title "humm ${VERSION}" \
               --notes-file RELEASE_NOTES.md \
               release-assets/*
           fi
-          echo "Release URL:"
+          echo "Draft release URL:"
           gh release view "${TAG}" --json url --jq .url

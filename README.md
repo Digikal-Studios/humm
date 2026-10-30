@@ -88,6 +88,7 @@ working OpenBLAS install for speaker diarization.
   dependencies are available
 - macOS, Linux, and Windows builds (platform audio and subprocess paths)
 
+<<<<<<< HEAD
 The M8 parity matrix is **46 verified / 4 named environment exceptions** of 50
 rows (`docs/analysis/PARITY_MATRIX.md`). That is not the same as “100% of
 current Buzz `main`.” Deliberate non-goals and remaining honesty gaps are
@@ -113,6 +114,11 @@ Also out of scope as Buzz-internal or toolkit-specific (documented in the gap
 walk, not product bugs): demucs windowed in-process RAM streaming, PortAudio
 device re-init, Qt XDG secret-portal freeze workarounds, and per-segment
 plugin `review_reason` without a plugin host (ADR-010).
+=======
+Gaps versus Buzz main and remaining environment-blocked parity rows are
+tracked in `docs/analysis/PARITY_MATRIX.md`. Published release archives (when
+any exist) are described under [Download](#download).
+>>>>>>> be61657 (HUM-26: address release review — bundle libs, honest drafts, fail GUI)
 
 ## For developers
 
