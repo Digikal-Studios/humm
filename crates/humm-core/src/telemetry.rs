@@ -242,8 +242,9 @@ pub fn kernel_release() -> Option<String> {
 /// (Python `platform.version()`). Windows: the version token inside
 /// `cmd /C ver`, parsed by [`crate::platform::parse_windows_ver`].
 pub fn os_version() -> Option<String> {
-    if cfg!(target_os = "macos") {
-        return macos_version();
+    #[cfg(target_os = "macos")]
+    {
+        macos_version()
     }
     #[cfg(windows)]
     {
