@@ -128,22 +128,21 @@ impl MediaFetcher for YtDlpFetcher {
         // on its own. On Windows the same helper hides the console window;
         // cancellation uses `taskkill /T`.
 
-        let mut child = command
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|err| {
-                map_spawn_error(
-                    "yt-dlp",
-                    "HUMM_YTDLP",
-                    crate::install_hint("yt-dlp"),
-                    &binary,
-                    err,
-                )
-            })?;
-        // Register after spawn. The lock is not held across `spawn`.
-        let _group = humm_core::abort::track_process(child.id());
+            .stderr(Stdio::piped());
+        let spawned = crate::spawn_prepared(&mut command).map_err(|err| {
+            map_spawn_error(
+                "yt-dlp",
+                "HUMM_YTDLP",
+                crate::install_hint("yt-dlp"),
+                &binary,
+                err,
+            )
+        })?;
+        // Registered by `spawn_prepared`. The guard must outlive `wait`.
+        let (mut child, _group) = spawned.into_parts();
 
         let stdout = child.stdout.take().expect("stdout was piped at spawn");
         let stderr = child.stderr.take().expect("stderr was piped at spawn");

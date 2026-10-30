@@ -38,7 +38,7 @@ impl Default for FfprobeProber {
 impl MediaProber for FfprobeProber {
     fn probe(&self, path: &Path) -> Result<MediaInfo, MediaError> {
         let (mut command, binary) = crate::prepare_command(&self.binary);
-        let output = command
+        command
             .args([
                 "-v",
                 "error",
@@ -48,17 +48,16 @@ impl MediaProber for FfprobeProber {
                 "-show_streams",
             ])
             .arg(path)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|err| {
-                map_spawn_error(
-                    "ffprobe",
-                    "HUMM_FFPROBE",
-                    crate::install_hint("ffprobe"),
-                    &binary,
-                    err,
-                )
-            })?;
+            .stdin(Stdio::null());
+        let output = crate::output_prepared(&mut command).map_err(|err| {
+            map_spawn_error(
+                "ffprobe",
+                "HUMM_FFPROBE",
+                crate::install_hint("ffprobe"),
+                &binary,
+                err,
+            )
+        })?;
 
         if !output.status.success() {
             let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();

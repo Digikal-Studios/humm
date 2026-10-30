@@ -38,20 +38,19 @@ impl AudioEncoder for FfmpegDecoder {
         let (mut cmd, binary) = crate::prepare_command(self.binary());
         cmd.args(encode_args(dest));
 
-        let mut child = cmd
-            .stdin(Stdio::piped())
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|err| {
-                map_spawn_error(
-                    "ffmpeg",
-                    "HUMM_FFMPEG",
-                    crate::install_hint("ffmpeg"),
-                    &binary,
-                    err,
-                )
-            })?;
+            .stderr(Stdio::piped());
+        let spawned = crate::spawn_prepared(&mut cmd).map_err(|err| {
+            map_spawn_error(
+                "ffmpeg",
+                "HUMM_FFMPEG",
+                crate::install_hint("ffmpeg"),
+                &binary,
+                err,
+            )
+        })?;
+        let (mut child, _group) = spawned.into_parts();
 
         let mut stdin = child.stdin.take().expect("stdin was piped at spawn");
         let mut stdout = child.stdout.take().expect("stdout was piped at spawn");
@@ -85,7 +84,7 @@ impl AudioEncoder for FfmpegDecoder {
 
         loop {
             if cancel.is_canceled() {
-                let _ = child.kill();
+                crate::kill_process_group(&mut child);
                 let _ = child.wait();
                 let _ = writer_handle.join();
                 let _ = stdout_handle.join();
@@ -100,7 +99,7 @@ impl AudioEncoder for FfmpegDecoder {
                     continue;
                 }
                 Err(err) => {
-                    let _ = child.kill();
+                    crate::kill_process_group(&mut child);
                     let _ = child.wait();
                     let _ = writer_handle.join();
                     let _ = stdout_handle.join();

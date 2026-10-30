@@ -115,6 +115,8 @@ pub struct FfmpegFrameStream {
     path: PathBuf,
     info: VideoStreamInfo,
     child: Arc<Mutex<Child>>,
+    /// Keeps the pid in the abort registry until this stream is dropped.
+    _group: humm_core::abort::TrackedProcess,
     stop: Arc<AtomicBool>,
     state: Arc<SharedState>,
 }
@@ -128,7 +130,7 @@ impl FfmpegFrameStream {
     ) -> Result<Self, MediaError> {
         let start_secs = (start.0 as f64 / 1000.0).max(0.0);
         let (mut command, binary) = crate::prepare_command(binary);
-        let mut child = command
+        command
             .args(["-ss", &start_secs.to_string()])
             .arg("-i")
             .arg(path)
@@ -140,17 +142,17 @@ impl FfmpegFrameStream {
             .arg("-")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|err| {
-                map_spawn_error(
-                    "ffmpeg",
-                    "HUMM_FFMPEG",
-                    crate::install_hint("ffmpeg"),
-                    &binary,
-                    err,
-                )
-            })?;
+            .stderr(Stdio::null());
+        let spawned = crate::spawn_prepared(&mut command).map_err(|err| {
+            map_spawn_error(
+                "ffmpeg",
+                "HUMM_FFMPEG",
+                crate::install_hint("ffmpeg"),
+                &binary,
+                err,
+            )
+        })?;
+        let (mut child, group) = spawned.into_parts();
 
         let stdout = child.stdout.take().expect("stdout was piped at spawn");
         // RGBA: 4 bytes/pixel (deviations ledger #10; Buzz's rgb24 is 3).
@@ -183,6 +185,7 @@ impl FfmpegFrameStream {
             path: path.to_path_buf(),
             info,
             child,
+            _group: group,
             stop,
             state,
         })

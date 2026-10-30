@@ -133,11 +133,21 @@ fn track_temp(path: PathBuf, keep: bool, directory: bool) -> TrackedTemp {
 /// left in place. Other temps are removed. Directory entries use
 /// `remove_dir_all`. This is not unix-only; signaling inside `kill` is.
 pub fn try_emergency_stop(kill: impl FnOnce(&[u32])) -> bool {
-    let Ok(registry) = REGISTRY.try_lock() else {
+    let Some(registry) = try_registry() else {
         return false;
     };
     stop_locked(&registry, |_| true, |_| true, kill);
     true
+}
+
+/// `try_lock`, recovering a poisoned registry. A previous panic must not
+/// disable cleanup. `None` only when another thread holds the lock.
+fn try_registry() -> Option<std::sync::MutexGuard<'static, Registry>> {
+    match REGISTRY.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
 }
 
 /// Same as [`try_emergency_stop`], but only the given registrations.
@@ -150,7 +160,7 @@ pub fn try_emergency_stop_registered(
     temps: &[u64],
     kill: impl FnOnce(&[u32]),
 ) -> bool {
-    let Ok(registry) = REGISTRY.try_lock() else {
+    let Some(registry) = try_registry() else {
         return false;
     };
     stop_locked(

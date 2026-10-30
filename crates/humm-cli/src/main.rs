@@ -15,6 +15,9 @@ fn main() -> ExitCode {
     let log_dir = humm_core::paths::log_dir();
     logging::init(&log_dir);
     log::debug!("humm starting (log_dir={})", log_dir.display());
+    // Detached ffmpeg/ffprobe/yt-dlp/demucs children do not receive SIGHUP
+    // or a Windows console-close. Install before any of them are spawned.
+    humm_media::install_terminal_cleanup();
 
     let cli = match args::Cli::try_parse() {
         Ok(cli) => cli,

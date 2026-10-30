@@ -65,7 +65,8 @@
 //!
 //! **The second Ctrl-C does not unwind.** `humm-cli`'s handler calls
 //! [`humm_core::abort::try_emergency_stop`] before `std::process::exit`,
-//! which SIGKILLs this child's process group (registered below) and deletes
+//! which SIGKILLs every detached media child (`prepare_command` registers
+//! the process group at spawn, including this one) and deletes
 //! the scratch directory without waiting and without running `Drop`. The
 //! user's source file is not registered. A denoised file is registered
 //! separately and kept when the user asked to keep it.
@@ -178,7 +179,7 @@ impl SpeechIsolator for DemucsIsolator {
         // `prepare_command` puts the child in its own process group on unix
         // (see this module's doc comment) and sets CREATE_NO_WINDOW on Windows.
 
-        let mut child = cmd.spawn().map_err(|err| {
+        let spawned = crate::spawn_prepared(&mut cmd).map_err(|err| {
             map_spawn_error(
                 "demucs",
                 "HUMM_DEMUCS",
@@ -187,8 +188,9 @@ impl SpeechIsolator for DemucsIsolator {
                 err,
             )
         })?;
-        // Register after spawn. The lock is not held across `spawn`.
-        let _group = humm_core::abort::track_process(child.id());
+        // `spawn_prepared` registers the process group. The lock is not held
+        // across `spawn`. The guard must outlive `wait`.
+        let (mut child, _group) = spawned.into_parts();
         let _scratch_track = humm_core::abort::track_temp_dir(scratch.path());
 
         let mut stdout = child.stdout.take().expect("stdout was piped at spawn");
@@ -400,10 +402,11 @@ fn copy_then_rename(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// Checks whether `binary` can be executed, without spawning it. An explicit
 /// path (more than one component, e.g. an absolute `HUMM_DEMUCS` override)
-/// is checked for existence directly; a bare command name (the default
-/// `"demucs"`) is looked up by scanning `PATH` for an executable file with
-/// that name — the same resolution `Command::spawn` itself performs, done
-/// here without actually spawning anything.
+/// is checked for existence directly. A bare command name (the default
+/// `"demucs"`) follows `Command`: on Unix, `PATH` (an empty component is the
+/// current directory); on Windows, the application directory, `System32`,
+/// the Windows directory, then `PATH`, appending `.exe` only and skipping
+/// empty `PATH` entries. `.bat` and `.cmd` are not candidates.
 fn binary_is_available(binary: &Path) -> bool {
     crate::executable_exists(binary)
 }
@@ -734,15 +737,17 @@ printf 'fake no_vocals data' > "$outdir/htdemucs/no_vocals.mp3"
         let start = Instant::now();
         // Only this test's registrations. The process-global stop would
         // SIGKILL demucs stubs other lib tests still have registered.
-        assert!(humm_core::abort::try_emergency_stop_registered(
-            &[_group.registration_id()],
-            &[
-                _speech_track.registration_id(),
-                _scratch_track.registration_id(),
-                _denoised_track.registration_id(),
-            ],
-            crate::kill_tracked_groups,
-        ));
+        assert!(
+            crate::emergency_stop_registered_for_test(
+                &[_group.registration_id()],
+                &[
+                    _speech_track.registration_id(),
+                    _scratch_track.registration_id(),
+                    _denoised_track.registration_id(),
+                ],
+            ),
+            "registry lock stayed busy"
+        );
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             match child.try_wait() {

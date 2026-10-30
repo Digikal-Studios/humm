@@ -260,17 +260,35 @@ pub fn os_version() -> Option<String> {
 }
 
 /// Live `cmd /C ver`, parsed. Windows-only: other hosts have no `ver`.
+///
+/// [`hidden_command`] sets `CREATE_NO_WINDOW`. A release GUI has no console,
+/// and a bare `cmd.exe` would otherwise open one for each probe.
 #[cfg(windows)]
 fn windows_ver() -> Option<crate::platform::WindowsVer> {
-    let output = std::process::Command::new("cmd")
-        .args(["/C", "ver"])
-        .output()
-        .ok()?;
+    let output = hidden_command("cmd").args(["/C", "ver"]).output().ok()?;
     if !output.status.success() {
         return None;
     }
     let text = String::from_utf8(output.stdout).ok()?;
     crate::platform::parse_windows_ver(&text)
+}
+
+/// `cmd.exe` is a console-subsystem binary. From a release GUI
+/// (`windows_subsystem`) it would flash a console unless
+/// [`crate::platform::WINDOWS_CREATE_NO_WINDOW`] is set. Rust ORs that flag
+/// with `CREATE_UNICODE_ENVIRONMENT`.
+fn hidden_command(program: &str) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new(program);
+        command.creation_flags(crate::platform::WINDOWS_CREATE_NO_WINDOW);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new(program)
+    }
 }
 
 /// Best-effort macOS product version via `sw_vers -productVersion` (e.g.
@@ -287,10 +305,7 @@ pub fn macos_version() -> Option<String> {
 /// non-empty, valid-UTF-8 exit, or `None` on any failure — the shared
 /// best-effort shell-out used by [`kernel_release`] and [`macos_version`].
 fn run_trimmed(command: &str, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new(command)
-        .args(args)
-        .output()
-        .ok()?;
+    let output = hidden_command(command).args(args).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -361,7 +376,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_release_and_version_match_live_ver() {
-        let output = std::process::Command::new("cmd")
+        let output = hidden_command("cmd")
             .args(["/C", "ver"])
             .output()
             .expect("cmd /C ver");

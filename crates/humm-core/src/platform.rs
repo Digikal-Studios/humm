@@ -4,6 +4,15 @@
 //! so the Windows and Linux cases run in tests on any host. Callers pass
 //! [`std::env::consts::OS`] at the edge.
 
+/// Win32 `CREATE_NO_WINDOW` (`0x08000000`).
+///
+/// A GUI-subsystem process has no console. Spawning a console-subsystem
+/// child such as `cmd.exe` or `ffmpeg.exe` would otherwise allocate one.
+/// Pass this to [`std::os::windows::process::CommandExt::creation_flags`].
+/// Rust ORs in `CREATE_UNICODE_ENVIRONMENT` itself, so this flag does not
+/// drop the Unicode environment.
+pub const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Python `platform.system()` spelling for a Rust [`std::env::consts::OS`]
 /// value. Buzz telemetry sends `"Darwin"`, `"Linux"`, and `"Windows"`.
 /// Rust's constant is `"macos"`, `"linux"`, and `"windows"`.
@@ -90,6 +99,11 @@ fn windows_release_name(version: &str) -> String {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn windows_create_no_window_is_the_win32_flag() {
+        assert_eq!(WINDOWS_CREATE_NO_WINDOW, 0x0800_0000);
+    }
 
     #[test]
     fn platform_system_name_matches_python_platform_system() {

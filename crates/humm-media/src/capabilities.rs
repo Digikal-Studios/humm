@@ -37,7 +37,8 @@ pub fn probe_binaries() -> MediaCapabilities {
 
 fn binary_version(binary: &Path) -> Option<String> {
     let (mut command, _) = crate::prepare_command(binary);
-    let output = command.arg("-version").stdin(Stdio::null()).output().ok()?;
+    command.arg("-version").stdin(Stdio::null());
+    let output = crate::output_prepared(&mut command).ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let first_line = stdout.lines().next()?;
     parse_version_line(first_line)
@@ -61,11 +62,8 @@ fn parse_version_line(first_line: &str) -> Option<String> {
 /// doesn't go through [`parse_version_line`].
 fn yt_dlp_version(binary: &Path) -> Option<String> {
     let (mut command, _) = crate::prepare_command(binary);
-    let output = command
-        .arg("--version")
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
+    command.arg("--version").stdin(Stdio::null());
+    let output = crate::output_prepared(&mut command).ok()?;
     if !output.status.success() {
         return None;
     }
