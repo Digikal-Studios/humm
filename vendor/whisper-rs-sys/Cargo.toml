@@ -1,0 +1,46 @@
+# Path override of crates.io whisper-rs-sys 0.15.0.
+# The published crate's whisper.cpp 1.8.3 calls whisper_coreml_init from
+# whisper_init_state whenever WHISPER_USE_COREML is compiled in, ignoring
+# whisper_context_params.use_gpu. humm's HUMM_FORCE_CPU / models.force_cpu
+# path sets use_gpu false (Metal backend already stays off) but still hit
+# that CoreML probe and SIGSEGV'd on Apple Silicon. build.rs unpacks the
+# pinned crate tarball and gates the probe on use_gpu. See ADR-002.
+#
+# Not a workspace member: cargo test --workspace must not treat this as its
+# own package. [patch.crates-io] in the workspace root selects it.
+
+[package]
+name = "whisper-rs-sys"
+version = "0.15.0"
+edition = "2021"
+rust-version = "1.88.0"
+links = "whisper"
+license = "Unlicense"
+description = "whisper-rs-sys 0.15.0 with CoreML skipped when use_gpu is false"
+build = "build.rs"
+publish = false
+
+[features]
+coreml = []
+cuda = []
+force-debug = []
+hipblas = []
+intel-sycl = []
+metal = []
+openblas = []
+openmp = []
+vulkan = []
+
+[lib]
+name = "whisper_rs_sys"
+path = "src/lib.rs"
+
+[build-dependencies]
+bindgen = "0.72"
+cfg-if = "1"
+cmake = "0.1"
+flate2 = "1"
+fs_extra = "1.3"
+semver = "1.0"
+sha2 = "0.10"
+tar = "0.4"

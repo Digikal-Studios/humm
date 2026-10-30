@@ -419,7 +419,8 @@ impl Env {
 
 /// Seeds `model_root` so `humm add -s tiny` resolves the model with no network:
 /// the Buzz stub ggml file, its `.humm_complete` sentinel, and a CoreML
-/// negative-cache marker (so the CoreML encoder is never probed either).
+/// negative-cache marker (so the downloader does not fetch an encoder).
+/// `HUMM_FORCE_CPU` is what keeps whisper from probing CoreML at state init.
 fn seed_stub_tiny(model_root: &Path) {
     let stub = testdata_dir().join("ggml-tiny.bin");
     assert!(

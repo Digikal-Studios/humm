@@ -2,9 +2,10 @@
 //! [`humm_core::boundary::TranscriptionEngine`].
 //!
 //! Loads a ggml model into a [`WhisperContext`] (Metal + CoreML on Apple
-//! Silicon, CPU elsewhere) and runs `whisper_full` per transcription, wiring
-//! whisper.cpp's progress / new-segment / abort callbacks to the core's
-//! [`SegmentSink`] and [`CancelToken`]. FullParams mirror Buzz's whisper-cli
+//! Silicon when `use_gpu` is true, CPU otherwise) and runs `whisper_full` per
+//! transcription, wiring whisper.cpp's progress / new-segment / abort
+//! callbacks to the core's [`SegmentSink`] and [`CancelToken`]. FullParams
+//! mirror Buzz's whisper-cli
 //! invocation (`buzz/transcriber/whisper_cpp.py:167-196`); word-level mode
 //! reconstructs per-word/character segments from token data via
 //! [`crate::words::group_words`].
@@ -36,10 +37,11 @@
 //!
 //! ## Live session state reuse (ADR-021 carried perf ticket, F-061)
 //! `transcribe_live` used to call `WhisperContext::create_state()` on every
-//! chunk. Under the `coreml` feature this reloads the CoreML encoder model
-//! from disk each time (`whisper_ctx_wrapper.rs:466` → whisper.cpp's
-//! `whisper_init_state` → `whisper_coreml_init`, vendored
-//! `whisper.cpp/src/whisper.cpp:3441-3446` — ADR-021's traced mechanism).
+//! chunk. Under the `coreml` feature, and only when `use_gpu` is true, this
+//! reloads the CoreML encoder model from disk each time
+//! (`whisper_ctx_wrapper.rs:466` → whisper.cpp's `whisper_init_state` →
+//! `whisper_coreml_init` — ADR-021's traced mechanism). `use_gpu == false`
+//! skips that call (ADR-002).
 //! [`WhisperEngine`] now caches one [`whisper_rs::WhisperState`] in a
 //! [`LiveStateSlot`] and reuses it across a live session's chunks;
 //! [`WhisperEngine::begin_live_session`] clears the slot (the hard guarantee
@@ -216,10 +218,18 @@ pub struct WhisperEngine {
 impl WhisperEngine {
     /// Loads a ggml model from `model_path`.
     ///
-    /// `use_gpu` selects Metal/CoreML acceleration (`false` forces CPU; the CLI
-    /// reads `HUMM_FORCE_CPU`, not this crate). With the `coreml` feature,
-    /// whisper.cpp auto-discovers `ggml-<name>-encoder.mlmodelc` next to the
-    /// ggml file and falls back gracefully when it is absent.
+    /// `use_gpu` selects Metal and CoreML. `false` forces CPU: the ggml Metal
+    /// backend stays off, and CoreML encoder load is skipped. whisper.cpp
+    /// 1.8.3 (whisper-rs-sys 0.15.0) otherwise calls `whisper_coreml_init`
+    /// from `whisper_init_state` whenever the `coreml` feature is compiled
+    /// in, which SIGSEGVs on Apple Silicon under `HUMM_FORCE_CPU` both with
+    /// and without `ggml-<name>-encoder.mlmodelc` on disk. The workspace
+    /// patches that call so it runs only when `use_gpu` is true (ADR-002).
+    /// The CLI and GUI pass the resolved flag; this crate does not read
+    /// `HUMM_FORCE_CPU` itself.
+    ///
+    /// With `use_gpu` true and the `coreml` feature, whisper.cpp
+    /// auto-discovers `ggml-<name>-encoder.mlmodelc` next to the ggml file.
     ///
     /// # Errors
     /// [`EngineError::ModelLoad`] if the file is missing or whisper-rs fails to
