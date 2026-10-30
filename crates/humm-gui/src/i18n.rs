@@ -6,18 +6,17 @@
 //! things:
 //!
 //! - [`AVAILABLE_LOCALES`]: the registry of embedded catalogs — `en_US` plus
-//!   the `ca_ES`/`da_DK`/`nl`/`de_DE`/`es_ES`/`it_IT`/`ja_JP`/`lv_LV`/
-//!   `pl_PL`/`pt_BR`/`ru`/`uk_UA`/`zh_CN`/`zh_TW` set (F-008b, design spec
-//!   §9.2), in Buzz's own `ui_locales` order (review-corrected, M8 Task 13
-//!   follow-up: `nl` sits right after `da_DK`, not after `it_IT` — see
-//!   `general_preferences_widget.py:34-50`, whose dict order is `en_US,
-//!   ca_ES, da_DK, nl, de_DE, es_ES, it_IT, ja_JP, lv_LV, pl_PL, pt_BR, ru,
-//!   uk_UA, zh_CN, zh_TW`). M8 Task 15 lands the last three (`lv_LV`,
-//!   `uk_UA`, `zh_TW`) — all 15 of Buzz's own locales are now embedded, so
-//!   this registry is complete; a future Buzz-side locale addition would
-//!   still be the same one-array-element + one-`include_str!` +
-//!   one-catalog-file shape, and the per-locale completeness tests at the
-//!   bottom of this module would pick it up automatically.
+//!   the `ca_ES`/`da_DK`/`nl`/`fr`/`de_DE`/`es_ES`/`it_IT`/`ja_JP`/`lv_LV`/
+//!   `pl_PL`/`pt_BR`/`ru`/`tr_TR`/`uk_UA`/`zh_CN`/`zh_TW` set (F-008b,
+//!   design spec §9.2), in Buzz's own `ui_locales` order (see
+//!   `general_preferences_widget.py` — dict order is `en_US, ca_ES, da_DK,
+//!   nl, fr, de_DE, es_ES, it_IT, ja_JP, lv_LV, pl_PL, pt_BR, ru, tr_TR,
+//!   uk_UA, zh_CN, zh_TW`). HUM-28 ports `fr` and `tr_TR` (Buzz `9775971` /
+//!   `95c91e4`) so all 17 of Buzz `main`'s locales are embedded; a future
+//!   Buzz-side locale addition would still be the same one-array-element +
+//!   one-`include_str!` + one-catalog-file shape, and the per-locale
+//!   completeness tests at the bottom of this module would pick it up
+//!   automatically.
 //! - [`negotiate`]/[`negotiate_in`]: Buzz's own gettext fallback chain
 //!   (`buzz/locale.py:15-21`) reimplemented over the registry — exact code
 //!   match, then language-prefix match, then `en_US`.
@@ -45,9 +44,10 @@ use humm_core::settings::Settings;
 /// One embedded UI-locale catalog: a Buzz locale code, the BCP-47 language
 /// tag Fluent/`unic-langid` needs, and the catalog source itself.
 ///
-/// Buzz's own vocabulary is the 15 codes in `ui_locales`
-/// (`general_preferences_widget.py:34-50`) — humm's registry uses the same
-/// codes as its wire values (parity with `settings.ui.locale`).
+/// Buzz's own vocabulary is the 17 codes in `ui_locales`
+/// (`general_preferences_widget.py`, including `fr` and `tr_TR`) — humm's
+/// registry uses the same codes as its wire values (parity with
+/// `settings.ui.locale`).
 #[derive(Clone, Copy)]
 pub struct LocaleEntry {
     /// The Buzz UI-locale code (e.g. `"en_US"`, `"de_DE"`, or a bare
@@ -90,6 +90,9 @@ const DA_FTL: &str = include_str!("../assets/i18n/da/humm.ftl");
 /// The embedded Dutch catalog source (F-008b, M8 Task 13).
 const NL_FTL: &str = include_str!("../assets/i18n/nl/humm.ftl");
 
+/// The embedded French catalog source (F-008b, HUM-28 / Buzz `9775971`).
+const FR_FTL: &str = include_str!("../assets/i18n/fr/humm.ftl");
+
 /// The embedded German catalog source (F-008b).
 const DE_FTL: &str = include_str!("../assets/i18n/de/humm.ftl");
 
@@ -114,6 +117,10 @@ const PT_BR_FTL: &str = include_str!("../assets/i18n/pt-BR/humm.ftl");
 /// The embedded Russian catalog source (F-008b, M8 Task 14).
 const RU_FTL: &str = include_str!("../assets/i18n/ru/humm.ftl");
 
+/// The embedded Turkish catalog source (F-008b, HUM-28 / Buzz `95c91e4`).
+/// Buzz's wire code is `tr_TR`; the Fluent assets live under `tr/`.
+const TR_FTL: &str = include_str!("../assets/i18n/tr/humm.ftl");
+
 /// The embedded Ukrainian catalog source (F-008b, M8 Task 15).
 const UK_FTL: &str = include_str!("../assets/i18n/uk/humm.ftl");
 
@@ -129,15 +136,14 @@ const ZH_CN_FTL: &str = include_str!("../assets/i18n/zh-CN/humm.ftl");
 /// own header comment for the full note.
 const ZH_TW_FTL: &str = include_str!("../assets/i18n/zh-TW/humm.ftl");
 
-/// The locale registry: every catalog embedded into this binary — all 15 of
-/// Buzz's own `ui_locales` codes (F-008b), listed in Buzz's own dict order
-/// (`general_preferences_widget.py:34-50`), which is also the order the
-/// Preferences language combo renders. M8 Task 15 lands the last three
-/// (`lv_LV`, `uk_UA`, `zh_TW`), completing the set; this module's per-locale
-/// completeness tests iterate this array, so any future entry (a
-/// hypothetical new Buzz locale) would still be covered the moment it
-/// lands, the same one-array-element + one-`include_str!` +
-/// one-catalog-file shape as every locale added so far.
+/// The locale registry: every catalog embedded into this binary — all 17 of
+/// Buzz `main`'s `ui_locales` codes (F-008b), listed in Buzz's own dict order
+/// (`general_preferences_widget.py`), which is also the order the Preferences
+/// language combo renders. HUM-28 adds `fr` and `tr_TR` after M8 Task 15's
+/// `lv_LV`/`uk_UA`/`zh_TW`; this module's per-locale completeness tests
+/// iterate this array, so any future entry (a hypothetical new Buzz locale)
+/// would still be covered the moment it lands, the same one-array-element +
+/// one-`include_str!` + one-catalog-file shape as every locale added so far.
 ///
 /// Index `0` is always `en_US` — both [`negotiate_in`]'s final fallback and
 /// [`ACTIVE_LOCALE_INDEX`]'s initial value depend on that.
@@ -153,7 +159,8 @@ const ZH_TW_FTL: &str = include_str!("../assets/i18n/zh-TW/humm.ftl");
 /// primary-language subtag is already a valid BCP-47 tag, so no region
 /// needs to be invented for it. `ru`'s tag (M8 Task 14) is the same bare
 /// `"ru"` for the same reason — Buzz's own code for Russian carries no
-/// region either.
+/// region either. `fr` (HUM-28) is likewise bare `"fr"` matching Buzz's
+/// wire code; `tr_TR` keeps the region as `tr-TR`.
 pub static AVAILABLE_LOCALES: &[LocaleEntry] = &[
     LocaleEntry {
         buzz_code: "en_US",
@@ -174,6 +181,11 @@ pub static AVAILABLE_LOCALES: &[LocaleEntry] = &[
         buzz_code: "nl",
         langid: "nl",
         ftl: NL_FTL,
+    },
+    LocaleEntry {
+        buzz_code: "fr",
+        langid: "fr",
+        ftl: FR_FTL,
     },
     LocaleEntry {
         buzz_code: "de_DE",
@@ -216,6 +228,11 @@ pub static AVAILABLE_LOCALES: &[LocaleEntry] = &[
         ftl: RU_FTL,
     },
     LocaleEntry {
+        buzz_code: "tr_TR",
+        langid: "tr-TR",
+        ftl: TR_FTL,
+    },
+    LocaleEntry {
         buzz_code: "uk_UA",
         langid: "uk-UA",
         ftl: UK_FTL,
@@ -246,6 +263,7 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "locale-name-ca-es",
         "locale-name-da-dk",
         "locale-name-nl",
+        "locale-name-fr",
         "locale-name-de-de",
         "locale-name-es-es",
         "locale-name-it-it",
@@ -254,6 +272,7 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "locale-name-pl-pl",
         "locale-name-pt-br",
         "locale-name-ru",
+        "locale-name-tr-tr",
         "locale-name-uk-ua",
         "locale-name-zh-cn",
         "locale-name-zh-tw",
@@ -1416,7 +1435,7 @@ mod tests {
     /// this test proved [`lumii_locale_requested`]'s raw-request read was
     /// the *only* thing making the gate reachable at all — gating on
     /// [`active_locale`] instead would have been permanently broken for
-    /// `lv_LV` specifically. Task 15 lands the `lv_LV` catalog (all 15 Buzz
+    /// `lv_LV` specifically. Task 15 lands the `lv_LV` catalog (then 15 Buzz
     /// locales are now embedded), so `negotiate` *does* resolve it now —
     /// the gap this test used to document is gone. What doesn't change is
     /// the design decision itself: the gate still reads the raw setting,
@@ -1531,15 +1550,15 @@ mod tests {
 
     // -- registry order (F-008b, M8 Task 13 review fix) --------------------------
 
-    /// Buzz's own `ui_locales` dict order, in full — all 15 codes
-    /// (`general_preferences_widget.py:34-50`), independent of which of them
-    /// humm currently embeds. [`AVAILABLE_LOCALES`]'s own order must always
-    /// be a *subsequence* of this: a locale not yet ported is simply absent,
-    /// but any locale that *is* embedded must appear in the same relative
-    /// order it holds here.
+    /// Buzz's own `ui_locales` dict order, in full — all 17 codes
+    /// (`general_preferences_widget.py`, including `fr` and `tr_TR`),
+    /// independent of which of them humm currently embeds.
+    /// [`AVAILABLE_LOCALES`]'s own order must always be a *subsequence* of
+    /// this: a locale not yet ported is simply absent, but any locale that
+    /// *is* embedded must appear in the same relative order it holds here.
     const BUZZ_UI_LOCALES_ORDER: &[&str] = &[
-        "en_US", "ca_ES", "da_DK", "nl", "de_DE", "es_ES", "it_IT", "ja_JP", "lv_LV", "pl_PL",
-        "pt_BR", "ru", "uk_UA", "zh_CN", "zh_TW",
+        "en_US", "ca_ES", "da_DK", "nl", "fr", "de_DE", "es_ES", "it_IT", "ja_JP", "lv_LV",
+        "pl_PL", "pt_BR", "ru", "tr_TR", "uk_UA", "zh_CN", "zh_TW",
     ];
 
     /// Pins [`AVAILABLE_LOCALES`]'s relative order against Buzz's real

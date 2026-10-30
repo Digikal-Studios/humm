@@ -1,6 +1,6 @@
 # CLAUDE.md — humm
 
-humm is a Rust port of Buzz (`/Users/jawad/RustroverProjects/buzz`) with **100% functional parity** and **decisively better performance** — in that order. The Buzz *source code* is the sole ground truth for behavior; never rely on prior knowledge of Buzz or assumptions about transcription apps.
+humm is a Rust port of Buzz (`/Users/jawad/RustroverProjects/buzz`) aiming at **functional parity with Buzz within named carve-outs**, plus **decisively better performance** — in that order. Do **not** claim “100% Buzz `main` parity” without the public exceptions list (README “Named exceptions”; `docs/review/buzz-main-gaps.md`; matrix FINAL 46 verified / 4 env exceptions). The Buzz *source code* is the sole ground truth for behavior; never rely on prior knowledge of Buzz or assumptions about transcription apps.
 
 ## Read before coding
 
