@@ -1,0 +1,399 @@
+# Build installable release archives for GitHub Releases.
+#
+# Triggers:
+#   - push of tags matching v* (creates a draft release for that version)
+#   - workflow_dispatch (draft by default; version from input or humm-cli Cargo.toml)
+#
+# Artifacts: humm CLI on every matrix cell; humm-gui when the cell builds it
+# cleanly (Windows ARM64 ships CLI only — DeepFilterNet/tract ARM64 asm).
+# No Apple Developer ID / notarization secrets are required; macOS binaries
+# are unsigned. OpenBLAS remains a runtime prerequisite (ADR-024 absolute
+# Homebrew path on macOS). No new non-Rust crate dependencies.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without leading v (empty = humm-cli Cargo.toml)"
+        required: false
+        type: string
+      draft:
+        description: "Publish as a draft GitHub Release"
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: stable
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      draft: ${{ steps.resolve.outputs.draft }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Resolve version and draft flag
+        id: resolve
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_DRAFT: ${{ github.event.inputs.draft }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            DRAFT=true
+          elif [[ -n "${INPUT_VERSION}" ]]; then
+            VERSION="${INPUT_VERSION#v}"
+            DRAFT="${INPUT_DRAFT:-true}"
+          else
+            VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' crates/humm-cli/Cargo.toml | head -n1)"
+            DRAFT="${INPUT_DRAFT:-true}"
+          fi
+          if [[ -z "${VERSION}" || ! "${VERSION}" =~ ^[0-9] ]]; then
+            echo "Could not resolve a numeric version (got '${VERSION:-}')" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag=v${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "draft=${DRAFT}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved version=${VERSION} tag=v${VERSION} draft=${DRAFT} event=${EVENT_NAME}"
+
+  build:
+    name: ${{ matrix.name }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            name: macOS aarch64
+            artifact: macos-aarch64
+            archive: tar.gz
+            gui: true
+            exe_suffix: ""
+          - os: ubuntu-latest
+            name: Linux x86_64
+            artifact: linux-x86_64
+            archive: tar.gz
+            gui: true
+            exe_suffix: ""
+          - os: ubuntu-24.04-arm
+            name: Linux aarch64
+            artifact: linux-aarch64
+            archive: tar.gz
+            gui: true
+            exe_suffix: ""
+          - os: windows-latest
+            name: Windows x86_64
+            artifact: windows-x86_64
+            archive: zip
+            gui: true
+            exe_suffix: ".exe"
+            vcpkg_triplet: x64-windows
+          - os: windows-11-arm
+            name: Windows ARM64
+            artifact: windows-aarch64
+            archive: zip
+            # humm-gui → humm-dfn → tract-linalg ARM64 .S does not assemble
+            # under MSVC/clang on this target (see Windows verification notes).
+            gui: false
+            exe_suffix: ".exe"
+            vcpkg_triplet: arm64-windows
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Release builds need link/compile deps only (no ffmpeg fixtures).
+          # openblas + libomp: ADR-024. cmake/pkgconf: whisper-rs / speakrs.
+          brew install openblas libomp cmake pkgconf
+          OPENBLAS_PREFIX="$(brew --prefix openblas)"
+          if ! pkg-config --exists openblas; then
+            echo "PKG_CONFIG_PATH=${OPENBLAS_PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
+              >> "${GITHUB_ENV}"
+          fi
+          test -f "${OPENBLAS_PREFIX}/lib/libopenblas.dylib"
+          test -f "$(brew --prefix libomp)/lib/libomp.dylib"
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            pkg-config \
+            libopenblas-dev \
+            libasound2-dev \
+            libgtk-3-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libwayland-dev
+
+      - name: Install Windows build dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ("${{ matrix.os }}" -eq "windows-11-arm") {
+            # ring on aarch64-pc-windows-msvc looks up clang.
+            choco install llvm -y --no-progress
+            $llvm = "C:\Program Files\LLVM\bin"
+            echo $llvm | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+          if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+            choco install cmake -y --installargs 'ADD_CMAKE_TO_PATH=System' --no-progress
+          }
+          $triplet = "${{ matrix.vcpkg_triplet }}"
+          if (-not $env:VCPKG_ROOT) {
+            $env:VCPKG_ROOT = "C:\vcpkg"
+          }
+          # openblas-system (speakrs / ndarray-linalg) needs headers + import
+          # lib; pkgconf helps discovery on MSVC where brew-style paths are absent.
+          & "$env:VCPKG_ROOT\vcpkg.exe" install "openblas:$triplet" "pkgconf:$triplet"
+          $prefix = Join-Path $env:VCPKG_ROOT "installed\$triplet"
+          $inc = Join-Path $prefix "include"
+          $lib = Join-Path $prefix "lib"
+          $pc = Join-Path $prefix "lib\pkgconfig"
+          "OPENBLAS_INCLUDE_DIR=$inc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENBLAS_LIB_DIR=$lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENBLAS_PATH=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PKG_CONFIG_PATH=$pc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VCPKG_ROOT=$($env:VCPKG_ROOT)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if ($env:LIB) {
+            "LIB=$lib;$($env:LIB)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } else {
+            "LIB=$lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+          $pkgBin = Join-Path $prefix "tools\pkgconf"
+          if (Test-Path $pkgBin) {
+            echo $pkgBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.artifact }}
+          save-if: true
+
+      - name: Build humm CLI (release)
+        shell: bash
+        run: cargo build --locked --release -p humm-cli
+
+      - name: Build humm-gui (release)
+        id: gui
+        if: matrix.gui
+        continue-on-error: true
+        shell: bash
+        run: cargo build --locked --release -p humm-gui
+
+      - name: Package archive
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          ARTIFACT: ${{ matrix.artifact }}
+          ARCHIVE: ${{ matrix.archive }}
+          EXE_SUFFIX: ${{ matrix.exe_suffix }}
+          GUI_OUTCOME: ${{ steps.gui.outcome }}
+          WANT_GUI: ${{ matrix.gui }}
+        run: |
+          set -euo pipefail
+          STAGE="dist/humm-${VERSION}-${ARTIFACT}"
+          mkdir -p "${STAGE}"
+          cp "target/release/humm${EXE_SUFFIX}" "${STAGE}/"
+          if [[ "${GUI_OUTCOME}" == "success" ]]; then
+            cp "target/release/humm-gui${EXE_SUFFIX}" "${STAGE}/"
+            echo "gui=yes" > "${STAGE}/CONTENTS.txt"
+          else
+            echo "gui=no" > "${STAGE}/CONTENTS.txt"
+            echo "humm-gui was not included in this archive." >> "${STAGE}/CONTENTS.txt"
+            if [[ "${WANT_GUI}" == "true" ]]; then
+              echo "A GUI build was attempted on this runner and failed; use cargo for humm-gui here." >> "${STAGE}/CONTENTS.txt"
+            else
+              echo "This target ships CLI only (GUI not attempted)." >> "${STAGE}/CONTENTS.txt"
+            fi
+          fi
+          cp LICENSE "${STAGE}/"
+          printf '%s\n' \
+            'humm release archive' \
+            '' \
+            'Runtime prerequisites (not bundled):' \
+            '- ffmpeg and yt-dlp on PATH for media decode and URL import' \
+            '- OpenBLAS for speaker diarization (on macOS: brew install openblas libomp;' \
+            '  binaries link Homebrew OpenBLAS by absolute path — ADR-024)' \
+            '- On Linux GUI: a desktop portal or zenity for native file dialogs; ALSA' \
+            '' \
+            'macOS binaries from this workflow are unsigned (no Developer ID /' \
+            'notarization secrets). Gatekeeper may block first launch: right-click' \
+            'the binary, choose Open, or clear quarantine after you trust the download.' \
+            '' \
+            'Verify the archive against SHA256SUMS on the GitHub Release.' \
+            > "${STAGE}/RUNTIME.txt"
+
+          mkdir -p dist
+          OUT="dist/humm-${VERSION}-${ARTIFACT}.${ARCHIVE}"
+          if [[ "${ARCHIVE}" == "zip" ]]; then
+            if command -v zip >/dev/null; then
+              (cd dist && zip -r "humm-${VERSION}-${ARTIFACT}.zip" "humm-${VERSION}-${ARTIFACT}")
+            else
+              powershell -NoProfile -Command \
+                "Compress-Archive -Path '${STAGE}' -DestinationPath '${OUT}' -Force"
+            fi
+          else
+            tar -C dist -czf "${OUT}" "humm-${VERSION}-${ARTIFACT}"
+          fi
+          ls -la dist/
+          # Drop the staging directory; keep only the archive for upload.
+          rm -rf "${STAGE}"
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: humm-${{ needs.version.outputs.version }}-${{ matrix.artifact }}
+          path: dist/humm-${{ needs.version.outputs.version }}-${{ matrix.artifact }}.${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Clean build tree
+        if: always()
+        shell: bash
+        run: |
+          cargo clean || true
+          rm -rf target || true
+
+  publish:
+    name: Draft GitHub Release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download archives
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: humm-${{ needs.version.outputs.version }}-*
+          merge-multiple: true
+
+      - name: Checksums and release notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          ls -la
+          sha256sum humm-* > SHA256SUMS
+          cat SHA256SUMS
+          {
+            echo "## humm ${VERSION}"
+            echo
+            echo "Draft release produced by the Release workflow."
+            echo
+            echo "### Assets"
+            echo
+            echo "| Archive | SHA-256 |"
+            echo "| --- | --- |"
+            while read -r hash file; do
+              echo "| \`${file}\` | \`${hash}\` |"
+            done < SHA256SUMS
+            echo
+            echo "### Install"
+            echo
+            echo "1. Download the archive for your OS/CPU from this release."
+            echo "2. Verify: \`sha256sum -c SHA256SUMS\` (or check the row above)."
+            echo "3. Unpack and put \`humm\` on your \`PATH\`."
+            echo "4. Install runtime deps (ffmpeg, yt-dlp; OpenBLAS — see README)."
+            echo
+            echo "macOS builds are **unsigned**. Windows ARM64 ships **CLI only**."
+            echo "Full GUI packaging notes and OpenBLAS caveats are in the README."
+          } > ../RELEASE_NOTES.md
+
+      - name: Create or update draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.version.outputs.version }}
+          TAG: ${{ needs.version.outputs.tag }}
+          DRAFT: ${{ needs.version.outputs.draft }}
+          TARGET_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${DRAFT}" == "true" ]]; then
+            DRAFT_ARGS=(--draft)
+          else
+            DRAFT_ARGS=(--draft=false)
+          fi
+
+          # Prefer an existing tag; for workflow_dispatch without a tag, create
+          # the release against this commit and let `gh` create the tag.
+          CREATE_ARGS=("${TAG}")
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            CREATE_ARGS+=(--target "${TARGET_COMMIT}")
+          fi
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" release-assets/* --clobber
+            gh release edit "${TAG}" \
+              "${DRAFT_ARGS[@]}" \
+              --title "humm ${VERSION}" \
+              --notes-file RELEASE_NOTES.md
+          else
+            # --draft=false is only meaningful on edit; create defaults to published
+            # unless --draft is passed.
+            CREATE_DRAFT=()
+            if [[ "${DRAFT}" == "true" ]]; then
+              CREATE_DRAFT=(--draft)
+            fi
+            gh release create "${CREATE_ARGS[@]}" \
+              "${CREATE_DRAFT[@]}" \
+              --title "humm ${VERSION}" \
+              --notes-file RELEASE_NOTES.md \
+              release-assets/*
+          fi
+          echo "Release URL:"
+          gh release view "${TAG}" --json url --jq .url

@@ -85,3 +85,13 @@ device contract tests stay ignored, and `opening_the_system_host_returns_a_resul
 accepts a missing host. The green cell is library compile, lint, and unit-test
 evidence plus that `ver` probe. It is not a WASAPI stream and not a live
 process-tree kill.
+
+## Release artifacts
+
+`.github/workflows/release.yml` builds installable archives on GitHub-hosted
+runners only (`macos-14`, `ubuntu-latest`, `ubuntu-24.04-arm`, `windows-latest`,
+`windows-11-arm`). It triggers on `v*` tags and on `workflow_dispatch`, uploads
+per-platform archives plus `SHA256SUMS`, and opens or updates a **draft** GitHub
+Release. The `humm` CLI is required on every cell; `humm-gui` is best-effort
+except Windows ARM64 (CLI only). macOS artifacts are unsigned. OpenBLAS stays a
+runtime prerequisite (ADR-024). See the README Download section for users.
