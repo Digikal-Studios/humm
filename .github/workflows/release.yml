@@ -281,7 +281,10 @@ jobs:
           "CC=clang-cl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CXX=clang-cl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           # ggml / gguf.cpp need C++ exceptions; cmake-rs/clang-cl defaults omit them.
-          "CXXFLAGS=/EHsc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Use -EHsc (not /EHsc): later cargo steps run under Git Bash, and MSYS
+          # path conversion turns `/EHsc` into `C:/Program Files/Git/EHsc`, which
+          # clang-cl then splits on the space ("no such file or directory: 'C:/Program'").
+          "CXXFLAGS=-EHsc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           # Ninja honors CC/CXX; the VS generator would pin the MSVC toolset.
           "CMAKE_GENERATOR=Ninja" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 

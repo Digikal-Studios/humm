@@ -130,6 +130,18 @@ class PackageReleaseHelpers(unittest.TestCase):
             resolved = pr.resolve_macos_dep(str(sibling), current)
             self.assertEqual(resolved, sibling.resolve())
 
+    def test_macos_stage_basename_keeps_install_name_over_symlink(self) -> None:
+        # Homebrew OpenBLAS: install name is libopenblas.0.dylib, real file is
+        # often libopenblas.dylib after resolve(). Staging must keep .0 so
+        # rewrite_macos_stage can -change the absolute install name.
+        resolved = Path("/opt/homebrew/Cellar/openblas/0.3.30/lib/libopenblas.dylib")
+        dep = "/opt/homebrew/opt/openblas/lib/libopenblas.0.dylib"
+        self.assertEqual(pr.macos_stage_basename(dep, resolved), "libopenblas.0.dylib")
+        self.assertEqual(
+            pr.macos_stage_basename("@rpath/libgcc_s.1.1.dylib", Path("/x/libgcc_s.1.1.dylib")),
+            "libgcc_s.1.1.dylib",
+        )
+
     def test_find_windows_ort_ep_dlls(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
