@@ -467,6 +467,15 @@ def verify_windows(stage: Path, binaries: list[str], require_ort: bool = True) -
 
 
 def smoke_help(stage: Path, binary: str) -> None:
+    # Absolute paths: a relative stage/binary with cwd=stage makes the kernel
+    # look for stage/stage/binary (FileNotFoundError on the dry-run runners).
+    stage = stage.resolve()
+    exe = stage / binary
+    if not exe.is_file():
+        listing = sorted(p.name for p in stage.iterdir()) if stage.is_dir() else []
+        raise RuntimeError(
+            f"smoke: staged binary missing: {exe} (stage contents: {listing})"
+        )
     env = dict(os.environ)
     for key in (
         "LD_LIBRARY_PATH",
@@ -477,7 +486,6 @@ def smoke_help(stage: Path, binary: str) -> None:
         env.pop(key, None)
     # Prefer the staged directory first so sibling DLLs win on Windows.
     env["PATH"] = str(stage) + os.pathsep + env.get("PATH", "")
-    exe = stage / binary
     result = subprocess.run(
         [str(exe), "--help"],
         text=True,
@@ -492,29 +500,44 @@ def smoke_help(stage: Path, binary: str) -> None:
         )
 
 
-def write_runtime_txt(stage: Path, include_gui: bool) -> None:
+def write_runtime_txt(stage: Path, include_gui: bool, bundled_ort: bool) -> None:
     lines = [
         "humm release archive",
         "",
-        "This archive bundles load-time OpenBLAS and ONNX Runtime libraries",
-        "next to the binaries. Keep those shared libraries beside humm when",
-        "you move or install it — launching without them fails before main.",
+        "This archive bundles load-time OpenBLAS next to the binaries (and",
+        "ONNX Runtime when the build linked it as a shared library). Keep",
+        "those shared libraries beside humm when you move or install it —",
+        "launching without them fails before main.",
         "",
-        "Still required on PATH (not bundled):",
-        "- ffmpeg and yt-dlp for media decode and URL import",
-        "",
-        "Linux GUI builds also need ordinary desktop shared libraries",
-        "(ALSA, and a portal/zenity for file dialogs) from the OS.",
-        "",
-        "macOS binaries are unsigned (no Developer ID / notarization).",
-        "Gatekeeper may block first launch: right-click → Open after you trust",
-        "the download, or clear the quarantine attribute.",
-        "",
-        "Windows may show SmartScreen for an unsigned exe.",
-        "",
-        "Verify the archive against SHA256SUMS on the GitHub Release",
-        "(Linux: sha256sum -c SHA256SUMS; macOS: shasum -a 256 -c SHA256SUMS).",
     ]
+    if bundled_ort:
+        lines.append("ONNX Runtime shared libraries are included in this archive.")
+    else:
+        lines.extend(
+            [
+                "This build linked ONNX Runtime statically (or does not need a",
+                "separate onnxruntime shared library at load time).",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "Still required on PATH (not bundled):",
+            "- ffmpeg and yt-dlp for media decode and URL import",
+            "",
+            "Linux GUI builds also need ordinary desktop shared libraries",
+            "(ALSA, and a portal/zenity for file dialogs) from the OS.",
+            "",
+            "macOS binaries are unsigned (no Developer ID / notarization).",
+            "Gatekeeper may block first launch: right-click → Open after you trust",
+            "the download, or clear the quarantine attribute.",
+            "",
+            "Windows may show SmartScreen for an unsigned exe.",
+            "",
+            "Verify the archive against SHA256SUMS on the GitHub Release",
+            "(Linux: sha256sum -c SHA256SUMS; macOS: shasum -a 256 -c SHA256SUMS).",
+        ]
+    )
     if not include_gui:
         lines.extend(
             [
@@ -533,6 +556,13 @@ def package(
     vcpkg_prefix: Path | None,
     license_path: Path,
 ) -> None:
+    # Resolve early so smoke/verify never mix a relative stage with cwd=stage.
+    stage = stage.resolve()
+    bin_dir = bin_dir.resolve()
+    license_path = license_path.resolve()
+    if vcpkg_prefix is not None:
+        vcpkg_prefix = vcpkg_prefix.resolve()
+
     if stage.exists():
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
@@ -544,6 +574,8 @@ def package(
         sources.append(src)
         dst = stage / f"{name}{exe_suffix}"
         copy_file(src, dst)
+        if not dst.is_file():
+            raise RuntimeError(f"failed to stage binary: {dst}")
         binaries.append(dst)
 
     needs_ort = binary_needs_ort(sources)
@@ -617,14 +649,19 @@ def package(
 
     copy_file(license_path, stage / "LICENSE")
     include_gui = any(name == "humm-gui" for name in bin_names)
+    bundled_ort = any("onnxruntime" in p.name.lower() for p in bundled_libs)
     contents = ["gui=yes" if include_gui else "gui=no"]
     if include_gui:
         contents.append("humm-gui is included in this archive.")
     else:
         contents.append("This archive is CLI-only (humm-gui was not built for this target).")
+    contents.append(f"onnxruntime_shared={'yes' if bundled_ort else 'no'}")
     (stage / "CONTENTS.txt").write_text("\n".join(contents) + "\n", encoding="utf-8")
-    write_runtime_txt(stage, include_gui=include_gui)
+    write_runtime_txt(stage, include_gui=include_gui, bundled_ort=bundled_ort)
 
+    for path in binaries:
+        if not path.is_file():
+            raise RuntimeError(f"staged binary disappeared before smoke: {path}")
     smoke_help(stage, f"humm{exe_suffix}")
     print(f"Packaged {stage} with {len(binaries)} binary(ies) and {len(bundled_libs)} lib(s)")
 

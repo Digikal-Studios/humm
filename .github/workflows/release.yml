@@ -263,11 +263,19 @@ jobs:
           done
           if command -v ldd >/dev/null && [[ -f target/release/humm ]]; then
             echo "=== ldd humm (onnx lines) ==="
-            ldd target/release/humm | grep -i onnx || true
+            ldd target/release/humm | grep -i onnx || echo "(none — ort may be statically linked)"
+          fi
+          if command -v readelf >/dev/null && [[ -f target/release/humm ]]; then
+            echo "=== readelf DT_NEEDED (onnx) ==="
+            readelf -d target/release/humm | grep -i onnx || echo "(none — ort may be statically linked)"
           fi
           if [[ -x /usr/bin/otool && -f target/release/humm ]]; then
             echo "=== otool -L humm (onnx lines) ==="
-            /usr/bin/otool -L target/release/humm | grep -i onnx || true
+            /usr/bin/otool -L target/release/humm | grep -i onnx || echo "(none)"
+          fi
+          test -x target/release/humm
+          if [[ "${{ matrix.gui }}" == "true" ]]; then
+            test -x target/release/humm-gui
           fi
 
       - name: Package archive (bundled libs + smoke)
