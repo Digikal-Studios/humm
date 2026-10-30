@@ -239,7 +239,7 @@ fn bare_command_exists(name: &Path) -> bool {
         let windows = std::env::var_os("SystemRoot").map(PathBuf::from);
         let system = windows.as_ref().map(|root| root.join("System32"));
         let path = std::env::var_os("PATH");
-        return windows_resolve_bare(
+        windows_resolve_bare(
             name.as_os_str(),
             &WindowsSearch {
                 app_dir: app.as_deref(),
@@ -249,7 +249,7 @@ fn bare_command_exists(name: &Path) -> bool {
             },
             is_executable_file,
         )
-        .is_some();
+        .is_some()
     }
     #[cfg(not(windows))]
     {
@@ -328,7 +328,10 @@ impl Spawned {
     }
 
     /// Registry id for [`humm_core::abort::try_emergency_stop_registered`].
-    #[cfg_attr(not(test), allow(dead_code))]
+    ///
+    /// Only the Unix emergency-stop tests call this. A Windows test build
+    /// does not, and `dead_code` is denied there.
+    #[cfg(all(test, unix))]
     pub(crate) fn registration_id(&self) -> u64 {
         self.track.registration_id()
     }
@@ -553,7 +556,10 @@ fn kill_on_close_job() -> Option<&'static win32job::Job> {
     .as_ref()
 }
 
-#[cfg(test)]
+/// Retries [`humm_core::abort::try_emergency_stop_registered`] while another
+/// test holds the process-global registry lock. Unix tests only: the callers
+/// spawn a process group, which Windows Clippy does not build.
+#[cfg(all(test, unix))]
 pub(crate) fn emergency_stop_registered_for_test(groups: &[u64], temps: &[u64]) -> bool {
     let start = std::time::Instant::now();
     while start.elapsed() < std::time::Duration::from_secs(5) {
