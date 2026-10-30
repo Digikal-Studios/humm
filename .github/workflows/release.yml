@@ -208,11 +208,6 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if ("${{ matrix.os }}" -eq "windows-11-arm") {
-            choco install llvm -y --no-progress
-            $llvm = "C:\Program Files\LLVM\bin"
-            echo $llvm | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          }
           if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
             choco install cmake -y --installargs 'ADD_CMAKE_TO_PATH=System' --no-progress
           }
@@ -230,6 +225,17 @@ jobs:
           if (Test-Path $pkgBin) {
             echo $pkgBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           }
+
+      # windows-11-arm ships / Chocolatey installs x86-64 libclang.dll; bindgen
+      # rejects it ("invalid DLL (x86-64)"). Install a native ARM64 LLVM and
+      # export LIBCLANG_PATH (see actions/runner-images#14085).
+      - name: Install native ARM64 LLVM (Windows ARM64)
+        if: matrix.os == 'windows-11-arm'
+        uses: KyleMayes/install-llvm-action@a7a1a882e2d06ebe05d5bb97c3e1f8c984ae96fc # v2.0.7
+        with:
+          version: "19.1.7"
+          arch: arm64
+          env: true
 
       - name: Install Rust 1.99.1
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
@@ -293,20 +299,23 @@ jobs:
         run: |
           set -euo pipefail
           STAGE="dist/humm-${VERSION}-${ARTIFACT}"
-          BIN_ARGS=(--bin humm)
+          # Build argv in one array. macOS /bin/bash is 3.2: empty
+          # "${ARR[@]}" under `set -u` errors ("unbound variable"), which is
+          # exactly what happened for VCPKG_ARGS on non-Windows cells.
+          PKG_CMD=(
+            python3 scripts/package_release.py
+            --stage "${STAGE}"
+            --bin-dir target/release
+            --exe-suffix "${EXE_SUFFIX}"
+            --bin humm
+          )
           if [[ "${WANT_GUI}" == "true" ]]; then
-            BIN_ARGS+=(--bin humm-gui)
+            PKG_CMD+=(--bin humm-gui)
           fi
-          VCPKG_ARGS=()
           if [[ -n "${VCPKG_PREFIX}" ]]; then
-            VCPKG_ARGS=(--vcpkg-prefix "${VCPKG_PREFIX}")
+            PKG_CMD+=(--vcpkg-prefix "${VCPKG_PREFIX}")
           fi
-          python3 scripts/package_release.py \
-            --stage "${STAGE}" \
-            --bin-dir target/release \
-            --exe-suffix "${EXE_SUFFIX}" \
-            "${BIN_ARGS[@]}" \
-            "${VCPKG_ARGS[@]}"
+          "${PKG_CMD[@]}"
 
           mkdir -p dist
           OUT="dist/humm-${VERSION}-${ARTIFACT}.${ARCHIVE}"

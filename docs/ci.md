@@ -105,6 +105,10 @@ smoke failures. An ONNX Runtime shared library is bundled only when the
 binaries' loader dependencies mention it (otherwise skipped — Linux often
 links `libonnxruntime.a` statically); `CONTENTS.txt` /
 `RUNTIME.txt` record which. GUI cells fail the job if `humm-gui` does not
-build; Windows ARM64 is explicitly `windows-aarch64-cli`. The shipped Rust
-toolchain is pinned to `1.99.1`. See the README Download section for the
-public story.
+build; Windows ARM64 is explicitly `windows-aarch64-cli` and installs a
+**native ARM64** LLVM via `KyleMayes/install-llvm-action` (`arch: arm64`)
+so `whisper-rs-sys`/bindgen gets an ARM64 `libclang` (Chocolatey /
+image LLVM is x86-64 and is rejected). Packaging argv is built as one
+bash array so macOS bash 3.2 + `set -u` does not trip on empty optional
+flags. The shipped Rust toolchain is pinned to `1.99.1`. See the README
+Download section for the public story.
