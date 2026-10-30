@@ -376,6 +376,8 @@ mod tests {
         }
     }
 
+    /// Argument vector only. A green run has not spawned `taskkill` or killed
+    /// a process tree.
     #[test]
     fn windows_tree_kill_is_taskkill_force_tree() {
         assert_eq!(

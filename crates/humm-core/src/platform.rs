@@ -126,6 +126,9 @@ mod tests {
         assert!(!subprocess_install_hint("windows", "yt-dlp").contains("brew"));
     }
 
+    /// Fixture strings only. The live `cmd /C ver` check is
+    /// `telemetry::tests::windows_release_and_version_match_live_ver`, and it
+    /// runs on Windows.
     #[test]
     fn parse_windows_ver_splits_release_and_version() {
         let win11 = parse_windows_ver("\r\nMicrosoft Windows [Version 10.0.22631.3880]\r\n")

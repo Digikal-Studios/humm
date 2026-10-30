@@ -60,9 +60,10 @@ mod tests {
 
     #[test]
     fn opening_the_system_host_returns_a_result() {
-        // On this Linux machine ALSA is installed, so this is `Ok`. A host
-        // whose audio stack fails to init must be `Err`, not a panic from
-        // `cpal::default_host`. This does not exercise CoreAudio or WASAPI.
+        // `Ok` when a host initializes, `Err` when it does not. Either one
+        // passes, including a missing ALSA, WASAPI, or CoreAudio device.
+        // No capture or playback stream is opened. A green result is not
+        // device coverage.
         match system_host() {
             Ok(host) => {
                 if let Ok(devices) = input_device_list(&host) {

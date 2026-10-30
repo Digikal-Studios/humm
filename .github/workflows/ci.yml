@@ -46,18 +46,29 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-  # GitHub-hosted architectures the Apple self-hosted gate cannot run.
+  # The four native hosts outside `gates`. macOS ARM is `gates` on
+  # GitHub-hosted macos-14, which installs Homebrew OpenBLAS, libomp, cmake,
+  # and ffmpeg. This matrix has no macOS cell: a cell here would skip those
+  # formulae and duplicate `gates` with a weaker toolchain.
+  #
   # Labels are the standard hosted runners documented at
   # https://docs.github.com/en/actions/reference/runners/github-hosted-runners
   # (ubuntu-24.04-arm and windows-11-arm included; none of the requested
   # targets were skipped).
   #
-  # Scope stays on the three library crates. That does not build
-  # humm-diarize, so speakrs/coreml and ort are not required and no models
-  # are downloaded. `cargo test` does not pass `--ignored`, so ffmpeg/yt-dlp
-  # contract tests and model-download contracts stay skipped. ffmpeg is not
-  # installed. Linux still needs ALSA headers: cpal's alsa-sys links
-  # libasound via pkg-config, and that package is not on the runner image.
+  # Scope stays on humm-core, humm-media, and humm-audio. humm-diarize stays
+  # unbuilt, so speakrs/coreml and ort are not required and no models are
+  # downloaded. `cargo test` does not pass `--ignored`, so ffmpeg/yt-dlp
+  # contract tests and model-download contracts stay skipped, and ffmpeg is
+  # not installed. Clippy on these cells is what lints cfg(windows) and
+  # cfg(target_os = "linux") items that macos-14 `gates` does not compile.
+  #
+  # A green Windows cell includes the live `cmd /C ver` check in humm-core.
+  # It is not a live `taskkill` (the suite checks the argument vector) and
+  # not a WASAPI capture or playback stream (those tests stay ignored, and
+  # a missing host still passes the unit test). Linux still needs ALSA
+  # headers: cpal's alsa-sys links libasound via pkg-config, and that
+  # package is not on the runner image.
   hosted-libraries:
     name: libraries (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
@@ -89,6 +100,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy humm-core, humm-media, and humm-audio
+        run: cargo clippy -p humm-core -p humm-media -p humm-audio --all-targets -- -D warnings
 
       - name: Test humm-core, humm-media, and humm-audio
         run: cargo test --locked -p humm-core -p humm-media -p humm-audio

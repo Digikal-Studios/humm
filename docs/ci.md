@@ -54,3 +54,34 @@ changes before pushing or opening PRs.
 Record final tested commit, run URL and actual runner assignment from GitHub job
 records. An enabled Actions setting or prepared YAML alone proves no execution.
 Roll back through reviewed workflow changes.
+
+## Hosted library matrix
+
+`hosted-libraries` covers the four native hosts outside `gates`:
+`windows-latest` (Windows x64), `ubuntu-latest` (Linux x64), `ubuntu-24.04-arm`
+(Linux ARM64), and `windows-11-arm` (Windows ARM64). macOS ARM stays on `gates`
+(`macos-14`), which is the job that installs Homebrew OpenBLAS, libomp, cmake,
+and ffmpeg. This matrix has no macOS cell, because that cell would skip those
+formulae and duplicate `gates` with a weaker toolchain.
+
+Each cell runs:
+
+```bash
+cargo clippy -p humm-core -p humm-media -p humm-audio --all-targets -- -D warnings
+cargo test --locked -p humm-core -p humm-media -p humm-audio
+```
+
+That clippy command is what lints `cfg(windows)` and `cfg(target_os = "linux")`
+items. `gates` on `macos-14` compiles the macOS configuration of those crates
+instead. The library cells leave `humm-gui`, `humm-whisper`, and `humm-diarize`
+unbuilt. Ignored contract tests stay skipped, so ffmpeg, yt-dlp, and model
+downloads stay out of this job. Linux cells install `libasound2-dev` so cpal
+can link ALSA.
+
+A green Windows cell runs the live `cmd /C ver` check: `kernel_release` and
+`os_version` must match `parse_windows_ver` of that output, and Windows does
+not consult `uname`. The `taskkill` test checks the argument vector only. Audio
+device contract tests stay ignored, and `opening_the_system_host_returns_a_result`
+accepts a missing host. The green cell is library compile, lint, and unit-test
+evidence plus that `ver` probe. It is not a WASAPI stream and not a live
+process-tree kill.
