@@ -247,12 +247,14 @@ jobs:
       # LIBCLANG_PATH, and drive whisper-rs-sys CMake with clang-cl +
       # Ninja (not plain clang — that injects GNU -fPIC into cc/cmake).
       # Do NOT pass env:true on install-llvm-action (CC/CXX=clang).
+      # Clang must be ≥20: VS 18 / MSVC 14.51 STL asserts STL1000
+      # ("expected Clang 20 or newer") when clang-cl 19 compiles ggml.
       - name: Install native ARM64 LLVM (Windows ARM64)
         if: matrix.os == 'windows-11-arm'
-        uses: KyleMayes/install-llvm-action@a7a1a882e2d06ebe05d5bb97c3e1f8c984ae96fc # v2.0.7
+        uses: KyleMayes/install-llvm-action@98e68e10c96dffcb7bfed8b2144541a66b49aa02 # v2.0.8
         with:
-          version: "19.1.7"
-          directory: "C:/llvm-woa64-19.1.7"
+          version: "20.1.8"
+          directory: "C:/llvm-woa64-20.1.8"
           arch: arm64
 
       - name: Configure clang-cl for whisper.cpp (Windows ARM64)
@@ -260,7 +262,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $llvmBin = "C:\llvm-woa64-19.1.7\bin"
+          $llvmBin = "C:\llvm-woa64-20.1.8\bin"
           if (-not (Test-Path "$llvmBin\libclang.dll")) {
             throw "missing ARM64 libclang.dll under $llvmBin"
           }
