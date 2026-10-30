@@ -416,14 +416,55 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
+    /// Writes a `#!/bin/sh` stub via temp + `fsync` + atomic rename so a
+    /// following `Command::spawn` cannot hit Linux `ETXTBSY` ("Text file
+    /// busy") on runners whose filesystem still has the truncated inode
+    /// open for write (observed on GitHub `ubuntu-24.04-arm`).
     #[cfg(unix)]
     fn write_stub(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write stub script");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
+        {
+            let mut file = std::fs::File::create(&tmp).expect("create stub tmp");
+            file.write_all(format!("#!/bin/sh\n{body}\n").as_bytes())
+                .expect("write stub script");
+            file.sync_all().expect("fsync stub script");
+        }
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
             .expect("chmod stub script");
+        std::fs::rename(&tmp, &path).expect("rename stub into place");
+        // Best-effort: persist the directory entry before execve.
+        if let Ok(dir_file) = std::fs::File::open(dir) {
+            let _ = dir_file.sync_all();
+        }
         path
+    }
+
+    /// Retries `isolate` when spawn races with a freshly-written stub
+    /// (`ErrorKind::ExecutableFileBusy` / errno 26). Production demucs is
+    /// never rewritten underfoot; this is test-only ARM CI hardening.
+    #[cfg(unix)]
+    fn isolate_retrying_etxtbsy(
+        isolator: &DemucsIsolator,
+        input: &Path,
+        cancel: &CancelToken,
+    ) -> Result<PathBuf, MediaError> {
+        const ATTEMPTS: u32 = 8;
+        for attempt in 1..=ATTEMPTS {
+            match isolator.isolate(input, cancel) {
+                Err(MediaError::Io(err))
+                    if attempt < ATTEMPTS
+                        && (err.kind() == std::io::ErrorKind::ExecutableFileBusy
+                            || err.raw_os_error() == Some(26)) =>
+                {
+                    thread::sleep(Duration::from_millis(15 * u64::from(attempt)));
+                }
+                other => return other,
+            }
+        }
+        unreachable!("loop always returns on final attempt")
     }
 
     /// A stub demucs that writes the spike-confirmed layout
@@ -486,7 +527,7 @@ printf 'fake no_vocals data' > "$outdir/htdemucs/no_vocals.mp3"
 
         let isolator = DemucsIsolator::with_binary(&stub);
         let cancel = CancelToken::new();
-        let result = isolator.isolate(&input, &cancel).expect("isolate ok");
+        let result = isolate_retrying_etxtbsy(&isolator, &input, &cancel).expect("isolate ok");
 
         assert_eq!(result, input_dir.path().join("clip_speech.mp3"));
         assert_eq!(
@@ -520,7 +561,9 @@ printf 'fake no_vocals data' > "$outdir/htdemucs/no_vocals.mp3"
         let cancel_from_main = cancel.clone();
 
         let start = Instant::now();
-        let handle = thread::spawn(move || isolator.isolate(&input, &cancel));
+        // Spawn retries only the write/exec race; once the sleep stub is
+        // running, cancel must still ack promptly (no multi-second backoff).
+        let handle = thread::spawn(move || isolate_retrying_etxtbsy(&isolator, &input, &cancel));
         thread::sleep(Duration::from_millis(200));
         cancel_from_main.cancel();
 
@@ -552,8 +595,7 @@ printf 'fake no_vocals data' > "$outdir/htdemucs/no_vocals.mp3"
 
         let isolator = DemucsIsolator::with_binary(&stub);
         let cancel = CancelToken::new();
-        let err = isolator
-            .isolate(&input, &cancel)
+        let err = isolate_retrying_etxtbsy(&isolator, &input, &cancel)
             .expect_err("nonzero exit should fail");
 
         match err {
