@@ -19,7 +19,9 @@
 //! A release build on Windows is a GUI subsystem binary (`windows_subsystem`),
 //! so launching humm-gui from Explorer does not open a spare console. Debug
 //! builds keep the console. Child processes hide their own consoles via
-//! `CREATE_NO_WINDOW` in humm-media.
+//! `CREATE_NO_WINDOW` in humm-media. A kill-on-close job reaps them when
+//! this process exits, and launch telemetry uses the same flag for
+//! `cmd /C ver`.
 
 use std::path::PathBuf;
 
@@ -31,6 +33,9 @@ fn main() -> eframe::Result {
     let log_dir = humm_core::paths::log_dir();
     logging::init(&log_dir);
     log::debug!("humm-gui starting (log_dir={})", log_dir.display());
+    // Before any ffmpeg/ffprobe child, and before the first-frame telemetry
+    // spawn. Release builds have no console of their own.
+    humm_media::install_terminal_cleanup();
 
     // Files passed as argv (Finder "open with" parity — deviation #12 in the
     // design spec): opened as the options sheet's request on the app's

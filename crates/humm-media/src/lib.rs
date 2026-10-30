@@ -19,14 +19,13 @@ pub use probe::FfprobeProber;
 pub use video::FfmpegVideoStreamer;
 
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+#[cfg(any(windows, test))]
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Once;
 
 use humm_core::error::MediaError;
-
-/// Win32 `CREATE_NO_WINDOW`. A GUI parent with no console otherwise gets a
-/// console window for every ffmpeg, ffprobe, yt-dlp, or demucs child.
-#[cfg(any(windows, test))]
-pub(crate) const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Resolves a subprocess binary path: the `var` env override if set, else
 /// `default` (looked up on `PATH` at spawn time).
@@ -76,55 +75,110 @@ pub(crate) fn install_hint(tool: &str) -> &'static str {
     humm_core::platform::subprocess_install_hint(std::env::consts::OS, tool)
 }
 
-/// `PATHEXT` entries, each starting with `.`. The default matches a stock
-/// Windows `PATHEXT` when the variable is unset. Unix passes an empty list
-/// and lookup stays exact-name.
-pub(crate) fn pathext_from(value: Option<&str>) -> Vec<String> {
-    let Some(raw) = value else {
-        return Vec::new();
+/// Directories Rust's Windows `Command` searches for a bare program name,
+/// in order: the application directory, `System32`, the Windows directory,
+/// then `PATH`.
+#[cfg(any(windows, test))]
+pub(crate) struct WindowsSearch<'a> {
+    /// Directory containing the running executable (`std::env::current_exe`).
+    pub app_dir: Option<&'a Path>,
+    /// `GetSystemDirectoryW`, approximated as `%SystemRoot%\System32` at the
+    /// call site.
+    pub system_dir: Option<&'a Path>,
+    /// `GetWindowsDirectoryW` / `%SystemRoot%`.
+    pub windows_dir: Option<&'a Path>,
+    /// The process `PATH`. Empty entries are skipped.
+    pub path: Option<&'a OsStr>,
+}
+
+/// File name `Command` looks for. A name with no `.` gets `.exe` appended.
+/// `.bat` and `.cmd` are never invented: Rust's resolver does not walk
+/// `PATHEXT`, and a batch file would be reparsed by `cmd.exe`.
+#[cfg(any(windows, test))]
+pub(crate) fn windows_candidate_name(name: &OsStr) -> OsString {
+    if name.as_encoded_bytes().contains(&b'.') {
+        name.to_os_string()
+    } else {
+        let mut owned = name.to_os_string();
+        owned.push(".exe");
+        owned
+    }
+}
+
+/// Finds `name` the way Rust 1.85 `std::sys::pal::windows::process::search_paths`
+/// does for a bare file name. Empty `PATH` entries are not the current
+/// directory. The first existing candidate wins.
+#[cfg(any(windows, test))]
+pub(crate) fn windows_resolve_bare(
+    name: &OsStr,
+    search: &WindowsSearch<'_>,
+    mut exists: impl FnMut(&Path) -> bool,
+) -> Option<PathBuf> {
+    let candidate = windows_candidate_name(name);
+    let mut found = None;
+    let mut consider = |dir: &Path| {
+        if found.is_some() {
+            return;
+        }
+        let full = dir.join(&candidate);
+        if exists(&full) {
+            found = Some(full);
+        }
     };
-    raw.split(';')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| {
-            if entry.starts_with('.') {
-                entry.to_string()
-            } else {
-                format!(".{entry}")
+    if let Some(dir) = search.app_dir {
+        consider(dir);
+    }
+    if let Some(dir) = search.system_dir {
+        consider(dir);
+    }
+    if let Some(dir) = search.windows_dir {
+        consider(dir);
+    }
+    if let Some(path) = search.path {
+        for dir in std::env::split_paths(path) {
+            if dir.as_os_str().is_empty() {
+                continue;
             }
-        })
-        .collect()
+            consider(&dir);
+        }
+    }
+    found
 }
 
-fn executable_extensions() -> Vec<String> {
-    #[cfg(windows)]
-    {
-        let raw = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-        pathext_from(Some(&raw))
-    }
-    #[cfg(not(windows))]
-    {
-        pathext_from(None)
+/// Explicit Windows path that does not already name an extension: the `.exe`
+/// sibling when `exe_sibling_is_file`, otherwise `path` unchanged. A path
+/// whose file name contains `.` (including `.exe`, `.bat`, `.cmd`) is left
+/// alone so this helper never prefers a batch file over `ffmpeg.exe`.
+#[cfg(any(windows, test))]
+pub(crate) fn explicit_windows_program(path: &Path, exe_sibling_is_file: bool) -> PathBuf {
+    if file_name_contains_dot(path) || !exe_sibling_is_file {
+        path.to_path_buf()
+    } else {
+        append_literal_exe(path)
     }
 }
 
-/// Names to try for `binary`. When `binary`'s file name already has an
-/// extension, only that name is returned (Windows does not append `PATHEXT`
-/// in that case). Otherwise each extension is appended, after the bare name.
-pub(crate) fn candidate_executable_names(binary: &Path, extensions: &[String]) -> Vec<PathBuf> {
-    let mut names = vec![binary.to_path_buf()];
-    let Some(file_name) = binary.file_name() else {
-        return names;
-    };
-    if Path::new(file_name).extension().is_some() {
-        return names;
+#[cfg(any(windows, test))]
+fn file_name_contains_dot(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.as_encoded_bytes().contains(&b'.'))
+}
+
+#[cfg(any(windows, test))]
+fn append_literal_exe(path: &Path) -> PathBuf {
+    let mut owned = path.as_os_str().to_os_string();
+    owned.push(".exe");
+    PathBuf::from(owned)
+}
+
+/// A program name with no directory component. `Command` resolves these
+/// itself.
+fn is_bare_command(binary: &Path) -> bool {
+    let mut components = binary.components();
+    match components.next() {
+        Some(Component::Normal(_)) => components.next().is_none(),
+        _ => false,
     }
-    for ext in extensions {
-        let mut owned = binary.as_os_str().to_os_string();
-        owned.push(ext);
-        names.push(PathBuf::from(owned));
-    }
-    names
 }
 
 /// `taskkill /F /T /PID <pid>`. `None` for pid 0, which is not a process.
@@ -142,43 +196,96 @@ pub(crate) fn windows_tree_kill_args(pid: u32) -> Option<Vec<String>> {
     }
 }
 
-fn find_on_path(binary: &Path, extensions: &[String], path: Option<&OsStr>) -> Option<PathBuf> {
-    let candidates = candidate_executable_names(binary, extensions);
-    if binary.components().count() > 1 {
-        return candidates
-            .into_iter()
-            .find(|candidate| is_executable_file(candidate));
-    }
-    let path = path?;
-    for dir in std::env::split_paths(path) {
-        for name in &candidates {
-            let full = dir.join(name);
-            if is_executable_file(&full) {
-                return Some(full);
-            }
-        }
-    }
-    None
-}
-
+/// Resolves `binary` the way [`Command`] will run it.
+///
+/// A bare name is returned unchanged so `Command` searches: on Windows that
+/// is the application directory, `System32`, the Windows directory, then
+/// `PATH`, appending `.exe` only and skipping empty `PATH` entries. An
+/// explicit path with no extension prefers an existing `.exe` sibling, then
+/// the path itself. `.bat` and `.cmd` are not candidates this function
+/// invents.
 pub(crate) fn resolve_executable(binary: &Path) -> PathBuf {
-    find_on_path(
-        binary,
-        &executable_extensions(),
-        std::env::var_os("PATH").as_deref(),
-    )
-    .unwrap_or_else(|| binary.to_path_buf())
+    if is_bare_command(binary) {
+        return binary.to_path_buf();
+    }
+    #[cfg(windows)]
+    {
+        explicit_windows_program(binary, append_literal_exe(binary).is_file())
+    }
+    #[cfg(not(windows))]
+    {
+        binary.to_path_buf()
+    }
 }
 
-/// True when `binary` is an executable file, or (on Windows) a `PATHEXT`
-/// sibling such as `ffmpeg.exe` for the bare name `ffmpeg`.
+/// Whether `binary` can be executed without spawning it. Bare names follow
+/// the same rules as [`resolve_executable`] / `Command`. Explicit paths are
+/// checked on disk (Unix: executable bit; Windows: the `.exe` sibling, then
+/// the path itself).
 pub(crate) fn executable_exists(binary: &Path) -> bool {
-    find_on_path(
-        binary,
-        &executable_extensions(),
-        std::env::var_os("PATH").as_deref(),
-    )
-    .is_some()
+    if is_bare_command(binary) {
+        bare_command_exists(binary)
+    } else {
+        explicit_program_exists(binary)
+    }
+}
+
+fn bare_command_exists(name: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let app = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf));
+        let windows = std::env::var_os("SystemRoot").map(PathBuf::from);
+        let system = windows.as_ref().map(|root| root.join("System32"));
+        let path = std::env::var_os("PATH");
+        windows_resolve_bare(
+            name.as_os_str(),
+            &WindowsSearch {
+                app_dir: app.as_deref(),
+                system_dir: system.as_deref(),
+                windows_dir: windows.as_deref(),
+                path: path.as_deref(),
+            },
+            is_executable_file,
+        )
+        .is_some()
+    }
+    #[cfg(not(windows))]
+    {
+        let Some(path) = std::env::var_os("PATH") else {
+            return false;
+        };
+        unix_find_bare(name, &path).is_some()
+    }
+}
+
+/// Exact-name `PATH` search. Empty components stay relative (the current
+/// directory), matching Unix `Command`.
+#[cfg(any(not(windows), test))]
+fn unix_find_bare(name: &Path, path: &OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path).find_map(|dir| {
+        let full = dir.join(name);
+        if is_executable_file(&full) {
+            Some(full)
+        } else {
+            None
+        }
+    })
+}
+
+fn explicit_program_exists(binary: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        if !file_name_contains_dot(binary) && is_executable_file(&append_literal_exe(binary)) {
+            return true;
+        }
+        is_executable_file(binary)
+    }
+    #[cfg(not(windows))]
+    {
+        is_executable_file(binary)
+    }
 }
 
 #[cfg(unix)]
@@ -194,13 +301,59 @@ fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
-/// Builds a [`std::process::Command`] for `binary`, resolving Windows
-/// `PATHEXT` names and applying [`configure_subprocess`].
-pub(crate) fn prepare_command(binary: &Path) -> (std::process::Command, PathBuf) {
+/// Builds a [`Command`] for `binary` and applies [`configure_subprocess`].
+///
+/// The child is detached (new process group on Unix, `CREATE_NO_WINDOW` on
+/// Windows). Spawn it with [`spawn_prepared`] or [`output_prepared`] so the
+/// abort registry can kill it on a second Ctrl-C, `SIGHUP`, or console close.
+pub(crate) fn prepare_command(binary: &Path) -> (Command, PathBuf) {
     let resolved = resolve_executable(binary);
-    let mut cmd = std::process::Command::new(&resolved);
+    let mut cmd = Command::new(&resolved);
     configure_subprocess(&mut cmd);
     (cmd, resolved)
+}
+
+/// A child started by [`spawn_prepared`]. Dropping the registration removes
+/// the pid from the abort registry; do that only after `wait`.
+pub(crate) struct Spawned {
+    /// The live child.
+    pub child: Child,
+    track: humm_core::abort::TrackedProcess,
+}
+
+impl Spawned {
+    /// Splits the child from its registry guard. Keep the guard until `wait`.
+    pub(crate) fn into_parts(self) -> (Child, humm_core::abort::TrackedProcess) {
+        (self.child, self.track)
+    }
+
+    /// Registry id for [`humm_core::abort::try_emergency_stop_registered`].
+    ///
+    /// Only the Unix emergency-stop tests call this. A Windows test build
+    /// does not, and `dead_code` is denied there.
+    #[cfg(all(test, unix))]
+    pub(crate) fn registration_id(&self) -> u64 {
+        self.track.registration_id()
+    }
+}
+
+/// Spawns `cmd`, puts the child in the kill-on-close job on Windows, and
+/// registers its pid. `cmd` should already have been through
+/// [`configure_subprocess`] ([`prepare_command`] does that).
+pub(crate) fn spawn_prepared(cmd: &mut Command) -> std::io::Result<Spawned> {
+    let child = cmd.spawn()?;
+    assign_kill_on_close(&child);
+    let track = humm_core::abort::track_process(child.id());
+    Ok(Spawned { child, track })
+}
+
+/// [`Command::output`], but the child is tracked for the whole wait.
+/// Stdout and stderr are piped. Stdin is whatever `cmd` already has.
+pub(crate) fn output_prepared(cmd: &mut Command) -> std::io::Result<std::process::Output> {
+    let child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    assign_kill_on_close(&child);
+    let _track = humm_core::abort::track_process(child.id());
+    child.wait_with_output()
 }
 
 /// Puts `cmd`'s child in a new process group on Unix so a later
@@ -226,7 +379,7 @@ pub(crate) fn configure_subprocess(cmd: &mut std::process::Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(WINDOWS_CREATE_NO_WINDOW);
+        cmd.creation_flags(humm_core::platform::WINDOWS_CREATE_NO_WINDOW);
     }
 }
 
@@ -242,27 +395,12 @@ pub(crate) fn signal_process_group(child: &std::process::Child, signal: nix::sys
     let _ = kill(Pid::from_raw(-(child.id() as i32)), signal);
 }
 
-/// SIGKILLs `child`'s whole process group (unix; `child` must have been
-/// spawned via [`spawn_own_process_group`]), then also directly
-/// `Child::kill()`s it as a fallback (a harmless no-op error if it's
-/// already reaped) — on every other target, just the direct `Child::kill()`
-/// (already the platform's immediate kill call, with no process-group
-/// distinction to make there).
-///
-/// Group-signaling matters because a single-PID kill can leave a
-/// descendant the child spawned of its own running: empirically confirmed
-/// for a shell-script-under-`demucs` case (`demucs.rs`'s module doc) — a
-/// killable `yt-dlp` invoking `ffmpeg` as an external downloader/
-/// post-processor for HLS or fixup steps is the same shape — and that
-/// descendant then keeps the killed child's stdout/stderr pipes open,
-/// blocking the caller's reader-thread `join`s until it exits naturally on
-/// its own.
-/// SIGKILL each process-group leader in `pids` and do not wait.
+/// SIGKILLs each process-group leader in `pids` and does not wait.
 ///
 /// `process_group(0)` makes the child's pid the group id, so the signal
-/// goes to `-pid`. Leaders that have already been waited and unregistered
-/// are not in `pids`. Windows runs `taskkill /F /T /PID` for each pid and
-/// does not wait. Any other target is a no-op.
+/// goes to `-pid`. On Windows each pid is `taskkill /F /T /PID` (no wait:
+/// this runs while the abort registry lock is held). Leaders that have
+/// already been waited and unregistered are not in `pids`.
 pub fn kill_tracked_groups(pids: &[u32]) {
     #[cfg(unix)]
     {
@@ -289,6 +427,13 @@ pub fn kill_tracked_groups(pids: &[u32]) {
     }
 }
 
+/// Kills `child` and descendants.
+///
+/// On Unix that is `SIGKILL` to the process group (`process_group(0)` makes
+/// the pid the group id), then `Child::kill` as a fallback. On Windows it
+/// is `taskkill /F /T` followed by `Child::kill`. Group kill matters because
+/// a single-pid kill leaves a grandchild (demucs under a shell, yt-dlp's
+/// ffmpeg) holding the pipes open.
 pub(crate) fn kill_process_group(child: &mut std::process::Child) {
     #[cfg(unix)]
     signal_process_group(child, nix::sys::signal::Signal::SIGKILL);
@@ -304,19 +449,126 @@ fn windows_kill_tree(pid: u32, wait: bool) {
     let Some(args) = windows_tree_kill_args(pid) else {
         return;
     };
-    let mut cmd = std::process::Command::new("taskkill");
+    let mut cmd = Command::new("taskkill");
     cmd.args(&args);
     configure_subprocess(&mut cmd);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // Not tracked: this runs while the abort registry lock is held.
+    let Ok(mut child) = cmd.spawn() else {
+        return;
+    };
+    assign_kill_on_close(&child);
     if wait {
-        let _ = cmd.output();
-    } else {
-        use std::process::Stdio;
-        let _ = cmd
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+        let _ = child.wait();
     }
+}
+
+/// Arranges for detached media children to die with this process.
+///
+/// On Unix, `SIGHUP` (the terminal closing) runs the same emergency stop as
+/// a second Ctrl-C: every pid registered via [`spawn_prepared`] /
+/// [`output_prepared`] is group-killed, then this process exits `129`.
+/// Those children are in their own process group, so the hangup would
+/// otherwise not reach them.
+///
+/// On Windows, children are placed in a job with `KILL_ON_JOB_CLOSE`.
+/// Closing the console, `process::exit`, or a crash closes that handle and
+/// the system kills the tree. `CREATE_NO_WINDOW` keeps them off the
+/// console, so `CTRL_CLOSE_EVENT` would not reach them on its own.
+///
+/// Safe to call more than once. A failure to install is logged and does not
+/// stop startup.
+pub fn install_terminal_cleanup() {
+    static INSTALLED: Once = Once::new();
+    INSTALLED.call_once(|| {
+        #[cfg(unix)]
+        if let Err(err) = install_sighup_handler() {
+            log::warn!("could not install SIGHUP cleanup ({err})");
+        }
+        #[cfg(windows)]
+        {
+            // Arm the job before the first child. Spawn also creates it
+            // lazily if this was not called.
+            let _ = kill_on_close_job();
+        }
+    });
+}
+
+#[cfg(unix)]
+fn install_sighup_handler() -> std::io::Result<()> {
+    let mut signals = signal_hook::iterator::Signals::new([signal_hook::consts::SIGHUP])?;
+    std::thread::Builder::new()
+        .name("humm-sighup".to_string())
+        .spawn(move || {
+            // One hangup, then exit. `process::exit` does not return, so
+            // this is not a loop.
+            if signals.forever().next().is_some() {
+                let _ = humm_core::abort::try_emergency_stop(kill_tracked_groups);
+                // 128 + SIGHUP(1). Default disposition is to terminate; do
+                // that after the children have been signaled. `exit` skips
+                // `Drop`, which is why the registry kill ran first.
+                std::process::exit(129);
+            }
+        })?;
+    Ok(())
+}
+
+fn assign_kill_on_close(child: &Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        let Some(job) = kill_on_close_job() else {
+            return;
+        };
+        let handle = child.as_raw_handle() as isize;
+        if let Err(err) = job.assign_process(handle) {
+            log::warn!(
+                "could not assign pid {} to the kill-on-close job ({err:?})",
+                child.id()
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child;
+    }
+}
+
+#[cfg(windows)]
+fn kill_on_close_job() -> Option<&'static win32job::Job> {
+    use std::sync::OnceLock;
+    static JOB: OnceLock<Option<win32job::Job>> = OnceLock::new();
+    JOB.get_or_init(|| {
+        let mut info = win32job::ExtendedLimitInfo::new();
+        info.limit_kill_on_job_close();
+        match win32job::Job::create_with_limit_info(&info) {
+            Ok(job) => Some(job),
+            Err(err) => {
+                log::warn!(
+                    "could not create a kill-on-close job ({err:?}); detached children rely on the abort registry"
+                );
+                None
+            }
+        }
+    })
+    .as_ref()
+}
+
+/// Retries [`humm_core::abort::try_emergency_stop_registered`] while another
+/// test holds the process-global registry lock. Unix tests only: the callers
+/// spawn a process group, which Windows Clippy does not build.
+#[cfg(all(test, unix))]
+pub(crate) fn emergency_stop_registered_for_test(groups: &[u64], temps: &[u64]) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(5) {
+        if humm_core::abort::try_emergency_stop_registered(groups, temps, kill_tracked_groups) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    false
 }
 
 #[cfg(test)]
@@ -393,71 +645,276 @@ mod tests {
     }
 
     #[test]
-    fn windows_create_no_window_is_the_win32_flag() {
-        assert_eq!(WINDOWS_CREATE_NO_WINDOW, 0x0800_0000);
+    fn bare_name_is_left_for_command_to_resolve() {
+        assert_eq!(
+            resolve_executable(Path::new("ffmpeg")),
+            PathBuf::from("ffmpeg")
+        );
+        assert_eq!(
+            resolve_executable(Path::new("yt-dlp")),
+            PathBuf::from("yt-dlp")
+        );
+        assert_eq!(
+            resolve_executable(Path::new("ffmpeg.bat")),
+            PathBuf::from("ffmpeg.bat")
+        );
     }
 
     #[test]
-    fn pathext_candidates_cover_a_bare_name_and_leave_an_extension_alone() {
-        let exts = pathext_from(Some(".COM;.EXE;.BAT;.CMD"));
-        let names = candidate_executable_names(Path::new("yt-dlp"), &exts);
-        assert_eq!(names[0], PathBuf::from("yt-dlp"));
-        assert!(names.iter().any(|path| path == Path::new("yt-dlp.EXE")));
+    fn windows_candidate_appends_exe_only_when_the_name_has_no_dot() {
         assert_eq!(
-            candidate_executable_names(Path::new("C:/bin/ffmpeg.exe"), &exts),
-            vec![PathBuf::from("C:/bin/ffmpeg.exe")]
+            windows_candidate_name(OsStr::new("ffmpeg")),
+            OsString::from("ffmpeg.exe")
         );
         assert_eq!(
-            candidate_executable_names(Path::new("C:/bin/ffmpeg"), &exts),
-            vec![
-                PathBuf::from("C:/bin/ffmpeg"),
-                PathBuf::from("C:/bin/ffmpeg.COM"),
-                PathBuf::from("C:/bin/ffmpeg.EXE"),
-                PathBuf::from("C:/bin/ffmpeg.BAT"),
-                PathBuf::from("C:/bin/ffmpeg.CMD"),
-            ]
+            windows_candidate_name(OsStr::new("yt-dlp")),
+            OsString::from("yt-dlp.exe")
         );
-        assert!(pathext_from(None).is_empty());
+        assert_eq!(
+            windows_candidate_name(OsStr::new("ffmpeg.exe")),
+            OsString::from("ffmpeg.exe")
+        );
+        assert_eq!(
+            windows_candidate_name(OsStr::new("ffmpeg.bat")),
+            OsString::from("ffmpeg.bat")
+        );
+        assert_eq!(
+            windows_candidate_name(OsStr::new("ffmpeg.cmd")),
+            OsString::from("ffmpeg.cmd")
+        );
     }
 
     #[test]
-    fn path_lookup_finds_an_exe_sibling_of_a_bare_name() {
+    fn windows_search_prefers_later_exe_over_earlier_bat_and_skips_empty_path() {
+        let earlier = tempfile::tempdir().expect("tempdir");
+        let later = tempfile::tempdir().expect("tempdir");
+        std::fs::write(earlier.path().join("ffmpeg.bat"), b"bat").expect("bat");
+        std::fs::write(earlier.path().join("ffmpeg.cmd"), b"cmd").expect("cmd");
+        let exe = later.path().join("ffmpeg.exe");
+        std::fs::write(&exe, b"exe").expect("exe");
+        // Leading and middle empty entries are the current directory for a
+        // naive join. Command skips them.
+        let path =
+            std::env::join_paths([Path::new(""), earlier.path(), Path::new(""), later.path()])
+                .expect("join PATH");
+        let mut seen = Vec::new();
+        let found = windows_resolve_bare(
+            OsStr::new("ffmpeg"),
+            &WindowsSearch {
+                app_dir: None,
+                system_dir: None,
+                windows_dir: None,
+                path: Some(&path),
+            },
+            |candidate| {
+                seen.push(candidate.to_path_buf());
+                candidate.is_file()
+            },
+        );
+        assert_eq!(found, Some(exe));
+        assert!(
+            seen.iter().all(|path| {
+                path.extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+                    && path
+                        .parent()
+                        .is_some_and(|parent| !parent.as_os_str().is_empty())
+            }),
+            "searched {seen:?}"
+        );
+    }
+
+    #[test]
+    fn windows_search_checks_the_application_directory_before_path() {
+        let app = tempfile::tempdir().expect("app");
+        let path_dir = tempfile::tempdir().expect("path");
+        let app_exe = app.path().join("ffmpeg.exe");
+        std::fs::write(&app_exe, b"app").expect("app exe");
+        std::fs::write(path_dir.path().join("ffmpeg.exe"), b"path").expect("path exe");
+        let path = std::env::join_paths([path_dir.path()]).expect("join PATH");
+        let found = windows_resolve_bare(
+            OsStr::new("ffmpeg"),
+            &WindowsSearch {
+                app_dir: Some(app.path()),
+                system_dir: None,
+                windows_dir: None,
+                path: Some(&path),
+            },
+            |candidate| candidate.is_file(),
+        );
+        assert_eq!(found, Some(app_exe));
+    }
+
+    #[test]
+    fn explicit_windows_path_uses_the_exe_sibling_before_the_extensionless_name() {
+        assert_eq!(
+            explicit_windows_program(Path::new("C:/Tools/ffmpeg"), true),
+            PathBuf::from("C:/Tools/ffmpeg.exe")
+        );
+        assert_eq!(
+            explicit_windows_program(Path::new("C:/Tools/ffmpeg"), false),
+            PathBuf::from("C:/Tools/ffmpeg")
+        );
+        assert_eq!(
+            explicit_windows_program(Path::new("C:/Tools/ffmpeg.exe"), true),
+            PathBuf::from("C:/Tools/ffmpeg.exe")
+        );
+        // Already has an extension: not rewritten into a batch name, and not
+        // given another suffix by this helper.
+        assert_eq!(
+            explicit_windows_program(Path::new("C:/Tools/ffmpeg.bat"), false),
+            PathBuf::from("C:/Tools/ffmpeg.bat")
+        );
+    }
+
+    #[test]
+    fn exact_name_lookup_does_not_invent_an_exe_or_bat_sibling() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let exe = dir.path().join("ffmpeg.exe");
-        std::fs::write(&exe, b"not a real binary").expect("write");
+        std::fs::write(dir.path().join("ffmpeg.exe"), b"exe").expect("exe");
+        std::fs::write(dir.path().join("ffmpeg.bat"), b"bat").expect("bat");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&exe).expect("meta").permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&exe, perms).expect("chmod");
+            for name in ["ffmpeg.exe", "ffmpeg.bat"] {
+                let path = dir.path().join(name);
+                let mut perms = std::fs::metadata(&path).expect("meta").permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&path, perms).expect("chmod");
+            }
         }
-        let exts = vec![".exe".to_string()];
-        assert_eq!(
-            find_on_path(Path::new("ffmpeg"), &exts, Some(dir.path().as_os_str())),
-            Some(exe)
+        let path = std::env::join_paths([dir.path()]).expect("join PATH");
+        assert_eq!(unix_find_bare(Path::new("ffmpeg"), &path), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn emergency_stop_kills_a_detached_child() {
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let (mut cmd, _) = prepare_command(Path::new("sleep"));
+        cmd.arg("30");
+        let mut spawned = spawn_prepared(&mut cmd).expect("spawn sleep");
+        let id = spawned.registration_id();
+        let start = Instant::now();
+        assert!(
+            emergency_stop_registered_for_test(&[id], &[]),
+            "registry lock stayed busy"
         );
-        // Unix lookup passes no extensions, so `ffmpeg.exe` is not `ffmpeg`.
-        assert_eq!(
-            find_on_path(Path::new("ffmpeg"), &[], Some(dir.path().as_os_str())),
-            None
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match spawned.child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+                Ok(None) => panic!("detached sleep still running after emergency stop"),
+                Err(err) => panic!("try_wait: {err}"),
+            }
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "kill waited {:?}",
+            start.elapsed()
         );
     }
 
+    /// The child process installs the SIGHUP handler, spawns a detached
+    /// `sleep`, and waits. The parent sends SIGHUP and checks that sleep died
+    /// with the handler, not only the harness.
+    #[cfg(unix)]
     #[test]
-    fn explicit_path_without_exe_finds_the_exe_sibling() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let exe = dir.path().join("ffmpeg.exe");
-        std::fs::write(&exe, b"not a real binary").expect("write");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&exe).expect("meta").permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&exe, perms).expect("chmod");
+    fn sighup_kills_a_detached_child() {
+        use std::process::Stdio;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        if std::env::var_os("HUMM_SIGHUP_PROBE").is_some() {
+            install_terminal_cleanup();
+            let (mut cmd, _) = prepare_command(Path::new("sleep"));
+            cmd.arg("60");
+            let mut spawned = spawn_prepared(&mut cmd).expect("spawn sleep");
+            let pid_path = std::env::var("HUMM_SLEEP_PID").expect("pid path");
+            std::fs::write(&pid_path, spawned.child.id().to_string()).expect("write pid");
+            // Hold the registry guard until the handler exits the process.
+            thread::sleep(Duration::from_secs(30));
+            let _ = spawned.child.wait();
+            return;
         }
-        let bare = dir.path().join("ffmpeg");
-        assert_eq!(find_on_path(&bare, &[".exe".to_string()], None), Some(exe));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join("sleep.pid");
+        let exe = std::env::current_exe().expect("test exe");
+        let mut child = Command::new(exe);
+        child
+            .env("HUMM_SIGHUP_PROBE", "1")
+            .env("HUMM_SLEEP_PID", &pid_path)
+            .args([
+                "--exact",
+                "--test-threads=1",
+                "tests::sighup_kills_a_detached_child",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = child.spawn().expect("spawn probe");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let sleep_pid = loop {
+            if let Ok(text) = std::fs::read_to_string(&pid_path)
+                && let Ok(pid) = text.trim().parse::<u32>()
+            {
+                break pid;
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let output = child.wait_with_output();
+                let detail = output.map(|out| {
+                    format!(
+                        "status {:?} stdout {} stderr {}",
+                        out.status,
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    )
+                });
+                panic!("probe did not record the sleep pid: {detail:?}");
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(child.id() as i32),
+            nix::sys::signal::Signal::SIGHUP,
+        )
+        .expect("SIGHUP");
+
+        let exit_deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if Instant::now() < exit_deadline => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = Command::new("kill")
+                        .args(["-9", &sleep_pid.to_string()])
+                        .status();
+                    panic!("SIGHUP handler did not exit the probe");
+                }
+                Err(err) => panic!("try_wait probe: {err}"),
+            }
+        };
+        let kill_status = Command::new("kill")
+            .args(["-0", &sleep_pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .expect("kill -0");
+        if kill_status.success() {
+            let _ = Command::new("kill")
+                .args(["-9", &sleep_pid.to_string()])
+                .status();
+            panic!("detached sleep {sleep_pid} survived SIGHUP (probe status {status})");
+        }
     }
 
     #[test]

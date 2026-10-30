@@ -7,8 +7,12 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use humm_core::boundary::{AudioDecoder, Pcm, PlaybackPcm, SAMPLE_RATE};
 use humm_core::cancel::CancelToken;
@@ -18,6 +22,10 @@ use crate::{binary_from_env, map_spawn_error};
 
 /// Bytes read from ffmpeg's stdout per chunk while streaming decoded PCM.
 const READ_CHUNK_BYTES: usize = 64 * 1024;
+
+/// How often a blocked stdout read is checked for cancellation. The read
+/// itself cannot be interrupted; a watcher kills ffmpeg so the pipe closes.
+const CANCEL_POLL: Duration = Duration::from_millis(50);
 
 /// Decodes media files to mono 16 kHz `f32` PCM via an `ffmpeg` subprocess.
 pub struct FfmpegDecoder {
@@ -112,6 +120,10 @@ impl AudioDecoder for FfmpegDecoder {
 /// cooperatively, and returns the raw decoded bytes. Shared by
 /// [`AudioDecoder::decode`] and [`AudioDecoder::decode_playback`], which
 /// differ only in ffmpeg's argument list.
+///
+/// `prepare_command` puts ffmpeg in its own process group, so the terminal's
+/// SIGINT does not reach it. Cancellation is observed from a watcher thread
+/// that kills the group, which unblocks a read stuck on the pipe.
 fn run_ffmpeg_pcm(
     mut cmd: Command,
     binary: &Path,
@@ -121,20 +133,19 @@ fn run_ffmpeg_pcm(
         return Err(MediaError::Canceled);
     }
 
-    let mut child = cmd
-        .stdin(Stdio::null())
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| {
-            map_spawn_error(
-                "ffmpeg",
-                "HUMM_FFMPEG",
-                crate::install_hint("ffmpeg"),
-                binary,
-                err,
-            )
-        })?;
+        .stderr(Stdio::piped());
+    let spawned = crate::spawn_prepared(&mut cmd).map_err(|err| {
+        map_spawn_error(
+            "ffmpeg",
+            "HUMM_FFMPEG",
+            crate::install_hint("ffmpeg"),
+            binary,
+            err,
+        )
+    })?;
+    let (mut child, _group) = spawned.into_parts();
 
     let mut stdout = child.stdout.take().expect("stdout was piped at spawn");
     let mut stderr = child.stderr.take().expect("stderr was piped at spawn");
@@ -148,18 +159,23 @@ fn run_ffmpeg_pcm(
         buf
     });
 
+    let child = Arc::new(Mutex::new(child));
+    let watch = CancelWatch::spawn(Arc::clone(&child), cancel.clone());
+
     let mut raw = Vec::new();
     let mut chunk = [0u8; READ_CHUNK_BYTES];
     loop {
         if cancel.is_canceled() {
-            crate::kill_process_group(&mut child);
-            let _ = child.wait();
-            let _ = stderr_handle.join();
-            return Err(MediaError::Canceled);
+            return Err(reap_canceled(child, stderr_handle, watch));
         }
         let n = match stdout.read(&mut chunk) {
             Ok(n) => n,
             Err(err) => {
+                if cancel.is_canceled() {
+                    return Err(reap_canceled(child, stderr_handle, watch));
+                }
+                let mut child = take_child(child);
+                watch.stop();
                 crate::kill_process_group(&mut child);
                 let _ = child.wait();
                 let _ = stderr_handle.join();
@@ -169,7 +185,19 @@ fn run_ffmpeg_pcm(
         if n == 0 {
             break;
         }
+        if cancel.is_canceled() {
+            return Err(reap_canceled(child, stderr_handle, watch));
+        }
         raw.extend_from_slice(&chunk[..n]);
+    }
+
+    watch.stop();
+    let mut child = take_child(child);
+    if cancel.is_canceled() {
+        crate::kill_process_group(&mut child);
+        let _ = child.wait();
+        let _ = stderr_handle.join();
+        return Err(MediaError::Canceled);
     }
 
     let status = child.wait().map_err(MediaError::Io)?;
@@ -181,6 +209,84 @@ fn run_ffmpeg_pcm(
     }
 
     Ok(raw)
+}
+
+/// Kills ffmpeg when `cancel` is set so a blocked `stdout.read` returns.
+struct CancelWatch {
+    stop: Arc<AtomicBool>,
+    wake: Option<mpsc::Sender<()>>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl CancelWatch {
+    fn spawn(child: Arc<Mutex<Child>>, cancel: CancelToken) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let stop_watch = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            loop {
+                match wake_rx.recv_timeout(CANCEL_POLL) {
+                    Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+                    Err(RecvTimeoutError::Timeout) => {
+                        if stop_watch.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        if cancel.is_canceled() {
+                            if let Ok(mut child) = child.lock()
+                                && !stop_watch.load(Ordering::SeqCst)
+                            {
+                                crate::kill_process_group(&mut child);
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        CancelWatch {
+            stop,
+            wake: Some(wake_tx),
+            handle: Some(handle),
+        }
+    }
+
+    fn stop(mut self) {
+        self.join();
+    }
+
+    fn join(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.wake.take();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for CancelWatch {
+    fn drop(&mut self) {
+        self.join();
+    }
+}
+
+fn take_child(child: Arc<Mutex<Child>>) -> Child {
+    Arc::try_unwrap(child)
+        .expect("cancel watcher dropped its child handle")
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn reap_canceled(
+    child: Arc<Mutex<Child>>,
+    stderr_handle: thread::JoinHandle<Vec<u8>>,
+    watch: CancelWatch,
+) -> MediaError {
+    watch.stop();
+    let mut child = take_child(child);
+    crate::kill_process_group(&mut child);
+    let _ = child.wait();
+    let _ = stderr_handle.join();
+    MediaError::Canceled
 }
 
 /// Converts little-endian `f32` PCM bytes to samples. A trailing partial
@@ -296,5 +402,39 @@ mod tests {
         let via_mono_at = decoder.decode_mono_at(Path::new("/irrelevant"), 16_000, &cancel);
         assert!(matches!(via_decode, Err(MediaError::Canceled)));
         assert!(matches!(via_mono_at, Err(MediaError::Canceled)));
+    }
+
+    /// ffmpeg is in its own process group, so SIGINT does not unblock a
+    /// read. Cancel must kill the child.
+    #[cfg(unix)]
+    #[test]
+    fn cancel_interrupts_a_blocked_decode_read() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Instant;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("ffmpeg-stub");
+        std::fs::write(&script, "#!/bin/sh\nexec sleep 30\n").expect("script");
+        let mut perms = std::fs::metadata(&script).expect("meta").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod");
+
+        let decoder = FfmpegDecoder::with_binary(&script);
+        let cancel = CancelToken::new();
+        let cancel_later = cancel.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            cancel_later.cancel();
+        });
+        let start = Instant::now();
+        let err = decoder
+            .decode(Path::new("ignored"), &cancel)
+            .expect_err("canceled decode");
+        assert!(matches!(err, MediaError::Canceled), "got {err:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "cancel took {:?}",
+            start.elapsed()
+        );
     }
 }
