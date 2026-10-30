@@ -102,10 +102,14 @@ Each archive is produced by `scripts/package_release.py`, which always
 bundles OpenBLAS load-time libraries beside the binaries, rewrites macOS
 install names / Linux `$ORIGIN` RPATH, and fail-closes on `otool` / `ldd` /
 smoke failures. An ONNX Runtime shared library is bundled only when the
-binaries' loader dependencies mention it (otherwise skipped — Linux often
-links `libonnxruntime.a` statically); `CONTENTS.txt` /
-`RUNTIME.txt` record which. GUI cells fail the job if `humm-gui` does not
-build; Windows ARM64 is explicitly `windows-aarch64-cli`.
+binaries' loader dependencies mention it (otherwise skipped — macOS/Linux
+often link `libonnxruntime.a` statically, and Windows ort 2.x commonly
+links `onnxruntime.lib` statically while still dropping `DirectML.dll` as
+an execution-provider sidecar); `CONTENTS.txt` / `RUNTIME.txt` record
+which. On macOS the OpenBLAS closure also resolves `@rpath` deps such as
+Homebrew gcc's `libgcc_s.1.1.dylib` (referenced from `libgfortran`) so the
+staged tree is self-contained. GUI cells fail the job if `humm-gui` does
+not build; Windows ARM64 is explicitly `windows-aarch64-cli`.
 
 Windows release cells install vcpkg `openblas` **and** `clapack` for the
 triplet: stock vcpkg OpenBLAS is BLAS-only (`BUILD_WITHOUT_LAPACK=ON`), so
@@ -113,7 +117,8 @@ triplet: stock vcpkg OpenBLAS is BLAS-only (`BUILD_WITHOUT_LAPACK=ON`), so
 via `RUSTFLAGS` (same as the Windows ARM64 production smoke). vcpkg
 `clapack` does not ship DLLs; packaging copies only existing
 `openblas*.dll` (and companions), never requiring `lapack.dll` /
-`libf2c.dll`.
+`libf2c.dll`. When ort left `DirectML.dll` next to the release exe, that
+EP DLL is copied into the archive even if `onnxruntime.dll` is absent.
 
 On `windows-11-arm`, ggml rejects plain MSVC (`MSVC is not supported for
 ARM, use clang`), and bindgen needs a native ARM64 `libclang`. The
@@ -124,7 +129,10 @@ directory (not `C:\Program Files\LLVM`), sets `LIBCLANG_PATH` to that
 `CC`/`CXX=clang-cl`, `CXXFLAGS=/EHsc`, `CMAKE_GENERATOR=Ninja`, plus
 `ilammy/msvc-dev-cmd` (`arch: arm64`) for the Windows SDK. It does
 **not** pass `env: true` on the LLVM action (that would set plain
-`CC`/`CXX=clang` and inject GNU `-fPIC` into cmake-rs).
+`CC`/`CXX=clang` and inject GNU `-fPIC` into cmake-rs). After
+`msvc-dev-cmd`, the workflow sets
+`CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER` to the absolute MSVC
+`link.exe` so Git Bash's `/usr/bin/link` is never selected.
 
 Packaging argv is built as one bash array so macOS bash 3.2 + `set -u`
 does not trip on empty optional flags. The shipped Rust toolchain is pinned

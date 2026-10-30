@@ -192,6 +192,75 @@ def find_ort_libs_via_loader(binaries: list[Path]) -> list[Path]:
     return _dedupe_libs(found)
 
 
+def pe_import_dll_names(binary: Path) -> list[str]:
+    """Return PE import DLL basenames without dumpbin (Git Bash packaging)."""
+    import struct
+
+    data = binary.read_bytes()
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        return []
+    e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+    if e_lfanew + 24 >= len(data) or data[e_lfanew : e_lfanew + 4] != b"PE\0\0":
+        return []
+    opt_off = e_lfanew + 24
+    magic = struct.unpack_from("<H", data, opt_off)[0]
+    # DataDirectory[1] = import table RVA. PE32 optional header is 96 bytes
+    # before directories; PE32+ is 112.
+    if magic == 0x10B:
+        dir_off = opt_off + 96
+    elif magic == 0x20B:
+        dir_off = opt_off + 112
+    else:
+        return []
+    if dir_off + 16 > len(data):
+        return []
+    import_rva = struct.unpack_from("<I", data, dir_off + 8)[0]
+    if import_rva == 0:
+        return []
+
+    # Map RVA → file offset via section headers.
+    num_sections = struct.unpack_from("<H", data, e_lfanew + 6)[0]
+    size_opt = struct.unpack_from("<H", data, e_lfanew + 20)[0]
+    section_off = e_lfanew + 24 + size_opt
+
+    def rva_to_offset(rva: int) -> int | None:
+        for i in range(num_sections):
+            off = section_off + i * 40
+            if off + 40 > len(data):
+                return None
+            virt_size, virt_addr, raw_size, raw_ptr = struct.unpack_from(
+                "<IIII", data, off + 8
+            )
+            size = max(virt_size, raw_size)
+            if virt_addr <= rva < virt_addr + size:
+                return raw_ptr + (rva - virt_addr)
+        return None
+
+    import_off = rva_to_offset(import_rva)
+    if import_off is None:
+        return []
+
+    names: list[str] = []
+    entry = import_off
+    # IMAGE_IMPORT_DESCRIPTOR is 20 bytes; null terminator ends the list.
+    while entry + 20 <= len(data):
+        lookup, _ts, _chain, name_rva, _iat = struct.unpack_from("<IIIII", data, entry)
+        if lookup == 0 and name_rva == 0:
+            break
+        name_off = rva_to_offset(name_rva)
+        if name_off is not None and name_off < len(data):
+            end = data.find(b"\0", name_off)
+            if end == -1:
+                end = min(name_off + 256, len(data))
+            raw = data[name_off:end]
+            try:
+                names.append(raw.decode("ascii"))
+            except UnicodeDecodeError:
+                pass
+        entry += 20
+    return names
+
+
 def binary_needs_ort(binaries: list[Path]) -> bool:
     """True when any binary's dynamic deps mention onnxruntime."""
     for binary in binaries:
@@ -220,11 +289,35 @@ def binary_needs_ort(binaries: list[Path]) -> bool:
             dumpbin = which("dumpbin")
             if dumpbin:
                 result = run([dumpbin, "/dependents", str(binary)])
-                return "onnxruntime" in result.stdout.lower()
-            # Without dumpbin, assume a diarize-linked binary needs ort and
-            # let the tree/cache search fail closed if nothing is found.
-            return True
+                if "onnxruntime" in result.stdout.lower():
+                    return True
+                continue
+            # Git Bash release packaging often has no dumpbin on PATH.
+            # ort 2.x on Windows ships a static onnxruntime.lib plus an EP
+            # DLL (DirectML.dll) next to the exe — that is NOT a load-time
+            # onnxruntime.dll dependency. Only require the DLL when the PE
+            # actually imports it, or when ort copy-dylibs left it beside
+            # the binary.
+            if (binary.parent / "onnxruntime.dll").is_file():
+                return True
+            if any(_is_ort_name(name) for name in pe_import_dll_names(binary)):
+                return True
     return False
+
+
+def find_windows_ort_ep_dlls(bin_dir: Path) -> list[Path]:
+    """Copy ort execution-provider DLLs that sit next to the release exe.
+
+    Static Windows ort still drops DirectML.dll via copy-dylibs; the loader
+    needs it at runtime even when onnxruntime.dll is absent.
+    """
+    wanted = ("DirectML.dll", "DirectML.Debug.dll")
+    found: list[Path] = []
+    for name in wanted:
+        path = bin_dir / name
+        if path.is_file():
+            found.append(path)
+    return found
 
 
 def find_ort_libs(bin_dir: Path, binaries: list[Path]) -> list[Path]:
@@ -290,9 +383,66 @@ def parse_otool_libs(output: str) -> list[str]:
 
 
 def is_system_mac_lib(path: str) -> bool:
-    if path.startswith("@") or path.startswith("/usr/lib/") or path.startswith("/System/"):
+    # Bare @rpath/@loader_path/@executable_path refs are NOT system — they are
+    # often Homebrew gcc runtimes (libgcc_s, libquadmath) that must be bundled.
+    if path.startswith("/usr/lib/") or path.startswith("/System/"):
+        return True
+    if path.startswith("@") and not path.startswith(
+        ("@rpath/", "@loader_path/", "@executable_path/")
+    ):
         return True
     return False
+
+
+def macos_lc_rpaths(mach_o: Path) -> list[Path]:
+    """Absolute LC_RPATH directories recorded on a Mach-O (skip @-relative)."""
+    otool = "/usr/bin/otool"
+    result = run([otool, "-l", str(mach_o)])
+    rpaths: list[Path] = []
+    lines = result.stdout.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "cmd LC_RPATH":
+            continue
+        for follow in lines[index + 1 : index + 8]:
+            stripped = follow.strip()
+            if stripped.startswith("path "):
+                raw = stripped[5:].split(" (", 1)[0].strip()
+                if raw.startswith("/") and Path(raw).is_dir():
+                    rpaths.append(Path(raw))
+                break
+    return rpaths
+
+
+def resolve_macos_dep(dep: str, current: Path) -> Path | None:
+    """Resolve an otool -L dependency to a real file, including @rpath."""
+    if is_system_mac_lib(dep):
+        return None
+    if not dep.startswith("@"):
+        path = Path(dep)
+        return path.resolve() if path.is_file() else None
+
+    # @rpath/libfoo.dylib, @loader_path/../lib/libfoo.dylib, etc.
+    if dep.startswith("@loader_path/"):
+        candidate = (current.parent / dep[len("@loader_path/") :]).resolve()
+        return candidate if candidate.is_file() else None
+    if dep.startswith("@executable_path/"):
+        candidate = (current.parent / dep[len("@executable_path/") :]).resolve()
+        return candidate if candidate.is_file() else None
+    if not dep.startswith("@rpath/"):
+        return None
+
+    name = Path(dep).name
+    search_dirs = [current.parent, *macos_lc_rpaths(current)]
+    for directory in search_dirs:
+        candidate = directory / name
+        if candidate.is_file():
+            return candidate.resolve()
+        # Homebrew gcc often nests libgcc_s one directory deeper than gfortran.
+        nested = list(directory.glob(f"*/{name}")) + list(directory.glob(f"*/*/{name}"))
+        for hit in nested:
+            if hit.is_file():
+                return hit.resolve()
+    return None
 
 
 def collect_macos_closure(roots: list[Path]) -> dict[str, Path]:
@@ -309,15 +459,12 @@ def collect_macos_closure(roots: list[Path]) -> dict[str, Path]:
         seen_files.add(current)
         result = run([otool, "-L", str(current)])
         for dep in parse_otool_libs(result.stdout):
-            if is_system_mac_lib(dep):
-                continue
-            dep_path = Path(dep)
-            if not dep_path.is_file():
-                # Relative / @loader_path refs are handled after rewrite verify.
+            dep_path = resolve_macos_dep(dep, current)
+            if dep_path is None:
                 continue
             name = dep_path.name
             if name not in closure:
-                closure[name] = dep_path.resolve()
+                closure[name] = dep_path
                 queue.append(dep_path)
     return closure
 
@@ -365,18 +512,30 @@ def rewrite_macos_stage(stage: Path, binaries: list[Path], dylibs: list[Path]) -
 
 def verify_macos(stage: Path, binaries: list[str]) -> None:
     otool = "/usr/bin/otool"
-    for name in binaries:
-        path = stage / name
+    staged = {p.name for p in stage.iterdir() if p.is_file()}
+    # Walk binaries and every staged dylib so @rpath leftovers on
+    # libgfortran → libgcc_s are caught before smoke.
+    targets = [stage / name for name in binaries]
+    targets.extend(
+        sorted(p for p in stage.iterdir() if p.suffix == ".dylib" and p.is_file())
+    )
+    for path in targets:
         result = run([otool, "-L", str(path)])
         for dep in parse_otool_libs(result.stdout):
             if dep.startswith("/opt/homebrew") or dep.startswith("/usr/local/opt"):
                 raise RuntimeError(
-                    f"{name} still references Homebrew absolute path: {dep}"
+                    f"{path.name} still references Homebrew absolute path: {dep}"
                 )
+            if dep.startswith("@rpath/") or dep.startswith("@loader_path/"):
+                base = Path(dep).name
+                if base != path.name and base not in staged:
+                    raise RuntimeError(
+                        f"{path.name} depends on unpackaged {dep} (missing {base})"
+                    )
             if dep.startswith("/") and not is_system_mac_lib(dep):
                 # Allowed only if the basename exists beside the binary.
                 if not (stage / Path(dep).name).is_file():
-                    raise RuntimeError(f"{name} depends on unpackaged {dep}")
+                    raise RuntimeError(f"{path.name} depends on unpackaged {dep}")
 
 
 def collect_linux_closure(roots: list[Path]) -> dict[str, Path]:
@@ -646,6 +805,12 @@ def package(
             dst = stage / lib.name
             copy_file(lib, dst)
             bundled_libs.append(dst)
+        # Static ort still needs its DirectML EP DLL next to the exe.
+        for dll in find_windows_ort_ep_dlls(bin_dir):
+            dst = stage / dll.name
+            if not dst.exists():
+                copy_file(dll, dst)
+                bundled_libs.append(dst)
         for dll in find_windows_openblas_dlls(vcpkg_prefix):
             dst = stage / dll.name
             copy_file(dll, dst)
