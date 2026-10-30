@@ -672,20 +672,15 @@ fn second_session_after_begin_produces_same_output_as_first() {
 /// first model fetch, ffmpeg on `PATH`), not for any sandbox restriction, and
 /// needs no sandbox-lift to run.
 ///
-/// One harmless sandboxed-only side effect observed, recorded honestly:
-/// after the test's own `ok` result, the process prints `E5RT encountered an
-/// STL exception. msg = filesystem error: in create_directories: Operation
-/// not permitted [".../Library/Caches/contract-<hash>"]` to stderr — some
-/// CoreML-adjacent framework (the crate is compiled with the `coreml`
-/// feature on macOS, module doc of `crate::engine`) still probes for a
-/// process-wide cache directory at load time even though `use_gpu(false)`
-/// means CoreML/Metal are never actually invoked for this test's own
-/// inference path. It never touched Metal/CoreML init (the test's own
-/// success proves it — a real GPU touch is what segfaults), never affects
-/// the test's `ok` result or exit code (confirmed `0` both sandboxed and
-/// not), and doesn't reproduce at all when the sandbox is lifted (the cache
-/// directory is simply writable there, so the same probe succeeds
-/// silently) — a sandbox-filesystem cosmetic, not a functional issue.
+/// One sandboxed-only side effect observed on 2026-07-27: after the test's
+/// own `ok` result, the process printed `E5RT encountered an STL exception.
+/// msg = filesystem error: in create_directories: Operation not permitted
+/// [".../Library/Caches/contract-<hash>"]`. That was CoreML init, not a
+/// harmless side probe. whisper.cpp 1.8.3 calls `whisper_coreml_init` from
+/// `whisper_init_state` even when `use_gpu` is false; on a later macOS that
+/// probe SIGSEGVs (`HUMM_FORCE_CPU`, exit 139). CPU loads now skip it
+/// (ADR-002). The line did not change the test's `ok` / exit code on that
+/// sandbox, and it did not appear when the sandbox was lifted.
 #[test]
 #[ignore = "requires ffmpeg + a real whisper tiny model (downloaded/cached on first run) -- \
             runs sandboxed with force_cpu(true), see this test's doc comment"]

@@ -18,6 +18,7 @@ whisper-rs = { workspace = true, features = ["log_backend"] }
 whisper-rs = { workspace = true, features = ["metal", "coreml"] }
 
 [dev-dependencies]
+log.workspace = true
 pretty_assertions.workspace = true
 # Contract tests decode Buzz testdata through the real ffmpeg adapter and pull
 # the Silero VAD model via humm-core's downloader.

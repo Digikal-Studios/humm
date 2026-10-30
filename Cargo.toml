@@ -124,3 +124,8 @@ ort = "=2.0.0-rc.12"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# whisper-rs-sys 0.15.0 loads CoreML from whisper_init_state even when
+# use_gpu is false. This path crate gates that probe (ADR-002 addendum).
+[patch.crates-io]
+whisper-rs-sys = { path = "vendor/whisper-rs-sys" }

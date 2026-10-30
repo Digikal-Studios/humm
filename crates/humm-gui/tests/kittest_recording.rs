@@ -1230,20 +1230,26 @@ fn scripted_end_to_end_record_two_utterances_then_stop() {
         .on_record_clicked(&deps_arc);
     harness.step();
 
-    // Poll until the session row exists (spec §4: inserted before the
-    // first chunk), learning its id from a store read, then assert the
-    // *running app's own table* — not a fresh `TasksVm::load` — already
-    // shows it (review finding 3: this is what actually exercises
-    // `SessionMessage::TableRefresh`'s wiring end to end, via
-    // `HummApp::tasks_row_for_test`).
+    // Poll until the *running app's own table* shows the session row (spec
+    // §4: inserted before the first chunk). The id is learned from a store
+    // read; the success condition is `HummApp::tasks_row_for_test`, which is
+    // what exercises `SessionMessage::TableRefresh` end to end (review
+    // finding 3). The store commit is visible a moment before that message
+    // is drained, so waiting only on `TasksVm::load` and then sampling the
+    // app table once races that frame (macos-14 gates run 41049615029).
     let mut live_row_id: Option<TranscriptionId> = None;
-    wait_for(&mut harness, "the live session row to appear", |_app| {
-        let Some(row) = TasksVm::load(&store).sorted_rows().first().cloned() else {
-            return false;
-        };
-        live_row_id = Some(row.id);
-        true
-    });
+    wait_for(
+        &mut harness,
+        "the running app's table to show the live row at session start",
+        |app| {
+            let Some(row) = TasksVm::load(&store).sorted_rows().first().cloned() else {
+                return false;
+            };
+            live_row_id = Some(row.id);
+            app.tasks_row_for_test(row.id)
+                .is_some_and(|shown| shown.status == Status::InProgress)
+        },
+    );
     let live_row_id = live_row_id.expect("the wait_for deadline-loop only exits on success");
     let app_row_at_start = harness
         .state()
