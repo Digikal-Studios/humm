@@ -1,0 +1,432 @@
+# Build release archives with bundled OpenBLAS (and ONNX Runtime shared libs
+# only when binaries DT_NEEDED / otool / dumpbin require them — Linux often
+# links ort statically and ships none).
+#
+# Triggers:
+#   - push of tags matching v* → draft GitHub Release (human publishes)
+#   - workflow_dispatch on main only → draft release for an *existing* tag
+#     (never mints tags; never publishes non-draft)
+#   - pull_request touching this workflow / packaging script → Linux dry-run
+#     only (no GitHub Release)
+#
+# Archives are fail-closed: scripts/package_release.py rewrites rpaths /
+# bundles OpenBLAS (and ort shared libs when needed) and refuses to upload
+# if otool/ldd/smoke still need the builder's Homebrew/vcpkg layout. GUI
+# cells fail the job on build error (Windows ARM64 is explicitly CLI-only).
+# No new non-Rust crate deps.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing git tag to attach a DRAFT release to (required)"
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "scripts/package_release.py"
+      - "docs/ci.md"
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pin the shipped toolchain (do not float on "stable").
+  RUSTUP_TOOLCHAIN: "1.99.1"
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      publish: ${{ steps.resolve.outputs.publish }}
+    steps:
+      - name: Guard workflow_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "workflow_dispatch is only allowed on main (got ${GITHUB_REF})" >&2
+            exit 1
+          fi
+          TAG_INPUT="${{ github.event.inputs.tag }}"
+          TAG_INPUT="${TAG_INPUT#v}"
+          if [[ -z "${TAG_INPUT}" || ! "${TAG_INPUT}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
+            echo "tag input must look like a semver (got '${{ github.event.inputs.tag }}')" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Resolve version and publish flag
+        id: resolve
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          PUBLISH=false
+          if [[ "${EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            TAG="${GITHUB_REF_NAME}"
+            PUBLISH=true
+          elif [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            TAG_RAW="${INPUT_TAG}"
+            TAG_RAW="${TAG_RAW#v}"
+            VERSION="${TAG_RAW}"
+            TAG="v${TAG_RAW}"
+            if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+              echo "Refusing to mint ${TAG}; push the tag first, then re-run dispatch." >&2
+              exit 1
+            fi
+            PUBLISH=true
+          else
+            # pull_request dry-run: version from Cargo.toml, no GitHub Release.
+            VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' crates/humm-cli/Cargo.toml | head -n1)"
+            TAG="v${VERSION}"
+            PUBLISH=false
+          fi
+          if [[ -z "${VERSION}" || ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
+            echo "Could not resolve a semver version (got '${VERSION:-}')" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "publish=${PUBLISH}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved version=${VERSION} tag=${TAG} publish=${PUBLISH} event=${EVENT_NAME}"
+
+  # Job-level `if:` cannot use the matrix context; select cells here instead.
+  # PRs only dry-run Linux x86_64 packaging. Tags / main dispatch use the full set.
+  matrix:
+    name: Select build matrix
+    needs: version
+    runs-on: ubuntu-24.04
+    outputs:
+      include: ${{ steps.select.outputs.include }}
+    steps:
+      - name: Select matrix cells
+        id: select
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          FULL='[
+            {"os":"macos-14","name":"macOS aarch64","artifact":"macos-aarch64","archive":"tar.gz","gui":true,"exe_suffix":""},
+            {"os":"ubuntu-24.04","name":"Linux x86_64","artifact":"linux-x86_64","archive":"tar.gz","gui":true,"exe_suffix":""},
+            {"os":"ubuntu-24.04-arm","name":"Linux aarch64","artifact":"linux-aarch64","archive":"tar.gz","gui":true,"exe_suffix":""},
+            {"os":"windows-latest","name":"Windows x86_64","artifact":"windows-x86_64","archive":"zip","gui":true,"exe_suffix":".exe","vcpkg_triplet":"x64-windows"},
+            {"os":"windows-11-arm","name":"Windows ARM64 (CLI only)","artifact":"windows-aarch64-cli","archive":"zip","gui":false,"exe_suffix":".exe","vcpkg_triplet":"arm64-windows"}
+          ]'
+          DRY='[
+            {"os":"ubuntu-24.04","name":"Linux x86_64 (dry-run)","artifact":"linux-x86_64","archive":"tar.gz","gui":true,"exe_suffix":""}
+          ]'
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            INCLUDE="${DRY}"
+          else
+            INCLUDE="${FULL}"
+          fi
+          # Compact to a single line for the output value.
+          INCLUDE="$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])))' "${INCLUDE}")"
+          echo "include=${INCLUDE}" >> "${GITHUB_OUTPUT}"
+          echo "Selected matrix: ${INCLUDE}"
+
+  build:
+    name: ${{ matrix.name }}
+    needs: [version, matrix]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.matrix.outputs.include) }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install openblas libomp cmake pkgconf
+          OPENBLAS_PREFIX="$(brew --prefix openblas)"
+          if ! pkg-config --exists openblas; then
+            echo "PKG_CONFIG_PATH=${OPENBLAS_PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
+              >> "${GITHUB_ENV}"
+          fi
+          test -f "${OPENBLAS_PREFIX}/lib/libopenblas.dylib"
+          test -f "$(brew --prefix libomp)/lib/libomp.dylib"
+          echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,@loader_path" >> "${GITHUB_ENV}"
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            pkg-config \
+            patchelf \
+            libopenblas-dev \
+            libasound2-dev \
+            libgtk-3-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libwayland-dev
+          echo 'RUSTFLAGS=-C link-arg=-Wl,-rpath,$ORIGIN' >> "${GITHUB_ENV}"
+
+      - name: Install Windows build dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ("${{ matrix.os }}" -eq "windows-11-arm") {
+            choco install llvm -y --no-progress
+            $llvm = "C:\Program Files\LLVM\bin"
+            echo $llvm | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+          if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+            choco install cmake -y --installargs 'ADD_CMAKE_TO_PATH=System' --no-progress
+          }
+          $triplet = "${{ matrix.vcpkg_triplet }}"
+          if (-not $env:VCPKG_ROOT) {
+            $env:VCPKG_ROOT = "C:\vcpkg"
+          }
+          & "$env:VCPKG_ROOT\vcpkg.exe" install "openblas:$triplet" "pkgconf:$triplet"
+          $prefix = Join-Path $env:VCPKG_ROOT "installed\$triplet"
+          $pc = Join-Path $prefix "lib\pkgconfig"
+          "VCPKG_ROOT=$($env:VCPKG_ROOT)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VCPKG_PREFIX=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PKG_CONFIG_PATH=$pc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $pkgBin = Join-Path $prefix "tools\pkgconf"
+          if (Test-Path $pkgBin) {
+            echo $pkgBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: "1.99.1"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          shared-key: release-${{ matrix.artifact }}
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      - name: Build humm CLI (release)
+        shell: bash
+        run: cargo build --locked --release -p humm-cli
+
+      - name: Build humm-gui (release)
+        if: matrix.gui
+        shell: bash
+        run: cargo build --locked --release -p humm-gui
+
+      - name: Locate ONNX Runtime shared libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== target/release onnxruntime candidates ==="
+          find target/release -maxdepth 4 \( -name '*onnxruntime*' -o -name 'onnxruntime*' \) 2>/dev/null | head -50 || true
+          echo "=== ort.pyke.io cache candidates ==="
+          for d in "$HOME/.cache/ort.pyke.io" "$HOME/Library/Caches/ort.pyke.io" "${LOCALAPPDATA:-}/ort.pyke.io"; do
+            if [[ -d "$d" ]]; then
+              echo "cache: $d"
+              find "$d" -name '*onnxruntime*' 2>/dev/null | head -40 || true
+            fi
+          done
+          if command -v ldd >/dev/null && [[ -f target/release/humm ]]; then
+            echo "=== ldd humm (onnx lines) ==="
+            ldd target/release/humm | grep -i onnx || echo "(none — ort may be statically linked)"
+          fi
+          if command -v readelf >/dev/null && [[ -f target/release/humm ]]; then
+            echo "=== readelf DT_NEEDED (onnx) ==="
+            readelf -d target/release/humm | grep -i onnx || echo "(none — ort may be statically linked)"
+          fi
+          if [[ -x /usr/bin/otool && -f target/release/humm ]]; then
+            echo "=== otool -L humm (onnx lines) ==="
+            /usr/bin/otool -L target/release/humm | grep -i onnx || echo "(none)"
+          fi
+          test -x target/release/humm
+          if [[ "${{ matrix.gui }}" == "true" ]]; then
+            test -x target/release/humm-gui
+          fi
+
+      - name: Package archive (bundled libs + smoke)
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          ARTIFACT: ${{ matrix.artifact }}
+          ARCHIVE: ${{ matrix.archive }}
+          EXE_SUFFIX: ${{ matrix.exe_suffix }}
+          WANT_GUI: ${{ matrix.gui }}
+          VCPKG_PREFIX: ${{ env.VCPKG_PREFIX }}
+        run: |
+          set -euo pipefail
+          STAGE="dist/humm-${VERSION}-${ARTIFACT}"
+          BIN_ARGS=(--bin humm)
+          if [[ "${WANT_GUI}" == "true" ]]; then
+            BIN_ARGS+=(--bin humm-gui)
+          fi
+          VCPKG_ARGS=()
+          if [[ -n "${VCPKG_PREFIX}" ]]; then
+            VCPKG_ARGS=(--vcpkg-prefix "${VCPKG_PREFIX}")
+          fi
+          python3 scripts/package_release.py \
+            --stage "${STAGE}" \
+            --bin-dir target/release \
+            --exe-suffix "${EXE_SUFFIX}" \
+            "${BIN_ARGS[@]}" \
+            "${VCPKG_ARGS[@]}"
+
+          mkdir -p dist
+          OUT="dist/humm-${VERSION}-${ARTIFACT}.${ARCHIVE}"
+          if [[ "${ARCHIVE}" == "zip" ]]; then
+            if command -v zip >/dev/null; then
+              (cd dist && zip -r "humm-${VERSION}-${ARTIFACT}.zip" "humm-${VERSION}-${ARTIFACT}")
+            else
+              powershell -NoProfile -Command \
+                "Compress-Archive -Path '${STAGE}' -DestinationPath '${OUT}' -Force"
+            fi
+          else
+            tar -C dist -czf "${OUT}" "humm-${VERSION}-${ARTIFACT}"
+          fi
+          ls -la dist/
+          rm -rf "${STAGE}"
+
+      - name: Upload archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: humm-${{ needs.version.outputs.version }}-${{ matrix.artifact }}
+          path: dist/humm-${{ needs.version.outputs.version }}-${{ matrix.artifact }}.${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Clean build tree
+        if: always()
+        shell: bash
+        run: |
+          cargo clean || true
+          rm -rf target || true
+
+  publish:
+    name: Draft GitHub Release
+    needs: [version, build]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Require existing tag (never mint)
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Refusing to create release: tag ${TAG} does not exist locally." >&2
+            echo "Push the tag first. This job never mints tags." >&2
+            exit 1
+          fi
+
+      - name: Download archives
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          path: release-assets
+          pattern: humm-${{ needs.version.outputs.version }}-*
+          merge-multiple: true
+
+      - name: Checksums and release notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          ls -la
+          sha256sum humm-* > SHA256SUMS
+          cat SHA256SUMS
+          {
+            echo "## humm ${VERSION}"
+            echo
+            echo "Draft release from tag \`${TAG}\`. Publish it from the GitHub UI"
+            echo "when the archives have been smoke-checked; drafts are not visible"
+            echo "to users without write access."
+            echo
+            echo "### Assets"
+            echo
+            echo "| Archive | SHA-256 |"
+            echo "| --- | --- |"
+            while read -r hash file; do
+              echo "| \`${file}\` | \`${hash}\` |"
+            done < SHA256SUMS
+            echo
+            echo "### Install"
+            echo
+            echo "1. Download the archive for your OS/CPU from this release (after it is published)."
+            echo "2. Verify checksums: \`sha256sum -c SHA256SUMS\` (Linux) or \`shasum -a 256 -c SHA256SUMS\` (macOS)."
+            echo "3. Unpack; keep bundled OpenBLAS (and any onnxruntime shared lib listed in \`CONTENTS.txt\`) beside \`humm\` / \`humm-gui\`."
+            echo "4. Put \`ffmpeg\` and \`yt-dlp\` on your \`PATH\`."
+            echo
+            echo "macOS builds are **unsigned**. \`windows-aarch64-cli\` is **CLI only**."
+            echo "Each archive's \`CONTENTS.txt\` / \`RUNTIME.txt\` record GUI presence and whether onnxruntime was shipped as a shared library."
+          } > ../RELEASE_NOTES.md
+
+      - name: Create or update draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.version.outputs.version }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Always draft. Publishing to the public is a human step in the GitHub UI.
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" release-assets/* --clobber
+            gh release edit "${TAG}" \
+              --draft \
+              --title "humm ${VERSION}" \
+              --notes-file RELEASE_NOTES.md
+          else
+            gh release create "${TAG}" \
+              --draft \
+              --title "humm ${VERSION}" \
+              --notes-file RELEASE_NOTES.md \
+              release-assets/*
+          fi
+          echo "Draft release URL:"
+          gh release view "${TAG}" --json url --jq .url

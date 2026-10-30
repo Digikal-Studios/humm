@@ -207,24 +207,35 @@ fn e_flag_without_demucs_fails_actionably() {
 /// be.
 #[cfg(unix)]
 fn write_stub_demucs(dir: &Path) {
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
+    // Write via temp + fsync + rename so spawn cannot race with a truncated
+    // inode still open for write (Linux ETXTBSY on some ARM CI filesystems).
     let path = dir.join("demucs");
-    fs::write(
-        &path,
-        "#!/bin/sh\n\
-         outdir=\"\"\n\
-         input=\"\"\n\
-         while [ $# -gt 0 ]; do\n\
-         case \"$1\" in\n\
-         -o) outdir=\"$2\"; shift 2 ;;\n\
-         *) input=\"$1\"; shift ;;\n\
-         esac\n\
-         done\n\
-         mkdir -p \"$outdir/htdemucs\"\n\
-         cp \"$input\" \"$outdir/htdemucs/vocals.mp3\"\n",
-    )
-    .expect("write stub demucs script");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod stub demucs");
+    let tmp = dir.join(format!(".demucs.tmp-{}", std::process::id()));
+    {
+        let mut file = fs::File::create(&tmp).expect("create stub demucs tmp");
+        file.write_all(
+            b"#!/bin/sh\n\
+              outdir=\"\"\n\
+              input=\"\"\n\
+              while [ $# -gt 0 ]; do\n\
+              case \"$1\" in\n\
+              -o) outdir=\"$2\"; shift 2 ;;\n\
+              *) input=\"$1\"; shift ;;\n\
+              esac\n\
+              done\n\
+              mkdir -p \"$outdir/htdemucs\"\n\
+              cp \"$input\" \"$outdir/htdemucs/vocals.mp3\"\n",
+        )
+        .expect("write stub demucs script");
+        file.sync_all().expect("fsync stub demucs");
+    }
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).expect("chmod stub demucs");
+    fs::rename(&tmp, &path).expect("rename stub demucs into place");
+    if let Ok(dir_file) = fs::File::open(dir) {
+        let _ = dir_file.sync_all();
+    }
 }
 
 // 10b. `-e/--extract-speech` with a stub `demucs` discovered via `PATH`

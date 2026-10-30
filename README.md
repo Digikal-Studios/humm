@@ -16,18 +16,58 @@ humm is an **independent Rust port** of
   See [NOTICE](NOTICE) for attribution. Do not claim “100% Buzz `main` parity”
   without that list.
 
+## Download
+
+Public pre-built archives appear only on **published** GitHub Releases
+([Releases](https://github.com/Digikal-Studios/humm/releases)). Until a
+maintainer publishes one, build from source under [Install](#install).
+
+How maintainers produce a release (not a public download path):
+
+1. Push an annotated/lightweight tag such as `v0.1.0` (or run
+   **Actions → Release → Run workflow** on `main` with that **existing** tag).
+2. The Release workflow uploads a **draft** release. Drafts are invisible to
+   anyone without write access on this public repo.
+3. After checking the archives, publish the draft from the GitHub UI. That is
+   when the Download links below become usable.
+
+| Archive suffix | Runner / CPU | Contents |
+| -------------- | ------------ | -------- |
+| `macos-aarch64` | macOS Apple Silicon | `humm` + `humm-gui` |
+| `linux-x86_64` | Linux x86_64 (Ubuntu 24.04) | `humm` + `humm-gui` |
+| `linux-aarch64` | Linux ARM64 (Ubuntu 24.04) | `humm` + `humm-gui` |
+| `windows-x86_64` | Windows x86_64 | `humm` + `humm-gui` |
+| `windows-aarch64-cli` | Windows ARM64 | `humm` only |
+
+Each archive also ships `LICENSE`, `CONTENTS.txt`, `RUNTIME.txt`, and the
+**bundled OpenBLAS** load-time libraries the binaries need (ADR-024). Keep
+those beside the binaries when you move the tree — without OpenBLAS the
+process fails before `main`. An ONNX Runtime *shared* library is included
+only when the packaged binaries dynamically depend on one (`CONTENTS.txt`
+records `onnxruntime_shared=yes|no`; Linux builds often link
+`libonnxruntime.a` statically and ship none). Version matches the git tag
+(`v0.1.0` → `0.1.0`). Check `SHA256SUMS` on the release (`sha256sum -c` on
+Linux, `shasum -a 256 -c` on macOS).
+
+**macOS:** binaries are **unsigned** (no Developer ID / notarization in CI).
+Gatekeeper may block the first launch — right-click → Open after you trust the
+download. **Windows:** SmartScreen may warn on an unsigned exe.
+
+**Still required on PATH (not bundled):** [ffmpeg](https://ffmpeg.org/) and
+[yt-dlp](https://github.com/yt-dlp/yt-dlp). Linux GUI builds also need ordinary
+desktop libraries (ALSA; a portal or zenity for file dialogs) from the OS.
+
 ## Install
 
-Pre-built installers are not published yet. Build from a checkout with a
-recent Rust toolchain.
+Build from a checkout with a recent Rust toolchain. Prefer this until a
+published release exists under [Download](#download).
 
-**Prerequisites (all platforms):** [ffmpeg](https://ffmpeg.org/) and
-[yt-dlp](https://github.com/yt-dlp/yt-dlp) on `PATH` for media decode and URL
-import. Speaker diarization needs OpenBLAS.
+**Prerequisites (all platforms) for source builds:** ffmpeg and yt-dlp on
+`PATH`. Speaker diarization / linked binaries need OpenBLAS at build time.
 
 | Platform | Extra packages |
 | -------- | -------------- |
-| **macOS** | `brew install openblas libomp ffmpeg yt-dlp` (OpenBLAS + libomp are required to launch `humm-gui`) |
+| **macOS** | `brew install openblas libomp ffmpeg yt-dlp` (OpenBLAS + libomp are required to launch a source-built `humm` / `humm-gui` that still links Homebrew by absolute path) |
 | **Linux** | `ffmpeg`, `yt-dlp`, `pkg-config`, OpenBLAS (`libopenblas-dev`), ALSA (`libasound2-dev`); a desktop portal or zenity for file dialogs |
 | **Windows** | ffmpeg and yt-dlp (e.g. `winget install Gyan.FFmpeg` and `winget install yt-dlp.yt-dlp`); OpenBLAS via vcpkg for diarization (`vcpkg install openblas`) |
 
@@ -55,7 +95,8 @@ The M8 parity matrix is **46 verified / 4 named environment exceptions** of 50
 rows (`docs/analysis/PARITY_MATRIX.md`). That is not the same as “100% of
 current Buzz `main`.” Deliberate non-goals and remaining honesty gaps are
 listed next and in [`docs/review/buzz-main-gaps.md`](docs/review/buzz-main-gaps.md).
-Release binaries are a separate follow-up (HUM-26 / HUM-27).
+Published release archives (when any exist) are described under
+[Download](#download).
 
 ## Named exceptions (not silent gaps)
 
@@ -68,7 +109,7 @@ These are intentional carve-outs or known remaining work. Public “parity” or
 | **FunASR** | FunASR models on the Hugging Face path (`851c8b3`) | Out of scope (OPEN_QUESTIONS Q-2, ADR-008). No FunASR engine, in-process Python, or `transformers` dependency. |
 | **transformers / Parakeet / MMS / Faster-Whisper** | Hugging Face transformers backends and related model families | Out of scope under ADR-008. Local inference is whisper-rs only. |
 | **Multiple custom Whisper.cpp models** | JSON list of custom ggml models (`f70a02f`) | One custom slot, `ggml-custom.bin` (ADR-008 / ledger P-008). Not renamed to Buzz’s `ggml-model-whisper-custom.bin` (would orphan caches). |
-| **Update payload / installables** | Buzz publishes releases consumers can check | Matrix F-006 stays `implemented` until a real `version_info.json` and installable assets exist. The check degrades on 404; it does not show “Available” against an empty release channel. |
+| **Update payload / installables** | Buzz publishes releases consumers can check | Matrix F-006 stays `implemented` until a real `version_info.json` and a **published** (non-draft) release with installable assets exist. The check degrades on 404; it does not show “Available” against an empty release channel. Draft CI archives are not a public download path. |
 | **Hardcoded English status cells** | Task status text goes through gettext | Column headers are Fluent; task-table status strings in `crates/humm-gui/src/format.rs` (`Queued`, `In Progress…`, etc.) are still English literals. Remaining i18n work. |
 
 Also out of scope as Buzz-internal or toolkit-specific (documented in the gap
