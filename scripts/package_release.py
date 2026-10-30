@@ -246,11 +246,17 @@ def find_windows_openblas_dlls(vcpkg_prefix: Path | None) -> list[Path]:
     if not bin_dir.is_dir():
         raise RuntimeError(f"vcpkg bin directory missing: {bin_dir}")
     # Dynamic triplets ship openblas.dll (and often libopenblas.dll aliases)
-    # plus MinGW runtime companions. Copy every DLL from that bin dir that
-    # openblas or its Fortran/OpenMP stack commonly needs — fail if none match.
+    # plus MinGW runtime companions. Stock vcpkg OpenBLAS is BLAS-only
+    # (BUILD_WITHOUT_LAPACK=ON); LAPACK comes from *static* vcpkg clapack
+    # (lapack.lib + libf2c.lib linked at build time — no clapack DLLs).
+    # Copy only DLLs that actually exist under bin/.
     wanted_prefixes = (
         "openblas",
         "libopenblas",
+        "lapack",  # only if a future dynamic LAPACK appears
+        "libf2c",
+        "f2c",
+        "clapack",
         "libgfortran",
         "libquadmath",
         "libgcc",
@@ -453,6 +459,7 @@ def verify_windows(stage: Path, binaries: list[str], require_ort: bool = True) -
     openblas = list(stage.glob("openblas*.dll")) + list(stage.glob("libopenblas*.dll"))
     if not openblas:
         raise RuntimeError("staged Windows tree is missing openblas*.dll")
+    # clapack is static-only in vcpkg — do not require lapack.dll / libf2c.dll.
     if require_ort and not (stage / "onnxruntime.dll").is_file():
         raise RuntimeError("staged Windows tree is missing onnxruntime.dll")
     dumpbin = which("dumpbin")
