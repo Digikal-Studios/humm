@@ -43,7 +43,7 @@ PostHog `app_launched` event (app version, locale, platform triple) with persist
 - Source: `buzz/widgets/application.py:80-93`.
 
 ### F-008 — UI localization
-gettext domain `buzz`, 15 locales, UI language selectable in Preferences (restart required), default system locale, English fallback.
+gettext domain `buzz`, **17** locales on Buzz `main` (includes `fr` and `tr_TR`), UI language selectable in Preferences (restart required), default system locale, English fallback. humm embeds all 17 as Fluent catalogs (`AVAILABLE_LOCALES`); humm-only strings without a Buzz msgid may still fall back to English inside a non-`en` catalog, and task-table status cells in `format.rs` remain hardcoded English (not routed through Fluent).
 - Source: `buzz/locale.py`, `buzz/locale/*/LC_MESSAGES/buzz.po`, `buzz/widgets/preferences_dialog/general_preferences_widget.py`.
 
 ### F-009 — Logging
@@ -194,8 +194,12 @@ Resizer window: create-new-vs-in-place; extend end times (default +0.2 s); witho
 - Source: `buzz/widgets/transcription_viewer/transcription_resizer_widget.py`, `buzz/plugins/transcript_resizer/plugin.py`.
 
 ### F-087 — Speaker identification
-Viewer button (hidden on Intel macOS): Step 1 diarization (NeMo MSDD via `whisper_diarization` submodule + ctc-forced-aligner word alignment + punctuation-based realignment via deepmultilingualpunctuation, progress + cancel), Step 2 name speakers (play sample per speaker, merge-sentences option) → labels written into segments. Heavy PyTorch stack → OPEN_QUESTIONS Q-3.
-- Source: `buzz/widgets/transcription_viewer/speaker_identification_widget.py`, submodules `whisper_diarization`, `ctc_forced_aligner`, `deepmultilingualpunctuation`.
+Viewer button (hidden on Intel macOS): Step 1 diarization, Step 2 name speakers (play sample per speaker, merge-sentences option) → labels written into segments.
+
+**Buzz `main`:** NeMo MSDD (optional `--speaker-count`) or Sortformer via `--speaker-diarizer`, plus ctc-forced-aligner word alignment and punctuation-based realignment (`whisper_diarization` / related submodules). Folder-watch prefs also expose identify / diarizer / count / merge-speaker-sentences (`2216597`).
+
+**humm:** outcome-level Speaker-ID through `OrtDiarizer` / `speakrs` (ADR-011 / ADR-024). Bare `--identify-speakers` works; `--speaker-count` and `--speaker-diarizer msdd|sortformer` are **rejected** (not silently ignored). Folder-watch does not expose NeMo engine controls. Named production carve-out — see README and `docs/review/buzz-main-gaps.md`. Heavy PyTorch NeMo stack → OPEN_QUESTIONS Q-3.
+- Source: `buzz/widgets/transcription_viewer/speaker_identification_widget.py`, `buzz/cli.py`, submodules `whisper_diarization`, `ctc_forced_aligner`, `deepmultilingualpunctuation`.
 
 ---
 
