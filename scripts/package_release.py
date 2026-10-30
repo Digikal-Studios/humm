@@ -74,8 +74,40 @@ def resolve_binary(bin_dir: Path, name: str, exe_suffix: str) -> Path:
     return path
 
 
-def find_ort_libs(bin_dir: Path) -> list[Path]:
-    """Locate ONNX Runtime shared libs staged by ort-sys copy-dylibs."""
+def _is_ort_name(name: str) -> bool:
+    lower = name.lower()
+    return "onnxruntime" in lower
+
+
+def _dedupe_libs(paths: list[Path]) -> list[Path]:
+    resolved: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        if not path.exists() and not path.is_symlink():
+            continue
+        real = path.resolve() if path.exists() or path.is_symlink() else path
+        if not real.is_file():
+            continue
+        key = real.name
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(real)
+    return resolved
+
+
+def _ort_cache_roots() -> list[Path]:
+    home = Path.home()
+    return [
+        home / ".cache" / "ort.pyke.io",
+        home / "Library" / "Caches" / "ort.pyke.io",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "ort.pyke.io",
+        Path(os.environ.get("ORT_DOWNLOAD_CACHE", "")),
+    ]
+
+
+def find_ort_libs_in_tree(bin_dir: Path) -> list[Path]:
+    """Search cargo target dirs and ort download caches for ONNX Runtime libs."""
     patterns = (
         "onnxruntime.dll",
         "onnxruntime_*.dll",
@@ -84,20 +116,127 @@ def find_ort_libs(bin_dir: Path) -> list[Path]:
         "libonnxruntime.dylib",
         "libonnxruntime.*.dylib",
     )
+    search_roots = [
+        bin_dir,
+        bin_dir / "deps",
+        bin_dir.parent,  # e.g. target/
+    ]
+    # Also scan build script OUT_DIR parents under target/<profile>/build/ort-sys-*
+    build_root = bin_dir / "build"
+    if build_root.is_dir():
+        search_roots.extend(sorted(build_root.glob("ort-sys-*"))[:8])
+    cache_roots = [root for root in _ort_cache_roots() if str(root) and root.is_dir()]
+
     found: list[Path] = []
-    for pattern in patterns:
-        found.extend(p for p in bin_dir.glob(pattern) if p.is_file() or p.is_symlink())
-    # Prefer real files; resolve symlinks to the cache so the archive is self-contained.
-    resolved: list[Path] = []
-    seen: set[str] = set()
-    for path in found:
-        real = path.resolve()
-        key = real.name
-        if key in seen:
+    for root in search_roots:
+        if not root.exists():
             continue
-        seen.add(key)
-        resolved.append(real)
-    return resolved
+        for pattern in patterns:
+            # Non-recursive first (fast), then shallow recursive for build outs.
+            found.extend(root.glob(pattern))
+            found.extend(root.glob(f"*/{pattern}"))
+            found.extend(root.glob(f"*/*/{pattern}"))
+    # ort.pyke.io caches nest the shared library a few directories deep.
+    for root in cache_roots:
+        for path in root.rglob("*onnxruntime*"):
+            name = path.name.lower()
+            if not path.is_file() and not path.is_symlink():
+                continue
+            if name.endswith(".dll") or name.endswith(".dylib") or ".so" in name:
+                found.append(path)
+    return _dedupe_libs(found)
+
+
+def find_ort_libs_via_loader(binaries: list[Path]) -> list[Path]:
+    """Ask the dynamic loader which onnxruntime image each binary needs."""
+    found: list[Path] = []
+    for binary in binaries:
+        if sys.platform == "darwin":
+            result = run(["/usr/bin/otool", "-L", str(binary)])
+            for dep in parse_otool_libs(result.stdout):
+                if _is_ort_name(Path(dep).name) and Path(dep).is_file():
+                    found.append(Path(dep))
+        elif sys.platform.startswith("linux"):
+            result = subprocess.run(
+                ["ldd", str(binary)], check=False, text=True, capture_output=True
+            )
+            for line in result.stdout.splitlines():
+                if "onnxruntime" not in line.lower():
+                    continue
+                if "=>" not in line:
+                    continue
+                right = line.split("=>", 1)[1].strip()
+                if right == "not found" or right.startswith("("):
+                    continue
+                path_str = right.split(" (", 1)[0].strip()
+                path = Path(path_str)
+                if path.is_file():
+                    found.append(path)
+        elif sys.platform.startswith("win"):
+            # dumpbin lists dependents by basename; search PATH + bin_dir later.
+            dumpbin = which("dumpbin")
+            if dumpbin is None:
+                continue
+            result = run([dumpbin, "/dependents", str(binary)])
+            for line in result.stdout.splitlines():
+                name = line.strip()
+                if _is_ort_name(name) and name.lower().endswith(".dll"):
+                    # Resolve beside the binary first, then PATH.
+                    candidate = binary.parent / name
+                    if candidate.is_file():
+                        found.append(candidate)
+                        continue
+                    located = which(name)
+                    if located:
+                        found.append(Path(located))
+    return _dedupe_libs(found)
+
+
+def binary_needs_ort(binaries: list[Path]) -> bool:
+    """True when any binary's dynamic deps mention onnxruntime."""
+    for binary in binaries:
+        if sys.platform == "darwin":
+            result = run(["/usr/bin/otool", "-L", str(binary)])
+            if any(_is_ort_name(Path(dep).name) for dep in parse_otool_libs(result.stdout)):
+                return True
+        elif sys.platform.startswith("linux"):
+            result = subprocess.run(
+                ["ldd", str(binary)], check=False, text=True, capture_output=True
+            )
+            if "onnxruntime" in result.stdout.lower():
+                return True
+            # Also check DT_NEEDED via readelf when ldd says not found.
+            readelf = which("readelf")
+            if readelf:
+                needed = subprocess.run(
+                    [readelf, "-d", str(binary)],
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+                if "onnxruntime" in needed.stdout.lower():
+                    return True
+        elif sys.platform.startswith("win"):
+            dumpbin = which("dumpbin")
+            if dumpbin:
+                result = run([dumpbin, "/dependents", str(binary)])
+                return "onnxruntime" in result.stdout.lower()
+            # Without dumpbin, assume a diarize-linked binary needs ort and
+            # let the tree/cache search fail closed if nothing is found.
+            return True
+    return False
+
+
+def find_ort_libs(bin_dir: Path, binaries: list[Path]) -> list[Path]:
+    """Locate ONNX Runtime shared libs for packaging.
+
+    Prefer the loader's resolved path (ldd/otool), then ort-sys copy-dylibs
+    outputs under the cargo target tree, then the ort.pyke.io download cache.
+    """
+    found = find_ort_libs_via_loader(binaries)
+    if found:
+        return found
+    return find_ort_libs_in_tree(bin_dir)
 
 
 def find_windows_openblas_dlls(vcpkg_prefix: Path | None) -> list[Path]:
@@ -279,13 +418,13 @@ def rewrite_linux_stage(binaries: list[Path], libs: list[Path]) -> None:
         run([patchelf, "--set-rpath", "$ORIGIN", str(path)])
 
 
-def verify_linux(stage: Path, binaries: list[str]) -> None:
+def verify_linux(stage: Path, binaries: list[str], require_ort: bool = True) -> None:
     env = dict(os.environ)
     # Force the loader to use only the staged tree + system defaults.
     env.pop("LD_LIBRARY_PATH", None)
     if not any(stage.glob("libopenblas*")) and not any(stage.glob("*openblas*.so*")):
         raise RuntimeError("staged Linux tree is missing libopenblas*")
-    if not any(stage.glob("libonnxruntime*")):
+    if require_ort and not any(stage.glob("libonnxruntime*")):
         raise RuntimeError("staged Linux tree is missing libonnxruntime*")
     stage_resolved = stage.resolve()
     for name in binaries:
@@ -310,16 +449,14 @@ def verify_linux(stage: Path, binaries: list[str]) -> None:
                     )
 
 
-def verify_windows(stage: Path, binaries: list[str]) -> None:
-    required = ["onnxruntime.dll"]
+def verify_windows(stage: Path, binaries: list[str], require_ort: bool = True) -> None:
     openblas = list(stage.glob("openblas*.dll")) + list(stage.glob("libopenblas*.dll"))
     if not openblas:
         raise RuntimeError("staged Windows tree is missing openblas*.dll")
-    for name in required:
-        if not (stage / name).is_file():
-            raise RuntimeError(f"staged Windows tree is missing {name}")
+    if require_ort and not (stage / "onnxruntime.dll").is_file():
+        raise RuntimeError("staged Windows tree is missing onnxruntime.dll")
     dumpbin = which("dumpbin")
-    if dumpbin:
+    if dumpbin and require_ort:
         for binary in binaries:
             result = run([dumpbin, "/dependents", str(stage / binary)])
             text = result.stdout.lower()
@@ -409,11 +546,20 @@ def package(
         copy_file(src, dst)
         binaries.append(dst)
 
-    ort_libs = find_ort_libs(bin_dir)
-    if not ort_libs:
+    needs_ort = binary_needs_ort(sources)
+    ort_libs = find_ort_libs(bin_dir, sources)
+    if needs_ort and not ort_libs:
+        listing = sorted(p.name for p in bin_dir.iterdir())[:40] if bin_dir.is_dir() else []
         raise RuntimeError(
-            f"no ONNX Runtime shared library next to {bin_dir}; "
-            "ort copy-dylibs should place libonnxruntime / onnxruntime.dll there"
+            "binaries dynamically depend on ONNX Runtime, but no libonnxruntime / "
+            f"onnxruntime.dll was found via ldd/otool, {bin_dir}, deps/, or the "
+            f"ort.pyke.io cache. target/release sample: {listing}"
+        )
+    if not needs_ort:
+        print(
+            "note: no onnxruntime DT_NEEDED on packaged binaries; "
+            "skipping ONNX Runtime bundle",
+            file=sys.stderr,
         )
 
     bundled_libs: list[Path] = []
@@ -449,8 +595,13 @@ def package(
             if not dst.exists():
                 copy_file(src, dst)
                 bundled_libs.append(dst)
+        # If ldd resolved onnxruntime after we staged a copy, ensure it is present.
+        if needs_ort and not any("onnxruntime" in p.name for p in bundled_libs):
+            raise RuntimeError(
+                "ONNX Runtime was required but not staged after closure collection"
+            )
         rewrite_linux_stage(binaries, bundled_libs)
-        verify_linux(stage, [f"{n}{exe_suffix}" for n in bin_names])
+        verify_linux(stage, [f"{n}{exe_suffix}" for n in bin_names], require_ort=needs_ort)
     elif sys.platform.startswith("win"):
         for lib in ort_libs:
             dst = stage / lib.name
@@ -460,7 +611,7 @@ def package(
             dst = stage / dll.name
             copy_file(dll, dst)
             bundled_libs.append(dst)
-        verify_windows(stage, [f"{n}{exe_suffix}" for n in bin_names])
+        verify_windows(stage, [f"{n}{exe_suffix}" for n in bin_names], require_ort=needs_ort)
     else:
         raise RuntimeError(f"unsupported packaging platform: {sys.platform}")
 

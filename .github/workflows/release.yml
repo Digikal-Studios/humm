@@ -248,6 +248,28 @@ jobs:
         shell: bash
         run: cargo build --locked --release -p humm-gui
 
+      - name: Locate ONNX Runtime shared libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== target/release onnxruntime candidates ==="
+          find target/release -maxdepth 4 \( -name '*onnxruntime*' -o -name 'onnxruntime*' \) 2>/dev/null | head -50 || true
+          echo "=== ort.pyke.io cache candidates ==="
+          for d in "$HOME/.cache/ort.pyke.io" "$HOME/Library/Caches/ort.pyke.io" "${LOCALAPPDATA:-}/ort.pyke.io"; do
+            if [[ -d "$d" ]]; then
+              echo "cache: $d"
+              find "$d" -name '*onnxruntime*' 2>/dev/null | head -40 || true
+            fi
+          done
+          if command -v ldd >/dev/null && [[ -f target/release/humm ]]; then
+            echo "=== ldd humm (onnx lines) ==="
+            ldd target/release/humm | grep -i onnx || true
+          fi
+          if [[ -x /usr/bin/otool && -f target/release/humm ]]; then
+            echo "=== otool -L humm (onnx lines) ==="
+            /usr/bin/otool -L target/release/humm | grep -i onnx || true
+          fi
+
       - name: Package archive (bundled libs + smoke)
         shell: bash
         env:
