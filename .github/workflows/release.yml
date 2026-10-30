@@ -1,4 +1,6 @@
-# Build release archives with bundled OpenBLAS + ONNX Runtime load-time libs.
+# Build release archives with bundled OpenBLAS (and ONNX Runtime shared libs
+# only when binaries DT_NEEDED / otool / dumpbin require them — Linux often
+# links ort statically and ships none).
 #
 # Triggers:
 #   - push of tags matching v* → draft GitHub Release (human publishes)
@@ -8,9 +10,10 @@
 #     only (no GitHub Release)
 #
 # Archives are fail-closed: scripts/package_release.py rewrites rpaths /
-# bundles DLLs and refuses to upload if otool/ldd/smoke still need the
-# builder's Homebrew/vcpkg layout. GUI cells fail the job on build error
-# (Windows ARM64 is explicitly CLI-only). No new non-Rust crate deps.
+# bundles OpenBLAS (and ort shared libs when needed) and refuses to upload
+# if otool/ldd/smoke still need the builder's Homebrew/vcpkg layout. GUI
+# cells fail the job on build error (Windows ARM64 is explicitly CLI-only).
+# No new non-Rust crate deps.
 
 name: Release
 
@@ -397,11 +400,11 @@ jobs:
             echo
             echo "1. Download the archive for your OS/CPU from this release (after it is published)."
             echo "2. Verify checksums: \`sha256sum -c SHA256SUMS\` (Linux) or \`shasum -a 256 -c SHA256SUMS\` (macOS)."
-            echo "3. Unpack; keep the bundled shared libraries beside \`humm\` / \`humm-gui\`."
+            echo "3. Unpack; keep bundled OpenBLAS (and any onnxruntime shared lib listed in \`CONTENTS.txt\`) beside \`humm\` / \`humm-gui\`."
             echo "4. Put \`ffmpeg\` and \`yt-dlp\` on your \`PATH\`."
             echo
             echo "macOS builds are **unsigned**. \`windows-aarch64-cli\` is **CLI only**."
-            echo "Each archive's \`CONTENTS.txt\` records whether \`humm-gui\` is present."
+            echo "Each archive's \`CONTENTS.txt\` / \`RUNTIME.txt\` record GUI presence and whether onnxruntime was shipped as a shared library."
           } > ../RELEASE_NOTES.md
 
       - name: Create or update draft release

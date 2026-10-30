@@ -40,11 +40,14 @@ How maintainers produce a release (not a public download path):
 | `windows-aarch64-cli` | Windows ARM64 | `humm` only |
 
 Each archive also ships `LICENSE`, `CONTENTS.txt`, `RUNTIME.txt`, and the
-**bundled load-time libraries** OpenBLAS needs and ONNX Runtime (`ort`
-`copy-dylibs`). Keep those shared libraries beside the binaries when you move
-the tree — without them the process fails before `main` (ADR-024). Version
-matches the git tag (`v0.1.0` → `0.1.0`). Check `SHA256SUMS` on the release
-(`sha256sum -c` on Linux, `shasum -a 256 -c` on macOS).
+**bundled OpenBLAS** load-time libraries the binaries need (ADR-024). Keep
+those beside the binaries when you move the tree — without OpenBLAS the
+process fails before `main`. An ONNX Runtime *shared* library is included
+only when the packaged binaries dynamically depend on one (`CONTENTS.txt`
+records `onnxruntime_shared=yes|no`; Linux builds often link
+`libonnxruntime.a` statically and ship none). Version matches the git tag
+(`v0.1.0` → `0.1.0`). Check `SHA256SUMS` on the release (`sha256sum -c` on
+Linux, `shasum -a 256 -c` on macOS).
 
 **macOS:** binaries are **unsigned** (no Developer ID / notarization in CI).
 Gatekeeper may block the first launch — right-click → Open after you trust the
