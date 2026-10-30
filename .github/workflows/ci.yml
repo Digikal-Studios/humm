@@ -10,14 +10,16 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # CI selects stable without changing the shared macOS user's Rust default.
+  # CI selects stable without changing a shared macOS user's Rust default.
   RUSTUP_TOOLCHAIN: stable
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
 
 jobs:
   gates:
-    runs-on:
-      group: apple-ci
-      labels: [self-hosted, macOS, ARM64, digikal-apple]
+    # GitHub-hosted macOS ARM. The org apple-ci / digikal-apple self-hosted
+    # runner is not registered for this repository, so gates queued forever.
+    runs-on: macos-14
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +30,9 @@ jobs:
         run: python3 scripts/ci_prepare.py
 
       - name: Install Rust
-        run: rustup toolchain install stable --profile minimal --no-self-update --component rustfmt --component clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Format check
         run: cargo fmt --check
