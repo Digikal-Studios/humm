@@ -59,7 +59,16 @@ const OS_LINESEP: &str = "\n";
 /// "\n"`) the second replace is a no-op and the net effect is simply
 /// `"\r\n" -> "\n"`, with bare `"\n"` unchanged.
 pub fn strip_newlines(text: &str) -> String {
-    text.replace("\r\n", OS_LINESEP).replace('\n', OS_LINESEP)
+    replace_newlines(text, OS_LINESEP)
+}
+
+/// Buzz's two-step newline rewrite with an explicit `os.linesep`.
+///
+/// `linesep == "\n"` is every Unix, including macOS. `linesep == "\r\n"` is
+/// Windows, and the second replace rewrites the `\n` inside the `\r\n` the
+/// first step just wrote, so an input `"\r\n"` becomes `"\r\r\n"`.
+pub fn replace_newlines(text: &str, linesep: &str) -> String {
+    text.replace("\r\n", linesep).replace('\n', linesep)
 }
 
 /// The live-translation consumer: the translation-side twin of the
@@ -175,8 +184,11 @@ mod tests {
 
     #[test]
     fn strip_newlines_collapses_crlf_to_os_linesep() {
-        // On Unix os.linesep == "\n", so "\r\n" -> "\n" (the "\r" is gone).
-        assert_eq!(strip_newlines("a\r\nb"), format!("a{OS_LINESEP}b"));
+        // Unix: the first replace turns "\r\n" into "\n"; the second is a no-op.
+        // Windows: the first replace writes "\r\n" back, and the second
+        // replace rewrites that "\n", so one input pair becomes "\r\r\n".
+        let expected = if cfg!(windows) { "a\r\r\nb" } else { "a\nb" };
+        assert_eq!(strip_newlines("a\r\nb"), expected);
     }
 
     #[test]
@@ -186,21 +198,36 @@ mod tests {
 
     #[test]
     fn strip_newlines_handles_crlf_and_lf_mixed() {
-        // A mix of both newline shapes in one string; every one maps to the
-        // OS separator (on the Unix test platform, all become "\n").
-        assert_eq!(
-            strip_newlines("one\r\ntwo\nthree\r\nfour"),
-            format!("one{OS_LINESEP}two{OS_LINESEP}three{OS_LINESEP}four")
-        );
+        // Each "\r\n" and each bare "\n" goes through both replaces. On
+        // Windows a "\r\n" becomes "\r\r\n" and a bare "\n" becomes "\r\n".
+        // On Unix both become "\n".
+        let expected = if cfg!(windows) {
+            "one\r\r\ntwo\r\nthree\r\r\nfour"
+        } else {
+            "one\ntwo\nthree\nfour"
+        };
+        assert_eq!(strip_newlines("one\r\ntwo\nthree\r\nfour"), expected);
+    }
+
+    #[test]
+    fn windows_linesep_rewrites_crlf_into_cr_crlf() {
+        // The Windows result of Buzz's two replaces. Tested here so a Linux
+        // or macOS runner still locks the order; `strip_newlines` itself
+        // uses the host separator.
+        assert_eq!(replace_newlines("a\r\nb", "\r\n"), "a\r\r\nb");
+        assert_eq!(replace_newlines("a\nb", "\r\n"), "a\r\nb");
+        assert_eq!(replace_newlines("a\r\nb", "\n"), "a\nb");
     }
 
     #[test]
     fn strip_newlines_two_step_order_removes_the_cr_of_a_crlf() {
-        // Pins the two-step order's Unix-observable consequence: because the
-        // FIRST replace targets the whole "\r\n" pair, the "\r" is consumed
-        // rather than left stranded. A one-step "\n"-only replace would have
-        // left "x\r\ny" as "x\r\ny" (stray "\r"); the two-step yields "x\ny".
-        assert_eq!(strip_newlines("x\r\ny"), format!("x{OS_LINESEP}y"));
+        // Unix: the first replace consumes the whole "\r\n", so the result
+        // is "x\ny" rather than a stranded "\r". Windows runs the same two
+        // replaces and the second one rewrites the "\n" just written, so
+        // the result is "x\r\r\ny".
+        let expected = if cfg!(windows) { "x\r\r\ny" } else { "x\ny" };
+        assert_eq!(strip_newlines("x\r\ny"), expected);
+        #[cfg(not(windows))]
         assert!(!strip_newlines("x\r\ny").contains('\r'));
     }
 
@@ -264,13 +291,18 @@ mod tests {
 
     #[test]
     fn apply_append_below_panel_gets_stripped_newlines() {
-        // The panel content is strip_newlines'd (the "\r" is removed); the
-        // raw-vs-stripped split is asserted against the export bytes below.
+        // The panel runs Buzz's two replaces. Unix drops the "\r". Windows
+        // turns the same "\r\n" into "\r\r\n".
         let mut applier =
             TranslationApplier::new(RecordingMode::AppendBelow, "\n\n".to_string(), false);
+        let expected = if cfg!(windows) {
+            "line1\r\r\nline2"
+        } else {
+            "line1\nline2"
+        };
         assert_eq!(
             applier.apply("line1\r\nline2", None),
-            Some(format!("line1{OS_LINESEP}line2"))
+            Some(expected.to_string())
         );
     }
 
@@ -398,7 +430,8 @@ mod tests {
 
         let panel = app.apply("a\r\nb", Some(&sink)).unwrap();
 
-        assert_eq!(panel, format!("a{OS_LINESEP}b")); // stripped in the panel
+        let stripped = if cfg!(windows) { "a\r\r\nb" } else { "a\nb" };
+        assert_eq!(panel, stripped); // two-step strip in the panel
         assert_eq!(
             std::fs::read_to_string(sink.translated_path()).unwrap(),
             "a\r\nb\n\n" // raw in the export (the "\r" survives)

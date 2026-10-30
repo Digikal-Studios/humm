@@ -58,35 +58,33 @@ impl Event {
     ///   `locale.getlocale()`, a 2-tuple; humm sends a single string or
     ///   nothing — the exact locale representation is GUI-shell work, not
     ///   this constructor's concern).
-    /// - `system`: `"Darwin"` on macOS (`cfg!(target_os = "macos")`) — Buzz's
-    ///   `platform.system()` reports the same string there — else
-    ///   [`std::env::consts::OS`] as-is (humm targets macOS only today, but
-    ///   this keeps the mapping total rather than partial).
+    /// - `system`: Python `platform.system()` spelling via
+    ///   [`crate::platform::platform_system_name`] — `"Darwin"`, `"Linux"`,
+    ///   or `"Windows"`, not Rust's lowercase `consts::OS`.
     /// - `release`: `kernel_release` verbatim, or `null` when `None` (Buzz:
     ///   `platform.release()`, the kernel version string, e.g. `"25.5.0"` —
     ///   see [`kernel_release`] for how a caller obtains this value; it is
     ///   deliberately a parameter here, not called internally, so this
-    ///   constructor stays a pure function of its inputs).
+    ///   constructor stays a pure function of its inputs). On Windows the
+    ///   caller passes the release from [`crate::platform::parse_windows_ver`]
+    ///   (`"10"` or `"11"`), which [`kernel_release`] reads from `cmd /C ver`.
     /// - `machine`: [`std::env::consts::ARCH`] with `"aarch64"` mapped to
     ///   `"arm64"` (Buzz's `platform.machine()` reports `"arm64"` on Apple
     ///   Silicon; Rust's `ARCH` constant reports `"aarch64"` for the
     ///   identical hardware — a naming difference to normalize, not a real
     ///   platform difference), else `ARCH` as-is.
     /// - `version`: `os_version` verbatim, or `null` when `None` (Buzz:
-    ///   `platform.version()`, a long kernel build string; humm substitutes
-    ///   the shorter, more useful `sw_vers -productVersion` — see
-    ///   [`macos_version`] — again passed in rather than called here).
+    ///   `platform.version()`). macOS sends `sw_vers -productVersion` — see
+    ///   [`macos_version`]. Linux sends `uname -v`. Windows sends the
+    ///   `ver` version token — see [`os_version`]. The value is a parameter
+    ///   so this constructor stays a pure function of its inputs).
     pub fn app_launched(
         app_version: &str,
         locale: Option<&str>,
         kernel_release: Option<&str>,
         os_version: Option<&str>,
     ) -> Event {
-        let system = if cfg!(target_os = "macos") {
-            "Darwin"
-        } else {
-            std::env::consts::OS
-        };
+        let system = crate::platform::platform_system_name(std::env::consts::OS);
         let machine = match std::env::consts::ARCH {
             "aarch64" => "arm64",
             other => other,
@@ -213,18 +211,63 @@ pub fn telemetry_enabled(
     has_key && !debug_build && !env_disabled && settings_enabled
 }
 
-/// Best-effort kernel release string via `uname -r` (e.g. `"25.5.0"`) — the
-/// value humm sends for the `release` property in [`Event::app_launched`],
-/// paralleling Buzz's `platform.release()`.
+/// Best-effort kernel release for the `release` property in
+/// [`Event::app_launched`], paralleling Buzz's `platform.release()`.
 ///
-/// `None` on any failure (binary missing, non-zero exit, non-UTF-8 or empty
-/// output): a `release`-less event still sends (as JSON `null`), so this is
-/// a leaf utility with a graceful-absence contract, not something callers
-/// need to handle as an error. Not called from this module's own tests —
-/// tests pass explicit values to [`Event::app_launched`] instead, so they
-/// stay hermetic and deterministic regardless of the host running them.
+/// Unix: `uname -r` (for example `"25.5.0"`). Windows: the release token
+/// from `cmd /C ver`, parsed by [`crate::platform::parse_windows_ver`]
+/// (`"11"`, `"10"`, `"6"`, …). Windows calls `ver` only. Git for Windows
+/// ships `uname`, and `uname -r` is a different string from
+/// `platform.release()`.
+///
+/// `None` on any failure (command missing, non-zero exit, non-UTF-8 or empty
+/// output, or `ver` text with no `[Version …]` token): a `release`-less
+/// event still sends (as JSON `null`), so this is a leaf utility with a
+/// graceful-absence contract, not something callers need to handle as an
+/// error.
 pub fn kernel_release() -> Option<String> {
-    run_trimmed("uname", &["-r"])
+    #[cfg(windows)]
+    {
+        windows_ver().map(|ver| ver.release)
+    }
+    #[cfg(not(windows))]
+    {
+        run_trimmed("uname", &["-r"])
+    }
+}
+
+/// OS version string for [`Event::app_launched`]'s `version` property.
+///
+/// macOS: `sw_vers -productVersion`. Linux and other Unix: `uname -v`
+/// (Python `platform.version()`). Windows: the version token inside
+/// `cmd /C ver`, parsed by [`crate::platform::parse_windows_ver`].
+pub fn os_version() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos_version()
+    }
+    #[cfg(windows)]
+    {
+        windows_ver().map(|ver| ver.version)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        run_trimmed("uname", &["-v"])
+    }
+}
+
+/// Live `cmd /C ver`, parsed. Windows-only: other hosts have no `ver`.
+#[cfg(windows)]
+fn windows_ver() -> Option<crate::platform::WindowsVer> {
+    let output = std::process::Command::new("cmd")
+        .args(["/C", "ver"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    crate::platform::parse_windows_ver(&text)
 }
 
 /// Best-effort macOS product version via `sw_vers -productVersion` (e.g.
@@ -232,8 +275,7 @@ pub fn kernel_release() -> Option<String> {
 /// [`Event::app_launched`], in place of Buzz's `platform.version()` (a
 /// longer kernel build string that is less useful to a human reader).
 ///
-/// Same best-effort, `None`-on-failure, not-unit-tested contract as
-/// [`kernel_release`].
+/// Same best-effort, `None`-on-failure contract as [`kernel_release`].
 pub fn macos_version() -> Option<String> {
     run_trimmed("sw_vers", &["-productVersion"])
 }
@@ -288,13 +330,46 @@ mod tests {
     }
 
     #[test]
-    fn app_launched_system_is_darwin_on_macos() {
+    fn app_launched_system_matches_python_platform_system() {
         let event = Event::app_launched("1.0.0", None, None, None);
-        if cfg!(target_os = "macos") {
-            assert_eq!(event.properties["system"], "Darwin");
-        } else {
-            assert_eq!(event.properties["system"], std::env::consts::OS);
-        }
+        assert_eq!(
+            event.properties["system"],
+            crate::platform::platform_system_name(std::env::consts::OS)
+        );
+    }
+
+    /// Linux-only. A `#[cfg]` gate keeps Windows and macOS from reporting this
+    /// as passed when the body never ran.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_reports_uname_release_and_version() {
+        let release = kernel_release().expect("uname -r");
+        let version = os_version().expect("uname -v");
+        assert!(!release.is_empty());
+        assert!(!version.is_empty());
+        // `sw_vers` is macOS-only. A Linux run must not pretend it produced
+        // a macOS product version by leaving this as the only check.
+        assert!(macos_version().is_none());
+    }
+
+    /// Fails unless both live probes match `parse_windows_ver` of a fresh
+    /// `cmd /C ver`. `kernel_release` on Windows must come from that parse,
+    /// which a successful `uname -r` (Git for Windows) would not.
+    #[cfg(windows)]
+    #[test]
+    fn windows_release_and_version_match_live_ver() {
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "ver"])
+            .output()
+            .expect("cmd /C ver");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "cmd /C ver failed: {stderr}");
+        let text = String::from_utf8(output.stdout).expect("ver stdout is utf-8");
+        let parsed = crate::platform::parse_windows_ver(&text).expect("live ver output must parse");
+        let release = kernel_release();
+        let version = os_version();
+        assert_eq!(release.as_deref(), Some(parsed.release.as_str()));
+        assert_eq!(version.as_deref(), Some(parsed.version.as_str()));
     }
 
     #[test]

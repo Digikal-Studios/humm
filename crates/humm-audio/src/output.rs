@@ -177,7 +177,7 @@ fn run_output_thread(
 /// callback depending on what the default device supports. Must run on the
 /// owner thread (the returned stream is `!Send`).
 fn build_stream(spec: StreamSpec, fill: FillCallback) -> Result<cpal::Stream, AudioError> {
-    let host = cpal::default_host();
+    let host = crate::host::system_host()?;
     let device = host
         .default_output_device()
         .ok_or_else(|| AudioError::DeviceUnavailable {

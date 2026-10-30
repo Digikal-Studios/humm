@@ -13,7 +13,7 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::thread;
 use std::time::Duration;
 
@@ -35,7 +35,7 @@ impl AudioEncoder for FfmpegDecoder {
             return Err(MediaError::Canceled);
         }
 
-        let mut cmd = Command::new(self.binary());
+        let (mut cmd, binary) = crate::prepare_command(self.binary());
         cmd.args(encode_args(dest));
 
         let mut child = cmd
@@ -47,8 +47,8 @@ impl AudioEncoder for FfmpegDecoder {
                 map_spawn_error(
                     "ffmpeg",
                     "HUMM_FFMPEG",
-                    "install it (e.g. `brew install ffmpeg`)",
-                    self.binary(),
+                    crate::install_hint("ffmpeg"),
+                    &binary,
                     err,
                 )
             })?;

@@ -71,7 +71,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -162,7 +162,7 @@ impl SpeechIsolator for DemucsIsolator {
         // including a panic unwind — see this module's doc comment.
         let scratch = tempfile::tempdir().map_err(MediaError::Io)?;
 
-        let mut cmd = Command::new(&self.binary);
+        let (mut cmd, binary) = crate::prepare_command(&self.binary);
         cmd.arg("--two-stems=vocals")
             .args(["-n", "htdemucs"])
             .arg("--mp3")
@@ -174,16 +174,15 @@ impl SpeechIsolator for DemucsIsolator {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // See this module's doc comment ("why the whole process group") for
-        // why the child is spawned into its own group here.
-        crate::spawn_own_process_group(&mut cmd);
+        // `prepare_command` puts the child in its own process group on unix
+        // (see this module's doc comment) and sets CREATE_NO_WINDOW on Windows.
 
         let mut child = cmd.spawn().map_err(|err| {
             map_spawn_error(
                 "demucs",
                 "HUMM_DEMUCS",
-                "install it (e.g. `pipx install demucs`)",
-                &self.binary,
+                crate::install_hint("demucs"),
+                &binary,
                 err,
             )
         })?;
@@ -403,25 +402,7 @@ fn copy_then_rename(from: &Path, to: &Path) -> std::io::Result<()> {
 /// that name — the same resolution `Command::spawn` itself performs, done
 /// here without actually spawning anything.
 fn binary_is_available(binary: &Path) -> bool {
-    if binary.components().count() > 1 {
-        return is_executable_file(binary);
-    }
-    std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).any(|dir| is_executable_file(&dir.join(binary))))
-        .unwrap_or(false)
-}
-
-#[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
+    crate::executable_exists(binary)
 }
 
 #[cfg(test)]
@@ -599,9 +580,8 @@ printf 'fake no_vocals data' > "$outdir/htdemucs/no_vocals.mp3"
             MediaError::BinaryMissing { hint, .. } => {
                 assert!(hint.contains("HUMM_DEMUCS"), "hint was: {hint}");
                 assert!(hint.contains("demucs not found"), "hint was: {hint}");
-                // Minor 6 (task-5 review): demucs isn't a Homebrew package —
-                // the hint must name a real install method for it, not the
-                // generic `brew install <program>` every other adapter uses.
+                // Demucs is a pip/pipx install on every OS. The ffmpeg/yt-dlp
+                // hints name Homebrew, apt, or winget instead.
                 assert!(hint.contains("pipx install demucs"), "hint was: {hint}");
                 assert!(!hint.contains("brew"), "hint was: {hint}");
             }

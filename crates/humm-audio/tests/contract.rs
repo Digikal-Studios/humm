@@ -1,9 +1,10 @@
 //! Contract tests for [`CpalOutput`] and [`CpalCapture`] against real audio
 //! devices.
 //!
-//! `#[ignore]` because they need CoreAudio (or the platform's real
-//! input/output device), which the sandbox may block. Run explicitly where a
-//! device is available (the machine the M3 windowed smoke ran on):
+//! `#[ignore]` because they open a real input or output device. Hosted CI
+//! leaves them ignored on macOS, Linux, and Windows alike, so a green
+//! library job is not capture or playback coverage. Run explicitly where a
+//! device is available:
 //!
 //! ```text
 //! cargo test -p humm-audio -- --ignored
@@ -26,7 +27,7 @@ use rtrb::RingBuffer;
 /// Opens the default device at 44.1 kHz stereo, plays ~100 ms of a 440 Hz
 /// sine, and asserts the stream opened and the `fill` callback was invoked.
 #[test]
-#[ignore = "requires a real audio output device (CoreAudio); run with --ignored"]
+#[ignore = "requires a real audio output device; run with --ignored"]
 fn cpal_output_opens_and_invokes_fill() {
     let calls = Arc::new(AtomicUsize::new(0));
     let calls_in_cb = calls.clone();
@@ -89,7 +90,7 @@ fn cpal_output_opens_and_invokes_fill() {
 /// live)`; the residual tolerance below absorbs the small fixed effects the
 /// capture path itself introduces (see the assertion).
 #[test]
-#[ignore = "requires a real audio input device (CoreAudio); run with --ignored"]
+#[ignore = "requires a real audio input device; run with --ignored"]
 fn cpal_capture_streams_16khz_mono_and_stops_promptly() {
     let (sink, mut consumer) = RingBuffer::<f32>::new(SAMPLE_RATE as usize * 5);
     let meter = Arc::new(MeterSnapshot::new());
@@ -160,9 +161,9 @@ fn cpal_capture_streams_16khz_mono_and_stops_promptly() {
 /// (device default config → rubato → 16 kHz) is what served the samples
 /// above, not the direct 16 kHz-mono-f32 path.
 #[test]
-#[ignore = "requires a real audio input device (CoreAudio); run with --ignored"]
+#[ignore = "requires a real audio input device; run with --ignored"]
 fn cpal_capture_reports_native_device_rate() {
-    let host = cpal::default_host();
+    let host = humm_audio::system_host().expect("audio host initializes");
     let device = host
         .default_input_device()
         .expect("a default input device is available on this machine");

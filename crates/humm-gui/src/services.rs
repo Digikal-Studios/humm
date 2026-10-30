@@ -880,7 +880,7 @@ pub fn fire_launch_telemetry(services: &Services) {
         env!("CARGO_PKG_VERSION"),
         locale.as_deref(),
         humm_core::telemetry::kernel_release().as_deref(),
-        humm_core::telemetry::macos_version().as_deref(),
+        humm_core::telemetry::os_version().as_deref(),
     );
     telemetry.capture(event);
 }

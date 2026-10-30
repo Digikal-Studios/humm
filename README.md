@@ -14,11 +14,19 @@ Copyright (c) 2022 Chidi Williams
 
 Run these from a checkout of this repository.
 
-On macOS, OpenBLAS and libomp are required to build and to launch the GUI. Speaker diarization links Homebrew's OpenBLAS, and `humm-gui` does not start without those libraries.
+Speaker diarization uses OpenBLAS. On macOS that is Homebrew's library, linked by absolute path, plus libomp, and the GUI does not start without them. CoreML stays enabled on macOS only.
 
 ```bash
-brew install openblas libomp
+brew install openblas libomp ffmpeg yt-dlp
 ```
+
+On Linux, ffmpeg, yt-dlp, pkg-config, and a system OpenBLAS are required. libomp is not; distribution OpenBLAS uses libgomp. Native file dialogs need a desktop portal or zenity. Audio capture uses ALSA.
+
+```bash
+sudo apt install ffmpeg yt-dlp pkg-config libopenblas-dev libasound2-dev
+```
+
+On Windows, install ffmpeg and yt-dlp (`winget install Gyan.FFmpeg`, `winget install yt-dlp.yt-dlp`). MSVC builds of speaker diarization need OpenBLAS from vcpkg (`vcpkg install openblas`). CoreML is not compiled into Windows or Linux builds. Running the GUI, WASAPI, and process-tree cancellation still needs a Windows machine.
 
 ```bash
 cargo fmt --check

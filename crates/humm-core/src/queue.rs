@@ -95,9 +95,14 @@ use crate::pipeline::{EngineTuning, JobOutcome, run_file_job};
 use crate::postproc::{self, PostprocConfig, PostprocConfigSource};
 
 /// The message emitted to yt-dlp-less URL tasks: exactly this string is
-/// written to the store and carried on the `Failed` event.
-const YTDLP_MISSING: &str =
-    "yt-dlp missing — install it (e.g. `brew install yt-dlp`) or set HUMM_YTDLP";
+/// written to the store and carried on the `Failed` event. The install
+/// example matches the host OS (Homebrew, apt, or winget).
+fn ytdlp_missing_message() -> String {
+    format!(
+        "yt-dlp missing — {} or set HUMM_YTDLP",
+        crate::platform::subprocess_install_hint(std::env::consts::OS, "yt-dlp")
+    )
+}
 
 /// One observable moment in a task's lifecycle, broadcast to every subscriber.
 ///
@@ -1959,7 +1964,7 @@ impl Runner {
         token: &CancelToken,
     ) -> Result<(PathBuf, Option<String>), Terminal> {
         let Some(fetcher) = self.fetcher.as_ref() else {
-            return Err(Terminal::Failed(YTDLP_MISSING.to_string()));
+            return Err(Terminal::Failed(ytdlp_missing_message()));
         };
 
         let dest = self.media_dir.join(id.to_string());
@@ -3307,11 +3312,11 @@ mod tests {
         q.finish().expect("finish");
         let events = drain(&rx);
 
-        let expected = "yt-dlp missing — install it (e.g. `brew install yt-dlp`) or set HUMM_YTDLP";
+        let expected = ytdlp_missing_message();
         let calls = h.store_calls();
         assert!(calls.contains(&StoreCall::Failed(a, expected.to_string())));
         assert!(events.iter().any(|e| e.task_id == a
-            && matches!(&e.kind, TaskEventKind::Failed { message } if message == expected)));
+            && matches!(&e.kind, TaskEventKind::Failed { message } if message == &expected)));
         // Started was emitted before the failure.
         assert!(
             events

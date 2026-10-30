@@ -21,6 +21,10 @@
 //! macOS build prerequisite: `brew install openblas libomp`). Non-macOS
 //! builds omit `coreml`: speakrs refuses to compile that feature off macOS.
 //! macOS still uses the workspace feature set, `coreml` included.
+//! Linux `openblas-system` links the distro OpenBLAS via pkg-config
+//! (`libopenblas-dev`); Homebrew `libomp` is not that dependency. Windows
+//! MSVC still needs OpenBLAS from vcpkg, because this pin of `openblas-src`
+//! cannot compile OpenBLAS itself for the MSVC ABI.
 //! **`online` deliberately dropped (task-9 review):** the spike's originally-recorded
 //! feature set included `online`, but that was never a deliberate choice —
 //! `online` gates only `speakrs::models::ModelManager`/`from_pretrained`'s

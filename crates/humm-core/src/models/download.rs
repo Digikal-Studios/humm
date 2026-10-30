@@ -1585,6 +1585,7 @@ mod tests {
 
     /// A symlink entry whose target is outside the extract directory, followed
     /// by a file that would be written through that link.
+    #[cfg(unix)]
     fn build_escaping_symlink_zip() -> Vec<u8> {
         let mut buf = Cursor::new(Vec::new());
         {
@@ -1630,6 +1631,7 @@ mod tests {
 
     /// `a/b/missing` → `..` first, then `a/b/link` → `missing/../../outside`,
     /// then file `a/b/link/pwned`. `missing` exists before `link` is checked.
+    #[cfg(unix)]
     fn build_symlink_chain_zip() -> Vec<u8> {
         let mut buf = Cursor::new(Vec::new());
         {
@@ -1675,6 +1677,7 @@ mod tests {
 
     /// Same chain with `link` created before `missing` exists. A lexical
     /// pop of the missing name would accept `missing/../../outside`.
+    #[cfg(unix)]
     fn build_swapped_symlink_chain_zip() -> Vec<u8> {
         let mut buf = Cursor::new(Vec::new());
         {

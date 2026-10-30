@@ -56,7 +56,7 @@ impl FfmpegDecoder {
         sample_rate: u32,
         cancel: &CancelToken,
     ) -> Result<Pcm, MediaError> {
-        let mut cmd = Command::new(&self.binary);
+        let (mut cmd, binary) = crate::prepare_command(&self.binary);
         cmd.arg("-nostdin")
             .args(["-threads", "0"])
             .arg("-i")
@@ -68,7 +68,7 @@ impl FfmpegDecoder {
             .args(["-loglevel", "error"])
             .arg("-");
 
-        let raw = run_ffmpeg_pcm(cmd, &self.binary, cancel)?;
+        let raw = run_ffmpeg_pcm(cmd, &binary, cancel)?;
         Ok(Pcm::new(bytes_to_f32(&raw)))
     }
 }
@@ -92,7 +92,7 @@ impl AudioDecoder for FfmpegDecoder {
     ) -> Result<PlaybackPcm, MediaError> {
         // `sounddevice_player.py:28-35`: playback is decoded to 44.1 kHz
         // stereo (distinct from `decode`'s mono 16 kHz for the engine).
-        let mut cmd = Command::new(&self.binary);
+        let (mut cmd, binary) = crate::prepare_command(&self.binary);
         cmd.arg("-nostdin")
             .arg("-i")
             .arg(path)
@@ -102,7 +102,7 @@ impl AudioDecoder for FfmpegDecoder {
             .args(["-loglevel", "error"])
             .arg("-");
 
-        let raw = run_ffmpeg_pcm(cmd, &self.binary, cancel)?;
+        let raw = run_ffmpeg_pcm(cmd, &binary, cancel)?;
         Ok(PlaybackPcm::new(bytes_to_f32(&raw), 2, 44_100))
     }
 }
@@ -130,7 +130,7 @@ fn run_ffmpeg_pcm(
             map_spawn_error(
                 "ffmpeg",
                 "HUMM_FFMPEG",
-                "install it (e.g. `brew install ffmpeg`)",
+                crate::install_hint("ffmpeg"),
                 binary,
                 err,
             )
@@ -152,7 +152,7 @@ fn run_ffmpeg_pcm(
     let mut chunk = [0u8; READ_CHUNK_BYTES];
     loop {
         if cancel.is_canceled() {
-            let _ = child.kill();
+            crate::kill_process_group(&mut child);
             let _ = child.wait();
             let _ = stderr_handle.join();
             return Err(MediaError::Canceled);
@@ -160,7 +160,7 @@ fn run_ffmpeg_pcm(
         let n = match stdout.read(&mut chunk) {
             Ok(n) => n,
             Err(err) => {
-                let _ = child.kill();
+                crate::kill_process_group(&mut child);
                 let _ = child.wait();
                 let _ = stderr_handle.join();
                 return Err(MediaError::Io(err));

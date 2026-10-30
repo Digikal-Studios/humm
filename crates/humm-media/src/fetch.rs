@@ -28,7 +28,7 @@
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -104,7 +104,7 @@ impl MediaFetcher for YtDlpFetcher {
             "download:{PROGRESS_PREFIX}%(progress.downloaded_bytes)s:%(progress.total_bytes)s:%(progress.total_bytes_estimate)s"
         );
 
-        let mut command = Command::new(&self.binary);
+        let (mut command, binary) = crate::prepare_command(&self.binary);
         command
             .arg(url.as_str())
             .args(["-f", "bestaudio/best"])
@@ -119,13 +119,14 @@ impl MediaFetcher for YtDlpFetcher {
         if let Some(cookie_file) = &self.cookie_file {
             command.arg("--cookies").arg(cookie_file);
         }
-        // Spawn into its own process group (unix) — see `demucs.rs`'s module
-        // doc / `crate::kill_process_group`'s doc for why: yt-dlp can invoke
-        // `ffmpeg` itself as an external downloader/post-processor (HLS
-        // streams, format merges, fixups), and a single-PID kill would leave
-        // that descendant running, holding this function's reader threads'
-        // pipes open until it exits naturally on its own.
-        crate::spawn_own_process_group(&mut command);
+        // `prepare_command` spawns into a new process group on unix — see
+        // `demucs.rs`'s module doc / `crate::kill_process_group`'s doc for
+        // why: yt-dlp can invoke `ffmpeg` itself as an external
+        // downloader/post-processor (HLS streams, format merges, fixups),
+        // and a single-PID kill would leave that descendant running, holding
+        // this function's reader threads' pipes open until it exits naturally
+        // on its own. On Windows the same helper hides the console window;
+        // cancellation uses `taskkill /T`.
 
         let mut child = command
             .stdin(Stdio::null())
@@ -136,8 +137,8 @@ impl MediaFetcher for YtDlpFetcher {
                 map_spawn_error(
                     "yt-dlp",
                     "HUMM_YTDLP",
-                    "install it (e.g. `brew install yt-dlp`)",
-                    &self.binary,
+                    crate::install_hint("yt-dlp"),
+                    &binary,
                     err,
                 )
             })?;

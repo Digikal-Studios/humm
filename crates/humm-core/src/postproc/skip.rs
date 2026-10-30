@@ -543,8 +543,10 @@ mod tests {
     #[test]
     fn result_search_matches_the_sanitized_export_stem() {
         let tmp = TempDir::new().expect("tempdir");
+        // Windows rejects `?` in a file name (os error 123). The search
+        // reads the path stem, so this fixture stays a path: `what?`
+        // sanitizes to `what_`, and only that result file is created.
         let input = tmp.path().join("what?.mp3");
-        std::fs::write(&input, b"fake media").expect("write input");
         std::fs::write(tmp.path().join("what_.txt"), "sanitized hit").expect("write txt");
 
         let segments =
