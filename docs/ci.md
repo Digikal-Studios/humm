@@ -105,10 +105,22 @@ smoke failures. An ONNX Runtime shared library is bundled only when the
 binaries' loader dependencies mention it (otherwise skipped — Linux often
 links `libonnxruntime.a` statically); `CONTENTS.txt` /
 `RUNTIME.txt` record which. GUI cells fail the job if `humm-gui` does not
-build; Windows ARM64 is explicitly `windows-aarch64-cli` and installs a
-**native ARM64** LLVM via `KyleMayes/install-llvm-action` (`arch: arm64`)
-so `whisper-rs-sys`/bindgen gets an ARM64 `libclang` (Chocolatey /
-image LLVM is x86-64 and is rejected). Packaging argv is built as one
-bash array so macOS bash 3.2 + `set -u` does not trip on empty optional
-flags. The shipped Rust toolchain is pinned to `1.99.1`. See the README
-Download section for the public story.
+build; Windows ARM64 is explicitly `windows-aarch64-cli`.
+
+Windows release cells install vcpkg `openblas` **and** `clapack` for the
+triplet: stock vcpkg OpenBLAS is BLAS-only (`BUILD_WITHOUT_LAPACK=ON`), so
+`ndarray-linalg`/`lax` needs `lapack.lib` + `libf2c.lib` linked via
+`RUSTFLAGS` (same as the Windows ARM64 production smoke). Packaging copies
+`openblas*.dll`, `lapack*.dll`, and `libf2c*.dll` into the archive.
+
+On `windows-11-arm`, bindgen needs a native ARM64 `libclang`. The workflow
+installs the LLVM **woa64** package via `KyleMayes/install-llvm-action`
+(`arch: arm64`) into a **non-default** directory (not
+`C:\Program Files\LLVM`, which holds the image's x86-64 LLVM) and sets
+`LIBCLANG_PATH` to that install's `bin` directory. It does **not** pass
+`env: true` on that action — that would export `CC`/`CXX=clang` and break
+`whisper-rs-sys` CMake (GNU `-fPIC` into the MSVC generator).
+
+Packaging argv is built as one bash array so macOS bash 3.2 + `set -u`
+does not trip on empty optional flags. The shipped Rust toolchain is pinned
+to `1.99.1`. See the README Download section for the public story.
