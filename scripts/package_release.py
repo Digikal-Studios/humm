@@ -247,14 +247,13 @@ def find_windows_openblas_dlls(vcpkg_prefix: Path | None) -> list[Path]:
         raise RuntimeError(f"vcpkg bin directory missing: {bin_dir}")
     # Dynamic triplets ship openblas.dll (and often libopenblas.dll aliases)
     # plus MinGW runtime companions. Stock vcpkg OpenBLAS is BLAS-only
-    # (BUILD_WITHOUT_LAPACK=ON); clapack supplies lapack.dll + libf2c.dll for
-    # ndarray-linalg/lax (dgetrf_/dgetri_/dsygv_). Copy every DLL from that
-    # bin dir that openblas/clapack or their Fortran/OpenMP stack commonly
-    # needs — fail if OpenBLAS or clapack LAPACK DLLs are missing.
+    # (BUILD_WITHOUT_LAPACK=ON); LAPACK comes from *static* vcpkg clapack
+    # (lapack.lib + libf2c.lib linked at build time — no clapack DLLs).
+    # Copy only DLLs that actually exist under bin/.
     wanted_prefixes = (
         "openblas",
         "libopenblas",
-        "lapack",
+        "lapack",  # only if a future dynamic LAPACK appears
         "libf2c",
         "f2c",
         "clapack",
@@ -273,21 +272,6 @@ def find_windows_openblas_dlls(vcpkg_prefix: Path | None) -> list[Path]:
     if not any(p.name.lower().startswith(("openblas", "libopenblas")) for p in selected):
         raise RuntimeError(
             f"no openblas*.dll under {bin_dir}; install openblas via vcpkg first"
-        )
-    has_lapack = any(
-        p.name.lower() in ("lapack.dll", "clapack.dll")
-        or p.name.lower().startswith("lapack")
-        for p in selected
-    )
-    has_f2c = any(
-        p.name.lower() in ("libf2c.dll", "f2c.dll") or p.name.lower().startswith("libf2c")
-        for p in selected
-    )
-    if not has_lapack or not has_f2c:
-        raise RuntimeError(
-            f"missing clapack DLLs under {bin_dir} "
-            f"(need lapack*.dll and libf2c*.dll; has_lapack={has_lapack}, has_f2c={has_f2c}); "
-            "install clapack via vcpkg (vcpkg OpenBLAS is BLAS-only)"
         )
     return selected
 
@@ -475,12 +459,7 @@ def verify_windows(stage: Path, binaries: list[str], require_ort: bool = True) -
     openblas = list(stage.glob("openblas*.dll")) + list(stage.glob("libopenblas*.dll"))
     if not openblas:
         raise RuntimeError("staged Windows tree is missing openblas*.dll")
-    lapack = list(stage.glob("lapack*.dll")) + list(stage.glob("clapack*.dll"))
-    if not lapack:
-        raise RuntimeError("staged Windows tree is missing lapack*.dll (clapack)")
-    f2c = list(stage.glob("libf2c*.dll")) + list(stage.glob("f2c*.dll"))
-    if not f2c:
-        raise RuntimeError("staged Windows tree is missing libf2c*.dll (clapack)")
+    # clapack is static-only in vcpkg — do not require lapack.dll / libf2c.dll.
     if require_ort and not (stage / "onnxruntime.dll").is_file():
         raise RuntimeError("staged Windows tree is missing onnxruntime.dll")
     dumpbin = which("dumpbin")
