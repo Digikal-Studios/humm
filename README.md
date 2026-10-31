@@ -91,8 +91,10 @@ working OpenBLAS install for speaker diarization.
   dependencies are available
 - macOS, Linux, and Windows builds (platform audio and subprocess paths)
 
-The M8 parity matrix is **46 verified / 4 named environment exceptions** of 50
-rows (`docs/analysis/PARITY_MATRIX.md`). That is not the same as “100% of
+The parity matrix is **48 verified / 2 named environment exceptions** of 50
+rows (`docs/analysis/PARITY_MATRIX.md`): F-006 (no published update payload)
+and F-042 (no fixed third-party custom-model target). F-031 and F-111 passed
+their chat-endpoint contracts on 2026-10-31. That is not the same as “100% of
 current Buzz `main`.” Deliberate non-goals and remaining honesty gaps are
 listed next and in [`docs/review/buzz-main-gaps.md`](docs/review/buzz-main-gaps.md).
 Published release archives (when any exist) are described under

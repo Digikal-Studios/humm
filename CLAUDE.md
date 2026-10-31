@@ -1,10 +1,10 @@
 # CLAUDE.md — humm
 
-humm is a Rust port of Buzz (`/Users/jawad/RustroverProjects/buzz`) aiming at **functional parity with Buzz within named carve-outs**, plus **decisively better performance** — in that order. Do **not** claim “100% Buzz `main` parity” without the public exceptions list (README “Named exceptions”; `docs/review/buzz-main-gaps.md`; matrix FINAL 46 verified / 4 env exceptions). The Buzz *source code* is the sole ground truth for behavior; never rely on prior knowledge of Buzz or assumptions about transcription apps.
+humm is a Rust port of Buzz (`/Users/jawad/RustroverProjects/buzz`) aiming at **functional parity with Buzz within named carve-outs**, plus **decisively better performance** — in that order. Do **not** claim “100% Buzz `main` parity” without the public exceptions list (README “Named exceptions”; `docs/review/buzz-main-gaps.md`; matrix current state 48 verified / 2 env exceptions, F-006 and F-042). The Buzz *source code* is the sole ground truth for behavior; never rely on prior knowledge of Buzz or assumptions about transcription apps.
 
 ## Read before coding
 
-1. `docs/analysis/PARITY_MATRIX.md` — the project spine. Done = every row `verified`, or a named, blocker-documented exception; final state: 46 verified / 4 exceptions.
+1. `docs/analysis/PARITY_MATRIX.md` — the project spine. Done = every row `verified`, or a named, blocker-documented exception; current state: 48 verified / 2 exceptions (F-006, F-042).
 2. `docs/analysis/FEATURE_INVENTORY.md` — feature IDs (F-###) with Buzz source refs. **Re-read the cited Buzz files before implementing a feature** — implement from source, not memory.
 3. `docs/design/ARCHITECTURE.md`, `docs/design/DECISIONS.md` (ADRs), `docs/design/UX_SPEC.md`, `docs/design/IMPLEMENTATION_PLAN.md` (current milestone).
 4. `docs/OPEN_QUESTIONS.md` — never invent behavior; log genuine ambiguity there.
