@@ -51,7 +51,7 @@ locale-name-zh-tw = Chinesisch (traditionell)
 
 ## Empty-state hero (views/main_window.rs)
 
-hero-drop = Medien hier ablegen oder ⌘O
+hero-drop = Medien hier ablegen oder %shortcut
 hero-import-button = Dateien importieren…
 
 ## Task table (views/task_table.rs, F-003) — column headers
@@ -81,6 +81,44 @@ task-translate = Ins Englische übersetzen
 
 status-isolating-speech = Sprache wird isoliert
 
+## Status words and notices added with the UX review fixes.
+status-queued = In Warteschlange
+status-canceled = Abgebrochen
+status-skipped = Übersprungen
+status-completed = Abgeschlossen
+status-failed = Fehlgeschlagen
+status-in-progress = In Bearbeitung
+status-eta = ETA
+status-downloading-model = Modell wird heruntergeladen
+status-downloading-media = Medien werden heruntergeladen
+status-reducing-noise = Rauschen wird reduziert
+table-menu-show-error = Fehler anzeigen
+toast-written-to = Geschrieben nach
+toast-postproc-written = Weitere Dateien geschrieben
+toast-postproc-errors = Ein Nachbearbeitungsschritt hat einen Fehler gemeldet. Die Transkription ist trotzdem abgeschlossen.
+toast-reduction-skipped = Die Rauschreduzierung lief nicht; die Transkription wurde fortgesetzt.
+options-word-timestamps-tooltip = Größe ändern ist später nur verfügbar, wenn Wortzeiten bei der Transkription aus waren. Zusammenführen ist später nur verfügbar, wenn Wortzeiten an waren.
+options-model-will-download = Ausführen lädt dieses Modell zuerst herunter. Das Fenster bleibt benutzbar.
+prefs-postproc-dfn-runs-before = DeepFilterNet läuft vor der Transkription und ersetzt das Audio, das das Modell hört.
+prefs-postproc-dfn-keep-name = Entrauschte Datei behalten lässt eine Datei namens <name>_DeepFilterNet3.wav neben der Quelle.
+prefs-general-export-template-tokens-intro = Die Leerzeichen in den Klammern gehören zum jeweiligen Token.
+prefs-general-export-template-model-type = model_type ist immer Whisper.cpp.
+prefs-general-cookie-label = Cookie-Datei
+prefs-general-cookie-browse = Durchsuchen…
+prefs-general-cookie-caption = HUMM_DOWNLOAD_COOKIEFILE hat Vorrang, wenn es gesetzt ist. Ein leeres Feld löscht den Wert.
+prefs-saved = Gespeichert
+prefs-save-failed = Einstellungen konnten nicht gespeichert werden:
+viewer-saved-neighbor = ein benachbartes Cue wurde angepasst
+viewer-timestamp-unparsed = Die vorherige Zeit wurde behalten. Das war keine Zeit.
+viewer-timestamp-range = Die vorherige Zeit wurde behalten. Der Start muss vor dem Ende liegen.
+speaker-id-save-copies = Speichern kopiert dieses Transkript in eine neue abgeschlossene Zeile. Das Original bleibt unverändert.
+speaker-id-merge-tooltip = Aufeinanderfolgende Zeilen desselben Sprechers werden verbunden.
+speaker-id-takes-minutes = Das kann mehrere Minuten dauern. Abbrechen verwirft den Lauf.
+already-running = humm läuft bereits.
+already-running-with-files = humm läuft bereits. Die an diesen Start übergebenen Dateien wurden nicht geöffnet. Importieren Sie sie im bereits geöffneten Fenster.
+banner-buzz-imported = %n Transkriptionen aus Buzz importiert.
+banner-buzz-import-failed = Transkriptionen aus Buzz konnten nicht importiert werden. humm versucht es beim nächsten Start erneut.
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = Aufnehmen
@@ -100,7 +138,7 @@ menu-file-import-folder = Ordner importieren…
 menu-help-title = Hilfe
 menu-help-about = Über humm
 menu-help-docs = Hilfe
-menu-help-docs-tooltip = Die Dokumentation erscheint mit der ersten Veröffentlichung
+menu-help-docs-tooltip = Es gibt keine Hilfe-Seite in der App.
 menu-help-preferences = Einstellungen…
 
 ## Clear-History confirm modal (views/main_window.rs, F-026)
@@ -349,7 +387,7 @@ prefs-fw-disposition-note = Nach der Transkription wird die Quelldatei in den Au
 ## Plugins management dialog, ADR-010) -- translated fresh in this
 ## catalog's own formal (Sie) register.
 
-prefs-postproc-header = Diese Hooks werden automatisch nach jeder abgeschlossenen Transkription ausgeführt. Ein Hook-Fehler wird protokolliert, führt aber nie zum Scheitern der Transkription selbst.
+prefs-postproc-header = Überspringen, Rauschreduzierung und Spracherkennung laufen vor der Transkription. Größenänderung, Zusammenfassung und DOCX-Export laufen danach. Ein Fehler wird protokolliert und lässt die Transkription nie scheitern.
 prefs-postproc-skip-title = Bereits Transkribierte überspringen
 prefs-postproc-skip-enable = Bereits Transkribierte überspringen aktivieren
 prefs-postproc-skip-check-files = Nach vorhandenen Ergebnisdateien suchen

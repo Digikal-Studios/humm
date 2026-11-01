@@ -147,9 +147,11 @@ fn persist_shortcuts(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     f(&mut guard.shortcuts);
-    if let Err(err) = guard.save(settings_path) {
-        log::warn!("could not persist the shortcut settings: {err}");
-    }
+    super::prefs_feedback::record_save(
+        guard.save(settings_path),
+        true,
+        "could not persist the shortcut settings",
+    );
 }
 
 /// Bumps `generation` — single-threaded by construction (both the write here

@@ -535,16 +535,15 @@ pub struct ActiveSession {
     pub thread: Option<JoinHandle<()>>,
 }
 
-/// Buzz's `"An error occurred while starting a new recording:" + cause +
-/// ". " + "Please check your audio devices or check the application logs
-/// for more information."` (`recording_transcriber_widget.py:1123-1132`),
-/// byte-exact including the missing space before `cause`. Must run on the
-/// UI thread ([`crate::i18n::tr`]'s own thread-local constraint) -- the
-/// session thread only ever sends the raw `cause` via
-/// [`SessionMessage::Error`].
+/// Buzz's two sentences (`recording_transcriber_widget.py:1123-1132`): the
+/// prefix, then the cause, then the "check your audio devices" sentence.
+/// The prefix and the cause are on separate lines so the cause is readable.
+/// The wording of each sentence stays the catalog text. Must run on the UI
+/// thread ([`crate::i18n::tr`]'s own thread-local constraint) -- the session
+/// thread only ever sends the raw `cause` via [`SessionMessage::Error`].
 pub fn recording_error_dialog_text(cause: &str) -> String {
     format!(
-        "{}{cause}. {}",
+        "{}\n{cause}.\n{}",
         crate::i18n::tr("recording-error-prefix"),
         crate::i18n::tr("recording-error-suffix")
     )
@@ -1438,7 +1437,7 @@ mod tests {
         let _guard = crate::i18n::lock_locale_for_test();
         assert_eq!(
             recording_error_dialog_text("no input device"),
-            "An error occurred while starting a new recording:no input device. Please check \
+            "An error occurred while starting a new recording:\nno input device.\nPlease check \
              your audio devices or check the application logs for more information."
         );
     }

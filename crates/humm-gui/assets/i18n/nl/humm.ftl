@@ -97,7 +97,7 @@ locale-name-zh-tw = Chinees (Traditioneel)
 
 ## Empty-state hero (views/main_window.rs)
 
-hero-drop = Sleep media hierheen, of ⌘O
+hero-drop = Sleep media hierheen, of %shortcut
 hero-import-button = Bestanden importeren…
 
 ## Task table (views/task_table.rs, F-003) — column headers
@@ -129,6 +129,44 @@ task-translate = Naar het Engels vertalen
 
 status-isolating-speech = spraak isoleren
 
+## Status words and notices added with the UX review fixes.
+status-queued = In wachtrij
+status-canceled = Geannuleerd
+status-skipped = Overgeslagen
+status-completed = Voltooid
+status-failed = Mislukt
+status-in-progress = Bezig
+status-eta = ETA
+status-downloading-model = Model downloaden
+status-downloading-media = Media downloaden
+status-reducing-noise = ruis verminderen
+table-menu-show-error = Fout tonen
+toast-written-to = Geschreven naar
+toast-postproc-written = Extra bestanden geschreven
+toast-postproc-errors = Een nabewerkingsstap meldde een fout. De transcriptie is wel voltooid.
+toast-reduction-skipped = Ruisreductie is niet uitgevoerd; de transcriptie ging door.
+options-word-timestamps-tooltip = Formaat wijzigen is later alleen beschikbaar als tijden op woordniveau uit stonden tijdens de transcriptie. Samenvoegen alleen als ze aan stonden.
+options-model-will-download = Uitvoeren downloadt eerst dit model. Het venster blijft bruikbaar.
+prefs-postproc-dfn-runs-before = DeepFilterNet draait vóór de transcriptie en vervangt de audio die het model hoort.
+prefs-postproc-dfn-keep-name = Geruisvrij bestand bewaren laat een bestand met de naam <name>_DeepFilterNet3.wav naast de bron achter.
+prefs-general-export-template-tokens-intro = De spaties binnen de accolades horen bij elk token.
+prefs-general-export-template-model-type = model_type is altijd Whisper.cpp.
+prefs-general-cookie-label = Cookiebestand
+prefs-general-cookie-browse = Bladeren…
+prefs-general-cookie-caption = HUMM_DOWNLOAD_COOKIEFILE wint als die is gezet. Laat het veld leeg om het te wissen.
+prefs-saved = Opgeslagen
+prefs-save-failed = Voorkeuren konden niet worden opgeslagen:
+viewer-saved-neighbor = een aangrenzende cue is aangepast
+viewer-timestamp-unparsed = De vorige tijd is behouden. Dat was geen tijd.
+viewer-timestamp-range = De vorige tijd is behouden. Het begin moet vóór het einde liggen.
+speaker-id-save-copies = Opslaan kopieert dit transcript naar een nieuwe voltooide rij. Het origineel blijft zoals het is.
+speaker-id-merge-tooltip = Opeenvolgende regels van dezelfde spreker worden samengevoegd.
+speaker-id-takes-minutes = Dit kan enkele minuten duren. Annuleren verwijdert deze run.
+already-running = humm is al actief.
+already-running-with-files = humm is al actief. De bestanden van deze start zijn niet geopend. Importeer ze vanuit het venster dat al open is.
+banner-buzz-imported = %n transcripties uit Buzz geïmporteerd.
+banner-buzz-import-failed = Transcripties uit Buzz konden niet worden geïmporteerd. humm probeert het opnieuw bij de volgende start.
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = Opnemen
@@ -148,7 +186,7 @@ menu-file-import-folder = Map importeren…
 menu-help-title = Hulp
 menu-help-about = Over humm
 menu-help-docs = Hulp
-menu-help-docs-tooltip = Documentatie volgt bij de eerste release
+menu-help-docs-tooltip = Er is geen helppagina in de app.
 menu-help-preferences = Instellingen…
 
 ## Clear-History confirm modal (views/main_window.rs, F-026)
@@ -405,7 +443,7 @@ prefs-fw-disposition-note = Zodra de transcriptie is voltooid, wordt het bronbes
 ## copy). `prefs-fw-browse`/`dialog-ok` above are reused for this tab's own
 ## Browse buttons and key-commit-failure modal.
 
-prefs-postproc-header = Deze hooks worden automatisch uitgevoerd na elke voltooide transcriptie. Een mislukte hook wordt vastgelegd in het logboek, maar laat de transcriptie zelf nooit mislukken.
+prefs-postproc-header = Overslaan, ruisreductie en taaldetectie draaien vóór de transcriptie. Formaat wijzigen, samenvatting en DOCX-export draaien daarna. Een fout wordt gelogd en laat de transcriptie nooit mislukken.
 prefs-postproc-skip-title = Reeds getranscribeerde overslaan
 prefs-postproc-skip-enable = Reeds getranscribeerde overslaan inschakelen
 prefs-postproc-skip-check-files = Controleren op bestaande resultaatbestanden

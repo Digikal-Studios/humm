@@ -4,7 +4,7 @@
 //! toast/banner state, rendering the main window every frame (design spec
 //! §1/§4).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -135,6 +135,9 @@ pub struct HummApp {
     /// returns (so actions pushed by this same frame's clicks are the ones
     /// executed, not last frame's).
     pending_table_actions: Vec<TableAction>,
+    /// Tasks whose noise reduction was skipped this session, so the
+    /// completion toast can still say so after the immediate notice expires.
+    reduction_skipped: HashSet<TranscriptionId>,
     /// The resolved keyboard-shortcut bindings: Buzz's F-005 defaults with
     /// `settings.shortcuts` overrides applied (`ShortcutMap::from_settings`),
     /// seeded at startup and rebuilt whenever [`Self::shortcuts_generation`]
@@ -630,6 +633,7 @@ impl HummApp {
         // The Speaker-ID window's adapter bundle (F-087): shares `viewer_deps`'s
         // own decoder/audio-output `Arc`s (see `speaker_deps`'s field doc) plus
         // `services.diarize` — real in production, scripted in kittest.
+        let buzz_import = services.buzz_import.clone();
         let speaker_deps = Arc::new(SpeakerIdDeps {
             store: Arc::clone(&services.store),
             decoder: Arc::clone(&viewer_deps.decoder),
@@ -684,6 +688,7 @@ impl HummApp {
             table_layout,
             last_saved_gui_settings,
             pending_table_actions: Vec::new(),
+            reduction_skipped: HashSet::new(),
             shortcuts,
             shortcuts_generation,
             last_shortcuts_generation: 0,
@@ -699,6 +704,7 @@ impl HummApp {
             app_event_rx,
             action_state: ActionState {
                 update_notice,
+                buzz_import,
                 ..ActionState::default()
             },
             dialogs: Box::new(RfdFileDialogs),
@@ -1217,21 +1223,14 @@ impl HummApp {
     fn react_to_event(&mut self, event: &TaskEvent, now: Instant) {
         match &event.kind {
             TaskEventKind::Completed { written } => {
-                let message = if written.is_empty() {
-                    tr("toast-completed")
-                } else {
-                    format!(
-                        "{} \u{2014} {} {}",
-                        tr("toast-completed"),
-                        written.len(),
-                        tr("toast-completed-suffix")
-                    )
-                };
+                let skipped = self.reduction_skipped.remove(&event.task_id);
+                let message = crate::format::completion_message(written, skipped);
                 self.action_state
                     .toasts
                     .push(ToastKind::Success, message, now);
             }
             TaskEventKind::Failed { message } => {
+                self.reduction_skipped.remove(&event.task_id);
                 let first_line = message.lines().next().unwrap_or(message).to_string();
                 self.action_state.toasts.push(
                     ToastKind::TaskFailed {
@@ -1243,9 +1242,16 @@ impl HummApp {
                 );
             }
             TaskEventKind::Canceled => {
+                self.reduction_skipped.remove(&event.task_id);
                 self.action_state
                     .toasts
                     .push(ToastKind::Info, tr("toast-canceled"), now);
+            }
+            TaskEventKind::ReductionSkipped => {
+                self.reduction_skipped.insert(event.task_id);
+                self.action_state
+                    .toasts
+                    .push(ToastKind::Info, tr("toast-reduction-skipped"), now);
             }
             TaskEventKind::StoreWriteFailed { .. } => {
                 self.action_state.banner.on_store_write_failed();
@@ -1254,10 +1260,18 @@ impl HummApp {
             // row from the store, covering the notes column; this covers
             // the one thing a row refresh can't: an *open viewer* still
             // showing the pre-resize segments in memory (design spec §2.3).
-            TaskEventKind::PostProcessed { .. }
-                if postprocessed_should_reload_viewer(&event.kind) =>
-            {
-                self.reload_viewer_segments_if_open(event.task_id);
+            TaskEventKind::PostProcessed {
+                errors, written, ..
+            } => {
+                if postprocessed_should_reload_viewer(&event.kind) {
+                    self.reload_viewer_segments_if_open(event.task_id);
+                }
+                if let Some(message) = crate::format::hook_files_message(written) {
+                    self.action_state.toasts.push(ToastKind::Info, message, now);
+                }
+                if let Some(message) = crate::format::hook_errors_message(errors) {
+                    self.action_state.toasts.push(ToastKind::Info, message, now);
+                }
             }
             _ => {}
         }
@@ -1362,6 +1376,7 @@ impl HummApp {
                 TableAction::Retry(id) => self.handle_retry(id, now),
                 TableAction::Rename(id) => self.open_rename_dialog(id),
                 TableAction::Notes(id) => self.open_notes_dialog(id),
+                TableAction::ShowError(id) => self.open_failed_detail(id),
                 TableAction::CancelSelected => self.handle_cancel_selected(),
             }
         }
@@ -1458,6 +1473,22 @@ impl HummApp {
     /// Row context menu "Add/Edit Notes" (or a Notes-cell double-click):
     /// prefills from the view-model's current notes text and opens the
     /// modal. A since-removed row silently does nothing.
+    /// Failed-row "Show error": the same detail popover a failed-task toast
+    /// click opens (full message, log folder, Retry). Single click still
+    /// only selects. Success and canceled toasts stay on the 5-second timer.
+    fn open_failed_detail(&mut self, id: TranscriptionId) {
+        let Some(row) = self.tasks.sorted_rows().iter().find(|row| row.id == id) else {
+            return;
+        };
+        if row.status != Status::Failed {
+            return;
+        }
+        self.action_state.toasts.detail = Some(crate::views::toasts::ErrorDetail {
+            task_id: id,
+            full_message: row.error.clone().unwrap_or_default(),
+        });
+    }
+
     fn open_notes_dialog(&mut self, id: TranscriptionId) {
         let Some(row) = self.tasks.sorted_rows().iter().find(|row| row.id == id) else {
             return;
@@ -4258,6 +4289,7 @@ impl eframe::App for HummApp {
             CURRENT_VERSION,
             &self.services.secrets,
             folder_watch_pill.as_ref(),
+            &self.services.model_root,
         );
 
         if let Some(outcome) = result.dialog_outcome {

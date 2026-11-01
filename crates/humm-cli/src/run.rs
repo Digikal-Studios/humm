@@ -980,7 +980,19 @@ impl<'a> HumanRenderer<'a> {
                         self.line
                             .update(PHASE_ISOLATING_KEY, &isolating_speech_line(&label));
                     }
+                    TaskPhase::ReducingNoise => {
+                        self.line
+                            .update(PHASE_REDUCING_KEY, &reducing_noise_line(&label));
+                    }
                 }
+            }
+            TaskEventKind::ReductionSkipped => {
+                if self.quiet {
+                    return;
+                }
+                self.line.finish();
+                let label = self.label(&event.task_id);
+                eprintln!("warning: {label}: noise reduction did not run; transcription continued");
             }
         }
     }
@@ -990,6 +1002,11 @@ impl<'a> HumanRenderer<'a> {
 /// `Progress`'s `0..100` and `DownloadProgress`'s `-1..-101` ranges, so it
 /// can never collide with either.
 const PHASE_ISOLATING_KEY: i64 = i64::MIN;
+
+/// [`ProgressLine`] key for [`TaskPhase::ReducingNoise`]. Distinct from
+/// [`PHASE_ISOLATING_KEY`] so the two indeterminate pre-passes don't collapse
+/// into one rewritten line.
+const PHASE_REDUCING_KEY: i64 = i64::MIN + 1;
 
 /// The stderr line printed for a `Skipped` event's terminal state, human
 /// mode: `<label>  skipped (already transcribed)` — the progress line's own
@@ -1006,6 +1023,12 @@ fn skipped_line(label: &str) -> String {
 /// which Standing Policy rule 3 forbids parsing).
 fn isolating_speech_line(label: &str) -> String {
     format!("{label}  isolating speech")
+}
+
+/// Human-mode progress line for [`TaskPhase::ReducingNoise`]: `<label>
+/// reducing noise`. No fraction — `NoiseReducer::reduce` does not report one.
+fn reducing_noise_line(label: &str) -> String {
+    format!("{label}  reducing noise")
 }
 
 /// Throttled single-line progress renderer: rewrites the same terminal line via
@@ -1141,6 +1164,9 @@ enum JsonEvent<'a> {
         task_id: String,
         phase: &'static str,
     },
+    ReductionSkipped {
+        task_id: String,
+    },
 }
 
 /// Maps a [`TaskPhase`] to its stable `--json` wire string (`docs/HUMM_SURFACE.md`
@@ -1148,6 +1174,7 @@ enum JsonEvent<'a> {
 fn task_phase_wire_str(phase: TaskPhase) -> &'static str {
     match phase {
         TaskPhase::IsolatingSpeech => "isolating_speech",
+        TaskPhase::ReducingNoise => "reducing_noise",
     }
 }
 
@@ -1216,6 +1243,7 @@ fn emit_json(event: &TaskEvent, labels: &HashMap<TranscriptionId, String>) {
             task_id,
             phase: task_phase_wire_str(*phase),
         },
+        TaskEventKind::ReductionSkipped => JsonEvent::ReductionSkipped { task_id },
     };
     if let Some(text) = to_json_line(&value) {
         println!("{text}");
@@ -1358,6 +1386,9 @@ mod tests {
             TaskEventKind::PhaseChanged { phase } => JsonEvent::Phase {
                 task_id: task_id_str,
                 phase: task_phase_wire_str(*phase),
+            },
+            TaskEventKind::ReductionSkipped => JsonEvent::ReductionSkipped {
+                task_id: task_id_str,
             },
         };
         to_json_line(&value).expect("serializes")
@@ -1530,6 +1561,24 @@ mod tests {
             ),
             r#"{"event":"phase","task_id":"550e8400-e29b-41d4-a716-446655440000","phase":"isolating_speech"}"#
         );
+        assert_eq!(
+            json_for(
+                TaskEventKind::PhaseChanged {
+                    phase: TaskPhase::ReducingNoise,
+                },
+                ID,
+                ""
+            ),
+            r#"{"event":"phase","task_id":"550e8400-e29b-41d4-a716-446655440000","phase":"reducing_noise"}"#
+        );
+    }
+
+    #[test]
+    fn json_reduction_skipped_matches_schema() {
+        assert_eq!(
+            json_for(TaskEventKind::ReductionSkipped, ID, ""),
+            r#"{"event":"reduction_skipped","task_id":"550e8400-e29b-41d4-a716-446655440000"}"#
+        );
     }
 
     // -- Human-mode rendering (Step 2) ----------------------------------------
@@ -1555,6 +1604,7 @@ mod tests {
             isolating_speech_line("clip.mp3"),
             "clip.mp3  isolating speech"
         );
+        assert_eq!(reducing_noise_line("clip.mp3"), "clip.mp3  reducing noise");
     }
 
     // -- Validation / helpers (carried from M1) -------------------------------

@@ -16,6 +16,9 @@
 //! focus-out/Enter (the same M6 commit-helper pattern every other humm
 //! path/text field uses), and the embedded options form's controls commit as
 //! one `SheetState::write_to` call whenever anything in that block changes.
+//! The LLM model and prompt text fields are the exception that stays quiet:
+//! they still save on each edit, but they do not flash "Saved". A preset
+//! click, checkbox, or combo in that form still flashes.
 //!
 //! **Browse-cancel divergence (deliberate, not a port)**: Buzz's own
 //! `on_click_browse_input_folder`/`on_click_browse_output_folder`
@@ -190,18 +193,25 @@ fn non_empty_path(s: &str) -> Option<PathBuf> {
 /// Locks `settings`, applies `f` to `settings.folder_watch`, and saves — the
 /// same diff-free, non-fatal-on-failure immediate-save contract every other
 /// tab's own `persist_*` helper uses (e.g. `prefs_general::persist_openai`).
+///
+/// `flash` is true for a discrete commit (checkbox, path focus-out, Browse,
+/// combo, preset). Typing in the LLM model or prompt fields passes `false`
+/// so "Saved" does not restart on every character.
 fn persist_folder_watch(
     settings: &Mutex<Settings>,
     settings_path: &Path,
+    flash: bool,
     f: impl FnOnce(&mut FolderWatchSettings),
 ) {
     let mut guard = settings
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     f(&mut guard.folder_watch);
-    if let Err(err) = guard.save(settings_path) {
-        log::warn!("could not persist the folder-watch settings: {err}");
-    }
+    super::prefs_feedback::record_save(
+        guard.save(settings_path),
+        flash,
+        "could not persist the folder-watch settings",
+    );
 }
 
 /// Commits the "Enable folder watch" checkbox.
@@ -211,7 +221,7 @@ pub fn commit_enabled(
     settings_path: &Path,
 ) {
     let value = state.enabled;
-    persist_folder_watch(settings, settings_path, |fw| fw.enabled = value);
+    persist_folder_watch(settings, settings_path, true, |fw| fw.enabled = value);
 }
 
 /// Commits the "Delete processed files" checkbox.
@@ -221,7 +231,7 @@ pub fn commit_delete_processed_files(
     settings_path: &Path,
 ) {
     let value = state.delete_processed_files;
-    persist_folder_watch(settings, settings_path, |fw| {
+    persist_folder_watch(settings, settings_path, true, |fw| {
         fw.delete_processed_files = value
     });
 }
@@ -233,7 +243,7 @@ pub fn commit_input_dir(
     settings_path: &Path,
 ) {
     let value = non_empty_path(&state.input_dir_buffer);
-    persist_folder_watch(settings, settings_path, |fw| fw.input_dir = value);
+    persist_folder_watch(settings, settings_path, true, |fw| fw.input_dir = value);
 }
 
 /// Commits the output-folder path field: empty (trimmed) → `None`.
@@ -243,7 +253,7 @@ pub fn commit_output_dir(
     settings_path: &Path,
 ) {
     let value = non_empty_path(&state.output_dir_buffer);
-    persist_folder_watch(settings, settings_path, |fw| fw.output_dir = value);
+    persist_folder_watch(settings, settings_path, true, |fw| fw.output_dir = value);
 }
 
 /// Commits the embedded options form as a whole: `SheetState::write_to` is
@@ -256,14 +266,38 @@ pub fn commit_output_dir(
 /// deliberately never written by `write_to` (see [`SheetState`]'s own field
 /// docs) — `last_import_folder` (unused in this context) is left untouched
 /// too, since `write_to` never touches it.
+///
+/// `flash` follows [`options_commit_flashes`]: a checkbox, combo, or model
+/// preset flashes; a keystroke in the LLM model or prompt fields does not.
 pub fn commit_options(
     state: &FolderWatchTabState,
     settings: &Mutex<Settings>,
     settings_path: &Path,
+    flash: bool,
 ) {
-    persist_folder_watch(settings, settings_path, |fw| {
+    persist_folder_watch(settings, settings_path, flash, |fw| {
         state.sheet.write_to(&mut fw.options)
     });
+}
+
+/// Whether this frame's embedded-options commit should flash "Saved".
+///
+/// Typing in the model or prompt fields changes only those two strings.
+/// A preset click writes the model the same way, so the click is what makes
+/// that commit discrete. Any other persisted field still flashes, including
+/// a frame that also edited the text.
+fn options_commit_flashes(
+    before: &FileTranscriberSettings,
+    after: &FileTranscriberSettings,
+    preset_clicked: bool,
+) -> bool {
+    if preset_clicked {
+        return true;
+    }
+    let mut quiet = after.clone();
+    quiet.llm_model = before.llm_model.clone();
+    quiet.llm_prompt = before.llm_prompt.clone();
+    quiet != *before
 }
 
 /// The projection of `sheet` that [`SheetState::write_to`] actually persists
@@ -378,13 +412,20 @@ pub fn ui(
         ui.checkbox(
             &mut state.sheet.word_timestamps,
             tr("options-word-timestamps"),
-        );
+        )
+        .on_hover_text(tr("options-word-timestamps-tooltip"));
         render_export_checkboxes(ui, &mut state.sheet.formats);
-        render_llm_translation_block(ui, "humm-prefs-fw-llm-model-presets", &mut state.sheet);
+        let preset_clicked =
+            render_llm_translation_block(ui, "humm-prefs-fw-llm-model-presets", &mut state.sheet);
 
         let after = persisted_projection(&state.sheet);
         if before != after {
-            commit_options(state, settings, settings_path);
+            commit_options(
+                state,
+                settings,
+                settings_path,
+                options_commit_flashes(&before, &after, preset_clicked),
+            );
         }
     });
 
@@ -583,7 +624,7 @@ mod tests {
         state.sheet.task = TaskKind::Translate;
         state.sheet.word_timestamps = true;
         state.sheet.formats = [OutputFormat::Srt].into_iter().collect();
-        commit_options(&state, &settings, &settings_path);
+        commit_options(&state, &settings, &settings_path, true);
 
         let guard = settings.lock().unwrap();
         assert_eq!(
@@ -611,7 +652,7 @@ mod tests {
         let mut state =
             FolderWatchTabState::new(&FolderWatchSettings::default(), &secrets, false, false);
         state.sheet.api_key = "sk-super-secret-value".to_string();
-        commit_options(&state, &settings, &settings_path);
+        commit_options(&state, &settings, &settings_path, true);
 
         let serialized = toml::to_string(&*settings.lock().unwrap()).expect("settings serialize");
         assert!(
@@ -647,5 +688,45 @@ mod tests {
         let after = persisted_projection(&sheet);
 
         assert_ne!(before, after);
+    }
+
+    // -- options_commit_flashes ------------------------------------------------
+
+    #[test]
+    fn llm_text_edits_do_not_flash_but_a_preset_or_other_control_does() {
+        let base = FileTranscriberSettings::default();
+
+        let mut typed = base.clone();
+        typed.llm_model = Some("gpt-4o-custom".to_string());
+        assert!(
+            !options_commit_flashes(&base, &typed, false),
+            "typing in the model field must not flash"
+        );
+
+        let mut prompted = base.clone();
+        prompted.llm_prompt = Some("hello".to_string());
+        assert!(
+            !options_commit_flashes(&base, &prompted, false),
+            "typing in the prompt field must not flash"
+        );
+
+        let mut both = typed.clone();
+        both.llm_prompt = Some("hello".to_string());
+        assert!(
+            !options_commit_flashes(&base, &both, false),
+            "editing both text fields in one frame must not flash"
+        );
+
+        assert!(
+            options_commit_flashes(&base, &typed, true),
+            "a preset click that writes the model string must flash"
+        );
+
+        let mut checked = typed.clone();
+        checked.enable_llm_translation = true;
+        assert!(
+            options_commit_flashes(&base, &checked, false),
+            "a checkbox in the same frame as a text edit must flash"
+        );
     }
 }

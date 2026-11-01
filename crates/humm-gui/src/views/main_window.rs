@@ -80,6 +80,9 @@ pub struct ActionState {
     pub toasts: ToastStack,
     /// The `StoreWriteFailed` health banner.
     pub banner: StoreHealthBanner,
+    /// This launch's Buzz history import, if it copied tasks or failed.
+    /// Dismissing it only hides the banner; it does not mark the import done.
+    pub buzz_import: Option<crate::services::BuzzImportNotice>,
     /// The open options sheet (F-023), if any — opened by `app.rs` from a
     /// file dialog pick, a folder scan, a dropped-files event, argv, or a
     /// confirmed URL dialog.
@@ -306,6 +309,7 @@ pub fn show(
     current_version: &str,
     secrets: &Arc<dyn SecretStore>,
     folder_watch_pill: Option<&FolderWatchPillState>,
+    model_root: &std::path::Path,
 ) -> ShowResult {
     handle_global_shortcuts(ui, actions, shortcuts, state, yt_dlp_available);
 
@@ -322,17 +326,26 @@ pub fn show(
             show_banner(ui, &mut state.banner);
         });
     }
+    if state.buzz_import.is_some() {
+        egui::Panel::top("humm-buzz-import-banner").show(ui, |ui| {
+            show_buzz_import_banner(ui, &mut state.buzz_import);
+        });
+    }
 
     let modal_open = state.modal_open();
     egui::CentralPanel::default().show(ui, |ui| {
         if vm.sorted_rows().is_empty() {
-            show_hero(ui, state);
+            show_hero(ui, state, shortcuts);
         } else {
             task_table::ui(ui, vm, layout, actions, modal_open);
         }
     });
 
-    let clear_confirmed = show_clear_confirm(ui.ctx(), &mut state.clear_confirm_open);
+    let clear_shortcut = ui
+        .ctx()
+        .format_shortcut(&shortcuts.get(ShortcutAction::ClearHistory));
+    let clear_confirmed =
+        show_clear_confirm(ui.ctx(), &mut state.clear_confirm_open, &clear_shortcut);
     let dialog_outcome = rename_notes::ui(ui.ctx(), &mut state.dialog);
     let toast_actions = toasts::ui(ui.ctx(), &mut state.toasts, vm, now);
     let sheet_outcome = options_sheet::ui(
@@ -342,6 +355,7 @@ pub fn show(
         include_lumii,
         demucs_available,
         secrets,
+        model_root,
     );
     let url_dialog_result = url_dialog::ui(ui.ctx(), &mut state.url_dialog);
     update_notice::dialog_ui(ui.ctx(), &mut state.update_notice, current_version);
@@ -591,6 +605,22 @@ fn show_folder_watch_pill(ui: &mut egui::Ui, pill: &FolderWatchPillState) -> boo
     ui.button(icon).on_hover_text(tr(tooltip_key)).clicked()
 }
 
+/// The Buzz-import banner. Dismiss hides it for this session only.
+fn show_buzz_import_banner(
+    ui: &mut egui::Ui,
+    notice: &mut Option<crate::services::BuzzImportNotice>,
+) {
+    let Some(current) = notice.clone() else {
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.label(current.message());
+        if ui.button("\u{00d7}").clicked() {
+            *notice = None;
+        }
+    });
+}
+
 /// The persistent store-health banner: base message plus a dismiss button.
 fn show_banner(ui: &mut egui::Ui, banner: &mut StoreHealthBanner) {
     let Some(message) = banner.message() else {
@@ -608,14 +638,15 @@ fn show_banner(ui: &mut egui::Ui, banner: &mut StoreHealthBanner) {
 /// Cancel buttons — `on_clear_history_action_triggered`,
 /// `main_window.py:232-255`). Returns whether Ok was clicked this frame;
 /// Cancel/Escape/backdrop-click just close it.
-fn show_clear_confirm(ctx: &egui::Context, open: &mut bool) -> bool {
+fn show_clear_confirm(ctx: &egui::Context, open: &mut bool, shortcut: &str) -> bool {
     if !*open {
         return false;
     }
     let mut confirmed = false;
     let mut close = false;
+    let title = format!("{} ({shortcut})", tr("clear-confirm-title"));
     let modal = egui::Modal::new(egui::Id::new("humm-clear-confirm")).show(ctx, |ui| {
-        ui.heading(tr("clear-confirm-title"));
+        ui.heading(title);
         ui.label(tr("clear-confirm-body"));
         ui.horizontal(|ui| {
             if ui.button(tr("clear-confirm-ok")).clicked() {
@@ -633,14 +664,24 @@ fn show_clear_confirm(ctx: &egui::Context, open: &mut bool) -> bool {
     confirmed
 }
 
+/// Empty-state sentence. `%shortcut` is replaced with the same formatted
+/// shortcut the File menu shows for Import File, so Linux/Windows do not
+/// advertise ⌘O.
+pub fn hero_drop_text(shortcut: &str) -> String {
+    tr("hero-drop").replace("%shortcut", shortcut)
+}
+
 /// The empty-state hero: a centered invitation to import media, plus an
 /// explicit button (design spec §3.4). The button now sets the same
 /// `pending_import` field the toolbar's "New File Transcription" does —
 /// Task 9's dialog wiring is the actual consumer either way.
-fn show_hero(ui: &mut egui::Ui, state: &mut ActionState) {
+fn show_hero(ui: &mut egui::Ui, state: &mut ActionState, shortcuts: &ShortcutMap) {
+    let shortcut = ui
+        .ctx()
+        .format_shortcut(&shortcuts.get(ShortcutAction::OpenImportWindow));
     ui.vertical_centered(|ui| {
         ui.add_space(ui.available_height() / 3.0);
-        ui.heading(tr("hero-drop"));
+        ui.heading(hero_drop_text(&shortcut));
         ui.add_space(12.0);
         if ui.button(tr("hero-import-button")).clicked() {
             state.pending_import = PendingImportRequest::File;
@@ -654,6 +695,13 @@ mod tests {
     use humm_core::domain::TranscriptionId;
 
     // -- toolbar_enablement -----------------------------------------------
+
+    #[test]
+    fn hero_drop_text_uses_the_shortcut_it_is_given() {
+        let _guard = crate::i18n::lock_locale_for_test();
+        assert_eq!(hero_drop_text("⌘O"), "Drop media here, or ⌘O");
+        assert_eq!(hero_drop_text("Ctrl+O"), "Drop media here, or Ctrl+O");
+    }
 
     #[test]
     fn empty_selection_disables_both_actions() {

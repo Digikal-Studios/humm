@@ -125,9 +125,11 @@ fn persist_postproc(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     f(&mut guard.postproc);
-    if let Err(err) = guard.save(settings_path) {
-        log::warn!("could not persist the post-processing settings: {err}");
-    }
+    super::prefs_feedback::record_save(
+        guard.save(settings_path),
+        true,
+        "could not persist the post-processing settings",
+    );
 }
 
 fn folder_buffer(path: &Option<PathBuf>) -> String {
@@ -737,6 +739,7 @@ pub fn ui(
                 state.noise_reduction_enabled = enabled;
                 commit_noise_reduction_enabled(state, settings, settings_path);
             }
+            ui.label(tr("prefs-postproc-dfn-runs-before"));
             ui.add_enabled_ui(state.noise_reduction_enabled, |ui| {
                 let mut keep_denoised_file = state.keep_denoised_file;
                 if ui
@@ -746,6 +749,7 @@ pub fn ui(
                     state.keep_denoised_file = keep_denoised_file;
                     commit_keep_denoised_file(state, settings, settings_path);
                 }
+                ui.label(tr("prefs-postproc-dfn-keep-name"));
             });
         });
 

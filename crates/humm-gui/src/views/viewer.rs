@@ -443,6 +443,10 @@ fn show_translate_modals(
 /// `saved_flash` + `Instant::elapsed`, with `request_repaint_after` so it clears
 /// without further input (design spec §2.2 / UX_SPEC J-6).
 fn show_autosave_indicator(ui: &mut egui::Ui, vm: &mut ViewerVm) {
+    if let Some(text) = vm.timestamp_notice_text() {
+        ui.separator();
+        ui.label(egui::RichText::new(text).weak());
+    }
     let Some(flashed_at) = vm.saved_flash else {
         return;
     };
@@ -452,7 +456,7 @@ fn show_autosave_indicator(ui: &mut egui::Ui, vm: &mut ViewerVm) {
         return;
     }
     ui.separator();
-    ui.label(egui::RichText::new(tr("viewer-saved")).weak());
+    ui.label(egui::RichText::new(vm.saved_flash_text()).weak());
     ui.ctx()
         .request_repaint_after(SAVED_FLASH_DURATION - elapsed);
 }
@@ -678,12 +682,8 @@ fn show_player_row(ui: &mut egui::Ui, vm: &mut ViewerVm) {
         }
         PlayerState::Failed(reason) => {
             ui.horizontal(|ui| {
-                ui.add_enabled(false, egui::Button::new("\u{25b6}"))
-                    .on_disabled_hover_text(format!("{}: {reason}", tr("viewer-player-failed")));
-                ui.add_enabled(
-                    false,
-                    egui::Label::new(egui::RichText::new(tr("viewer-player-failed")).weak()),
-                );
+                ui.add_enabled(false, egui::Button::new("\u{25b6}"));
+                ui.label(format!("{}: {reason}", tr("viewer-player-failed")));
             });
         }
         PlayerState::Ready(player) => {

@@ -106,7 +106,7 @@ locale-name-zh-tw = 中国語（繁体字）
 
 ## Empty-state hero (views/main_window.rs)
 
-hero-drop = ここにメディアをドロップ、または ⌘O
+hero-drop = ここにメディアをドロップ、または %shortcut
 hero-import-button = ファイルをインポート…
 
 ## Task table (views/task_table.rs, F-003) — column headers
@@ -138,6 +138,44 @@ task-translate = 英語に翻訳
 
 status-isolating-speech = 音声を分離中
 
+## Status words and notices added with the UX review fixes.
+status-queued = 待機中
+status-canceled = キャンセル
+status-skipped = スキップ
+status-completed = 完了
+status-failed = 失敗
+status-in-progress = 処理中
+status-eta = 残り
+status-downloading-model = モデルをダウンロード中
+status-downloading-media = メディアをダウンロード中
+status-reducing-noise = ノイズを低減中
+table-menu-show-error = エラーを表示
+toast-written-to = 保存先
+toast-postproc-written = 追加ファイルを保存しました
+toast-postproc-errors = 後処理でエラーが報告されました。文字起こし自体は完了しています。
+toast-reduction-skipped = ノイズ低減は実行されませんでした。文字起こしは続行しました。
+options-word-timestamps-tooltip = サイズ変更は、文字起こし時に単語単位のタイミングがオフだった場合にのみ後で使えます。結合は、オンだった場合にのみ後で使えます。
+options-model-will-download = 実行すると、まずこのモデルをダウンロードします。ウィンドウはそのまま使えます。
+prefs-postproc-dfn-runs-before = DeepFilterNet は文字起こしの前に実行され、モデルが聞く音声を置き換えます。
+prefs-postproc-dfn-keep-name = ノイズ除去ファイルを保持すると、ソースの隣に <name>_DeepFilterNet3.wav が残ります。
+prefs-general-export-template-tokens-intro = 中括弧の中の空白は各トークンの一部です。
+prefs-general-export-template-model-type = model_type は常に Whisper.cpp です。
+prefs-general-cookie-label = Cookie ファイル
+prefs-general-cookie-browse = 参照…
+prefs-general-cookie-caption = HUMM_DOWNLOAD_COOKIEFILE が設定されているとその値が優先されます。空にするとクリアされます。
+prefs-saved = 保存しました
+prefs-save-failed = 設定を保存できませんでした:
+viewer-saved-neighbor = 隣のキューを調整しました
+viewer-timestamp-unparsed = 前の時刻をそのままにしました。時刻として読めませんでした。
+viewer-timestamp-range = 前の時刻をそのままにしました。開始は終了より前である必要があります。
+speaker-id-save-copies = 保存すると、この文字起こしを新しい完了行にコピーします。元の行はそのままです。
+speaker-id-merge-tooltip = 同じ話者の連続した行が結合されます。
+speaker-id-takes-minutes = 数分かかることがあります。キャンセルするとこの実行は破棄されます。
+already-running = humm はすでに実行中です。
+already-running-with-files = humm はすでに実行中です。この起動に渡されたファイルは開かれていません。すでに開いているウィンドウの読み込みから追加してください。
+banner-buzz-imported = Buzz から %n 件の文字起こしを読み込みました。
+banner-buzz-import-failed = Buzz から文字起こしを読み込めませんでした。humm は次回の起動時に再試行します。
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = 録音する
@@ -157,7 +195,7 @@ menu-file-import-folder = フォルダをインポートする…
 menu-help-title = ヘルプ
 menu-help-about = humm について
 menu-help-docs = ヘルプ
-menu-help-docs-tooltip = ドキュメントは最初のリリースで提供されます
+menu-help-docs-tooltip = アプリ内のヘルプページはありません。
 menu-help-preferences = 設定…
 
 ## Clear-History confirm modal (views/main_window.rs, F-026)
@@ -414,7 +452,7 @@ prefs-fw-disposition-note = 文字起こしが完了すると、元のファイ�
 ## copy). `prefs-fw-browse`/`dialog-ok` above are reused for this tab's own
 ## Browse buttons and key-commit-failure modal.
 
-prefs-postproc-header = これらのフックは各文字起こしが完了すると自動的に実行されます。フックが失敗してもログに記録されるだけで、文字起こし自体が失敗することはありません。
+prefs-postproc-header = スキップ、ノイズ低減、言語検出は文字起こしの前に実行されます。サイズ変更、要約、DOCX 書き出しはその後です。失敗は記録されますが、文字起こし自体は失敗しません。
 prefs-postproc-skip-title = 転写済みをスキップ
 prefs-postproc-skip-enable = 「既に文字起こし済みならスキップ」を有効にする
 prefs-postproc-skip-check-files = 既存の結果ファイルを確認

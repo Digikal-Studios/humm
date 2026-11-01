@@ -101,7 +101,7 @@ locale-name-zh-tw = 中文（繁體）
 
 ## Empty-state hero (views/main_window.rs)
 
-hero-drop = 將媒體檔案拖放到此處，或按 ⌘O
+hero-drop = 將媒體檔案拖放到此處，或按 %shortcut
 hero-import-button = 匯入檔案…
 
 ## Task table (views/task_table.rs, F-003) — column headers
@@ -133,6 +133,44 @@ task-translate = 翻譯為英語
 
 status-isolating-speech = 正在分離人聲
 
+## Status words and notices added with the UX review fixes.
+status-queued = 排隊中
+status-canceled = 已取消
+status-skipped = 已略過
+status-completed = 已完成
+status-failed = 失敗
+status-in-progress = 進行中
+status-eta = 預計
+status-downloading-model = 正在下載模型
+status-downloading-media = 正在下載媒體
+status-reducing-noise = 正在降噪
+table-menu-show-error = 顯示錯誤
+toast-written-to = 已寫入
+toast-postproc-written = 已寫入附加檔案
+toast-postproc-errors = 一個後處理步驟回報了錯誤。轉錄本身仍然已完成。
+toast-reduction-skipped = 降噪沒有執行；轉錄已繼續。
+options-word-timestamps-tooltip = 僅當轉錄時關閉了字級時間戳，之後才能調整大小。僅當轉錄時開啟了字級時間戳，之後才能合併。
+options-model-will-download = 執行會先下載此模型。視窗仍可使用。
+prefs-postproc-dfn-runs-before = DeepFilterNet 在轉錄之前執行，並替換模型聽到的音訊。
+prefs-postproc-dfn-keep-name = 保留降噪檔案會在來源旁留下名為 <name>_DeepFilterNet3.wav 的檔案。
+prefs-general-export-template-tokens-intro = 大括號內的空格是每個代號的一部分。
+prefs-general-export-template-model-type = model_type 始終是 Whisper.cpp。
+prefs-general-cookie-label = Cookie 檔案
+prefs-general-cookie-browse = 瀏覽…
+prefs-general-cookie-caption = 若設定了 HUMM_DOWNLOAD_COOKIEFILE，則它優先於這個欄位。將欄位留空即可清除。
+prefs-saved = 已儲存
+prefs-save-failed = 無法儲存偏好設定：
+viewer-saved-neighbor = 已調整相鄰字幕
+viewer-timestamp-unparsed = 已保留先前的時間。這不是一個時間。
+viewer-timestamp-range = 已保留先前的時間。開始時間必須早於結束時間。
+speaker-id-save-copies = 儲存會把這份轉錄複製成一筆新的已完成列。原始內容維持不變。
+speaker-id-merge-tooltip = 同一說話者的連續行會被合併。
+speaker-id-takes-minutes = 這可能需要數分鐘。取消會捨棄這次執行。
+already-running = humm 已在執行。
+already-running-with-files = humm 已在執行。傳給這次啟動的檔案沒有開啟。請從已經開啟的視窗中的匯入動作加入它們。
+banner-buzz-imported = 已從 Buzz 匯入 %n 筆轉錄。
+banner-buzz-import-failed = 無法從 Buzz 匯入轉錄。humm 會在下次啟動時重試。
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = 錄製
@@ -152,7 +190,7 @@ menu-file-import-folder = 導入資料夾…
 menu-help-title = 幫助
 menu-help-about = 關於 humm
 menu-help-docs = 幫助
-menu-help-docs-tooltip = 文件將隨第一個正式版本推出
+menu-help-docs-tooltip = 應用程式內沒有說明頁面。
 menu-help-preferences = 偏好設定…
 
 ## Clear-History confirm modal (views/main_window.rs, F-026)
@@ -409,7 +447,7 @@ prefs-fw-disposition-note = 轉錄完成後，來源檔案會移動到輸出資�
 ## copy). `prefs-fw-browse`/`dialog-ok` above are reused for this tab's own
 ## Browse buttons and key-commit-failure modal.
 
-prefs-postproc-header = 這些掛勾會在每次轉錄完成後自動執行。掛勾失敗會被記錄，但絕不會導致轉錄本身失敗。
+prefs-postproc-header = 略過、降噪和語言偵測在轉錄之前執行。調整大小、摘要和 DOCX 匯出在之後執行。處理失敗會被記錄，但不會導致轉錄本身失敗。
 prefs-postproc-skip-title = 跳過已轉錄檔案
 prefs-postproc-skip-enable = 啟用跳過已轉錄檔案
 prefs-postproc-skip-check-files = 檢查現有結果檔案

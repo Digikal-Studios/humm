@@ -289,10 +289,21 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "table-menu-restart",
         "table-menu-rename",
         "table-menu-notes",
+        "table-menu-show-error",
         "task-transcribe",
         "task-translate",
         // Task table — status-column phase text (format.rs, F-027, M8)
         "status-isolating-speech",
+        "status-queued",
+        "status-canceled",
+        "status-skipped",
+        "status-completed",
+        "status-failed",
+        "status-in-progress",
+        "status-eta",
+        "status-downloading-model",
+        "status-downloading-media",
+        "status-reducing-noise",
         // Toolbar (F-004, Task 8; Record unlocked F-004/F-060, Task 10)
         "toolbar-record",
         "toolbar-new-file",
@@ -329,6 +340,10 @@ pub fn all_keys_used() -> &'static [&'static str] {
         // Toasts (F-026, Task 8)
         "toast-completed",
         "toast-completed-suffix",
+        "toast-written-to",
+        "toast-postproc-written",
+        "toast-postproc-errors",
+        "toast-reduction-skipped",
         "toast-canceled",
         "toast-detail-title",
         "toast-detail-open-log",
@@ -337,6 +352,10 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "retry-error-unavailable",
         // Store-health banner (F-004, Task 8)
         "banner-store-health",
+        "banner-buzz-imported",
+        "banner-buzz-import-failed",
+        "already-running",
+        "already-running-with-files",
         // Drag-and-drop overlay (F-021, Task 9)
         "drop-overlay-text",
         // URL-import capability gating (F-022, Task 9)
@@ -354,6 +373,8 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "options-language-label",
         "language-detect",
         "options-word-timestamps",
+        "options-word-timestamps-tooltip",
+        "options-model-will-download",
         "options-extract-speech",
         "options-extract-speech-missing-tooltip",
         "options-export-label",
@@ -427,6 +448,13 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "prefs-general-model-label",
         "prefs-general-model-placeholder",
         "prefs-general-export-template-label",
+        "prefs-general-export-template-tokens-intro",
+        "prefs-general-export-template-model-type",
+        "prefs-general-cookie-label",
+        "prefs-general-cookie-browse",
+        "prefs-general-cookie-caption",
+        "prefs-saved",
+        "prefs-save-failed",
         "prefs-general-force-cpu-row-label",
         "prefs-general-force-cpu-label",
         "prefs-general-force-cpu-tooltip",
@@ -497,6 +525,8 @@ pub fn all_keys_used() -> &'static [&'static str] {
         // Preferences Post-processing tab (views/prefs_postproc.rs, ADR-010,
         // design spec §8.5, Task 16)
         "prefs-postproc-header",
+        "prefs-postproc-dfn-runs-before",
+        "prefs-postproc-dfn-keep-name",
         "prefs-postproc-skip-title",
         "prefs-postproc-skip-enable",
         "prefs-postproc-skip-check-files",
@@ -558,6 +588,9 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "viewer-col-text",
         "viewer-col-translation",
         "viewer-saved",
+        "viewer-saved-neighbor",
+        "viewer-timestamp-unparsed",
+        "viewer-timestamp-range",
         "viewer-unsaved-warning",
         // Synced playback: player row + controls bar (F-083, views/viewer.rs,
         // views/playback_controls.rs)
@@ -616,6 +649,9 @@ pub fn all_keys_used() -> &'static [&'static str] {
         "speaker-id-play-sample",
         "speaker-id-merge-checkbox",
         "speaker-id-save-button",
+        "speaker-id-save-copies",
+        "speaker-id-merge-tooltip",
+        "speaker-id-takes-minutes",
         "speaker-id-save-error",
         // Live-recording window (views/recording.rs, views/audio_meter.rs, F-060)
         "recording-window-title",
@@ -1184,7 +1220,7 @@ mod tests {
     #[test]
     fn hero_drop_matches_the_buzz_notes_wording() {
         let _guard = lock_locale_for_test();
-        assert_eq!(tr("hero-drop"), "Drop media here, or ⌘O");
+        assert_eq!(tr("hero-drop"), "Drop media here, or %shortcut");
     }
 
     #[test]
@@ -1545,7 +1581,7 @@ mod tests {
         // itself, after a `set_locale` call made on another thread entirely.
         // That is the deferred-viewport render-thread contract proven on
         // content, not just on the generation counter.
-        assert_eq!(after_text, "Medien hier ablegen oder ⌘O");
+        assert_eq!(after_text, "Medien hier ablegen oder %shortcut");
     }
 
     // -- registry order (F-008b, M8 Task 13 review fix) --------------------------

@@ -478,6 +478,7 @@ fn font_size_persists_and_clamps() {
             &fixture.settings,
             &fixture.settings_path,
             &ctx,
+            true,
         );
     }
 
@@ -499,6 +500,7 @@ fn font_size_persists_and_clamps() {
             &fixture.settings,
             &fixture.settings_path,
             &ctx,
+            true,
         );
     }
     let reloaded = Settings::load(&settings_path).expect("settings file was written");

@@ -91,7 +91,7 @@ locale-name-zh-tw = Cinese (tradizionale)
 
 ## Empty-state hero (views/main_window.rs)
 
-hero-drop = Trascina qui i file multimediali, oppure ⌘O
+hero-drop = Trascina qui i file multimediali, oppure %shortcut
 hero-import-button = Importa file…
 
 ## Task table (views/task_table.rs, F-003) — column headers
@@ -123,6 +123,44 @@ task-translate = Traduci in inglese
 
 status-isolating-speech = isolamento del parlato
 
+## Status words and notices added with the UX review fixes.
+status-queued = In coda
+status-canceled = Annullato
+status-skipped = Saltato
+status-completed = Completato
+status-failed = Non riuscito
+status-in-progress = In corso
+status-eta = ETA
+status-downloading-model = Download del modello
+status-downloading-media = Download del media
+status-reducing-noise = riduzione del rumore
+table-menu-show-error = Mostra errore
+toast-written-to = Scritto in
+toast-postproc-written = File aggiuntivi scritti
+toast-postproc-errors = Un passaggio di post-elaborazione ha segnalato un errore. La trascrizione è comunque completata.
+toast-reduction-skipped = La riduzione del rumore non è stata eseguita; la trascrizione è continuata.
+options-word-timestamps-tooltip = Ridimensiona è disponibile dopo solo se i tempi a livello di parola erano disattivati durante la trascrizione. Unisci è disponibile dopo solo se erano attivati.
+options-model-will-download = Esegui scarica prima questo modello. La finestra resta utilizzabile.
+prefs-postproc-dfn-runs-before = DeepFilterNet viene eseguito prima della trascrizione e sostituisce l'audio che il modello sente.
+prefs-postproc-dfn-keep-name = Mantieni il file denoisato lascia un file chiamato <name>_DeepFilterNet3.wav accanto alla sorgente.
+prefs-general-export-template-tokens-intro = Gli spazi dentro le parentesi graffe fanno parte di ogni token.
+prefs-general-export-template-model-type = model_type è sempre Whisper.cpp.
+prefs-general-cookie-label = File dei cookie
+prefs-general-cookie-browse = Sfoglia…
+prefs-general-cookie-caption = HUMM_DOWNLOAD_COOKIEFILE ha la precedenza su questo campo quando è impostata. Lascia il campo vuoto per cancellarlo.
+prefs-saved = Salvato
+prefs-save-failed = Impossibile salvare le preferenze:
+viewer-saved-neighbor = un cue adiacente è stato regolato
+viewer-timestamp-unparsed = È stato tenuto il tempo precedente. Quello non era un tempo.
+viewer-timestamp-range = È stato tenuto il tempo precedente. L'inizio deve precedere la fine.
+speaker-id-save-copies = Salva copia questa trascrizione in una nuova riga completata. L'originale resta com'è.
+speaker-id-merge-tooltip = Le righe consecutive dello stesso parlante vengono unite.
+speaker-id-takes-minutes = Può richiedere diversi minuti. Annulla scarta l'esecuzione.
+already-running = humm è già in esecuzione.
+already-running-with-files = humm è già in esecuzione. I file passati a questo avvio non sono stati aperti. Importali dalla finestra già aperta.
+banner-buzz-imported = Importate %n trascrizioni da Buzz.
+banner-buzz-import-failed = Impossibile importare le trascrizioni da Buzz. humm riproverà al prossimo avvio.
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = Registra
@@ -142,7 +180,7 @@ menu-file-import-folder = Importa cartella…
 menu-help-title = Aiuto
 menu-help-about = Informazioni su humm
 menu-help-docs = Aiuto
-menu-help-docs-tooltip = La documentazione arriverà con la prima versione
+menu-help-docs-tooltip = Non c'è una pagina di aiuto nell'applicazione.
 menu-help-preferences = Preferenze…
 
 ## Clear-History confirm modal (views/main_window.rs, F-026)
@@ -399,7 +437,7 @@ prefs-fw-disposition-note = Una volta trascritto, il file di origine viene spost
 ## copy). `prefs-fw-browse`/`dialog-ok` above are reused for this tab's own
 ## Browse buttons and key-commit-failure modal.
 
-prefs-postproc-header = Questi hook vengono eseguiti automaticamente al termine di ogni trascrizione. Un errore dell'hook viene registrato nel log, ma non fa mai fallire la trascrizione stessa.
+prefs-postproc-header = Salta, la riduzione del rumore e il rilevamento della lingua vengono eseguiti prima della trascrizione. Il ridimensionamento, il riassunto e l'esportazione DOCX vengono eseguiti dopo. Un errore viene registrato e non fa mai fallire la trascrizione.
 prefs-postproc-skip-title = Salta i già trascritti
 prefs-postproc-skip-enable = Abilita Salta i già trascritti
 prefs-postproc-skip-check-files = Cerca file di risultato esistenti

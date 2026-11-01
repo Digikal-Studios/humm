@@ -643,14 +643,13 @@ fn player_failed_state_disables_controls_with_tooltip() {
     let mut harness = build_harness(fixture);
     harness.run();
 
-    // The disabled play button carries the cause in its disabled-hover tooltip.
     let play = harness.get_by_label("\u{25b6}");
     assert!(
         play.accesskit_node().is_disabled(),
         "the play control must be disabled when playback failed"
     );
-    // And the "Playback unavailable" label renders (only in the Failed arm).
-    harness.get_by_label_contains("Playback unavailable");
+    // The cause is text next to the disabled control, not only a hover.
+    harness.get_by_label_contains("Playback unavailable: file not found");
 }
 
 /// The controls bar is hidden by default and auto-shows the frame playback

@@ -82,7 +82,7 @@ locale-name-zh-tw = Китайский (традиционный)
 
 ## Empty-state hero (views/main_window.rs)
 
-hero-drop = Перетащите медиафайл сюда или нажмите ⌘O
+hero-drop = Перетащите медиафайл сюда или нажмите %shortcut
 hero-import-button = Импортировать файлы…
 
 ## Task table (views/task_table.rs, F-003) — column headers
@@ -114,6 +114,44 @@ task-translate = Перевести на английский
 
 status-isolating-speech = выделение речи
 
+## Status words and notices added with the UX review fixes.
+status-queued = В очереди
+status-canceled = Отменено
+status-skipped = Пропущено
+status-completed = Завершено
+status-failed = Ошибка
+status-in-progress = Выполняется
+status-eta = осталось
+status-downloading-model = Загрузка модели
+status-downloading-media = Загрузка медиа
+status-reducing-noise = уменьшение шума
+table-menu-show-error = Показать ошибку
+toast-written-to = Записано в
+toast-postproc-written = Записаны дополнительные файлы
+toast-postproc-errors = Шаг постобработки сообщил об ошибке. Транскрипция всё равно завершена.
+toast-reduction-skipped = Шумоподавление не выполнялось; транскрипция продолжилась.
+options-word-timestamps-tooltip = Изменение размера доступно позже, только если покадровые времена слов были выключены при транскрипции. Объединение — только если они были включены.
+options-model-will-download = Запуск сначала скачает эту модель. Окно остаётся доступным.
+prefs-postproc-dfn-runs-before = DeepFilterNet выполняется до транскрипции и заменяет аудио, которое слышит модель.
+prefs-postproc-dfn-keep-name = Сохранение файла без шума оставляет файл <name>_DeepFilterNet3.wav рядом с источником.
+prefs-general-export-template-tokens-intro = Пробелы внутри скобок являются частью каждого токена.
+prefs-general-export-template-model-type = model_type всегда равен Whisper.cpp.
+prefs-general-cookie-label = Файл cookie
+prefs-general-cookie-browse = Обзор…
+prefs-general-cookie-caption = HUMM_DOWNLOAD_COOKIEFILE имеет приоритет, если задана. Пустое поле очищает значение.
+prefs-saved = Сохранено
+prefs-save-failed = Не удалось сохранить настройки:
+viewer-saved-neighbor = соседняя метка была поправлена
+viewer-timestamp-unparsed = Предыдущее время сохранено. Это было не время.
+viewer-timestamp-range = Предыдущее время сохранено. Начало должно быть раньше конца.
+speaker-id-save-copies = Сохранить копирует эту транскрипцию в новую завершённую строку. Оригинал остаётся как есть.
+speaker-id-merge-tooltip = Подряд идущие строки одного говорящего объединяются.
+speaker-id-takes-minutes = Это может занять несколько минут. Отмена отбрасывает запуск.
+already-running = humm уже запущен.
+already-running-with-files = humm уже запущен. Файлы, переданные этому запуску, не открыты. Импортируйте их из уже открытого окна.
+banner-buzz-imported = Импортировано транскрипций из Buzz: %n.
+banner-buzz-import-failed = Не удалось импортировать транскрипции из Buzz. humm повторит попытку при следующем запуске.
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = Записать
@@ -133,7 +171,7 @@ menu-file-import-folder = Импортировать папку…
 menu-help-title = Справка
 menu-help-about = О humm
 menu-help-docs = Справка
-menu-help-docs-tooltip = Документация появится с первым релизом
+menu-help-docs-tooltip = В приложении нет страницы справки.
 menu-help-preferences = Настройки…
 
 ## Clear-History confirm modal (views/main_window.rs, F-026)
@@ -390,7 +428,7 @@ prefs-fw-disposition-note = После транскрипции исходный
 ## copy). `prefs-fw-browse`/`dialog-ok` above are reused for this tab's own
 ## Browse buttons and key-commit-failure modal.
 
-prefs-postproc-header = Эти хуки запускаются автоматически после завершения каждой транскрипции. Ошибка хука записывается в журнал, но никогда не приводит к сбою самой транскрипции.
+prefs-postproc-header = Пропуск, шумоподавление и определение языка выполняются до транскрипции. Изменение размера, сводка и экспорт DOCX — после. Ошибка записывается в журнал и никогда не приводит к сбою транскрипции.
 prefs-postproc-skip-title = Пропустить уже транскрибированные
 prefs-postproc-skip-enable = Включить пропуск уже транскрибированных
 prefs-postproc-skip-check-files = Проверить наличие файлов результатов

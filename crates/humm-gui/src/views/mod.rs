@@ -98,6 +98,7 @@ pub mod main_window;
 pub mod options_sheet;
 pub mod playback_controls;
 pub mod preferences;
+pub mod prefs_feedback;
 pub mod prefs_folder_watch;
 pub mod prefs_general;
 pub mod prefs_postproc;

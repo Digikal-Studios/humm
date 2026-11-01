@@ -41,6 +41,7 @@
 //! whatever's in the field, seed or not (design spec §7.2 ledger #10).
 
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -49,6 +50,7 @@ use humm_core::domain::{
     OutputFormat, OutputSpec, Source, TaskKind, TaskSpec, TranscriptionId, TranscriptionOptions,
 };
 use humm_core::language::Language;
+use humm_core::models::registry::local_model_path;
 use humm_core::secrets::{SecretKey, SecretStore};
 use humm_core::settings::FileTranscriberSettings;
 use humm_core::viewer::text_view::paragraph_split_from_env;
@@ -759,7 +761,35 @@ fn summary_text(state: &SheetState) -> String {
             .collect::<Vec<_>>()
             .join("+")
     };
-    format!("Whisper \u{b7} {model_part} \u{b7} {language_part} \u{b7} {formats_part}")
+    let backend_part = match state.backend {
+        Backend::Whisper => tr("options-backend-whisper"),
+        Backend::OpenAiApi => tr("options-backend-openai-api"),
+    };
+    let mut parts = vec![backend_part];
+    if size_combo_visible(state.backend) || non_empty_trimmed(&state.hf_repo).is_some() {
+        parts.push(model_part);
+    }
+    parts.push(language_part);
+    parts.push(formats_part);
+    parts.join(" \u{b7} ")
+}
+
+/// One line under the model combo when Run will download that size first.
+/// Hidden for the API backend, a size that already has a complete sentinel,
+/// a custom model, and a Hugging Face repo — those must not be promised a
+/// ggml download that will not happen or will fail. File-sheet only: the
+/// shared size combo is also the live-recording combo, whose button is not Run.
+pub(crate) fn model_download_notice(state: &SheetState, model_root: &Path) -> Option<String> {
+    if !size_combo_visible(state.backend) || state.model_size == ModelSize::Custom {
+        return None;
+    }
+    if non_empty_trimmed(&state.hf_repo).is_some() {
+        return None;
+    }
+    if local_model_path(model_root, state.model_size).is_some() {
+        return None;
+    }
+    Some(tr("options-model-will-download"))
 }
 
 /// The model-size combo row, shared verbatim by the options sheet and the
@@ -962,18 +992,29 @@ pub(crate) fn render_api_key_row(
 /// sharing one `egui::Context`'s `Id` namespace, exactly the scenario
 /// `render_model_combo`'s own `id_salt` doc comment already calls out.
 ///
+/// Returns whether a model preset was clicked this frame (see
+/// [`render_llm_model_prompt_fields`]). The enable checkbox is a separate
+/// widget; callers that diff the sheet still see that change.
+///
 /// `pub(crate)`: promoted (Task 15) for that same reuse.
 pub(crate) fn render_llm_translation_block(
     ui: &mut egui::Ui,
     id_salt: &str,
     state: &mut SheetState,
-) {
+) -> bool {
     ui.label(egui::RichText::new(tr("options-llm-heading")).strong());
     ui.checkbox(&mut state.enable_llm_translation, tr("options-llm-enable"));
 
+    let mut preset_clicked = false;
     ui.add_enabled_ui(state.enable_llm_translation, |ui| {
-        render_llm_model_prompt_fields(ui, id_salt, &mut state.llm_model, &mut state.llm_prompt);
+        preset_clicked = render_llm_model_prompt_fields(
+            ui,
+            id_salt,
+            &mut state.llm_model,
+            &mut state.llm_prompt,
+        );
     });
+    preset_clicked
 }
 
 /// The AI-model field (free-text `TextEdit` plus a [`LLM_MODEL_PRESETS`]
@@ -984,12 +1025,17 @@ pub(crate) fn render_llm_translation_block(
 /// the combo/textarea code. `id_salt` keeps the two call sites' `ComboBox`
 /// ids distinct (the shared-widget convention [`render_model_combo`]/
 /// [`render_task_combo`]/[`render_language_combo`] already follow).
+///
+/// Returns whether a model preset was clicked this frame. Typing in either
+/// text field does not count: a preset click is a discrete commit, and the
+/// Folder Watch tab uses that to decide whether to flash "Saved".
 pub(crate) fn render_llm_model_prompt_fields(
     ui: &mut egui::Ui,
     id_salt: &str,
     model: &mut String,
     prompt: &mut String,
-) {
+) -> bool {
+    let mut preset_clicked = false;
     ui.horizontal(|ui| {
         ui.label(tr("options-llm-model-label"));
         ui.text_edit_singleline(model);
@@ -999,12 +1045,14 @@ pub(crate) fn render_llm_model_prompt_fields(
                 for preset in LLM_MODEL_PRESETS {
                     if ui.selectable_label(*model == preset, preset).clicked() {
                         *model = preset.to_string();
+                        preset_clicked = true;
                     }
                 }
             });
     });
     ui.label(tr("options-llm-prompt-label"));
     ui.text_edit_multiline(prompt);
+    preset_clicked
 }
 
 /// Renders the options sheet (a no-op returning `None` while `sheet` is
@@ -1038,6 +1086,7 @@ pub fn ui(
     include_lumii: bool,
     demucs_available: bool,
     secrets: &Arc<dyn SecretStore>,
+    model_root: &Path,
 ) -> Option<SheetOutcome> {
     let OptionsSheet {
         request,
@@ -1078,6 +1127,9 @@ pub fn ui(
                 custom_model_available,
                 include_lumii,
             );
+            if let Some(notice) = model_download_notice(state, model_root) {
+                ui.label(egui::RichText::new(notice).weak());
+            }
         }
         if api_key_row_visible(state.backend) {
             render_api_key_row(
@@ -1090,7 +1142,8 @@ pub fn ui(
         }
         render_task_combo(ui, "humm-options-task", &mut state.task);
         render_language_combo(ui, "humm-options-language", &mut state.language);
-        ui.checkbox(&mut state.word_timestamps, tr("options-word-timestamps"));
+        ui.checkbox(&mut state.word_timestamps, tr("options-word-timestamps"))
+            .on_hover_text(tr("options-word-timestamps-tooltip"));
 
         // F-027: disabled — with an actionable install-hint tooltip — only
         // when demucs itself is genuinely absent (Capabilities pattern,
@@ -1203,6 +1256,62 @@ mod tests {
             llm_prompt: String::new(),
             export_template: None,
         }
+    }
+
+    #[test]
+    fn summary_text_names_the_selected_backend() {
+        let _guard = crate::i18n::lock_locale_for_test();
+        let mut state = base_state();
+        state.formats.insert(OutputFormat::Srt);
+        let local = summary_text(&state);
+        assert!(
+            local.starts_with("Whisper \u{b7} Small"),
+            "local summary was {local:?}"
+        );
+        state.backend = Backend::OpenAiApi;
+        let api = summary_text(&state);
+        assert!(
+            api.starts_with("OpenAI Whisper API"),
+            "api summary was {api:?}"
+        );
+        assert!(
+            !api.contains("Small"),
+            "the hidden size combo must leave the summary: {api:?}"
+        );
+        state.hf_repo = "org/model".to_string();
+        let with_repo = summary_text(&state);
+        assert!(
+            with_repo.contains("org/model"),
+            "a set Hugging Face repo stays in the model slot: {with_repo:?}"
+        );
+    }
+
+    #[test]
+    fn model_download_notice_is_only_a_missing_local_ggml() {
+        let _guard = crate::i18n::lock_locale_for_test();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = base_state();
+        assert!(model_download_notice(&state, dir.path()).is_some());
+        state.backend = Backend::OpenAiApi;
+        assert!(model_download_notice(&state, dir.path()).is_none());
+        state.backend = Backend::Whisper;
+        state.model_size = ModelSize::Custom;
+        assert!(model_download_notice(&state, dir.path()).is_none());
+        state.model_size = ModelSize::Small;
+        state.hf_repo = "org/model".to_string();
+        assert!(model_download_notice(&state, dir.path()).is_none());
+        state.hf_repo.clear();
+        let ggml = humm_core::models::registry::ggml_file_name(ModelSize::Small);
+        std::fs::write(dir.path().join(&ggml), b"ggml").expect("ggml");
+        std::fs::write(
+            dir.path().join(format!(
+                "{ggml}{}",
+                humm_core::models::registry::SENTINEL_SUFFIX
+            )),
+            b"",
+        )
+        .expect("sentinel");
+        assert!(model_download_notice(&state, dir.path()).is_none());
     }
 
     // -- from_settings / defaults --------------------------------------------

@@ -80,7 +80,7 @@ locale-name-zh-tw = Chinês (Tradicional)
 
 ## Empty-state hero (views/main_window.rs)
 
-hero-drop = Solte a mídia aqui, ou ⌘O
+hero-drop = Solte a mídia aqui, ou %shortcut
 hero-import-button = Importar arquivos…
 
 ## Task table (views/task_table.rs, F-003) — column headers
@@ -112,6 +112,44 @@ task-translate = Traduzir para Inglês
 
 status-isolating-speech = isolando a voz
 
+## Status words and notices added with the UX review fixes.
+status-queued = Na fila
+status-canceled = Cancelado
+status-skipped = Ignorado
+status-completed = Concluído
+status-failed = Falhou
+status-in-progress = Em andamento
+status-eta = ETA
+status-downloading-model = Baixando modelo
+status-downloading-media = Baixando mídia
+status-reducing-noise = reduzindo ruído
+table-menu-show-error = Mostrar erro
+toast-written-to = Gravado em
+toast-postproc-written = Arquivos adicionais gravados
+toast-postproc-errors = Uma etapa de pós-processamento relatou um erro. A transcrição continua concluída.
+toast-reduction-skipped = A redução de ruído não foi executada; a transcrição continuou.
+options-word-timestamps-tooltip = Redimensionar fica disponível depois somente se os tempos por palavra estavam desligados durante a transcrição. Mesclar fica disponível depois somente se estavam ligados.
+options-model-will-download = Executar baixa este modelo primeiro. A janela continua utilizável.
+prefs-postproc-dfn-runs-before = O DeepFilterNet roda antes da transcrição e substitui o áudio que o modelo ouve.
+prefs-postproc-dfn-keep-name = Manter o arquivo sem ruído deixa um arquivo chamado <name>_DeepFilterNet3.wav ao lado da fonte.
+prefs-general-export-template-tokens-intro = Os espaços dentro das chaves fazem parte de cada token.
+prefs-general-export-template-model-type = model_type é sempre Whisper.cpp.
+prefs-general-cookie-label = Arquivo de cookies
+prefs-general-cookie-browse = Procurar…
+prefs-general-cookie-caption = HUMM_DOWNLOAD_COOKIEFILE tem prioridade quando está definida. Deixe o campo vazio para limpá-lo.
+prefs-saved = Salvo
+prefs-save-failed = Não foi possível salvar as preferências:
+viewer-saved-neighbor = uma deixa vizinha foi ajustada
+viewer-timestamp-unparsed = O tempo anterior foi mantido. Aquilo não era um tempo.
+viewer-timestamp-range = O tempo anterior foi mantido. O início deve ser anterior ao fim.
+speaker-id-save-copies = Salvar copia esta transcrição para uma nova linha concluída. O original permanece como está.
+speaker-id-merge-tooltip = Linhas consecutivas do mesmo falante são unidas.
+speaker-id-takes-minutes = Isso pode levar vários minutos. Cancelar descarta a execução.
+already-running = o humm já está em execução.
+already-running-with-files = o humm já está em execução. Os arquivos passados a esta inicialização não foram abertos. Importe-os pela janela que já está aberta.
+banner-buzz-imported = %n transcrições importadas do Buzz.
+banner-buzz-import-failed = Não foi possível importar as transcrições do Buzz. O humm tentará de novo na próxima inicialização.
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = Gravar
@@ -131,7 +169,7 @@ menu-file-import-folder = Importar Pasta…
 menu-help-title = Ajuda
 menu-help-about = Sobre o humm
 menu-help-docs = Ajuda
-menu-help-docs-tooltip = A documentação chega com o primeiro lançamento
+menu-help-docs-tooltip = Não há uma página de ajuda no aplicativo.
 menu-help-preferences = Preferências…
 
 ## Clear-History confirm modal (views/main_window.rs, F-026)
@@ -388,7 +426,7 @@ prefs-fw-disposition-note = Uma vez transcrito, o arquivo de origem é movido pa
 ## copy). `prefs-fw-browse`/`dialog-ok` above are reused for this tab's own
 ## Browse buttons and key-commit-failure modal.
 
-prefs-postproc-header = Esses hooks são executados automaticamente após a conclusão de cada transcrição. Uma falha no hook é registrada, mas nunca faz a transcrição em si falhar.
+prefs-postproc-header = Ignorar, a redução de ruído e a detecção de idioma rodam antes da transcrição. O redimensionamento, o resumo e a exportação DOCX rodam depois. Uma falha é registrada e nunca faz a transcrição falhar.
 prefs-postproc-skip-title = Pular já transcritos
 prefs-postproc-skip-enable = Ativar Pular já transcritos
 prefs-postproc-skip-check-files = Verificar arquivos de resultado existentes

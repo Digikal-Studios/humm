@@ -133,6 +133,15 @@ pub trait FileDialogs: Send + Sync {
     /// `None` on cancel.
     fn pick_folder(&self, start_dir: Option<&Path>) -> Option<PathBuf>;
 
+    /// Opens a single-file dialog with no media filter (Preferences → General
+    /// cookie file). `None` on cancel. The default returns `None` so test
+    /// fakes that never browse a cookie file need not implement it;
+    /// [`RfdFileDialogs`] is the production override.
+    fn pick_file(&self, start_dir: Option<&Path>) -> Option<PathBuf> {
+        let _ = start_dir;
+        None
+    }
+
     /// Opens a native "save file" dialog (the transcript viewer's export
     /// menu, F-084 — Buzz `QFileDialog.getSaveFileName`,
     /// `export_transcription_menu.py:80-85`), titled `title`, starting at
@@ -172,6 +181,14 @@ impl FileDialogs for RfdFileDialogs {
             dialog = dialog.set_directory(dir);
         }
         dialog.pick_folder()
+    }
+
+    fn pick_file(&self, start_dir: Option<&Path>) -> Option<PathBuf> {
+        let mut dialog = rfd::FileDialog::new().add_filter("All files", &["*"]);
+        if let Some(dir) = start_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        dialog.pick_file()
     }
 
     fn save_file(

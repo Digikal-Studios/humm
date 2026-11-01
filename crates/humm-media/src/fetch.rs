@@ -30,12 +30,14 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use humm_core::boundary::{FetchProgress, FetchedMedia, MediaFetcher};
 use humm_core::cancel::CancelToken;
 use humm_core::error::MediaError;
+use humm_core::settings::Settings;
 
 use crate::{binary_from_env, map_spawn_error};
 
@@ -65,7 +67,13 @@ const STDERR_TAIL_CAP: usize = 2 * 1024;
 /// Downloads remote media via a `yt-dlp` subprocess (ADR-016).
 pub struct YtDlpFetcher {
     binary: PathBuf,
+    /// Snapshot taken by [`Self::new`] / [`Self::with_binary`]. Ignored when
+    /// [`Self::live_settings`] is set.
     cookie_file: Option<PathBuf>,
+    /// When set, each fetch reads `downloads.cookie_file` from this handle
+    /// (a Preferences edit is visible on the next URL) and a non-empty
+    /// `HUMM_DOWNLOAD_COOKIEFILE` wins over it.
+    live_settings: Option<Arc<Mutex<Settings>>>,
 }
 
 impl YtDlpFetcher {
@@ -83,7 +91,42 @@ impl YtDlpFetcher {
         YtDlpFetcher {
             binary: binary.into(),
             cookie_file,
+            live_settings: None,
         }
+    }
+
+    /// GUI constructor: the cookie path is read from `settings` on every
+    /// fetch, so a write-through Preferences edit is not stuck at the value
+    /// from process start. A non-empty `HUMM_DOWNLOAD_COOKIEFILE` wins.
+    pub fn with_live_settings(settings: Arc<Mutex<Settings>>) -> Self {
+        YtDlpFetcher {
+            binary: binary_from_env("HUMM_YTDLP", "yt-dlp"),
+            cookie_file: None,
+            live_settings: Some(settings),
+        }
+    }
+
+    fn cookie_arg(&self) -> Option<PathBuf> {
+        if let Some(settings) = &self.live_settings {
+            let env = std::env::var_os("HUMM_DOWNLOAD_COOKIEFILE").map(PathBuf::from);
+            let setting = settings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .downloads
+                .cookie_file
+                .clone();
+            return prefer_cookie(env, setting);
+        }
+        self.cookie_file.clone()
+    }
+}
+
+/// Env wins when it is set to a non-empty path. An empty env value does not
+/// hide the settings field. An empty settings path is "no cookie file".
+pub fn prefer_cookie(env: Option<PathBuf>, setting: Option<PathBuf>) -> Option<PathBuf> {
+    match env {
+        Some(path) if !path.as_os_str().is_empty() => Some(path),
+        _ => setting.filter(|path| !path.as_os_str().is_empty()),
     }
 }
 
@@ -116,7 +159,7 @@ impl MediaFetcher for YtDlpFetcher {
             .arg(&progress_template)
             .args(["--print", RESULT_TEMPLATE])
             .arg("--no-simulate");
-        if let Some(cookie_file) = &self.cookie_file {
+        if let Some(cookie_file) = self.cookie_arg() {
             command.arg("--cookies").arg(cookie_file);
         }
         // `prepare_command` spawns into a new process group on unix — see
@@ -437,6 +480,22 @@ exit 1
         let cookie = PathBuf::from("/home/user/cookies.txt");
         let fetcher = YtDlpFetcher::with_binary("yt-dlp", Some(cookie.clone()));
         assert_eq!(fetcher.cookie_file, Some(cookie));
+    }
+
+    #[test]
+    fn prefer_cookie_lets_a_non_empty_env_win_and_an_empty_setting_clear() {
+        let setting = Some(PathBuf::from("/settings/cookies.txt"));
+        assert_eq!(
+            prefer_cookie(Some(PathBuf::from("/env/cookies.txt")), setting.clone()),
+            Some(PathBuf::from("/env/cookies.txt"))
+        );
+        assert_eq!(prefer_cookie(None, setting.clone()), setting);
+        assert_eq!(
+            prefer_cookie(Some(PathBuf::new()), setting.clone()),
+            setting
+        );
+        assert_eq!(prefer_cookie(None, Some(PathBuf::new())), None);
+        assert_eq!(prefer_cookie(None, None), None);
     }
 
     #[test]

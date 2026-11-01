@@ -203,6 +203,56 @@ pub struct Services {
     /// `HummApp`'s `speaker_deps` (`app.rs`) alongside `viewer_deps`'s own
     /// decoder/audio-output `Arc`s.
     pub diarize: Arc<dyn DiarizeService>,
+    /// One-time Buzz history import notice for this launch. `None` when
+    /// there was nothing to import, the import was already done, or it
+    /// copied zero tasks. A failure does not set `buzz_import_done`; the
+    /// next launch tries again. Dismissing the banner does not count as
+    /// success.
+    pub buzz_import: Option<BuzzImportNotice>,
+}
+
+/// What the main window says about this launch's Buzz history import.
+/// Dismissing it is session-only and does not write `buzz_import_done`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuzzImportNotice {
+    /// A non-zero number of transcriptions were copied.
+    Imported {
+        /// Tasks newly copied this run.
+        tasks: usize,
+    },
+    /// The Buzz file was present and the import failed. The next launch
+    /// retries, because a failure does not set `buzz_import_done`.
+    Failed {
+        /// The store error, for the banner.
+        detail: String,
+    },
+}
+
+impl BuzzImportNotice {
+    /// Banner text. The count is spliced with `replace`, not a Fluent
+    /// placeable, so bidi isolates do not land in the sentence.
+    pub fn message(&self) -> String {
+        match self {
+            Self::Imported { tasks } => {
+                crate::i18n::tr("banner-buzz-imported").replace("%n", &tasks.to_string())
+            }
+            Self::Failed { detail } => {
+                format!("{} {detail}", crate::i18n::tr("banner-buzz-import-failed"))
+            }
+        }
+    }
+}
+
+/// Maps a successful import outcome to a banner. Zero tasks and a skipped
+/// (already-done) import stay quiet.
+pub fn buzz_import_notice(outcome: &humm_store::BuzzImportOutcome) -> Option<BuzzImportNotice> {
+    if outcome.skipped || outcome.tasks == 0 {
+        None
+    } else {
+        Some(BuzzImportNotice::Imported {
+            tasks: outcome.tasks,
+        })
+    }
 }
 
 impl Services {
@@ -305,7 +355,7 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
     let settings = Arc::new(Mutex::new(Settings::load(&settings_path)?));
 
     let store = Arc::new(SqliteStore::open(&paths::db_path())?);
-    import_buzz_history(&store);
+    let buzz_import = import_buzz_history(&store);
     apply_stale_flip(&store, sole_instance);
 
     let media_caps = probe_binaries();
@@ -327,12 +377,7 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
     // duplicate the adapter" pattern as `isolator` above.
     let reducer = Arc::new(DfNoiseReducer::new(Arc::clone(&decoder)));
     let prober = Arc::new(FfprobeProber::new());
-    let fetcher = {
-        let guard = settings
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        build_fetcher(&guard, &media_caps)
-    };
+    let fetcher = build_fetcher(&settings, &media_caps);
     let model_root = paths::model_root();
 
     let use_gpu = use_gpu_from_env(std::env::var("HUMM_FORCE_CPU").ok().as_deref());
@@ -457,6 +502,7 @@ pub fn init(sole_instance: bool) -> Result<Services, InitError> {
         translate: Arc::new(RealTranslateSpawner) as Arc<dyn TranslateSpawner>,
         validate: real_validate_fn(),
         diarize,
+        buzz_import,
     })
 }
 
@@ -769,34 +815,42 @@ pub fn init_with(deps: TestDeps) -> Services {
         translate: deps.translate,
         validate: deps.validate,
         diarize: default_test_diarize(),
+        buzz_import: None,
     }
 }
 
 /// Runs the one-time Buzz import when a Buzz database is present and the
-/// import hasn't already completed. Non-fatal by contract: failures are
-/// logged, never surfaced (same as `humm-cli`'s `import_buzz_history`). Must
-/// run *before* the stale-task flip so an imported stale row is flipped like
-/// any other.
-fn import_buzz_history(store: &SqliteStore) {
+/// import hasn't already completed. Non-fatal: a failure is logged and
+/// returned as a banner, and `buzz_import_done` stays unset so the next
+/// launch retries. A dismiss of that banner is not a successful import.
+/// Must run *before* the stale-task flip so an imported stale row is flipped
+/// like any other. Zero-task success and an already-done skip return `None`.
+fn import_buzz_history(store: &SqliteStore) -> Option<BuzzImportNotice> {
     match store.buzz_import_done() {
-        Ok(true) => return,
+        Ok(true) => return None,
         Ok(false) => {}
         Err(err) => {
             log::warn!("could not check Buzz-import state (skipping import): {err}");
-            return;
+            return None;
         }
     }
-    let Some(buzz_db) = paths::buzz_sqlite_path() else {
-        return;
-    };
+    let buzz_db = paths::buzz_sqlite_path()?;
     match store.import_buzz_db(&buzz_db) {
-        Ok(outcome) => log::info!(
-            "imported Buzz history from {}: {} task(s), {} segment(s)",
-            buzz_db.display(),
-            outcome.tasks,
-            outcome.segments
-        ),
-        Err(err) => log::warn!("Buzz import failed (continuing without it): {err}"),
+        Ok(outcome) => {
+            log::info!(
+                "imported Buzz history from {}: {} task(s), {} segment(s)",
+                buzz_db.display(),
+                outcome.tasks,
+                outcome.segments
+            );
+            buzz_import_notice(&outcome)
+        }
+        Err(err) => {
+            log::warn!("Buzz import failed (continuing without it): {err}");
+            Some(BuzzImportNotice::Failed {
+                detail: err.to_string(),
+            })
+        }
     }
 }
 
@@ -820,12 +874,17 @@ fn apply_stale_flip(store: &SqliteStore, sole_instance: bool) {
 /// then fail actionably — the queue's own `YTDLP_MISSING` message). Cookie
 /// file resolves `HUMM_DOWNLOAD_COOKIEFILE` (env wins) then
 /// `settings.downloads.cookie_file` — same precedence as the CLI.
-fn build_fetcher(settings: &Settings, caps: &MediaCapabilities) -> Option<Arc<dyn MediaFetcher>> {
+fn build_fetcher(
+    settings: &Arc<Mutex<Settings>>,
+    caps: &MediaCapabilities,
+) -> Option<Arc<dyn MediaFetcher>> {
     caps.yt_dlp.as_ref()?;
-    let cookie_file = std::env::var_os("HUMM_DOWNLOAD_COOKIEFILE")
-        .map(PathBuf::from)
-        .or_else(|| settings.downloads.cookie_file.clone());
-    Some(Arc::new(YtDlpFetcher::new(cookie_file)))
+    // Live settings, not a snapshot: Preferences → General writes
+    // `downloads.cookie_file` through, and each fetch reads it.
+    // `HUMM_DOWNLOAD_COOKIEFILE` still wins inside the fetcher.
+    Some(Arc::new(YtDlpFetcher::with_live_settings(Arc::clone(
+        settings,
+    ))))
 }
 
 /// Fires humm's one `app_launched` telemetry event (F-007, ADR-009),
@@ -1164,6 +1223,35 @@ mod tests {
         assert_eq!(
             guard.updates.available_version, None,
             "available_version must be left untouched on a failed fetch"
+        );
+    }
+
+    #[test]
+    fn buzz_import_notice_is_quiet_for_zero_tasks_and_a_skip() {
+        use humm_store::BuzzImportOutcome;
+        assert_eq!(
+            buzz_import_notice(&BuzzImportOutcome {
+                skipped: true,
+                tasks: 0,
+                segments: 0,
+            }),
+            None
+        );
+        assert_eq!(
+            buzz_import_notice(&BuzzImportOutcome {
+                skipped: false,
+                tasks: 0,
+                segments: 4,
+            }),
+            None
+        );
+        assert_eq!(
+            buzz_import_notice(&BuzzImportOutcome {
+                skipped: false,
+                tasks: 3,
+                segments: 9,
+            }),
+            Some(BuzzImportNotice::Imported { tasks: 3 })
         );
     }
 }

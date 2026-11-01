@@ -101,7 +101,7 @@ locale-name-zh-tw = Ķīniešu (tradicionālā)
 
 ## Empty-state hero (views/main_window.rs)
 
-hero-drop = Nometiet multivides failu šeit vai nospiediet ⌘O
+hero-drop = Nometiet multivides failu šeit vai nospiediet %shortcut
 hero-import-button = Importēt failus…
 
 ## Task table (views/task_table.rs, F-003) — column headers
@@ -133,6 +133,44 @@ task-translate = Tulkot angliski
 
 status-isolating-speech = izolē runu
 
+## Status words and notices added with the UX review fixes.
+status-queued = Rindā
+status-canceled = Atcelts
+status-skipped = Izlaists
+status-completed = Pabeigts
+status-failed = Neizdevās
+status-in-progress = Notiek
+status-eta = Atlikušais
+status-downloading-model = Lejupielādē modeli
+status-downloading-media = Lejupielādē multividi
+status-reducing-noise = samazina troksni
+table-menu-show-error = Rādīt kļūdu
+toast-written-to = Saglabāts
+toast-postproc-written = Papildu faili saglabāti
+toast-postproc-errors = Pēcapstrādes solis ziņoja par kļūdu. Transkripcija joprojām ir pabeigta.
+toast-reduction-skipped = Trokšņa samazināšana netika palaista; transkripcija turpinājās.
+options-word-timestamps-tooltip = Izmēra maiņa vēlāk ir pieejama tikai tad, ja vārdu laiki transkripcijas laikā bija izslēgti. Apvienošana ir pieejama tikai tad, ja tie bija ieslēgti.
+options-model-will-download = Palaist vispirms lejupielādē šo modeli. Logs paliek lietojams.
+prefs-postproc-dfn-runs-before = DeepFilterNet darbojas pirms transkripcijas un aizstāj audio, ko dzird modelis.
+prefs-postproc-dfn-keep-name = Saglabāt attīrīto failu atstāj failu <name>_DeepFilterNet3.wav blakus avotam.
+prefs-general-export-template-tokens-intro = Atstarpes figūriekavās ir daļa no katra marķiera.
+prefs-general-export-template-model-type = model_type vienmēr ir Whisper.cpp.
+prefs-general-cookie-label = Sīkdatņu fails
+prefs-general-cookie-browse = Pārlūkot…
+prefs-general-cookie-caption = HUMM_DOWNLOAD_COOKIEFILE ir prioritāte, ja tā ir iestatīta. Tukšs lauks to notīra.
+prefs-saved = Saglabāts
+prefs-save-failed = Neizdevās saglabāt iestatījumus:
+viewer-saved-neighbor = blakus esošais marķieris tika pielāgots
+viewer-timestamp-unparsed = Iepriekšējais laiks tika paturēts. Tas nebija laiks.
+viewer-timestamp-range = Iepriekšējais laiks tika paturēts. Sākumam jābūt pirms beigām.
+speaker-id-save-copies = Saglabāt kopē šo transkripciju jaunā pabeigtā rindā. Oriģināls paliek, kā ir.
+speaker-id-merge-tooltip = Viena runātāja secīgas rindas tiek apvienotas.
+speaker-id-takes-minutes = Tas var aizņemt vairākas minūtes. Atcelt atmet šo palaišanu.
+already-running = humm jau darbojas.
+already-running-with-files = humm jau darbojas. Šai palaišanai nodotie faili netika atvērti. Importējiet tos jau atvērtajā logā.
+banner-buzz-imported = Importētas %n transkripcijas no Buzz.
+banner-buzz-import-failed = Neizdevās importēt transkripcijas no Buzz. humm mēģinās vēlreiz nākamajā startā.
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = Ierakstīt
@@ -152,7 +190,7 @@ menu-file-import-folder = Importēt mapi…
 menu-help-title = Palīdzība
 menu-help-about = Par humm
 menu-help-docs = Palīdzība
-menu-help-docs-tooltip = Dokumentācija būs pieejama ar pirmo laidienu
+menu-help-docs-tooltip = Lietotnē nav palīdzības lapas.
 menu-help-preferences = Iestatījumi…
 
 ## Clear-History confirm modal (views/main_window.rs, F-026)
@@ -409,7 +447,7 @@ prefs-fw-disposition-note = Pēc atpazīšanas pabeigšanas avota fails tiek pā
 ## copy). `prefs-fw-browse`/`dialog-ok` above are reused for this tab's own
 ## Browse buttons and key-commit-failure modal.
 
-prefs-postproc-header = Šie āķi tiek automātiski palaisti pēc katras atpazīšanas pabeigšanas. Āķa kļūda tiek ierakstīta žurnālā, bet nekad neizraisa pašas atpazīšanas neizdošanos.
+prefs-postproc-header = Izlaist, trokšņa samazināšana un valodas noteikšana notiek pirms transkripcijas. Izmēra maiņa, kopsavilkums un DOCX eksports notiek pēc tam. Kļūda tiek reģistrēta un nekad neizraisa transkripcijas neveiksmi.
 prefs-postproc-skip-title = Izlaist jau transkribētos
 prefs-postproc-skip-enable = Iespējot Izlaist jau atpazīto
 prefs-postproc-skip-check-files = Pārbaudīt esošos rezultātu failus

@@ -57,17 +57,18 @@
 //! `openai_api_key_line_edit.py`/`BASE64_PATTERN` a second time.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use humm_core::export::DEFAULT_EXPORT_TEMPLATE;
 use humm_core::openai::{OpenAiAuth, ValidateOutcome, validate_key};
 use humm_core::secrets::{SecretKey, SecretStore};
 use humm_core::settings::{
-    FileTranscriberSettings, ModelSettings, OpenAiSettings, Settings, UiSettings,
+    DownloadSettings, FileTranscriberSettings, ModelSettings, OpenAiSettings, Settings, UiSettings,
 };
 
 use crate::i18n::{self, tr};
+use crate::import::FileDialogs;
 use crate::views::secret_field::{self, CommitOutcome};
 
 /// Signature for the Test button's background key-validation check:
@@ -148,20 +149,31 @@ fn persist_openai(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     f(&mut guard.openai);
-    if let Err(err) = guard.save(settings_path) {
-        log::warn!("could not persist the OpenAI settings: {err}");
-    }
+    // These fields save on every keystroke. A "Saved" flash per character
+    // strobes, so only a failed write is shown.
+    super::prefs_feedback::record_save(
+        guard.save(settings_path),
+        false,
+        "could not persist the OpenAI settings",
+    );
 }
 
 /// As [`persist_openai`], but for `settings.ui` (locale, font size).
-fn persist_ui(settings: &Mutex<Settings>, settings_path: &Path, f: impl FnOnce(&mut UiSettings)) {
+fn persist_ui(
+    settings: &Mutex<Settings>,
+    settings_path: &Path,
+    flash: bool,
+    f: impl FnOnce(&mut UiSettings),
+) {
     let mut guard = settings
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     f(&mut guard.ui);
-    if let Err(err) = guard.save(settings_path) {
-        log::warn!("could not persist the UI settings: {err}");
-    }
+    super::prefs_feedback::record_save(
+        guard.save(settings_path),
+        flash,
+        "could not persist the UI settings",
+    );
 }
 
 /// As [`persist_openai`], but for `settings.file_transcriber` (the default
@@ -175,9 +187,11 @@ fn persist_file_transcriber(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     f(&mut guard.file_transcriber);
-    if let Err(err) = guard.save(settings_path) {
-        log::warn!("could not persist the file-transcriber settings: {err}");
-    }
+    super::prefs_feedback::record_save(
+        guard.save(settings_path),
+        true,
+        "could not persist the file-transcriber settings",
+    );
 }
 
 /// As [`persist_openai`], but for `settings.models` (Disable GPU).
@@ -190,9 +204,29 @@ fn persist_models(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     f(&mut guard.models);
-    if let Err(err) = guard.save(settings_path) {
-        log::warn!("could not persist the model settings: {err}");
-    }
+    super::prefs_feedback::record_save(
+        guard.save(settings_path),
+        true,
+        "could not persist the model settings",
+    );
+}
+
+/// As [`persist_openai`], but for `settings.downloads` (the cookie file).
+/// A discrete commit: Browse or focus-out, so a successful save flashes.
+fn persist_downloads(
+    settings: &Mutex<Settings>,
+    settings_path: &Path,
+    f: impl FnOnce(&mut DownloadSettings),
+) {
+    let mut guard = settings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard.downloads);
+    super::prefs_feedback::record_save(
+        guard.save(settings_path),
+        true,
+        "could not persist the download settings",
+    );
 }
 
 // -- Font-size scaling (design spec §8.1) -------------------------------------
@@ -353,6 +387,9 @@ pub struct GeneralTabState {
     pub export_template_buffer: String,
     /// The "Disable GPU" checkbox's live value (`settings.models.force_cpu`).
     pub force_cpu: bool,
+    /// Cookie file for URL downloads (`settings.downloads.cookie_file`).
+    /// Empty clears it. `HUMM_DOWNLOAD_COOKIEFILE` still wins at fetch time.
+    pub cookie_buffer: String,
 }
 
 impl GeneralTabState {
@@ -393,6 +430,12 @@ impl GeneralTabState {
                 .clone()
                 .unwrap_or_default(),
             force_cpu: settings.models.force_cpu,
+            cookie_buffer: settings
+                .downloads
+                .cookie_file
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
         }
     }
 }
@@ -412,6 +455,7 @@ impl std::fmt::Debug for GeneralTabState {
             .field("font_size_value", &self.font_size_value)
             .field("export_template_buffer", &self.export_template_buffer)
             .field("force_cpu", &self.force_cpu)
+            .field("cookie_buffer", &self.cookie_buffer)
             .finish()
     }
 }
@@ -470,7 +514,9 @@ pub fn commit_api_model(state: &GeneralTabState, settings: &Mutex<Settings>, set
 pub fn commit_locale(code: &str, settings: &Mutex<Settings>, settings_path: &Path) {
     i18n::set_locale(code);
     let code = code.to_string();
-    persist_ui(settings, settings_path, move |ui| ui.locale = Some(code));
+    persist_ui(settings, settings_path, true, move |ui| {
+        ui.locale = Some(code)
+    });
 }
 
 /// Commits the font-size row: `state.font_size_custom` gates whether
@@ -478,18 +524,22 @@ pub fn commit_locale(code: &str, settings: &Mutex<Settings>, settings_path: &Pat
 /// MAX))` or `None` (Task 1's contract — `None` is egui's own default, never
 /// persisted as a concrete number); either way, [`apply_font_size`] applies
 /// the resolved value to `ctx` immediately (live, no restart).
+///
+/// `flash` is true for the Custom checkbox, a discrete commit, and false
+/// while the size is dragged, so the drag does not strobe "Saved".
 pub fn commit_font_size(
     state: &GeneralTabState,
     settings: &Mutex<Settings>,
     settings_path: &Path,
     ctx: &egui::Context,
+    flash: bool,
 ) {
     let value = state.font_size_custom.then(|| {
         state
             .font_size_value
             .clamp(UiSettings::MIN_FONT_SIZE, UiSettings::MAX_FONT_SIZE)
     });
-    persist_ui(settings, settings_path, |ui| ui.font_size = value);
+    persist_ui(settings, settings_path, flash, |ui| ui.font_size = value);
     apply_font_size(ctx, value);
 }
 
@@ -515,6 +565,44 @@ pub fn commit_export_template(
 pub fn commit_force_cpu(state: &GeneralTabState, settings: &Mutex<Settings>, settings_path: &Path) {
     let value = state.force_cpu;
     persist_models(settings, settings_path, |models| models.force_cpu = value);
+}
+
+/// Commits the cookie-file field. Empty clears `downloads.cookie_file`.
+/// The running fetcher reads this setting on each fetch; a non-empty
+/// `HUMM_DOWNLOAD_COOKIEFILE` still wins.
+pub fn commit_cookie_file(
+    state: &GeneralTabState,
+    settings: &Mutex<Settings>,
+    settings_path: &Path,
+) {
+    let value = non_empty_path(&state.cookie_buffer);
+    persist_downloads(settings, settings_path, |downloads| {
+        downloads.cookie_file = value;
+    });
+}
+
+fn non_empty_path(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
+}
+
+/// The always-visible export-template caption: the six tokens, the required
+/// internal spaces, and the fixed `{{ model_type }}` value. The tokens
+/// themselves are not catalog text — a brace in a Fluent value is a
+/// placeable — so they are appended from the same spellings
+/// `output_file_path` replaces.
+const EXPORT_TEMPLATE_TOKENS: &str = "{{ input_file_name }}, {{ task }}, {{ language }}, {{ model_type }}, {{ model_size }}, {{ date_time }}";
+
+pub fn export_template_caption() -> String {
+    format!(
+        "{}\n{EXPORT_TEMPLATE_TOKENS}\n{}",
+        tr("prefs-general-export-template-tokens-intro"),
+        tr("prefs-general-export-template-model-type")
+    )
 }
 
 /// Starts a Test click: snapshots `settings.openai.base_url` *now* (spec
@@ -597,6 +685,7 @@ pub fn ui(
     settings_path: &Path,
     secrets: &Arc<dyn SecretStore>,
     validate: &ValidateFn,
+    dialogs: &dyn FileDialogs,
 ) {
     drain_test_result(state);
 
@@ -637,7 +726,7 @@ pub fn ui(
             .changed()
         {
             state.font_size_custom = custom;
-            commit_font_size(state, settings, settings_path, ui.ctx());
+            commit_font_size(state, settings, settings_path, ui.ctx(), true);
         }
         let mut value = state.font_size_value;
         let response = ui.add_enabled(
@@ -647,7 +736,7 @@ pub fn ui(
         );
         if response.changed() {
             state.font_size_value = value;
-            commit_font_size(state, settings, settings_path, ui.ctx());
+            commit_font_size(state, settings, settings_path, ui.ctx(), false);
         }
     });
 
@@ -707,10 +796,37 @@ pub fn ui(
             egui::TextEdit::singleline(&mut state.export_template_buffer)
                 .hint_text(DEFAULT_EXPORT_TEMPLATE),
         );
+        if response.changed() {
+            super::prefs_feedback::clear_flash();
+        }
         if response.lost_focus() {
             commit_export_template(state, settings, settings_path);
         }
     });
+    ui.label(egui::RichText::new(export_template_caption()).weak());
+
+    ui.horizontal(|ui| {
+        ui.label(tr("prefs-general-cookie-label"));
+        let response = ui.add(egui::TextEdit::singleline(&mut state.cookie_buffer));
+        if response.changed() {
+            super::prefs_feedback::clear_flash();
+        }
+        if response.lost_focus() {
+            commit_cookie_file(state, settings, settings_path);
+        }
+        if ui.button(tr("prefs-general-cookie-browse")).clicked() {
+            let start = non_empty_path(&state.cookie_buffer).and_then(|path| {
+                path.parent()
+                    .filter(|dir| !dir.as_os_str().is_empty())
+                    .map(Path::to_path_buf)
+            });
+            if let Some(picked) = dialogs.pick_file(start.as_deref()) {
+                state.cookie_buffer = picked.display().to_string();
+                commit_cookie_file(state, settings, settings_path);
+            }
+        }
+    });
+    ui.label(egui::RichText::new(tr("prefs-general-cookie-caption")).weak());
 
     // 7. Disable GPU (Buzz row last) -- Buzz has both a form-row label
     // ("Disable GPU") and a separate checkbox-own label ("Use only CPU and
@@ -799,6 +915,7 @@ mod tests {
             font_size_value: DEFAULT_BODY_SIZE,
             export_template_buffer: String::new(),
             force_cpu: false,
+            cookie_buffer: String::new(),
         }
     }
 
@@ -1108,7 +1225,7 @@ mod tests {
         let mut state = state_with("", false);
         state.font_size_custom = true;
         state.font_size_value = 99; // above UiSettings::MAX_FONT_SIZE (32)
-        commit_font_size(&state, &settings, &settings_path, &ctx);
+        commit_font_size(&state, &settings, &settings_path, &ctx, true);
 
         assert_eq!(
             settings.lock().unwrap().ui.font_size,
@@ -1129,7 +1246,7 @@ mod tests {
         let mut state = state_with("", false);
         state.font_size_custom = false;
         state.font_size_value = 20;
-        commit_font_size(&state, &settings, &settings_path, &ctx);
+        commit_font_size(&state, &settings, &settings_path, &ctx, true);
 
         assert_eq!(
             settings.lock().unwrap().ui.font_size,
