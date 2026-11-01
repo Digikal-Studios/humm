@@ -1,16 +1,17 @@
-//! Buzz-exact status/ETA/date display formatting for the task table (F-003,
-//! F-025 GUI half). Ported from `transcription_tasks_table_widget.py:67-107`
-//! (status text + ETA) and `:624-634` (`format_timedelta`); every literal
-//! string here is byte-exact Buzz text and pinned by this module's unit
-//! tests — including the em dash (`\u{2014}`) in the in-progress/ETA string.
+//! Status/ETA/date display formatting for the task table (F-003, F-025 GUI
+//! half, F-008). Ported from `transcription_tasks_table_widget.py:67-107`
+//! (status text + ETA) and `:624-634` (`format_timedelta`). The English
+//! catalog keeps Buzz's literals byte-exact, including the em dash
+//! (`\u{2014}`) in the in-progress/ETA string; other catalogs translate the
+//! static words.
 //!
-//! These functions build plain `String`s with `format!`, not through the
-//! Fluent catalog (`crate::i18n`): Fluent wraps substituted placeables in
-//! Unicode bidi-isolation marks by default (`i18n.rs`'s own
-//! `tr_args_substitutes_named_placeables` test proves this is still the
-//! bundle's behavior), which would silently break the byte-exact contract
-//! these strings need. Only the *static* labels around them (column headers,
-//! menu items) go through `crate::i18n::tr`.
+//! Percent, ETA, and duration are interpolated with `format!`, not Fluent
+//! placeables. Fluent wraps substituted placeables in Unicode bidi-isolation
+//! marks by default (`i18n.rs`'s `tr_args_substitutes_named_placeables`
+//! test), which would break the English byte-exact contract. Static labels
+//! (`Queued`, `Failed`, `Downloading model`, …) go through [`tr`].
+
+use std::path::PathBuf;
 
 use chrono::NaiveDateTime;
 
@@ -93,43 +94,62 @@ fn percent(fraction: f32) -> i64 {
 /// `chrono::Local::now()`) so the in-progress/ETA branch is deterministic
 /// and unit-testable against synthetic timestamps.
 ///
-/// [`Phase::Isolating`] (M8, F-027) is the one phase text that goes through
-/// [`tr`] rather than a literal Buzz string: every other branch here pins a
-/// byte-exact Buzz status (the module doc's "Fluent would break the
-/// byte-exact contract" rule), but "isolating speech" has no Buzz precedent
-/// to be exact *about* — it's a humm addition (`docs/design/UX_SPEC.md`'s ✚
-/// phase list), so it is translated like any other UI string instead.
+/// Status-column text. Static words are catalog keys so a non-English locale
+/// translates them (F-008). The English values are Buzz's literals, and the
+/// percent / ETA / duration are `format!`'d so Fluent's bidi isolates never
+/// land in the string.
+///
+/// [`Phase::Isolating`] and [`Phase::ReducingNoise`] are humm phases with no
+/// Buzz original (`docs/design/UX_SPEC.md`'s ✚ phase list). Reducing noise is
+/// indeterminate: the reducer has no fraction.
 pub fn status_text(row: &RowVm, now: NaiveDateTime) -> String {
     if row.status == Status::InProgress {
         match row.phase {
             Phase::Model(Some(fraction)) => {
-                return format!("Downloading model ({}%)", percent(fraction));
+                return format!(
+                    "{} ({}%)",
+                    tr("status-downloading-model"),
+                    percent(fraction)
+                );
             }
-            Phase::Model(None) => return "Downloading model\u{2026}".to_string(),
+            Phase::Model(None) => {
+                return format!("{}\u{2026}", tr("status-downloading-model"));
+            }
             Phase::Media(fraction) => {
-                return format!("Downloading media ({}%)", percent(fraction));
+                return format!(
+                    "{} ({}%)",
+                    tr("status-downloading-media"),
+                    percent(fraction)
+                );
             }
             Phase::Isolating => return tr("status-isolating-speech"),
+            Phase::ReducingNoise => return tr("status-reducing-noise"),
             Phase::None => {}
         }
     }
 
     match row.status {
-        Status::Queued => "Queued".to_string(),
+        Status::Queued => tr("status-queued"),
         Status::InProgress => in_progress_text(row, now),
         Status::Completed => completed_text(row),
-        Status::Failed => format!("Failed ({})", row.error.as_deref().unwrap_or("")),
-        Status::Canceled => "Canceled".to_string(),
-        Status::Skipped => "Skipped".to_string(),
+        Status::Failed => format!(
+            "{} ({})",
+            tr("status-failed"),
+            row.error.as_deref().unwrap_or("")
+        ),
+        Status::Canceled => tr("status-canceled"),
+        Status::Skipped => tr("status-skipped"),
     }
 }
 
 /// `"In Progress (NN%)"`, or `"In Progress (NN%) \u{2014} ETA: <eta>"` once
 /// `humm_core::format::format_eta`'s guards (>2s elapsed, `0 < p < 1`) are
 /// satisfied. The em dash is U+2014, surrounded by spaces, matching Buzz
-/// byte-for-byte.
+/// byte-for-byte in English. `ETA` is its own catalog word; the duration
+/// text stays `format_eta`'s Buzz spelling.
 fn in_progress_text(row: &RowVm, now: NaiveDateTime) -> String {
     let pct = percent(row.progress);
+    let label = tr("status-in-progress");
     let eta = row
         .time_started
         .as_deref()
@@ -139,14 +159,15 @@ fn in_progress_text(row: &RowVm, now: NaiveDateTime) -> String {
             format_eta(elapsed_secs, row.progress)
         });
     match eta {
-        Some(eta) => format!("In Progress ({pct}%) \u{2014} ETA: {eta}"),
-        None => format!("In Progress ({pct}%)"),
+        Some(eta) => format!("{label} ({pct}%) \u{2014} {}: {eta}", tr("status-eta")),
+        None => format!("{label} ({pct}%)"),
     }
 }
 
 /// `"Completed"`, or `"Completed (<format_timedelta>)"` when both
 /// `time_started` and `time_ended` are present and parse.
 fn completed_text(row: &RowVm) -> String {
+    let label = tr("status-completed");
     let duration = row
         .time_started
         .as_deref()
@@ -154,9 +175,88 @@ fn completed_text(row: &RowVm) -> String {
         .and_then(|(started, ended)| Some((parse_iso(started)?, parse_iso(ended)?)))
         .map(|(started, ended)| (ended - started).num_seconds());
     match duration {
-        Some(secs) => format!("Completed ({})", format_timedelta(secs)),
-        None => "Completed".to_string(),
+        Some(secs) => format!("{label} ({})", format_timedelta(secs)),
+        None => label,
     }
+}
+
+/// Where a non-empty export list landed. One file: its full path. Several
+/// files that share a parent: that directory. Otherwise each distinct parent,
+/// one per line — never a single directory that does not hold every file.
+pub fn written_location(paths: &[PathBuf]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+    let head = tr("toast-written-to");
+    if paths.len() == 1 {
+        return Some(format!("{head} {}", paths[0].display()));
+    }
+    let mut parents: Vec<String> = paths
+        .iter()
+        .map(|path| {
+            path.parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .map(|parent| parent.display().to_string())
+                .unwrap_or_else(|| ".".to_string())
+        })
+        .collect();
+    parents.sort();
+    parents.dedup();
+    if parents.len() == 1 {
+        return Some(format!("{head} {}", parents[0]));
+    }
+    let mut message = head;
+    for parent in parents {
+        message.push('\n');
+        message.push_str(&parent);
+    }
+    Some(message)
+}
+
+/// The completion toast. An empty `written` list keeps the plain
+/// "Transcription complete" line. A skipped noise-reduction pass appends
+/// its notice without changing the task's completed status.
+pub fn completion_message(written: &[PathBuf], reduction_skipped: bool) -> String {
+    let mut message = if written.is_empty() {
+        tr("toast-completed")
+    } else {
+        format!(
+            "{} \u{2014} {} {}",
+            tr("toast-completed"),
+            written.len(),
+            tr("toast-completed-suffix")
+        )
+    };
+    if let Some(location) = written_location(written) {
+        message.push('\n');
+        message.push_str(&location);
+    }
+    if reduction_skipped {
+        message.push('\n');
+        message.push_str(&tr("toast-reduction-skipped"));
+    }
+    message
+}
+
+/// Info toast for files a later post-processing hook wrote. `None` when
+/// `written` is empty — the completion toast already covered the task.
+pub fn hook_files_message(written: &[PathBuf]) -> Option<String> {
+    let location = written_location(written)?;
+    Some(format!("{}\n{location}", tr("toast-postproc-written")))
+}
+
+/// Info toast listing post-hook errors. `None` when there are none. The
+/// task stays completed; this does not fail it.
+pub fn hook_errors_message(errors: &[String]) -> Option<String> {
+    if errors.is_empty() {
+        return None;
+    }
+    let mut message = tr("toast-postproc-errors");
+    for error in errors {
+        message.push('\n');
+        message.push_str(error);
+    }
+    Some(message)
 }
 
 #[cfg(test)]
@@ -165,6 +265,14 @@ mod tests {
     use crate::viewmodel::ColumnId;
     use humm_core::domain::TranscriptionId;
     use pretty_assertions::assert_eq;
+
+    /// Locks the locale so a parallel test's `set_locale` cannot change the
+    /// English byte-exact strings these cases pin. Not used by the isolating
+    /// test, which already holds the same non-reentrant lock.
+    fn status(row: &RowVm, now: NaiveDateTime) -> String {
+        let _guard = crate::i18n::lock_locale_for_test();
+        status_text(row, now)
+    }
 
     fn base_row(status: Status) -> RowVm {
         RowVm {
@@ -242,7 +350,7 @@ mod tests {
     #[test]
     fn status_text_queued() {
         assert_eq!(
-            status_text(&base_row(Status::Queued), dt("2026-07-21T09:00:00.0")),
+            status(&base_row(Status::Queued), dt("2026-07-21T09:00:00.0")),
             "Queued"
         );
     }
@@ -250,7 +358,7 @@ mod tests {
     #[test]
     fn status_text_canceled() {
         assert_eq!(
-            status_text(&base_row(Status::Canceled), dt("2026-07-21T09:00:00.0")),
+            status(&base_row(Status::Canceled), dt("2026-07-21T09:00:00.0")),
             "Canceled"
         );
     }
@@ -258,7 +366,7 @@ mod tests {
     #[test]
     fn status_text_skipped() {
         assert_eq!(
-            status_text(&base_row(Status::Skipped), dt("2026-07-21T09:00:00.0")),
+            status(&base_row(Status::Skipped), dt("2026-07-21T09:00:00.0")),
             "Skipped"
         );
     }
@@ -268,7 +376,7 @@ mod tests {
         let mut row = base_row(Status::Failed);
         row.error = Some("ffmpeg not found".to_string());
         assert_eq!(
-            status_text(&row, dt("2026-07-21T09:00:00.0")),
+            status(&row, dt("2026-07-21T09:00:00.0")),
             "Failed (ffmpeg not found)"
         );
     }
@@ -276,7 +384,7 @@ mod tests {
     #[test]
     fn status_text_failed_with_no_message_renders_empty_parens() {
         let row = base_row(Status::Failed);
-        assert_eq!(status_text(&row, dt("2026-07-21T09:00:00.0")), "Failed ()");
+        assert_eq!(status(&row, dt("2026-07-21T09:00:00.0")), "Failed ()");
     }
 
     // -- status_text: in-progress / ETA guards -----------------------------
@@ -286,7 +394,7 @@ mod tests {
         let mut row = base_row(Status::InProgress);
         row.progress = 0.42;
         assert_eq!(
-            status_text(&row, dt("2026-07-21T09:00:10.0")),
+            status(&row, dt("2026-07-21T09:00:10.0")),
             "In Progress (42%)"
         );
     }
@@ -298,7 +406,7 @@ mod tests {
         row.time_started = Some("2026-07-21T09:00:00.0".to_string());
         // Only 1 second elapsed: format_eta's own >2s guard suppresses ETA.
         assert_eq!(
-            status_text(&row, dt("2026-07-21T09:00:01.0")),
+            status(&row, dt("2026-07-21T09:00:01.0")),
             "In Progress (50%)"
         );
     }
@@ -309,7 +417,7 @@ mod tests {
         row.progress = 0.0;
         row.time_started = Some("2026-07-21T09:00:00.0".to_string());
         assert_eq!(
-            status_text(&row, dt("2026-07-21T09:01:00.0")),
+            status(&row, dt("2026-07-21T09:01:00.0")),
             "In Progress (0%)"
         );
     }
@@ -320,7 +428,7 @@ mod tests {
         row.progress = 1.0;
         row.time_started = Some("2026-07-21T09:00:00.0".to_string());
         assert_eq!(
-            status_text(&row, dt("2026-07-21T09:01:00.0")),
+            status(&row, dt("2026-07-21T09:01:00.0")),
             "In Progress (100%)"
         );
     }
@@ -335,7 +443,7 @@ mod tests {
         // 222s elapsed == 3m 42s, matching the brief's illustrative ETA text.
         let now = dt("2026-07-21T09:03:42.0");
 
-        let text = status_text(&row, now);
+        let text = status(&row, now);
         assert_eq!(text, "In Progress (50%) \u{2014} ETA: 3m 42s");
         assert!(
             text.contains('\u{2014}'),
@@ -350,7 +458,7 @@ mod tests {
         let mut row = base_row(Status::InProgress);
         row.phase = Phase::Model(Some(0.3));
         assert_eq!(
-            status_text(&row, dt("2026-07-21T09:00:00.0")),
+            status(&row, dt("2026-07-21T09:00:00.0")),
             "Downloading model (30%)"
         );
     }
@@ -360,7 +468,7 @@ mod tests {
         let mut row = base_row(Status::InProgress);
         row.phase = Phase::Model(None);
         assert_eq!(
-            status_text(&row, dt("2026-07-21T09:00:00.0")),
+            status(&row, dt("2026-07-21T09:00:00.0")),
             "Downloading model\u{2026}"
         );
     }
@@ -370,7 +478,7 @@ mod tests {
         let mut row = base_row(Status::InProgress);
         row.phase = Phase::Media(0.75);
         assert_eq!(
-            status_text(&row, dt("2026-07-21T09:00:00.0")),
+            status(&row, dt("2026-07-21T09:00:00.0")),
             "Downloading media (75%)"
         );
     }
@@ -394,6 +502,11 @@ mod tests {
             status_text(&row, dt("2026-07-21T09:00:00.0")),
             crate::i18n::tr("status-isolating-speech")
         );
+        row.phase = Phase::ReducingNoise;
+        assert_eq!(
+            status_text(&row, dt("2026-07-21T09:00:00.0")),
+            crate::i18n::tr("status-reducing-noise")
+        );
     }
 
     #[test]
@@ -403,7 +516,7 @@ mod tests {
         // render it for a non-InProgress row, belt-and-braces).
         let mut row = base_row(Status::Completed);
         row.phase = Phase::Media(0.75);
-        assert_eq!(status_text(&row, dt("2026-07-21T09:00:00.0")), "Completed");
+        assert_eq!(status(&row, dt("2026-07-21T09:00:00.0")), "Completed");
     }
 
     // -- status_text: completed duration ------------------------------------
@@ -414,7 +527,7 @@ mod tests {
         row.time_started = Some("2026-07-21T09:00:00.0".to_string());
         row.time_ended = Some("2026-07-21T09:03:05.0".to_string());
         assert_eq!(
-            status_text(&row, dt("2026-07-21T09:03:05.0")),
+            status(&row, dt("2026-07-21T09:03:05.0")),
             "Completed (3m 5s)"
         );
     }
@@ -422,7 +535,64 @@ mod tests {
     #[test]
     fn status_text_completed_without_timestamps_omits_duration() {
         let row = base_row(Status::Completed);
-        assert_eq!(status_text(&row, dt("2026-07-21T09:00:00.0")), "Completed");
+        assert_eq!(status(&row, dt("2026-07-21T09:00:00.0")), "Completed");
+    }
+
+    #[test]
+    fn completion_message_empty_written_stays_the_plain_toast() {
+        let _guard = crate::i18n::lock_locale_for_test();
+        assert_eq!(completion_message(&[], false), "Transcription complete");
+    }
+
+    #[test]
+    fn completion_message_names_a_single_path_and_distinct_parents() {
+        let _guard = crate::i18n::lock_locale_for_test();
+        assert_eq!(
+            completion_message(&[PathBuf::from("/media/1/a.srt")], false),
+            "Transcription complete \u{2014} 1 file(s) written\nWritten to /media/1/a.srt"
+        );
+        assert_eq!(
+            completion_message(
+                &[
+                    PathBuf::from("/media/1/a.srt"),
+                    PathBuf::from("/media/1/a.txt"),
+                ],
+                false
+            ),
+            "Transcription complete \u{2014} 2 file(s) written\nWritten to /media/1"
+        );
+        let split = completion_message(
+            &[PathBuf::from("/a/x.srt"), PathBuf::from("/b/y.srt")],
+            false,
+        );
+        assert!(
+            split.contains("\n/a\n/b") || split.contains("\n/b\n/a"),
+            "distinct parents are listed, got {split:?}"
+        );
+        assert!(
+            !split.contains("Written to /a/x.srt"),
+            "a mixed list must not pretend one file's path holds every file"
+        );
+    }
+
+    #[test]
+    fn completion_message_appends_a_skipped_reduction_without_hiding_the_toast() {
+        let _guard = crate::i18n::lock_locale_for_test();
+        let text = completion_message(&[], true);
+        assert_eq!(
+            text,
+            "Transcription complete\nNoise reduction did not run; transcription continued."
+        );
+    }
+
+    #[test]
+    fn hook_messages_skip_empty_lists_and_keep_errors_non_failing() {
+        let _guard = crate::i18n::lock_locale_for_test();
+        assert!(hook_files_message(&[]).is_none());
+        assert!(hook_errors_message(&[]).is_none());
+        let errors = hook_errors_message(&["summary: timed out".to_string()]).expect("notice");
+        assert!(errors.contains("summary: timed out"));
+        assert!(errors.contains("still complete"));
     }
 
     // Sanity: ColumnId is used elsewhere in this crate's tests via this

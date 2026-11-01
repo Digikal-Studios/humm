@@ -56,7 +56,7 @@ fn main() -> eframe::Result {
     let _gui_lock = match humm_core::instance::acquire_gui_lock(&data_dir) {
         Ok(Some(guard)) => Some(guard),
         Ok(None) => {
-            show_already_running_dialog();
+            show_already_running_dialog(!pending_import.is_empty());
             return Ok(());
         }
         Err(err) => {
@@ -106,12 +106,24 @@ fn import_paths_from_args(args: impl Iterator<Item = String>) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Dialog body for a second launch. The extra sentence is only when argv
+/// carried paths. It points at the already-open window's import actions
+/// rather than one menu item, because the paths may be a file, a folder, or
+/// a mix. Ok-only. No handoff to the first process.
+fn already_running_description(had_paths: bool) -> String {
+    if had_paths {
+        humm_gui::i18n::tr("already-running-with-files")
+    } else {
+        humm_gui::i18n::tr("already-running")
+    }
+}
+
 /// Shows the native "already running" dialog (design spec §3.1 / ADR-017):
 /// Buzz has no such guard, so this is a humm-only addition.
-fn show_already_running_dialog() {
+fn show_already_running_dialog(had_paths: bool) {
     rfd::MessageDialog::new()
         .set_title("humm")
-        .set_description("humm is already running.")
+        .set_description(already_running_description(had_paths))
         .set_level(rfd::MessageLevel::Info)
         .set_buttons(rfd::MessageButtons::Ok)
         .show();
@@ -221,5 +233,19 @@ mod tests {
     #[test]
     fn import_paths_from_args_empty_for_no_args() {
         assert!(import_paths_from_args(args(&[])).is_empty());
+    }
+
+    #[test]
+    fn already_running_description_names_paths_only_when_argv_had_them() {
+        let _guard = humm_gui::i18n::lock_locale_for_test();
+        assert_eq!(
+            already_running_description(false),
+            "humm is already running."
+        );
+        let with_paths = already_running_description(true);
+        assert!(with_paths.starts_with("humm is already running."));
+        assert!(with_paths.contains("were not opened"));
+        assert!(with_paths.contains("window that is already open"));
+        assert!(!with_paths.contains("Import File"));
     }
 }

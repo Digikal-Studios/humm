@@ -60,6 +60,7 @@ use humm_core::viewer::text_view;
 use humm_core::viewer::timestamp::parse_timestamp;
 use humm_store::{SegmentRow, SqliteStore};
 
+use crate::i18n::tr;
 use crate::import::FileDialogs;
 use crate::translate_seam::{TranslateControl, TranslateSpawner};
 use crate::views::options_sheet::{DEFAULT_LLM_MODEL, DEFAULT_LLM_PROMPT};
@@ -496,6 +497,15 @@ pub enum TranslateModal {
 /// Segments are loaded into [`Self::rows`] once at [`Self::open`] and every
 /// read (table, text views, search, export) hits memory — nothing else mutates
 /// a transcript's segments while its viewer is open in M4 (design spec §1.2).
+/// Why a timestamp cell was left unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimestampNotice {
+    /// The buffer was not a time.
+    Unparsed,
+    /// The core rule rejected the range (`start` must be before `end`).
+    Range,
+}
+
 pub struct ViewerVm {
     /// The transcript this window views.
     pub id: TranscriptionId,
@@ -638,6 +648,12 @@ pub struct ViewerVm {
     /// "edited · saved" autosave indicator, which shows for ~1.5 s then clears
     /// itself (design spec §2.2 / UX_SPEC J-6).
     pub saved_flash: Option<Instant>,
+    /// Set with [`Self::saved_flash`] when that write also clamped a neighbor
+    /// cue (F-081). The flash names the clamp; the clamp rule is unchanged.
+    pub saved_neighbor_adjusted: bool,
+    /// Why a timestamp edit was kept unchanged. The stored transcript stays
+    /// on the reject rule. Shown as one non-modal line, then cleared.
+    pub timestamp_notice: Option<(Instant, TimestampNotice)>,
     /// Set true when a store write for a committed edit failed: the edit stays
     /// in memory (never lost) but is flagged unsaved, surfaced as an inline
     /// warning banner in the viewer (ADR-018 consistency — the app's toast
@@ -782,6 +798,8 @@ impl ViewerVm {
             selected: None,
             editing: None,
             saved_flash: None,
+            saved_neighbor_adjusted: false,
+            timestamp_notice: None,
             unsaved: false,
             search: SearchState::new(settings.viewer.find_widget_visible),
             export_flash: None,
@@ -852,6 +870,8 @@ impl ViewerVm {
             selected: None,
             editing: None,
             saved_flash: None,
+            saved_neighbor_adjusted: false,
+            timestamp_notice: None,
             unsaved: false,
             search: SearchState::new(false),
             export_flash: None,
@@ -1051,7 +1071,12 @@ impl ViewerVm {
             .collect();
 
         let (value, neighbor) = match timestamp_edit(&times, idx, field, new_value, floor) {
-            EditOutcome::Rejected => return false,
+            EditOutcome::Rejected => {
+                self.saved_flash = None;
+                self.saved_neighbor_adjusted = false;
+                self.timestamp_notice = Some((Instant::now(), TimestampNotice::Range));
+                return false;
+            }
             EditOutcome::Apply { value, neighbor } => (value, neighbor),
         };
 
@@ -1085,6 +1110,7 @@ impl ViewerVm {
             let row = &self.rows[idx];
             (row.id, row.start, row.end)
         };
+        self.saved_neighbor_adjusted = neighbor_idx.is_some();
         let mut ok = self.write_times(deps, edited_id, edited_start, edited_end);
         if let Some(neighbor_idx) = neighbor_idx {
             let (neighbor_id, neighbor_start, neighbor_end) = {
@@ -1141,6 +1167,7 @@ impl ViewerVm {
             }
             EditCol::Start | EditCol::End => return,
         };
+        self.saved_neighbor_adjusted = false;
         self.record_save(ok);
     }
 
@@ -1180,10 +1207,41 @@ impl ViewerVm {
         if ok {
             self.saved_flash = Some(Instant::now());
             self.unsaved = false;
+            self.timestamp_notice = None;
         } else {
             self.saved_flash = None;
+            self.saved_neighbor_adjusted = false;
             self.unsaved = true;
         }
+    }
+
+    /// The timestamp buffer did not parse. Nothing is written.
+    pub fn note_unparsed_timestamp(&mut self) {
+        self.saved_flash = None;
+        self.saved_neighbor_adjusted = false;
+        self.timestamp_notice = Some((Instant::now(), TimestampNotice::Unparsed));
+    }
+
+    /// The autosave flash, naming a clamped neighbor when this save wrote one.
+    pub fn saved_flash_text(&self) -> String {
+        if self.saved_neighbor_adjusted {
+            format!(
+                "{} \u{b7} {}",
+                tr("viewer-saved"),
+                tr("viewer-saved-neighbor")
+            )
+        } else {
+            tr("viewer-saved")
+        }
+    }
+
+    /// One line for a rejected timestamp edit, if the notice is still current.
+    pub fn timestamp_notice_text(&self) -> Option<String> {
+        let (_at, notice) = self.timestamp_notice?;
+        Some(match notice {
+            TimestampNotice::Unparsed => tr("viewer-timestamp-unparsed"),
+            TimestampNotice::Range => tr("viewer-timestamp-range"),
+        })
     }
 
     // -- Translate (F-085, design spec §7.3) -------------------------------
@@ -2223,6 +2281,8 @@ mod tests {
         assert_eq!(vm.rows[0].end, Millis(800));
         // A successful write arms the flash and leaves nothing unsaved.
         assert!(vm.saved_flash.is_some());
+        assert!(vm.saved_neighbor_adjusted);
+        assert!(vm.timestamp_notice.is_none());
         assert!(!vm.unsaved);
 
         // Store: both rows persisted — proven by a fresh read, not memory.
@@ -2242,10 +2302,20 @@ mod tests {
         let mut vm = ViewerVm::open(id, &deps, &Settings::default()).expect("open");
 
         // start >= end → rejected: no write, no flash, memory unchanged.
+        // The notice is the reason the field snaps back; the store stays.
         let landed = vm.apply_timestamp_edit(&deps, 0, Field::Start, Millis(1000), false);
         assert!(!landed);
         assert_eq!(vm.rows[0].start, Millis(0));
         assert!(vm.saved_flash.is_none());
+        assert!(matches!(
+            vm.timestamp_notice,
+            Some((_, TimestampNotice::Range))
+        ));
+        vm.note_unparsed_timestamp();
+        assert!(matches!(
+            vm.timestamp_notice,
+            Some((_, TimestampNotice::Unparsed))
+        ));
         assert_eq!(
             store.get_segment_rows(id).expect("reread")[0].start,
             Millis(0)

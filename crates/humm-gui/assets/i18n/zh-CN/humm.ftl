@@ -61,7 +61,7 @@ locale-name-zh-tw = 中文（繁体）
 
 ## Empty-state hero (views/main_window.rs)
 
-hero-drop = 将媒体文件拖放到此处，或按 ⌘O
+hero-drop = 将媒体文件拖放到此处，或按 %shortcut
 hero-import-button = 导入文件…
 
 ## Task table (views/task_table.rs, F-003) — column headers
@@ -91,6 +91,44 @@ task-translate = 翻译成英语
 
 status-isolating-speech = 正在分离人声
 
+## Status words and notices added with the UX review fixes.
+status-queued = 排队中
+status-canceled = 已取消
+status-skipped = 已跳过
+status-completed = 已完成
+status-failed = 失败
+status-in-progress = 进行中
+status-eta = 预计
+status-downloading-model = 正在下载模型
+status-downloading-media = 正在下载媒体
+status-reducing-noise = 正在降噪
+table-menu-show-error = 显示错误
+toast-written-to = 已写入
+toast-postproc-written = 已写入附加文件
+toast-postproc-errors = 一个后处理步骤报告了错误。本次识别仍然已完成。
+toast-reduction-skipped = 降噪没有运行；识别已继续。
+options-word-timestamps-tooltip = 仅当转写时关闭了词级时间戳，之后才能调整大小。仅当转写时开启了词级时间戳，之后才能合并。
+options-model-will-download = 运行会先下载此模型。窗口仍可使用。
+prefs-postproc-dfn-runs-before = DeepFilterNet 在识别之前运行，并替换模型听到的音频。
+prefs-postproc-dfn-keep-name = 保留降噪文件会在源文件旁留下名为 <name>_DeepFilterNet3.wav 的文件。
+prefs-general-export-template-tokens-intro = 花括号内的空格是每个记号的一部分。
+prefs-general-export-template-model-type = model_type 始终是 Whisper.cpp。
+prefs-general-cookie-label = Cookie 文件
+prefs-general-cookie-browse = 浏览…
+prefs-general-cookie-caption = 若设置了 HUMM_DOWNLOAD_COOKIEFILE，则它优先于该字段。将字段留空即可清除。
+prefs-saved = 已保存
+prefs-save-failed = 无法保存偏好设置：
+viewer-saved-neighbor = 已调整相邻字幕
+viewer-timestamp-unparsed = 已保留之前的时间。这不是一个时间。
+viewer-timestamp-range = 已保留之前的时间。开始时间必须早于结束时间。
+speaker-id-save-copies = 保存会把这份转写复制为一条新的已完成记录。原始记录保持不变。
+speaker-id-merge-tooltip = 同一说话人的连续行会被合并。
+speaker-id-takes-minutes = 这可能需要几分钟。取消会丢弃这次运行。
+already-running = humm 已在运行。
+already-running-with-files = humm 已在运行。传给这次启动的文件没有打开。请从已经打开的窗口中的导入操作添加它们。
+banner-buzz-imported = 已从 Buzz 导入 %n 条转写。
+banner-buzz-import-failed = 无法从 Buzz 导入转写。humm 会在下次启动时重试。
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = 录制
@@ -110,7 +148,7 @@ menu-file-import-folder = 导入文件夹…
 menu-help-title = 帮助
 menu-help-about = 关于 humm
 menu-help-docs = 帮助
-menu-help-docs-tooltip = 文档将随首个版本一同发布
+menu-help-docs-tooltip = 应用内没有帮助页面。
 menu-help-preferences = 偏好设置…
 
 ## Clear-History confirm modal (views/main_window.rs, F-026)
@@ -365,7 +403,7 @@ prefs-fw-disposition-note = 识别完成后，源文件会被移动到输出文�
 ## translated fresh, using this catalog's own 识别 for "transcription" and
 ## reusing each section's own copied title for its enable checkbox.
 
-prefs-postproc-header = 这些处理会在每次识别完成后自动运行。处理失败会被记录，但不会导致本次识别失败。
+prefs-postproc-header = 跳过、降噪和语言检测在识别之前运行。调整大小、摘要和 DOCX 导出在之后运行。处理失败会被记录，但不会导致本次识别失败。
 prefs-postproc-skip-title = 跳过已转录文件
 prefs-postproc-skip-enable = 启用跳过已转录文件
 prefs-postproc-skip-check-files = 检查现有结果文件

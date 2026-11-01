@@ -77,13 +77,10 @@ use humm_core::domain::{Status, TranscriptionId};
 use humm_gui::viewmodel::{Phase, RowVm, TasksVm};
 use humm_gui::views::task_table::{self, TableLayout};
 
-/// Row height `task_table::ui` renders at (`body.rows(20.0, ..)`,
-/// `views/task_table.rs`) — duplicated here (not imported: it's a private
-/// literal inside that function, not a constant) so this file can convert a
-/// scroll offset in points into an approximate row index for the sanity
-/// check and the sweep math below. If that literal ever changes, the sanity
-/// check's row-count assertions would need re-tuning, but the scroll
-/// mechanism itself (offset in points) would not.
+/// Floor of `task_table::task_table_row_height` at the default body size
+/// (`(line_height + 4).max(20)`). The bench renders with egui's default
+/// font, where that floor is the row height. A larger Preferences font
+/// grows the real rows; this constant is the default-font measurement.
 const ROW_HEIGHT: f32 = 20.0;
 
 /// Duplicated from `views/task_table.rs`'s private `TABLE_ID_SALT` — see the

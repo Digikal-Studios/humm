@@ -211,15 +211,19 @@ pub enum TaskEventKind {
     },
     /// The task moved into a distinguishable mid-run phase that isn't a
     /// plain progress fraction (M8, design spec §3/§8) — additive, like
-    /// [`Self::Skipped`]/[`Self::PostProcessed`] before it. Currently
-    /// emitted only for [`TaskPhase::IsolatingSpeech`] (F-027's demucs
-    /// pre-pass, wired in both binaries — see
-    /// [`crate::boundary::SpeechIsolator`]'s doc); extensible to future
-    /// phases without another `TaskEventKind` variant.
+    /// [`Self::Skipped`]/[`Self::PostProcessed`] before it. Emitted for
+    /// [`TaskPhase::IsolatingSpeech`] (F-027's demucs pre-pass) and
+    /// [`TaskPhase::ReducingNoise`] (F-112's DeepFilterNet pre-pass).
+    /// Extensible to future phases without another `TaskEventKind` variant.
     PhaseChanged {
         /// Which phase the task entered.
         phase: TaskPhase,
     },
+    /// Noise reduction was enabled but did not replace the audio. The task
+    /// continues on the prior audio and is not failed (Buzz's plugin returns
+    /// `None` on exception, `plugin.py:58-60`). Emitted only when the run is
+    /// not being canceled — a cancel ends the task `Canceled` instead.
+    ReductionSkipped,
 }
 
 /// A distinguishable mid-run phase reported by [`TaskEventKind::PhaseChanged`]
@@ -233,6 +237,10 @@ pub enum TaskPhase {
     /// emits human-oriented tqdm output on stderr, which Standing Policy
     /// rule 3 forbids parsing, so no fraction accompanies this phase.
     IsolatingSpeech,
+    /// Reducing noise with DeepFilterNet before transcription (F-112).
+    /// Indeterminate: [`crate::boundary::NoiseReducer::reduce`] reports no
+    /// fraction, so none is invented here.
+    ReducingNoise,
 }
 
 /// A [`TaskEventKind`] tagged with the task it belongs to.
@@ -1560,6 +1568,14 @@ impl Runner {
             && cfg.noise_reduction.enabled
             && let Some(reducer) = self.reducer.clone()
         {
+            // Indeterminate phase, same family as isolating speech: the
+            // reducer reports no fraction (`NoiseReducer::reduce`).
+            self.emit(TaskEvent {
+                task_id: id,
+                kind: TaskEventKind::PhaseChanged {
+                    phase: TaskPhase::ReducingNoise,
+                },
+            });
             let prior_audio = audio_input.clone();
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 reducer.reduce(&prior_audio, token)
@@ -1578,10 +1594,24 @@ impl Runner {
                 }
                 Ok(Err(err)) => {
                     log::warn!("noise reduction failed, proceeding with the prior audio: {err}");
+                    // A cancel ends the task `Canceled` just below; that is
+                    // not "transcription continued", so it is not this notice.
+                    if !token.is_canceled() {
+                        self.emit(TaskEvent {
+                            task_id: id,
+                            kind: TaskEventKind::ReductionSkipped,
+                        });
+                    }
                 }
                 Err(payload) => {
                     let msg = panic_message(&*payload);
                     log::error!("noise reduction hook panicked for task {id}: {msg}");
+                    if !token.is_canceled() {
+                        self.emit(TaskEvent {
+                            task_id: id,
+                            kind: TaskEventKind::ReductionSkipped,
+                        });
+                    }
                 }
             }
         }
@@ -6218,6 +6248,30 @@ mod tests {
             events
                 .iter()
                 .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Completed { .. }))
+        );
+        assert!(
+            events.iter().any(|e| {
+                e.task_id == a
+                    && matches!(
+                        e.kind,
+                        TaskEventKind::PhaseChanged {
+                            phase: TaskPhase::ReducingNoise,
+                        }
+                    )
+            }),
+            "a running reducer emits an indeterminate reducing-noise phase"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::ReductionSkipped)),
+            "a reducer error is a non-failing notice; the task still completes"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.task_id == a && matches!(e.kind, TaskEventKind::Failed { .. })),
+            "a reducer error must not fail the task"
         );
         assert_eq!(h.decoded.lock().expect("decoded").clone(), vec![input]);
     }

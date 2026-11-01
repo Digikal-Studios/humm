@@ -41,7 +41,7 @@ locale-name-zh-tw = Chinese (Traditional)
 
 ## Empty-state hero (views/main_window.rs)
 
-hero-drop = Drop media here, or ⌘O
+hero-drop = Drop media here, or %shortcut
 hero-import-button = Import files…
 
 ## Task table (views/task_table.rs, F-003) — column headers
@@ -73,6 +73,44 @@ task-translate = Translate to English
 
 status-isolating-speech = isolating speech
 
+## Status words and notices added with the UX review fixes.
+status-queued = Queued
+status-canceled = Canceled
+status-skipped = Skipped
+status-completed = Completed
+status-failed = Failed
+status-in-progress = In Progress
+status-eta = ETA
+status-downloading-model = Downloading model
+status-downloading-media = Downloading media
+status-reducing-noise = reducing noise
+table-menu-show-error = Show error
+toast-written-to = Written to
+toast-postproc-written = Additional files written
+toast-postproc-errors = A post-processing step reported an error. The transcription is still complete.
+toast-reduction-skipped = Noise reduction did not run; transcription continued.
+options-word-timestamps-tooltip = Resize is available later only if word level timings were disabled during transcription. Merge is available later only if word level timings were enabled during transcription.
+options-model-will-download = Run downloads this model first. The window stays usable.
+prefs-postproc-dfn-runs-before = DeepFilterNet runs before transcription and replaces the audio the model hears.
+prefs-postproc-dfn-keep-name = Keep denoised file leaves a file named <name>_DeepFilterNet3.wav next to the source.
+prefs-general-export-template-tokens-intro = The spaces inside the braces are part of each token.
+prefs-general-export-template-model-type = model_type is always Whisper.cpp.
+prefs-general-cookie-label = Cookie file
+prefs-general-cookie-browse = Browse…
+prefs-general-cookie-caption = HUMM_DOWNLOAD_COOKIEFILE overrides this field when it is set. Leave the field empty to clear it.
+prefs-saved = Saved
+prefs-save-failed = Could not save preferences:
+viewer-saved-neighbor = a neighboring cue was adjusted
+viewer-timestamp-unparsed = The previous time was kept. That was not a time.
+viewer-timestamp-range = The previous time was kept. The start must be before the end.
+speaker-id-save-copies = Save copies this transcript into a new completed row. The original stays as it is.
+speaker-id-merge-tooltip = Consecutive lines from the same speaker are joined.
+speaker-id-takes-minutes = This can take several minutes. Cancel discards the run.
+already-running = humm is already running.
+already-running-with-files = humm is already running. The files passed to this launch were not opened. Import them from the window that is already open.
+banner-buzz-imported = Imported %n transcriptions from Buzz.
+banner-buzz-import-failed = Could not import transcriptions from Buzz. humm will try again the next time it starts.
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = Record
@@ -92,7 +130,7 @@ menu-file-import-folder = Import Folder…
 menu-help-title = Help
 menu-help-about = About humm
 menu-help-docs = Help
-menu-help-docs-tooltip = Documentation arrives with the first release
+menu-help-docs-tooltip = There is no in-app help page.
 menu-help-preferences = Preferences…
 
 ## Clear-History confirm modal (views/main_window.rs, F-026)
@@ -349,7 +387,7 @@ prefs-fw-disposition-note = Once transcribed, the source file is moved into the 
 ## copy). `prefs-fw-browse`/`dialog-ok` above are reused for this tab's own
 ## Browse buttons and key-commit-failure modal.
 
-prefs-postproc-header = These hooks run automatically after each transcription completes. A hook failure is logged but never fails the transcription itself.
+prefs-postproc-header = Skip, noise reduction, and language detection run before transcription. The resizer, summary, and DOCX export run after. A hook failure is logged and never fails the transcription.
 prefs-postproc-skip-title = Skip Already Transcribed
 prefs-postproc-skip-enable = Enable Skip Already Transcribed
 prefs-postproc-skip-check-files = Check for existing result files
@@ -504,7 +542,7 @@ speaker-id-save-error = The changes could not be saved:
 ## `recording_transcriber_widget.py`/`record_button.py`/`audio_meter_widget.py`.
 
 recording-window-title = Live Recording
-recording-model-load-note = First time use of a model may take up to several minutest to load.
+recording-model-load-note = First time use of a model may take up to several minutes to load.
 recording-advanced-button = Advanced...
 recording-microphone-label = Microphone:
 recording-record-button = Record

@@ -52,7 +52,7 @@ locale-name-zh-tw = Chino (tradicional)
 
 ## Empty-state hero (views/main_window.rs)
 
-hero-drop = Suelte archivos multimedia aquí, o ⌘O
+hero-drop = Suelte archivos multimedia aquí, o %shortcut
 hero-import-button = Importar archivos…
 
 ## Task table (views/task_table.rs, F-003) — column headers
@@ -82,6 +82,44 @@ task-translate = Traducir al Inglés
 
 status-isolating-speech = Aislando la voz
 
+## Status words and notices added with the UX review fixes.
+status-queued = En cola
+status-canceled = Cancelado
+status-skipped = Omitido
+status-completed = Completado
+status-failed = Error
+status-in-progress = En progreso
+status-eta = ETA
+status-downloading-model = Descargando modelo
+status-downloading-media = Descargando medios
+status-reducing-noise = reduciendo ruido
+table-menu-show-error = Mostrar error
+toast-written-to = Escrito en
+toast-postproc-written = Archivos adicionales escritos
+toast-postproc-errors = Un paso de posprocesado informó un error. La transcripción sigue completa.
+toast-reduction-skipped = La reducción de ruido no se ejecutó; la transcripción continuó.
+options-word-timestamps-tooltip = Redimensionar solo está disponible después si los tiempos por palabra estaban desactivados durante la transcripción. Combinar solo está disponible después si estaban activados.
+options-model-will-download = Ejecutar descarga primero este modelo. La ventana sigue usable.
+prefs-postproc-dfn-runs-before = DeepFilterNet se ejecuta antes de la transcripción y sustituye el audio que oye el modelo.
+prefs-postproc-dfn-keep-name = Conservar el archivo sin ruido deja un archivo llamado <name>_DeepFilterNet3.wav junto a la fuente.
+prefs-general-export-template-tokens-intro = Los espacios dentro de las llaves forman parte de cada token.
+prefs-general-export-template-model-type = model_type es siempre Whisper.cpp.
+prefs-general-cookie-label = Archivo de cookies
+prefs-general-cookie-browse = Examinar…
+prefs-general-cookie-caption = HUMM_DOWNLOAD_COOKIEFILE tiene prioridad cuando está definida. Deje el campo vacío para borrarlo.
+prefs-saved = Guardado
+prefs-save-failed = No se pudieron guardar las preferencias:
+viewer-saved-neighbor = se ajustó una señal vecina
+viewer-timestamp-unparsed = Se conservó el tiempo anterior. Eso no era un tiempo.
+viewer-timestamp-range = Se conservó el tiempo anterior. El inicio debe ser anterior al final.
+speaker-id-save-copies = Guardar copia esta transcripción en una fila completada nueva. El original se queda como está.
+speaker-id-merge-tooltip = Las líneas consecutivas del mismo hablante se unen.
+speaker-id-takes-minutes = Esto puede tardar varios minutos. Cancelar descarta la ejecución.
+already-running = humm ya se está ejecutando.
+already-running-with-files = humm ya se está ejecutando. Los archivos pasados a este inicio no se abrieron. Impórtelos desde la ventana que ya está abierta.
+banner-buzz-imported = Se importaron %n transcripciones de Buzz.
+banner-buzz-import-failed = No se pudieron importar las transcripciones de Buzz. humm lo intentará de nuevo la próxima vez que se inicie.
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = Grabar
@@ -101,7 +139,7 @@ menu-file-import-folder = Importar carpeta…
 menu-help-title = Ayuda
 menu-help-about = Acerca de humm
 menu-help-docs = Ayuda
-menu-help-docs-tooltip = La documentación llegará con la primera versión
+menu-help-docs-tooltip = No hay una página de ayuda en la aplicación.
 menu-help-preferences = Preferencias…
 
 ## Clear-History confirm modal (views/main_window.rs, F-026)
@@ -350,7 +388,7 @@ prefs-fw-disposition-note = Una vez transcrito, el archivo de origen se mueve a 
 ## Plugins management dialog, ADR-010) -- translated fresh in this
 ## catalog's own register.
 
-prefs-postproc-header = Estos procesos se ejecutan automáticamente después de cada transcripción completada. Un fallo se registra en el log, pero nunca hace fallar la transcripción en sí.
+prefs-postproc-header = Omitir, la reducción de ruido y la detección de idioma se ejecutan antes de la transcripción. El redimensionado, el resumen y la exportación DOCX se ejecutan después. Un fallo se registra y nunca hace fallar la transcripción.
 prefs-postproc-skip-title = Omitir ya transcritos
 prefs-postproc-skip-enable = Habilitar Omitir ya transcritos
 prefs-postproc-skip-check-files = Buscar archivos de resultado existentes

@@ -82,6 +82,9 @@ fn show_step1(ui: &mut egui::Ui, vm: &mut SpeakerIdVm, deps: &SpeakerIdDeps, ctx
                 ui.add(egui::ProgressBar::new(0.0));
             }
         }
+        if matches!(vm.stage, SpeakerIdStage::Running { .. }) {
+            ui.label(tr("speaker-id-takes-minutes"));
+        }
 
         if let SpeakerIdStage::Error(message) = &vm.stage {
             ui.colored_label(ui.visuals().warn_fg_color, message);
@@ -140,6 +143,7 @@ fn show_step2(ui: &mut egui::Ui, vm: &mut SpeakerIdVm, deps: &SpeakerIdDeps, ctx
             };
             if ui
                 .checkbox(&mut merge, tr("speaker-id-merge-checkbox"))
+                .on_hover_text(tr("speaker-id-merge-tooltip"))
                 .changed()
             {
                 merge_toggled = Some(merge);
@@ -154,6 +158,7 @@ fn show_step2(ui: &mut egui::Ui, vm: &mut SpeakerIdVm, deps: &SpeakerIdDeps, ctx
             ui.colored_label(ui.visuals().warn_fg_color, message);
         }
 
+        ui.label(tr("speaker-id-save-copies"));
         if ui.button(tr("speaker-id-save-button")).clicked() {
             // The Speaker-ID window is itself a deferred child viewport, so a
             // bare flag latch would never reach `app.rs`'s root-only harvest

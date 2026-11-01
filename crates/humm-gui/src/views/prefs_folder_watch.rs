@@ -199,9 +199,11 @@ fn persist_folder_watch(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     f(&mut guard.folder_watch);
-    if let Err(err) = guard.save(settings_path) {
-        log::warn!("could not persist the folder-watch settings: {err}");
-    }
+    super::prefs_feedback::record_save(
+        guard.save(settings_path),
+        true,
+        "could not persist the folder-watch settings",
+    );
 }
 
 /// Commits the "Enable folder watch" checkbox.
@@ -378,7 +380,8 @@ pub fn ui(
         ui.checkbox(
             &mut state.sheet.word_timestamps,
             tr("options-word-timestamps"),
-        );
+        )
+        .on_hover_text(tr("options-word-timestamps-tooltip"));
         render_export_checkboxes(ui, &mut state.sheet.formats);
         render_llm_translation_block(ui, "humm-prefs-fw-llm-model-presets", &mut state.sheet);
 

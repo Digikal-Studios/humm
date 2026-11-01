@@ -83,7 +83,7 @@ locale-name-zh-tw = Chiński (tradycyjny)
 
 ## Empty-state hero (views/main_window.rs)
 
-hero-drop = Upuść tutaj plik multimedialny lub ⌘O
+hero-drop = Upuść tutaj plik multimedialny lub %shortcut
 hero-import-button = Importuj pliki…
 
 ## Task table (views/task_table.rs, F-003) — column headers
@@ -115,6 +115,44 @@ task-translate = Przetłumacz na angielski
 
 status-isolating-speech = izolowanie mowy
 
+## Status words and notices added with the UX review fixes.
+status-queued = W kolejce
+status-canceled = Anulowano
+status-skipped = Pominięto
+status-completed = Ukończono
+status-failed = Niepowodzenie
+status-in-progress = W toku
+status-eta = ETA
+status-downloading-model = Pobieranie modelu
+status-downloading-media = Pobieranie multimediów
+status-reducing-noise = redukcja szumu
+table-menu-show-error = Pokaż błąd
+toast-written-to = Zapisano w
+toast-postproc-written = Zapisano dodatkowe pliki
+toast-postproc-errors = Krok przetwarzania końcowego zgłosił błąd. Transkrypcja pozostaje ukończona.
+toast-reduction-skipped = Redukcja szumu nie została uruchomiona; transkrypcja była kontynuowana.
+options-word-timestamps-tooltip = Zmiana rozmiaru jest później dostępna tylko wtedy, gdy czasy na poziomie słów były wyłączone podczas transkrypcji. Scalanie tylko wtedy, gdy były włączone.
+options-model-will-download = Uruchom najpierw pobiera ten model. Okno pozostaje używalne.
+prefs-postproc-dfn-runs-before = DeepFilterNet działa przed transkrypcją i zastępuje dźwięk, który słyszy model.
+prefs-postproc-dfn-keep-name = Zachowanie pliku po usunięciu szumów zostawia plik o nazwie <name>_DeepFilterNet3.wav obok źródła.
+prefs-general-export-template-tokens-intro = Spacje wewnątrz nawiasów klamrowych są częścią każdego tokenu.
+prefs-general-export-template-model-type = model_type to zawsze Whisper.cpp.
+prefs-general-cookie-label = Plik ciasteczek
+prefs-general-cookie-browse = Przeglądaj…
+prefs-general-cookie-caption = HUMM_DOWNLOAD_COOKIEFILE ma pierwszeństwo, gdy jest ustawiona. Puste pole czyści wartość.
+prefs-saved = Zapisano
+prefs-save-failed = Nie udało się zapisać preferencji:
+viewer-saved-neighbor = sąsiednia klatka została dopasowana
+viewer-timestamp-unparsed = Zachowano poprzedni czas. To nie był czas.
+viewer-timestamp-range = Zachowano poprzedni czas. Początek musi być przed końcem.
+speaker-id-save-copies = Zapisz kopiuje tę transkrypcję do nowego ukończonego wiersza. Oryginał pozostaje bez zmian.
+speaker-id-merge-tooltip = Kolejne wiersze tego samego mówcy są łączone.
+speaker-id-takes-minutes = To może potrwać kilka minut. Anuluj odrzuca to uruchomienie.
+already-running = humm jest już uruchomiony.
+already-running-with-files = humm jest już uruchomiony. Pliki przekazane temu uruchomieniu nie zostały otwarte. Zaimportuj je z okna, które jest już otwarte.
+banner-buzz-imported = Zaimportowano %n transkrypcji z Buzz.
+banner-buzz-import-failed = Nie udało się zaimportować transkrypcji z Buzz. humm spróbuje ponownie przy następnym uruchomieniu.
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = Nagraj
@@ -134,7 +172,7 @@ menu-file-import-folder = Importuj folder…
 menu-help-title = Pomoc
 menu-help-about = O programie humm
 menu-help-docs = Pomoc
-menu-help-docs-tooltip = Dokumentacja pojawi się wraz z pierwszym wydaniem
+menu-help-docs-tooltip = W aplikacji nie ma strony pomocy.
 menu-help-preferences = Ustawienia…
 
 ## Clear-History confirm modal (views/main_window.rs, F-026)
@@ -391,7 +429,7 @@ prefs-fw-disposition-note = Po zakończeniu transkrypcji plik źródłowy zostaj
 ## copy). `prefs-fw-browse`/`dialog-ok` above are reused for this tab's own
 ## Browse buttons and key-commit-failure modal.
 
-prefs-postproc-header = Te hooki uruchamiają się automatycznie po zakończeniu każdej transkrypcji. Błąd hooka jest rejestrowany w dzienniku, ale nigdy nie powoduje niepowodzenia samej transkrypcji.
+prefs-postproc-header = Pomijanie, redukcja szumu i wykrywanie języka działają przed transkrypcją. Zmiana rozmiaru, podsumowanie i eksport DOCX działają później. Błąd jest rejestrowany i nigdy nie powoduje niepowodzenia transkrypcji.
 prefs-postproc-skip-title = Pomijaj już transkrybowane
 prefs-postproc-skip-enable = Włącz Pomiń już przetranskrybowane
 prefs-postproc-skip-check-files = Sprawdź istniejące pliki wyników

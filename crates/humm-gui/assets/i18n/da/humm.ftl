@@ -74,7 +74,7 @@ locale-name-zh-tw = Kinesisk (traditionelt)
 
 ## Empty-state hero (views/main_window.rs)
 
-hero-drop = Slip medier her, eller ⌘O
+hero-drop = Slip medier her, eller %shortcut
 hero-import-button = Importer filer…
 
 ## Task table (views/task_table.rs, F-003) — column headers
@@ -106,6 +106,44 @@ task-translate = Oversæt til engelsk
 
 status-isolating-speech = isolerer tale
 
+## Status words and notices added with the UX review fixes.
+status-queued = I kø
+status-canceled = Annulleret
+status-skipped = Sprunget over
+status-completed = Fuldført
+status-failed = Mislykkedes
+status-in-progress = I gang
+status-eta = ETA
+status-downloading-model = Henter model
+status-downloading-media = Henter medier
+status-reducing-noise = reducerer støj
+table-menu-show-error = Vis fejl
+toast-written-to = Skrevet til
+toast-postproc-written = Yderligere filer skrevet
+toast-postproc-errors = Et efterbehandlingstrin rapporterede en fejl. Transskriptionen er stadig fuldført.
+toast-reduction-skipped = Støjreduktion kørte ikke; transskriptionen fortsatte.
+options-word-timestamps-tooltip = Tilpas størrelse er kun tilgængelig senere, hvis tidskoder på ordniveau var slået fra under transskriptionen. Flet er kun tilgængelig senere, hvis de var slået til.
+options-model-will-download = Kør henter denne model først. Vinduet kan stadig bruges.
+prefs-postproc-dfn-runs-before = DeepFilterNet kører før transskriptionen og erstatter den lyd, modellen hører.
+prefs-postproc-dfn-keep-name = Behold den støjreducerede fil efterlader en fil ved navn <name>_DeepFilterNet3.wav ved siden af kilden.
+prefs-general-export-template-tokens-intro = Mellemrummene inden i klammerne er en del af hvert token.
+prefs-general-export-template-model-type = model_type er altid Whisper.cpp.
+prefs-general-cookie-label = Cookie-fil
+prefs-general-cookie-browse = Gennemse…
+prefs-general-cookie-caption = HUMM_DOWNLOAD_COOKIEFILE tilsidesætter dette felt, når den er sat. Lad feltet være tomt for at rydde det.
+prefs-saved = Gemt
+prefs-save-failed = Kunne ikke gemme indstillinger:
+viewer-saved-neighbor = et tilstødende cue blev justeret
+viewer-timestamp-unparsed = Det forrige tidspunkt blev beholdt. Det var ikke et tidspunkt.
+viewer-timestamp-range = Det forrige tidspunkt blev beholdt. Starten skal være før slutningen.
+speaker-id-save-copies = Gem kopierer denne transskription til en ny fuldført række. Originalen forbliver, som den er.
+speaker-id-merge-tooltip = På hinanden følgende linjer fra den samme taler sættes sammen.
+speaker-id-takes-minutes = Det kan tage flere minutter. Annuller kasserer kørslen.
+already-running = humm kører allerede.
+already-running-with-files = humm kører allerede. Filerne til denne start blev ikke åbnet. Importér dem fra det vindue, der allerede er åbent.
+banner-buzz-imported = Importerede %n transskriptioner fra Buzz.
+banner-buzz-import-failed = Kunne ikke importere transskriptioner fra Buzz. humm prøver igen næste gang, det starter.
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = Optag
@@ -125,7 +163,7 @@ menu-file-import-folder = Importer Mappe…
 menu-help-title = Hjælp
 menu-help-about = Om humm
 menu-help-docs = Hjælp
-menu-help-docs-tooltip = Dokumentationen kommer med den første udgivelse
+menu-help-docs-tooltip = Der er ingen hjælpeside i appen.
 menu-help-preferences = Indstillinger…
 
 ## Clear-History confirm modal (views/main_window.rs, F-026)
@@ -382,7 +420,7 @@ prefs-fw-disposition-note = Når transskriptionen er fuldført, flyttes kildefil
 ## copy). `prefs-fw-browse`/`dialog-ok` above are reused for this tab's own
 ## Browse buttons and key-commit-failure modal.
 
-prefs-postproc-header = Disse hooks køres automatisk, efter hver transskription er fuldført. En hook-fejl logges, men får aldrig selve transskriptionen til at mislykkes.
+prefs-postproc-header = Spring over, støjreduktion og sprogregistrering kører før transskriptionen. Størrelsestilpasning, resumé og DOCX-eksport kører bagefter. En fejl logges og får aldrig transskriptionen til at mislykkes.
 prefs-postproc-skip-title = Spring allerede transkriberede over
 prefs-postproc-skip-enable = Aktiver Spring allerede transkriberede over
 prefs-postproc-skip-check-files = Tjek for eksisterende resultatfiler

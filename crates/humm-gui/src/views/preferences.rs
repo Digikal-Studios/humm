@@ -37,6 +37,7 @@ use crate::i18n::{self, tr};
 use crate::import::FileDialogs;
 use crate::models_ui::{self, ModelsTabState};
 use crate::shortcuts::ShortcutMap;
+use crate::views::prefs_feedback;
 use crate::views::prefs_folder_watch::{self, FolderWatchTabState};
 use crate::views::prefs_general::{self, GeneralTabState, ValidateFn};
 use crate::views::prefs_postproc::{self, PostprocTabState};
@@ -177,6 +178,7 @@ pub fn ui(
         ui.selectable_value(&mut state.tab, PrefsTab::Privacy, tr("prefs-tab-privacy"));
     });
     ui.separator();
+    prefs_feedback::show(ui);
 
     match state.tab {
         PrefsTab::General => {
@@ -187,6 +189,7 @@ pub fn ui(
                 settings_path,
                 secrets,
                 validate,
+                dialogs,
             );
         }
         PrefsTab::Models => {
@@ -286,9 +289,11 @@ fn privacy_tab_ui(ui: &mut egui::Ui, settings: &Arc<Mutex<Settings>>, settings_p
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.privacy.telemetry_enabled = telemetry_enabled;
         guard.updates.check_enabled = check_enabled;
-        if let Err(err) = guard.save(settings_path) {
-            log::warn!("could not persist the privacy settings: {err}");
-        }
+        crate::views::prefs_feedback::record_save(
+            guard.save(settings_path),
+            true,
+            "could not persist the privacy settings",
+        );
     }
 }
 

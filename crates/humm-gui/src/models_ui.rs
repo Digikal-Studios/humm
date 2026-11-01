@@ -527,9 +527,11 @@ pub fn ui(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.models.custom_model_url = value;
-        if let Err(err) = guard.save(settings_path) {
-            log::warn!("could not persist the custom model URL: {err}");
-        }
+        crate::views::prefs_feedback::record_save(
+            guard.save(settings_path),
+            true,
+            "could not persist the custom model URL",
+        );
         drop(guard);
         state.refresh_from_disk(root);
     }

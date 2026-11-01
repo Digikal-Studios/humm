@@ -179,6 +179,7 @@ fn row_context_menu_gates_restart_to_failed_canceled_skipped() {
         .click_secondary();
     harness.run();
     harness.get_by_label_contains("Restart Transcription");
+    harness.get_by_label("Show error");
 }
 
 #[test]
@@ -196,6 +197,10 @@ fn row_context_menu_on_completed_row_does_not_offer_restart() {
             .query_by_label_contains("Restart Transcription")
             .is_none(),
         "a completed row must not offer Restart Transcription"
+    );
+    assert!(
+        harness.query_by_label("Show error").is_none(),
+        "a completed row must not offer Show error"
     );
 }
 

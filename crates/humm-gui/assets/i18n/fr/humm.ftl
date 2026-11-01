@@ -36,7 +36,7 @@ locale-name-zh-tw = Chinois (traditionnel)
 
 ## Empty-state hero (views/main_window.rs)
 
-hero-drop = Drop media here, or ⌘O
+hero-drop = Drop media here, or %shortcut
 hero-import-button = Import files…
 
 ## Task table (views/task_table.rs, F-003) — column headers
@@ -68,6 +68,44 @@ task-translate = Traduire en anglais
 
 status-isolating-speech = isolating speech
 
+## Status words and notices added with the UX review fixes.
+status-queued = En file
+status-canceled = Annulé
+status-skipped = Ignoré
+status-completed = Terminé
+status-failed = Échec
+status-in-progress = En cours
+status-eta = ETA
+status-downloading-model = Téléchargement du modèle
+status-downloading-media = Téléchargement du média
+status-reducing-noise = réduction du bruit
+table-menu-show-error = Afficher l'erreur
+toast-written-to = Écrit dans
+toast-postproc-written = Fichiers supplémentaires écrits
+toast-postproc-errors = Une étape de post-traitement a signalé une erreur. La transcription est tout de même terminée.
+toast-reduction-skipped = La réduction du bruit n'a pas été exécutée ; la transcription a continué.
+options-word-timestamps-tooltip = Redimensionner n'est disponible ensuite que si les minutages par mot étaient désactivés pendant la transcription. Fusionner n'est disponible ensuite que s'ils étaient activés.
+options-model-will-download = Exécuter télécharge d'abord ce modèle. La fenêtre reste utilisable.
+prefs-postproc-dfn-runs-before = DeepFilterNet s'exécute avant la transcription et remplace l'audio que le modèle entend.
+prefs-postproc-dfn-keep-name = Conserver le fichier débruité laisse un fichier nommé <name>_DeepFilterNet3.wav à côté de la source.
+prefs-general-export-template-tokens-intro = Les espaces à l'intérieur des accolades font partie de chaque jeton.
+prefs-general-export-template-model-type = model_type vaut toujours Whisper.cpp.
+prefs-general-cookie-label = Fichier de cookies
+prefs-general-cookie-browse = Parcourir…
+prefs-general-cookie-caption = HUMM_DOWNLOAD_COOKIEFILE l'emporte sur ce champ lorsqu'elle est définie. Laissez le champ vide pour l'effacer.
+prefs-saved = Enregistré
+prefs-save-failed = Impossible d'enregistrer les préférences :
+viewer-saved-neighbor = un repère voisin a été ajusté
+viewer-timestamp-unparsed = L'heure précédente a été conservée. Ce n'était pas une heure.
+viewer-timestamp-range = L'heure précédente a été conservée. Le début doit précéder la fin.
+speaker-id-save-copies = Enregistrer copie cette transcription dans une nouvelle ligne terminée. L'original reste tel quel.
+speaker-id-merge-tooltip = Les lignes consécutives du même locuteur sont réunies.
+speaker-id-takes-minutes = Cela peut prendre plusieurs minutes. Annuler abandonne l'exécution.
+already-running = humm est déjà en cours d'exécution.
+already-running-with-files = humm est déjà en cours d'exécution. Les fichiers passés à ce lancement n'ont pas été ouverts. Importez-les depuis la fenêtre déjà ouverte.
+banner-buzz-imported = %n transcriptions importées depuis Buzz.
+banner-buzz-import-failed = Impossible d'importer les transcriptions depuis Buzz. humm réessaiera au prochain démarrage.
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = Enregistrer
@@ -87,7 +125,7 @@ menu-file-import-folder = Importer un dossier...
 menu-help-title = Aide
 menu-help-about = About humm
 menu-help-docs = Aide
-menu-help-docs-tooltip = Documentation arrives with the first release
+menu-help-docs-tooltip = Il n'y a pas de page d'aide dans l'application.
 menu-help-preferences = Préférences...
 
 ## Clear-History confirm modal (views/main_window.rs, F-026)
@@ -344,7 +382,7 @@ prefs-fw-disposition-note = Once transcribed, the source file is moved into the 
 ## copy). `prefs-fw-browse`/`dialog-ok` above are reused for this tab's own
 ## Browse buttons and key-commit-failure modal.
 
-prefs-postproc-header = These hooks run automatically after each transcription completes. A hook failure is logged but never fails the transcription itself.
+prefs-postproc-header = Ignorer, la réduction du bruit et la détection de la langue s'exécutent avant la transcription. Le redimensionnement, le résumé et l'export DOCX s'exécutent après. Un échec est journalisé et ne fait jamais échouer la transcription.
 prefs-postproc-skip-title = Ignorer les déjà transcrits
 prefs-postproc-skip-enable = Enable Skip Already Transcribed
 prefs-postproc-skip-check-files = Vérifier les fichiers de résultats existants

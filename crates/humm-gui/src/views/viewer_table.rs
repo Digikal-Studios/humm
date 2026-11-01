@@ -340,9 +340,10 @@ fn render_text_editor(ui: &mut egui::Ui, editor: &mut CellEditor) -> bool {
 }
 
 /// Commits a finished editor: timestamp cells parse the buffer and route
-/// through [`ViewerVm::apply_timestamp_edit`] (garbage reverts silently — no
-/// write, no flash); text cells store the buffer as-typed via
-/// [`ViewerVm::apply_text_edit`].
+/// through [`ViewerVm::apply_timestamp_edit`]. A buffer that is not a time,
+/// or a range the core rule rejects, writes nothing and leaves one viewer
+/// line saying the previous time was kept. Text cells store the buffer
+/// as-typed via [`ViewerVm::apply_text_edit`].
 fn commit_editor(
     vm: &mut ViewerVm,
     deps: &ViewerDeps,
@@ -354,13 +355,15 @@ fn commit_editor(
     }
     match editor.col.as_time_field() {
         Some(field) => {
-            if let Some(ms) = parse_timestamp(&editor.buffer)
-                && vm.apply_timestamp_edit(deps, editor.row, field, ms, false)
-            {
-                applied.push(EditApplied {
-                    row: editor.row,
-                    col: editor.col,
-                });
+            if let Some(ms) = parse_timestamp(&editor.buffer) {
+                if vm.apply_timestamp_edit(deps, editor.row, field, ms, false) {
+                    applied.push(EditApplied {
+                        row: editor.row,
+                        col: editor.col,
+                    });
+                }
+            } else {
+                vm.note_unparsed_timestamp();
             }
         }
         None => {

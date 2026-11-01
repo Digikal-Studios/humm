@@ -237,7 +237,7 @@ pub fn ui(
 ) {
     let modifiers = ui.input(|i| i.modifiers);
     if !modal_open {
-        handle_keyboard_shortcuts(ui, vm, actions);
+        handle_keyboard_shortcuts(ui, vm, layout, actions);
     }
 
     let visible_columns = layout.visible_in_order();
@@ -253,6 +253,7 @@ pub fn ui(
         ui.ctx().request_repaint_after(Duration::from_secs(1));
     }
 
+    let row_height = task_table_row_height(ui.text_style_height(&egui::TextStyle::Body));
     let mut builder = TableBuilder::new(ui)
         .id_salt(TABLE_ID_SALT)
         .striped(true)
@@ -279,12 +280,12 @@ pub fn ui(
     let sort = vm.sort();
 
     let mut header_union: Option<egui::Response> = None;
-    let table = builder.header(22.0, |mut header| {
+    let table = builder.header(row_height, |mut header| {
         for col in &visible_columns {
             let label = header_label(*col, sort);
             let mut cell_response = None;
             header.col(|ui| {
-                cell_response = Some(interactive_cell(ui, "sort-click", label));
+                cell_response = Some(interactive_cell(ui, "sort-click", label, None));
             });
             if let Some(response) = &cell_response
                 && response.clicked()
@@ -317,7 +318,7 @@ pub fn ui(
 
     table.body(|body| {
         let total_rows = vm.sorted_rows().len();
-        body.rows(20.0, total_rows, |mut row| {
+        body.rows(row_height, total_rows, |mut row| {
             let idx = row.index();
             let row_id = vm.sorted_rows()[idx].id;
             let row_status = vm.sorted_rows()[idx].status;
@@ -328,9 +329,10 @@ pub fn ui(
             let mut notes_cell_response: Option<egui::Response> = None;
             for col in &visible_columns {
                 let text = cell_text(vm.sorted_rows(), idx, *col, now);
+                let hover = (*col == ColumnId::Status).then(|| text.clone());
                 let mut cell_response = None;
                 row.col(|ui| {
-                    cell_response = Some(interactive_cell(ui, "row-click", text));
+                    cell_response = Some(interactive_cell(ui, "row-click", text, hover.as_deref()));
                 });
                 if *col == ColumnId::Notes {
                     notes_cell_response = cell_response.clone();
@@ -368,6 +370,11 @@ pub fn ui(
                 actions.push(TableAction::OpenSelected);
             }
             response.context_menu(|ui| {
+                if row_status == Status::Failed && ui.button(tr("table-menu-show-error")).clicked()
+                {
+                    actions.push(TableAction::ShowError(row_id));
+                    ui.close();
+                }
                 if matches!(
                     row_status,
                     Status::Failed | Status::Canceled | Status::Skipped
@@ -391,19 +398,42 @@ pub fn ui(
     });
 }
 
-/// Delete/⌘C/Return, gated on a non-empty selection (mirroring Buzz's own
-/// enablement — none of these three do anything with nothing selected).
-fn handle_keyboard_shortcuts(ui: &egui::Ui, vm: &TasksVm, actions: &mut Vec<TableAction>) {
+/// Single-line task-table row. At least the historical 20pt row, and at
+/// least the body line plus a little padding, so Preferences font sizes
+/// 8–32 do not clip the status cell. `line_height` is
+/// `ui.text_style_height(TextStyle::Body)`.
+pub fn task_table_row_height(line_height: f32) -> f32 {
+    (line_height + 4.0).max(20.0)
+}
+
+/// Delete/⌘C/Return, plus Up/Down moving the selection among display rows.
+/// Delete/⌘C/Return still do nothing with an empty selection. Down from an
+/// empty selection selects the first row; Up does not. Arrows do not wrap.
+/// Already skipped by the caller while `modal_open`.
+fn handle_keyboard_shortcuts(
+    ui: &egui::Ui,
+    vm: &mut TasksVm,
+    layout: &mut TableLayout,
+    actions: &mut Vec<TableAction>,
+) {
+    let (delete, copy, open, up, down) = ui.input_mut(|input| {
+        (
+            input.key_pressed(Key::Delete),
+            input.modifiers.command && input.key_pressed(Key::C),
+            input.key_pressed(Key::Enter),
+            input.consume_key(egui::Modifiers::NONE, Key::ArrowUp),
+            input.consume_key(egui::Modifiers::NONE, Key::ArrowDown),
+        )
+    });
+    if up || down {
+        let direction = if down { 1 } else { -1 };
+        if let Some(anchor) = vm.nudge_selection(direction, layout.anchor) {
+            layout.anchor = Some(anchor);
+        }
+    }
     if vm.selection().is_empty() {
         return;
     }
-    let (delete, copy, open) = ui.input(|i| {
-        (
-            i.key_pressed(Key::Delete),
-            i.modifiers.command && i.key_pressed(Key::C),
-            i.key_pressed(Key::Enter),
-        )
-    });
     if delete {
         actions.push(TableAction::ClearSelected);
     }
@@ -456,11 +486,21 @@ fn apply_row_click(
 /// identity already comes from the table's own per-cell id salting), so a
 /// short fixed string per call site (`"sort-click"`, `"row-click"`) is
 /// enough.
-fn interactive_cell(ui: &mut egui::Ui, id_salt: &str, text: String) -> egui::Response {
+fn interactive_cell(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    text: String,
+    hover: Option<&str>,
+) -> egui::Response {
     ui.label(text);
     let rect = ui.max_rect();
     let id = ui.id().with(id_salt);
-    ui.interact(rect, id, Sense::click())
+    let response = ui.interact(rect, id, Sense::click());
+    if let Some(hover) = hover {
+        response.on_hover_text(hover)
+    } else {
+        response
+    }
 }
 
 /// Folds `next` into `acc` via [`egui::Response::union`], the same
@@ -520,6 +560,13 @@ mod tests {
             task_table_sort_column: sort_col.map(str::to_string),
             task_table_sort_descending: sort_desc,
         }
+    }
+
+    #[test]
+    fn row_height_keeps_the_20pt_floor_and_grows_past_it() {
+        assert_eq!(task_table_row_height(12.0), 20.0);
+        assert_eq!(task_table_row_height(16.0), 20.0);
+        assert_eq!(task_table_row_height(30.0), 34.0);
     }
 
     #[test]

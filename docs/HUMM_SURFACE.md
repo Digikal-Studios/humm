@@ -78,6 +78,8 @@ One JSON object per line on **stdout**; nothing else is written to stdout in
 {"event":"skipped","task_id":"550e8400-e29b-41d4-a716-446655440000"}
 {"event":"post_processed","task_id":"550e8400-e29b-41d4-a716-446655440000","notes_updated":true,"segments_replaced":false,"written":["/out.docx"],"errors":[]}
 {"event":"phase","task_id":"550e8400-e29b-41d4-a716-446655440000","phase":"isolating_speech"}
+{"event":"phase","task_id":"550e8400-e29b-41d4-a716-446655440000","phase":"reducing_noise"}
+{"event":"reduction_skipped","task_id":"550e8400-e29b-41d4-a716-446655440000"}
 ```
 
 Per task the order is `queued` → `started` → (`download_progress`* for URL
@@ -110,18 +112,26 @@ settings are the only switch). Post-hooks are off by default, so a default
 configuration emits neither.
 
 `phase` (F-027, M8, additive) reports a mid-run phase transition that isn't a
-plain progress fraction (`TaskEventKind::PhaseChanged`): today the only value
-`phase` ever carries is `"isolating_speech"` (demucs speech isolation running
-before transcription), `snake_case` of the corresponding `TaskPhase` variant —
-the field is extensible to future phases without a schema change. **Has a
-real producer as of Task 5**: `Runner::run_job`'s before-transcription seam
-emits it right before calling the wired `SpeechIsolator` (`DemucsIsolator`,
-`humm-media`), gated on the task's own `TranscriptionOptions::extract_speech`
-— reachable from the CLI via `-e`/`--extract-speech` (§1) once `demucs` is
-found on `PATH`/`HUMM_DEMUCS` (§5). It appears anywhere between `started` and
-the terminal event, never terminal itself; human mode renders it as a
-progress-style line (`<input>  isolating speech`), so `--quiet` suppresses it
+plain progress fraction (`TaskEventKind::PhaseChanged`). Values are the
+`snake_case` of the corresponding `TaskPhase` variant: `"isolating_speech"`
+(demucs speech isolation) and `"reducing_noise"` (DeepFilterNet, indeterminate
+— the reducer reports no fraction). **`isolating_speech` has a real producer
+as of Task 5**: `Runner::run_job`'s before-transcription seam emits it right
+before calling the wired `SpeechIsolator` (`DemucsIsolator`, `humm-media`),
+gated on the task's own `TranscriptionOptions::extract_speech` — reachable
+from the CLI via `-e`/`--extract-speech` (§1) once `demucs` is found on
+`PATH`/`HUMM_DEMUCS` (§5). `reducing_noise` is emitted in that same seam when
+Preferences noise reduction is enabled, immediately before `NoiseReducer::reduce`.
+Either phase appears anywhere between `started` and the terminal event, never
+terminal itself; human mode renders it as a progress-style line (`<input>
+isolating speech` or `<input>  reducing noise`), so `--quiet` suppresses it
 exactly like `download_progress`/`progress`.
+
+`reduction_skipped` is the non-failing notice when that reducer errors or
+panics and the task continues on the prior audio. It is not emitted when the
+run is canceled instead. Human mode prints
+`warning: <input>: noise reduction did not run; transcription continued`
+(suppressed by `--quiet`). The task's own terminal event is unchanged.
 
 LLM translation (F-031) adds **no new `--json` event** in M6 — the schema
 above is unchanged: `humm add` has no LLM-translation flag (`humm-cli`'s
@@ -137,16 +147,19 @@ Human mode instead prints, to **stderr**, a per-task progress line
 `<input>  NN% — ETA: <eta>` (ETA rendered `NNm NNs` or `NNs`, Buzz's formula),
 a URL download phase line `downloading <url>  NN%`, and — live since M8 Task 5
 wired the producer described above — a `phase` line `<input>  isolating
-speech` whenever `-e`/`--extract-speech` is in play; written export
+speech` whenever `-e`/`--extract-speech` is in play, plus `<input>  reducing
+noise` while DeepFilterNet runs; written export
 paths go to **stdout** (one per line); failures print `error: <input>: <cause>` to
 stderr; a `store_write_failed` event prints `warning: history not recorded
 (<operation>): <detail>` to stderr. A `skipped` event's terminal line is
 `<input>  skipped (already transcribed)`, to stderr, in the same slot a
 `completed`/`failed` terminal line occupies. A `post_processed` event prints
 nothing unless its `errors` array is non-empty, in which case each prints
-`warning: post-processing: <cause>` to stderr. `--quiet` suppresses the
-progress and warning lines only (`post_processed`'s warnings included;
-`skipped`'s terminal line is not suppressed, same as `completed`/`failed`).
+`warning: post-processing: <cause>` to stderr. A `reduction_skipped` event
+prints `warning: <input>: noise reduction did not run; transcription continued`.
+`--quiet` suppresses the progress and warning lines only (`post_processed`'s
+and `reduction_skipped`'s warnings included; `skipped`'s terminal line is not
+suppressed, same as `completed`/`failed`).
 
 ## 4. Exit codes
 

@@ -48,6 +48,9 @@ pub enum Phase {
     /// emits human-oriented progress on stderr (Standing Policy rule 3
     /// forbids parsing it), so this phase is indeterminate.
     Isolating,
+    /// Reducing noise with DeepFilterNet before transcription (F-112).
+    /// No fraction: `NoiseReducer::reduce` does not report one.
+    ReducingNoise,
 }
 
 /// One task-table row, derived from a [`TaskRow`] plus (when available) its
@@ -209,6 +212,9 @@ pub enum TableAction {
     Rename(TranscriptionId),
     /// Row context menu "Add/Edit Notes".
     Notes(TranscriptionId),
+    /// Failed-row context menu "Show error": open the same detail popover a
+    /// failed-task toast click opens. Single click still only selects.
+    ShowError(TranscriptionId),
     /// Toolbar "Cancel Transcription" / ⌘X: cancel every selected row whose
     /// status is queued/in-progress (Task 8, F-004/F-026). Shares this enum
     /// (rather than a separate action type) because the toolbar pushes onto
@@ -386,9 +392,13 @@ impl TasksVm {
                     row.status = Status::InProgress;
                     row.phase = match phase {
                         TaskPhase::IsolatingSpeech => Phase::Isolating,
+                        TaskPhase::ReducingNoise => Phase::ReducingNoise,
                     };
                 });
             }
+            // The row status stays whatever it already is. The notice is a
+            // toast in `HummApp::react_to_event`, not a status change.
+            TaskEventKind::ReductionSkipped => {}
             TaskEventKind::SegmentAdded(_) => {}
             TaskEventKind::Completed { .. }
             | TaskEventKind::Failed { .. }
@@ -479,6 +489,63 @@ impl TasksVm {
     /// Clears the selection entirely.
     pub fn clear_selection(&mut self) {
         self.selection.clear();
+    }
+
+    /// Moves the selection one display row. `direction` is `-1` (Up) or `+1`
+    /// (Down). Does not wrap. An empty selection and Down selects the first
+    /// row; Up leaves it empty. Any multi-selection collapses to the single
+    /// destination row. `anchor` is the shift-click anchor when it still
+    /// points at a selected row; otherwise the first selected row in display
+    /// order is the cursor. Returns the new anchor, or `None` when nothing
+    /// changed.
+    pub fn nudge_selection(&mut self, direction: i8, anchor: Option<usize>) -> Option<usize> {
+        if self.rows.is_empty() || direction == 0 {
+            return None;
+        }
+        let direction = direction.signum();
+        let next = self.nudge_index(direction, anchor)?;
+        let id = self.rows[next].id;
+        self.select_only(id);
+        Some(next)
+    }
+
+    /// The display index [`Self::nudge_selection`] would land on, or `None`
+    /// when the key does not move the selection (empty + Up, or already at
+    /// the end in that direction).
+    fn nudge_index(&self, direction: i8, anchor: Option<usize>) -> Option<usize> {
+        let current = self.cursor_index(anchor);
+        match current {
+            None => {
+                if direction > 0 {
+                    Some(0)
+                } else {
+                    None
+                }
+            }
+            Some(idx) => {
+                let last = self.rows.len() - 1;
+                let dest = if direction > 0 {
+                    idx.saturating_add(1).min(last)
+                } else {
+                    idx.saturating_sub(1)
+                };
+                (dest != idx).then_some(dest)
+            }
+        }
+    }
+
+    /// The row Up/Down moves from: `anchor` when it still names a selected
+    /// row, otherwise the first selected row in display order.
+    fn cursor_index(&self, anchor: Option<usize>) -> Option<usize> {
+        if let Some(anchor) = anchor
+            && anchor < self.rows.len()
+            && self.selection.contains(&self.rows[anchor].id)
+        {
+            return Some(anchor);
+        }
+        self.rows
+            .iter()
+            .position(|row| self.selection.contains(&row.id))
     }
 
     /// Re-reads `id`'s row from `store` and replaces it in place (same
@@ -993,6 +1060,51 @@ mod tests {
         );
 
         assert!(vm.sorted_rows().is_empty());
+    }
+
+    #[test]
+    fn nudge_selection_down_from_empty_selects_first_and_does_not_wrap() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut vm = TasksVm::default();
+        for name in ["a.wav", "b.wav", "c.wav"] {
+            let id = TranscriptionId::new();
+            let spec = sample_spec(Input::Path(PathBuf::from(name)));
+            store
+                .create_task(&id, &spec, Source::FileImport)
+                .expect("create");
+            vm.apply(
+                &TaskEvent {
+                    task_id: id,
+                    kind: TaskEventKind::Queued,
+                },
+                &store,
+            );
+        }
+        assert_eq!(vm.sorted_rows().len(), 3);
+        assert!(vm.nudge_selection(-1, None).is_none());
+        assert!(vm.selection().is_empty());
+
+        let first = vm
+            .nudge_selection(1, None)
+            .expect("down selects the first row");
+        assert_eq!(first, 0);
+        assert!(vm.selection().contains(&vm.sorted_rows()[0].id));
+        assert_eq!(vm.selection().len(), 1);
+        assert!(
+            vm.nudge_selection(-1, Some(0)).is_none(),
+            "up from the first row does not wrap"
+        );
+
+        let mut anchor = Some(first);
+        while let Some(next) = vm.nudge_selection(1, anchor) {
+            anchor = Some(next);
+        }
+        let last = vm.sorted_rows().len() - 1;
+        assert_eq!(anchor, Some(last));
+        assert!(
+            vm.nudge_selection(1, anchor).is_none(),
+            "down does not wrap"
+        );
     }
 
     #[test]

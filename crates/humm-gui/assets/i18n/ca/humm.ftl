@@ -91,7 +91,7 @@ locale-name-zh-tw = Xinès (Tradicional)
 
 ## Empty-state hero (views/main_window.rs)
 
-hero-drop = Deixeu anar contingut multimèdia aquí, o ⌘O
+hero-drop = Deixeu anar contingut multimèdia aquí, o %shortcut
 hero-import-button = Importa fitxers…
 
 ## Task table (views/task_table.rs, F-003) — column headers
@@ -123,6 +123,44 @@ task-translate = Traduir a l'anglès
 
 status-isolating-speech = aïllant la veu
 
+## Status words and notices added with the UX review fixes.
+status-queued = En cua
+status-canceled = Cancel·lat
+status-skipped = Omes
+status-completed = Completat
+status-failed = Ha fallat
+status-in-progress = En curs
+status-eta = Temps restant
+status-downloading-model = S'està baixant el model
+status-downloading-media = S'estan baixant els mitjans
+status-reducing-noise = reduint el soroll
+table-menu-show-error = Mostra l'error
+toast-written-to = Escrit a
+toast-postproc-written = Fitxers addicionals escrits
+toast-postproc-errors = Un procés posterior ha informat d'un error. La transcripció continua completa.
+toast-reduction-skipped = La reducció de soroll no s'ha executat; la transcripció ha continuat.
+options-word-timestamps-tooltip = Redimensionar només està disponible més tard si els temps per paraula estaven desactivats durant la transcripció. Fusionar només està disponible més tard si els temps per paraula estaven activats.
+options-model-will-download = Executar baixa primer aquest model. La finestra continua utilitzable.
+prefs-postproc-dfn-runs-before = DeepFilterNet s'executa abans de la transcripció i substitueix l'àudio que sent el model.
+prefs-postproc-dfn-keep-name = Conservar el fitxer sense soroll deixa un fitxer anomenat <name>_DeepFilterNet3.wav al costat de la font.
+prefs-general-export-template-tokens-intro = Els espais dins de les claus formen part de cada testimoni.
+prefs-general-export-template-model-type = model_type és sempre Whisper.cpp.
+prefs-general-cookie-label = Fitxer de galetes
+prefs-general-cookie-browse = Navega…
+prefs-general-cookie-caption = HUMM_DOWNLOAD_COOKIEFILE té prioritat sobre aquest camp quan està definit. Deixeu el camp buit per esborrar-lo.
+prefs-saved = Desat
+prefs-save-failed = No s'han pogut desar les preferències:
+viewer-saved-neighbor = s'ha ajustat un senyal veí
+viewer-timestamp-unparsed = S'ha conservat el temps anterior. Allò no era un temps.
+viewer-timestamp-range = S'ha conservat el temps anterior. L'inici ha de ser abans del final.
+speaker-id-save-copies = Desar copia aquesta transcripció en una fila nova completada. L'original es queda com està.
+speaker-id-merge-tooltip = Les línies consecutives del mateix parlant s'uneixen.
+speaker-id-takes-minutes = Això pot trigar uns quants minuts. Cancel·lar descarta l'execució.
+already-running = humm ja s'està executant.
+already-running-with-files = humm ja s'està executant. Els fitxers passats a aquest llançament no s'han obert. Importeu-los des de la finestra que ja és oberta.
+banner-buzz-imported = S'han importat %n transcripcions de Buzz.
+banner-buzz-import-failed = No s'han pogut importar les transcripcions de Buzz. humm ho tornarà a provar la propera vegada que s'iniciï.
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = Enregistra
@@ -142,7 +180,7 @@ menu-file-import-folder = Importa carpeta…
 menu-help-title = Ajuda
 menu-help-about = Quant a humm
 menu-help-docs = Ajuda
-menu-help-docs-tooltip = La documentació arribarà amb el primer llançament
+menu-help-docs-tooltip = No hi ha cap pàgina d'ajuda dins l'aplicació.
 menu-help-preferences = Preferències…
 
 ## Clear-History confirm modal (views/main_window.rs, F-026)
@@ -399,7 +437,7 @@ prefs-fw-disposition-note = Un cop transcrit, el fitxer d'origen es mou a la car
 ## copy). `prefs-fw-browse`/`dialog-ok` above are reused for this tab's own
 ## Browse buttons and key-commit-failure modal.
 
-prefs-postproc-header = Aquests processos s'executen automàticament després de cada transcripció completada. Una fallada es registra, però mai fa fallar la transcripció en si.
+prefs-postproc-header = Ometre, la reducció de soroll i la detecció d'idioma s'executen abans de la transcripció. El redimensionador, el resum i l'exportació DOCX s'executen després. Una fallada es registra i mai fa fallar la transcripció.
 prefs-postproc-skip-title = Omet els ja transcrits
 prefs-postproc-skip-enable = Habilita Omet els ja transcrits
 prefs-postproc-skip-check-files = Comprova si hi ha fitxers de resultats existents

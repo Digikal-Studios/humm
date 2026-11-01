@@ -36,7 +36,7 @@ locale-name-zh-tw = Çince (Geleneksel)
 
 ## Empty-state hero (views/main_window.rs)
 
-hero-drop = Drop media here, or ⌘O
+hero-drop = Drop media here, or %shortcut
 hero-import-button = Import files…
 
 ## Task table (views/task_table.rs, F-003) — column headers
@@ -68,6 +68,44 @@ task-translate = İngilizceye Çevir
 
 status-isolating-speech = isolating speech
 
+## Status words and notices added with the UX review fixes.
+status-queued = Kuyrukta
+status-canceled = İptal edildi
+status-skipped = Atlandı
+status-completed = Tamamlandı
+status-failed = Başarısız
+status-in-progress = Sürüyor
+status-eta = Kalan
+status-downloading-model = Model indiriliyor
+status-downloading-media = Medya indiriliyor
+status-reducing-noise = gürültü azaltılıyor
+table-menu-show-error = Hatayı göster
+toast-written-to = Yazıldığı yer
+toast-postproc-written = Ek dosyalar yazıldı
+toast-postproc-errors = Bir son işleme adımı hata bildirdi. Transkripsiyon yine de tamamlandı.
+toast-reduction-skipped = Gürültü azaltma çalışmadı; transkripsiyon devam etti.
+options-word-timestamps-tooltip = Yeniden boyutlandırma, transkripsiyon sırasında sözcük zamanları kapalıysa daha sonra kullanılabilir. Birleştirme, açıksa kullanılabilir.
+options-model-will-download = Çalıştır önce bu modeli indirir. Pencere kullanılabilir kalır.
+prefs-postproc-dfn-runs-before = DeepFilterNet transkripsiyondan önce çalışır ve modelin duyduğu sesi değiştirir.
+prefs-postproc-dfn-keep-name = Gürültüsü alınmış dosyayı tut, kaynağın yanında <name>_DeepFilterNet3.wav bırakır.
+prefs-general-export-template-tokens-intro = Küme parantezlerinin içindeki boşluklar her belirtecin parçasıdır.
+prefs-general-export-template-model-type = model_type her zaman Whisper.cpp olur.
+prefs-general-cookie-label = Çerez dosyası
+prefs-general-cookie-browse = Gözat…
+prefs-general-cookie-caption = HUMM_DOWNLOAD_COOKIEFILE ayarlıysa bu alanın yerine geçer. Temizlemek için alanı boş bırakın.
+prefs-saved = Kaydedildi
+prefs-save-failed = Tercihler kaydedilemedi:
+viewer-saved-neighbor = komşu işaret ayarlandı
+viewer-timestamp-unparsed = Önceki zaman korundu. Bu bir zaman değildi.
+viewer-timestamp-range = Önceki zaman korundu. Başlangıç bitişten önce olmalıdır.
+speaker-id-save-copies = Kaydet bu transkripti yeni bir tamamlanmış satıra kopyalar. Özgün satır olduğu gibi kalır.
+speaker-id-merge-tooltip = Aynı konuşmacının ardışık satırları birleştirilir.
+speaker-id-takes-minutes = Bu birkaç dakika sürebilir. İptal bu çalıştırmayı atar.
+already-running = humm zaten çalışıyor.
+already-running-with-files = humm zaten çalışıyor. Bu başlatmaya verilen dosyalar açılmadı. Onları zaten açık olan penceredeki içe aktarma eylemlerinden ekleyin.
+banner-buzz-imported = Buzz'tan %n transkripsiyon içe aktarıldı.
+banner-buzz-import-failed = Buzz transkripsiyonları içe aktarılamadı. humm bir sonraki açılışta yeniden deneyecek.
+
 ## Toolbar (views/main_window.rs, F-004; Record unlocked F-004/F-060, Task 10)
 
 toolbar-record = Kayıt
@@ -87,7 +125,7 @@ menu-file-import-folder = Klasör İçe Aktar...
 menu-help-title = Yardım
 menu-help-about = About humm
 menu-help-docs = Yardım
-menu-help-docs-tooltip = Documentation arrives with the first release
+menu-help-docs-tooltip = Uygulama içinde bir yardım sayfası yok.
 menu-help-preferences = Tercihler...
 
 ## Clear-History confirm modal (views/main_window.rs, F-026)
@@ -344,7 +382,7 @@ prefs-fw-disposition-note = Once transcribed, the source file is moved into the 
 ## copy). `prefs-fw-browse`/`dialog-ok` above are reused for this tab's own
 ## Browse buttons and key-commit-failure modal.
 
-prefs-postproc-header = These hooks run automatically after each transcription completes. A hook failure is logged but never fails the transcription itself.
+prefs-postproc-header = Atlama, gürültü azaltma ve dil algılama transkripsiyondan önce çalışır. Yeniden boyutlandırma, özet ve DOCX dışa aktarma sonra çalışır. Bir hata günlüğe yazılır ve transkripsiyonu asla başarısız yapmaz.
 prefs-postproc-skip-title = Önceden Deşifre Edilenleri Atla
 prefs-postproc-skip-enable = Enable Skip Already Transcribed
 prefs-postproc-skip-check-files = Mevcut sonuç dosyalarını kontrol et
