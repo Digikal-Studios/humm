@@ -992,18 +992,29 @@ pub(crate) fn render_api_key_row(
 /// sharing one `egui::Context`'s `Id` namespace, exactly the scenario
 /// `render_model_combo`'s own `id_salt` doc comment already calls out.
 ///
+/// Returns whether a model preset was clicked this frame (see
+/// [`render_llm_model_prompt_fields`]). The enable checkbox is a separate
+/// widget; callers that diff the sheet still see that change.
+///
 /// `pub(crate)`: promoted (Task 15) for that same reuse.
 pub(crate) fn render_llm_translation_block(
     ui: &mut egui::Ui,
     id_salt: &str,
     state: &mut SheetState,
-) {
+) -> bool {
     ui.label(egui::RichText::new(tr("options-llm-heading")).strong());
     ui.checkbox(&mut state.enable_llm_translation, tr("options-llm-enable"));
 
+    let mut preset_clicked = false;
     ui.add_enabled_ui(state.enable_llm_translation, |ui| {
-        render_llm_model_prompt_fields(ui, id_salt, &mut state.llm_model, &mut state.llm_prompt);
+        preset_clicked = render_llm_model_prompt_fields(
+            ui,
+            id_salt,
+            &mut state.llm_model,
+            &mut state.llm_prompt,
+        );
     });
+    preset_clicked
 }
 
 /// The AI-model field (free-text `TextEdit` plus a [`LLM_MODEL_PRESETS`]
@@ -1014,12 +1025,17 @@ pub(crate) fn render_llm_translation_block(
 /// the combo/textarea code. `id_salt` keeps the two call sites' `ComboBox`
 /// ids distinct (the shared-widget convention [`render_model_combo`]/
 /// [`render_task_combo`]/[`render_language_combo`] already follow).
+///
+/// Returns whether a model preset was clicked this frame. Typing in either
+/// text field does not count: a preset click is a discrete commit, and the
+/// Folder Watch tab uses that to decide whether to flash "Saved".
 pub(crate) fn render_llm_model_prompt_fields(
     ui: &mut egui::Ui,
     id_salt: &str,
     model: &mut String,
     prompt: &mut String,
-) {
+) -> bool {
+    let mut preset_clicked = false;
     ui.horizontal(|ui| {
         ui.label(tr("options-llm-model-label"));
         ui.text_edit_singleline(model);
@@ -1029,12 +1045,14 @@ pub(crate) fn render_llm_model_prompt_fields(
                 for preset in LLM_MODEL_PRESETS {
                     if ui.selectable_label(*model == preset, preset).clicked() {
                         *model = preset.to_string();
+                        preset_clicked = true;
                     }
                 }
             });
     });
     ui.label(tr("options-llm-prompt-label"));
     ui.text_edit_multiline(prompt);
+    preset_clicked
 }
 
 /// Renders the options sheet (a no-op returning `None` while `sheet` is

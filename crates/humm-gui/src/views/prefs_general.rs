@@ -524,18 +524,22 @@ pub fn commit_locale(code: &str, settings: &Mutex<Settings>, settings_path: &Pat
 /// MAX))` or `None` (Task 1's contract — `None` is egui's own default, never
 /// persisted as a concrete number); either way, [`apply_font_size`] applies
 /// the resolved value to `ctx` immediately (live, no restart).
+///
+/// `flash` is true for the Custom checkbox, a discrete commit, and false
+/// while the size is dragged, so the drag does not strobe "Saved".
 pub fn commit_font_size(
     state: &GeneralTabState,
     settings: &Mutex<Settings>,
     settings_path: &Path,
     ctx: &egui::Context,
+    flash: bool,
 ) {
     let value = state.font_size_custom.then(|| {
         state
             .font_size_value
             .clamp(UiSettings::MIN_FONT_SIZE, UiSettings::MAX_FONT_SIZE)
     });
-    persist_ui(settings, settings_path, false, |ui| ui.font_size = value);
+    persist_ui(settings, settings_path, flash, |ui| ui.font_size = value);
     apply_font_size(ctx, value);
 }
 
@@ -722,7 +726,7 @@ pub fn ui(
             .changed()
         {
             state.font_size_custom = custom;
-            commit_font_size(state, settings, settings_path, ui.ctx());
+            commit_font_size(state, settings, settings_path, ui.ctx(), true);
         }
         let mut value = state.font_size_value;
         let response = ui.add_enabled(
@@ -732,7 +736,7 @@ pub fn ui(
         );
         if response.changed() {
             state.font_size_value = value;
-            commit_font_size(state, settings, settings_path, ui.ctx());
+            commit_font_size(state, settings, settings_path, ui.ctx(), false);
         }
     });
 
@@ -1221,7 +1225,7 @@ mod tests {
         let mut state = state_with("", false);
         state.font_size_custom = true;
         state.font_size_value = 99; // above UiSettings::MAX_FONT_SIZE (32)
-        commit_font_size(&state, &settings, &settings_path, &ctx);
+        commit_font_size(&state, &settings, &settings_path, &ctx, true);
 
         assert_eq!(
             settings.lock().unwrap().ui.font_size,
@@ -1242,7 +1246,7 @@ mod tests {
         let mut state = state_with("", false);
         state.font_size_custom = false;
         state.font_size_value = 20;
-        commit_font_size(&state, &settings, &settings_path, &ctx);
+        commit_font_size(&state, &settings, &settings_path, &ctx, true);
 
         assert_eq!(
             settings.lock().unwrap().ui.font_size,

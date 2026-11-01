@@ -420,6 +420,7 @@ fn embedded_options_model_change_persists_into_folder_watch_options() {
             &fixture.state,
             &fixture.settings,
             &fixture.settings_path,
+            true,
         );
     }
     let reloaded = Settings::load(&settings_path).expect("settings file was written");
