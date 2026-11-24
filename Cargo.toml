@@ -21,7 +21,7 @@ license = "MIT"
 repository = "https://repo.digikal.com/jawad/humm"
 
 [workspace.dependencies]
-humm-core = { path = "crates/humm-core", version = "0.1.0" }
+humm-core = { path = "crates/humm-core", version = "0.1.1" }
 thiserror = "2"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
