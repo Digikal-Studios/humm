@@ -1,7 +1,9 @@
 # macOS CI gates
 
-The `gates` job runs on GitHub-hosted `macos-14` (Apple Silicon), with a
-120-minute bound. It no longer targets organization runner group `apple-ci` /
+The `gates` job runs on GitHub-hosted `macos-15` (Apple Silicon), with a
+120-minute bound. GitHub retired the `macos-14` image on 2026-11-02;
+`macos-14` jobs are cancelled at once (`macos-14-arm64-us-default` is not
+supported). `macos-15` is the oldest arm64 image still offered. It no longer targets organization runner group `apple-ci` /
 label `digikal-apple`: that self-hosted runner is not registered for this
 repository, so jobs queued forever. Existing `cargo fmt --check`, full-workspace
 Clippy and `cargo test --workspace` gates remain unchanged. Rust is installed
@@ -60,7 +62,7 @@ Roll back through reviewed workflow changes.
 `hosted-libraries` covers the four native hosts outside `gates`:
 `windows-latest` (Windows x64), `ubuntu-latest` (Linux x64), `ubuntu-24.04-arm`
 (Linux ARM64), and `windows-11-arm` (Windows ARM64). macOS ARM stays on `gates`
-(`macos-14`), which is the job that installs Homebrew OpenBLAS, libomp, cmake,
+(`macos-15`), which is the job that installs Homebrew OpenBLAS, libomp, cmake,
 and ffmpeg. This matrix has no macOS cell, because that cell would skip those
 formulae and duplicate `gates` with a weaker toolchain.
 
@@ -72,7 +74,7 @@ cargo test --locked -p humm-core -p humm-media -p humm-audio
 ```
 
 That clippy command is what lints `cfg(windows)` and `cfg(target_os = "linux")`
-items. `gates` on `macos-14` compiles the macOS configuration of those crates
+items. `gates` on `macos-15` compiles the macOS configuration of those crates
 instead. The library cells leave `humm-gui`, `humm-whisper`, and `humm-diarize`
 unbuilt. Ignored contract tests stay skipped, so ffmpeg, yt-dlp, and model
 downloads stay out of this job. Linux cells install `libasound2-dev` so cpal
@@ -89,7 +91,7 @@ process-tree kill.
 ## Release artifacts
 
 `.github/workflows/release.yml` builds release archives on GitHub-hosted
-runners only (`macos-14`, `ubuntu-24.04`, `ubuntu-24.04-arm`, `windows-latest`,
+runners only (`macos-15`, `ubuntu-24.04`, `ubuntu-24.04-arm`, `windows-latest`,
 `windows-11-arm`). It is separate from the `CI` workflow:
 
 | Event | What runs |
