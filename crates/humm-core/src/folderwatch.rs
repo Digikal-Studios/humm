@@ -279,11 +279,7 @@ fn is_folder_watch_candidate(path: &Path, seen: &SeenSet, known: &dyn Fn(&Path) 
         );
         return false;
     };
-    if seen.matches(path, metadata.len(), mtime) {
-        return false;
-    }
-
-    true
+    !seen.matches(path, metadata.len(), mtime)
 }
 
 /// How long a folder-watch file's size and mtime must stay unchanged before
