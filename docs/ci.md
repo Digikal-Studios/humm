@@ -124,15 +124,16 @@ EP DLL is copied into the archive even if `onnxruntime.dll` is absent.
 
 On `windows-11-arm`, ggml rejects plain MSVC (`MSVC is not supported for
 ARM, use clang`), and bindgen needs a native ARM64 `libclang`. The
-workflow installs LLVM **20.1.8 woa64** via `KyleMayes/install-llvm-action`
-(`arch: arm64`) into a **non-default** directory (not
+workflow installs LLVM **22.1.8 woa64** via `KyleMayes/install-llvm-action`
+(`arch: arm64`, `force-url` of the `llvmorg-22.1.8` woa64 installer —
+v2.0.8's asset list has no LLVM 22) into a **non-default** directory (not
 `C:\Program Files\LLVM`), sets `LIBCLANG_PATH` to that `bin`, puts
 `clang-cl` on `PATH`, and builds `whisper-rs-sys` with
 `CC`/`CXX=clang-cl`, `CXXFLAGS=-EHsc` (dash form — Git Bash/MSYS would
 rewrite `/EHsc` into `C:/Program Files/Git/EHsc`), `CMAKE_GENERATOR=Ninja`,
 plus `ilammy/msvc-dev-cmd` (`arch: arm64`) for the Windows SDK. Clang
-**≥20** is required: VS 18 / MSVC 14.51 STL fails closed with STL1000
-(`expected Clang 20 or newer`) under clang-cl 19. It does **not** pass
+**≥22** is required: VS 18 / MSVC 14.52 STL fails closed with STL1000
+(`expected Clang 22 or newer`) under clang-cl 20.1.8. It does **not** pass
 `env: true` on the LLVM action (that would set plain `CC`/`CXX=clang` and
 inject GNU `-fPIC` into cmake-rs). After `msvc-dev-cmd`, the workflow sets
 `CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER` to the absolute MSVC
