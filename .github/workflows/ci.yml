@@ -19,7 +19,7 @@ jobs:
   gates:
     # GitHub-hosted macOS ARM. The org apple-ci / digikal-apple self-hosted
     # runner is not registered for this repository, so gates queued forever.
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +47,7 @@ jobs:
         run: cargo test --workspace
 
   # The four native hosts outside `gates`. macOS ARM is `gates` on
-  # GitHub-hosted macos-14, which installs Homebrew OpenBLAS, libomp, cmake,
+  # GitHub-hosted macos-15, which installs Homebrew OpenBLAS, libomp, cmake,
   # and ffmpeg. This matrix has no macOS cell: a cell here would skip those
   # formulae and duplicate `gates` with a weaker toolchain.
   #
@@ -61,7 +61,7 @@ jobs:
   # downloaded. `cargo test` does not pass `--ignored`, so ffmpeg/yt-dlp
   # contract tests and model-download contracts stay skipped, and ffmpeg is
   # not installed. Clippy on these cells is what lints cfg(windows) and
-  # cfg(target_os = "linux") items that macos-14 `gates` does not compile.
+  # cfg(target_os = "linux") items that macos-15 `gates` does not compile.
   #
   # A green Windows cell includes the live `cmd /C ver` check in humm-core.
   # It is not a live `taskkill` (the suite checks the argument vector) and
